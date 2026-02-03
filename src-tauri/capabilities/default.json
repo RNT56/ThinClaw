@@ -1,0 +1,40 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$APPDATA/**"
+        },
+        {
+          "path": "$APP_DATA/**"
+        },
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "/Users/mt/Library/**"
+        }
+      ]
+    },
+    "shell:allow-execute",
+    "core:event:default",
+    "core:window:default",
+    "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$APP_DATA/**",
+        "$RESOURCE/**",
+        "$HOME/Library/Application Support/com.mt.tauri-app/**"
+      ]
+    }
+  ]
+}

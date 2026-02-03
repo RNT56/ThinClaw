@@ -1,0 +1,60 @@
+# Documentation
+documentation/
+
+# Node & Dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/bin/
+src-tauri/resources/chromium/
+
+# Generated Binaries & Heavy Assets
+binaries/
+bin/
+
+# Logs & Diagnostics
+logs/
+*.log
+websearch_log.md
+new_sd_help.txt
+
+# Database & Persistence
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.usearch
+*.mv.db
+*.trace.db
+
+# Security & Secrets
+identity.json
+*.pem
+*.key
+.env
+.env.*
+! .env.example
+
+# IDE & OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+.DS_Store
+.cursor/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
