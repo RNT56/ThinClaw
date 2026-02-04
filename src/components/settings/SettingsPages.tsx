@@ -27,6 +27,7 @@ import { toast } from 'sonner';
 import { cn, unwrap } from '../../lib/utils';
 import { ThemeToggle, useTheme } from '../theme-provider';
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, SyntaxTheme } from '../../lib/syntax-themes';
+import { APP_THEMES, AppTheme } from '../../lib/app-themes';
 
 interface SettingsContentProps {
     activePage: SettingsPage;
@@ -537,12 +538,53 @@ function SyntaxThemeOption({ theme, isActive, onClick }: { theme: SyntaxTheme, i
     );
 }
 
+function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppTheme, isActive: boolean, onClick: () => void, currentMode: 'light' | 'dark' }) {
+    const colors = currentMode === 'dark' ? theme.dark : theme.light;
+
+    return (
+        <button
+            onClick={onClick}
+            className={cn(
+                "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
+                isActive
+                    ? "bg-primary/5 border-primary shadow-[0_0_20px_rgba(var(--primary),0.1)] ring-1 ring-primary/20"
+                    : "bg-card/50 hover:bg-muted/50 border-border/50 hover:border-border shadow-sm"
+            )}
+        >
+            <div className="flex items-center justify-between w-full mb-3">
+                <span className={cn(
+                    "text-[10px] font-bold transition-colors uppercase tracking-[0.15em]",
+                    isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
+                )}>
+                    {theme.label}
+                </span>
+                {isActive && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                )}
+            </div>
+
+            <div className="flex gap-2 p-1.5 rounded-lg w-full border border-border/10 justify-center" style={{ backgroundColor: `hsl(${colors.background})` }}>
+                <div className="w-4 h-4 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.primary})` }} title="Primary" />
+                <div className="w-4 h-4 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.accent})` }} title="Accent" />
+                <div className="w-4 h-4 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.secondary})` }} title="Secondary" />
+            </div>
+        </button>
+    );
+}
+
 function AppearanceSettings() {
     const {
+        theme,
         darkSyntaxTheme,
         lightSyntaxTheme,
-        setSyntaxTheme
+        setSyntaxTheme,
+        appThemeId,
+        setAppThemeId
     } = useTheme();
+
+    const effectiveMode = theme === 'system'
+        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? 'dark' : 'light')
+        : theme as 'light' | 'dark';
 
     return (
         <div className="space-y-10">
@@ -556,6 +598,26 @@ function AppearanceSettings() {
                 </div>
                 <div className="scale-110">
                     <ThemeToggle />
+                </div>
+            </div>
+
+            {/* App Style Templates */}
+            <div className="space-y-6">
+                <div className="pt-6 border-t border-border/10 space-y-1">
+                    <h3 className="text-xl font-bold tracking-tight">App Style Templates</h3>
+                    <p className="text-sm text-muted-foreground">Adjust the entire application styling with these curated templates.</p>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+                    {APP_THEMES.map(t => (
+                        <AppThemeOption
+                            key={t.id}
+                            theme={t}
+                            isActive={appThemeId === t.id}
+                            onClick={() => setAppThemeId(t.id)}
+                            currentMode={effectiveMode}
+                        />
+                    ))}
                 </div>
             </div>
 

@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react"
 import { Monitor, Moon, Sun } from "lucide-react"
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES } from "../lib/syntax-themes"
+import { APP_THEMES } from "../lib/app-themes"
 
 type Theme = "dark" | "light" | "system"
 
@@ -16,6 +17,8 @@ type ThemeProviderState = {
     darkSyntaxTheme: string
     lightSyntaxTheme: string
     setSyntaxTheme: (type: 'dark' | 'light', themeId: string) => void
+    appThemeId: string
+    setAppThemeId: (themeId: string) => void
 }
 
 const initialState: ThemeProviderState = {
@@ -24,6 +27,8 @@ const initialState: ThemeProviderState = {
     darkSyntaxTheme: "tokyo-night",
     lightSyntaxTheme: "atom-one-light",
     setSyntaxTheme: () => null,
+    appThemeId: "zinc",
+    setAppThemeId: () => null,
 }
 
 const ThemeProviderContext = createContext<ThemeProviderState>(initialState)
@@ -44,6 +49,10 @@ export function ThemeProvider({
         () => localStorage.getItem("syntax-theme-light") || "atom-one-light"
     )
 
+    const [appThemeId, setAppThemeId] = useState(
+        () => localStorage.getItem("app-theme") || "zinc"
+    )
+
     const applySyntaxColors = useCallback((uiTheme: 'dark' | 'light') => {
         const root = window.document.documentElement
         const themeList = uiTheme === 'dark' ? DARK_SYNTAX_THEMES : LIGHT_SYNTAX_THEMES
@@ -54,6 +63,16 @@ export function ThemeProvider({
             root.style.setProperty(`--hljs-${key}`, value)
         })
     }, [darkSyntaxTheme, lightSyntaxTheme])
+
+    const applyAppTheme = useCallback((uiTheme: 'dark' | 'light') => {
+        const root = window.document.documentElement
+        const themeData = APP_THEMES.find(t => t.id === appThemeId) || APP_THEMES[0]
+        const colors = uiTheme === 'dark' ? themeData.dark : themeData.light
+
+        Object.entries(colors).forEach(([key, value]) => {
+            root.style.setProperty(`--${key}`, value)
+        })
+    }, [appThemeId])
 
     useEffect(() => {
         const root = window.document.documentElement
@@ -71,6 +90,7 @@ export function ThemeProvider({
 
             root.classList.add(effectiveTheme)
             applySyntaxColors(effectiveTheme)
+            applyAppTheme(effectiveTheme)
         }
 
         updateTheme()
@@ -80,7 +100,7 @@ export function ThemeProvider({
             mediaQuery.addEventListener("change", updateTheme)
             return () => mediaQuery.removeEventListener("change", updateTheme)
         }
-    }, [theme, applySyntaxColors])
+    }, [theme, applySyntaxColors, applyAppTheme])
 
     const value = {
         theme,
@@ -98,6 +118,11 @@ export function ThemeProvider({
                 setLightSyntaxTheme(themeId)
                 localStorage.setItem("syntax-theme-light", themeId)
             }
+        },
+        appThemeId,
+        setAppThemeId: (themeId: string) => {
+            setAppThemeId(themeId)
+            localStorage.setItem("app-theme", themeId)
         }
     }
 

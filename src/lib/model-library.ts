@@ -643,6 +643,7 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
             }
         ]
     },
+    // --- DIFFUSION MODELS: ---
     {
         id: "sd-3.5-large-official",
         name: "SD 3.5 Large (Official Safetensors)",
