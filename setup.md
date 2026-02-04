@@ -94,7 +94,7 @@ The bundled Chromium instance is set up to run natively on Apple Silicon, ensuri
 
 While Scrappy can run fully local AI, its advanced features benefit from the following:
 - **Anthropic API**: Supports **Claude 4.5 Sonnet** and **Claude 4.5 Opus**. [Get a Key](https://console.anthropic.com/)
-- **OpenAI API**: For GPT-4o and specialized reasoning models. [Get a Key](https://platform.openai.com/)
+- **OpenAI API**: For GPT-5.2 and specialized reasoning and coding models. [Get a Key](https://platform.openai.com/)
 - **OpenRouter API**: Provides access to a vast array of open-source and proprietary models through a single interface. [Get a Key](https://openrouter.ai/keys)
 - **Brave Search API**: Enables the agent to perform deep web research. [Get a Key](https://brave.com/search/api/)
 - **Hugging Face Token**: A **Read Access Token** is required to download gated models (like Llama 3 or Gemma). Add this in **Settings > Secrets**. [Get a Token](https://huggingface.co/settings/tokens)

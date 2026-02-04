@@ -179,7 +179,7 @@ function SecretCard({
                         onClick={() => onToggle(!granted)}
                         className={cn(
                             "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
-                            granted ? "bg-primary" : "bg-muted"
+                            granted ? "bg-primary" : "bg-slate-200 dark:bg-muted"
                         )}
                     >
                         <span
@@ -342,6 +342,28 @@ export function SecretsTab() {
         }
     };
 
+    const handleOpenAISave = async (key: string) => {
+        const value = key.trim() || null;
+        console.log(`[SecretsTab] Saving OpenAI key:`, value ? "REDACTED" : "null");
+        const res = await commands.saveOpenaiKey(value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleOpenRouterSave = async (key: string) => {
+        const value = key.trim() || null;
+        console.log(`[SecretsTab] Saving OpenRouter key:`, value ? "REDACTED" : "null");
+        const res = await commands.saveOpenrouterKey(value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
     const handleToggle = async (secret: string, granted: boolean) => {
         try {
             const res = await commands.clawdbotToggleSecretAccess(secret, granted);
@@ -366,6 +388,16 @@ export function SecretsTab() {
         return res.status === 'ok' ? res.data : null;
     };
 
+    const handleOpenAIFetch = async (): Promise<string | null> => {
+        const res = await commands.getOpenaiKey();
+        return res.status === 'ok' ? res.data : null;
+    };
+
+    const handleOpenRouterFetch = async (): Promise<string | null> => {
+        const res = await commands.getOpenrouterKey();
+        return res.status === 'ok' ? res.data : null;
+    };
+
     const handleAnthropicDelete = async () => {
         console.log(`[SecretsTab] Deleting Anthropic key...`);
         const res = await commands.saveAnthropicKey(null);
@@ -381,6 +413,26 @@ export function SecretsTab() {
         console.log(`[SecretsTab] Deleting Brave key...`);
         const res = await commands.saveBraveKey(null);
         console.log(`[SecretsTab] Brave save result:`, res);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleOpenAIDelete = async () => {
+        console.log(`[SecretsTab] Deleting OpenAI key...`);
+        const res = await commands.saveOpenaiKey(null);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleOpenRouterDelete = async () => {
+        console.log(`[SecretsTab] Deleting OpenRouter key...`);
+        const res = await commands.saveOpenrouterKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -436,11 +488,11 @@ export function SecretsTab() {
             <div className="grid gap-6">
                 <SecretCard
                     title="Anthropic API Key"
-                    description="Used for Claude 3.5 Sonnet and other Opus models via cloud."
+                    description="Used for Claude 4.5 Sonnet / Opus and other world-class models."
                     icon={<Bot className="w-5 h-5 text-purple-500" />}
                     placeholder="sk-ant-api03-..."
-                    hasKey={status?.has_anthropic_key}
-                    granted={status?.anthropic_granted}
+                    hasKey={!!(status?.has_anthropic_key ?? status?.hasAnthropicKey)}
+                    granted={!!(status?.anthropic_granted ?? status?.anthropicGranted)}
                     onSave={handleAnthropicSave}
                     onToggle={(g) => handleToggle('anthropic', g)}
                     onFetch={handleAnthropicFetch}
@@ -452,8 +504,8 @@ export function SecretsTab() {
                     description="Enables web search, current news, and weather tools for agents."
                     icon={<Search className="w-5 h-5 text-orange-500" />}
                     placeholder="BSA..."
-                    hasKey={status?.has_brave_key}
-                    granted={status?.brave_granted}
+                    hasKey={!!(status?.has_brave_key ?? status?.hasBraveKey)}
+                    granted={!!(status?.brave_granted ?? status?.braveGranted)}
                     onSave={handleBraveSave}
                     onToggle={(g) => handleToggle('brave', g)}
                     onFetch={handleBraveFetch}
@@ -461,12 +513,38 @@ export function SecretsTab() {
                 />
 
                 <SecretCard
+                    title="OpenAI API Key"
+                    description="For GPT 5.2, specialized reasoning and advanced coding models."
+                    icon={<Bot className="w-5 h-5 text-emerald-500" />}
+                    placeholder="sk-..."
+                    hasKey={!!(status?.has_openai_key ?? status?.hasOpenaiKey)}
+                    granted={!!(status?.openai_granted ?? status?.openaiGranted)}
+                    onSave={handleOpenAISave}
+                    onToggle={(g) => handleToggle('openai', g)}
+                    onFetch={handleOpenAIFetch}
+                    onDelete={handleOpenAIDelete}
+                />
+
+                <SecretCard
+                    title="OpenRouter API Key"
+                    description="Universal access to hundreds of open-source and proprietary models."
+                    icon={<Bot className="w-5 h-5 text-indigo-500" />}
+                    placeholder="sk-or-v1-..."
+                    hasKey={!!(status?.has_openrouter_key ?? status?.hasOpenrouterKey)}
+                    granted={!!(status?.openrouter_granted ?? status?.openrouterGranted)}
+                    onSave={handleOpenRouterSave}
+                    onToggle={(g) => handleToggle('openrouter', g)}
+                    onFetch={handleOpenRouterFetch}
+                    onDelete={handleOpenRouterDelete}
+                />
+
+                <SecretCard
                     title="Hugging Face Token"
                     description="Required for downloading gated models and datasets."
                     icon={<Bot className="w-5 h-5 text-yellow-500" />}
                     placeholder="hf_..."
-                    hasKey={status?.has_huggingface_token}
-                    granted={true} // HF token is always granted if present (no separate grant toggle yet)
+                    hasKey={!!(status?.has_huggingface_token ?? status?.hasHuggingfaceToken)}
+                    granted={!!(status?.huggingface_granted ?? status?.huggingfaceGranted)}
                     onSave={async (key) => {
                         const value = key.trim() || "";
                         console.log(`[SecretsTab] Saving HF token:`, value ? "REDACTED" : "empty (delete)");
@@ -479,7 +557,7 @@ export function SecretsTab() {
                             toast.error("Failed to save HF token");
                         }
                     }}
-                    onToggle={async () => { }} // No toggle for HF yet
+                    onToggle={(g) => handleToggle('huggingface', g)}
                     onFetch={async () => {
                         const res = await commands.getHfToken();
                         return res.status === 'ok' ? res.data : null;

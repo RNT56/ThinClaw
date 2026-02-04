@@ -303,10 +303,15 @@ pub struct ClawdbotStatus {
     pub auth_token: String,
     pub state_dir: String,
     pub has_huggingface_token: bool,
+    pub huggingface_granted: bool,
     pub has_anthropic_key: bool,
     pub anthropic_granted: bool,
     pub has_brave_key: bool,
     pub brave_granted: bool,
+    pub has_openai_key: bool,
+    pub openai_granted: bool,
+    pub has_openrouter_key: bool,
+    pub openrouter_granted: bool,
     pub custom_secrets: Vec<super::config::CustomSecret>,
     pub node_host_enabled: bool,
     pub local_inference_enabled: bool,
@@ -460,10 +465,35 @@ pub async fn get_clawdbot_status(
         .map(|cfg| cfg.brave_granted)
         .unwrap_or(false);
 
+    let has_openai_key = config
+        .as_ref()
+        .and_then(|cfg| cfg.openai_api_key.as_ref())
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let openai_granted = config
+        .as_ref()
+        .map(|cfg| cfg.openai_granted)
+        .unwrap_or(false);
+
+    let has_openrouter_key = config
+        .as_ref()
+        .and_then(|cfg| cfg.openrouter_api_key.as_ref())
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let openrouter_granted = config
+        .as_ref()
+        .map(|cfg| cfg.openrouter_granted)
+        .unwrap_or(false);
+
     let has_huggingface_token = config
         .as_ref()
         .and_then(|cfg| cfg.huggingface_token.as_ref())
         .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+
+    let huggingface_granted = config
+        .as_ref()
+        .map(|cfg| cfg.huggingface_granted)
         .unwrap_or(false);
 
     Ok(ClawdbotStatus {
@@ -479,10 +509,15 @@ pub async fn get_clawdbot_status(
         auth_token,
         state_dir,
         has_huggingface_token,
+        huggingface_granted,
         has_anthropic_key,
         anthropic_granted,
         has_brave_key,
         brave_granted,
+        has_openai_key,
+        openai_granted,
+        has_openrouter_key,
+        openrouter_granted,
         custom_secrets: config
             .as_ref()
             .map(|cfg| cfg.custom_secrets.clone())
@@ -496,6 +531,106 @@ pub async fn get_clawdbot_status(
             .map(|cfg| cfg.local_inference_enabled)
             .unwrap_or(false),
     })
+}
+
+/// Get OpenAI API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_openai_key(state: State<'_, ClawdbotManager>) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.openai_api_key))
+}
+
+/// Save OpenAI API key
+#[tauri::command]
+#[specta::specta]
+pub async fn save_openai_key(
+    state: State<'_, ClawdbotManager>,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let result = cfg.update_openai_key(key);
+
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
+    cfg.write_config(&moltbot, None)
+        .map_err(|e| e.to_string())?;
+
+    result.map_err(|e| e.to_string())?;
+    *state.config.write().await = Some(cfg);
+
+    Ok(())
+}
+
+/// Get OpenRouter API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_openrouter_key(
+    state: State<'_, ClawdbotManager>,
+) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.openrouter_api_key))
+}
+
+/// Save OpenRouter API key
+#[tauri::command]
+#[specta::specta]
+pub async fn save_openrouter_key(
+    state: State<'_, ClawdbotManager>,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let result = cfg.update_openrouter_key(key);
+
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
+    cfg.write_config(&moltbot, None)
+        .map_err(|e| e.to_string())?;
+
+    result.map_err(|e| e.to_string())?;
+    *state.config.write().await = Some(cfg);
+
+    Ok(())
+}
+
+/// Get Anthropic API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_anthropic_key(
+    state: State<'_, ClawdbotManager>,
+) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.anthropic_api_key))
+}
+
+/// Get Brave Search API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_brave_key(state: State<'_, ClawdbotManager>) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.brave_search_api_key))
 }
 
 /// Save Slack configuration
@@ -521,7 +656,14 @@ pub async fn save_anthropic_key(
 
     // Immediately regenerate Moltbot config to reflect changes (e.g. auth-profiles.json)
     // This solves the issue where updating the key didn't trigger a re-write of agent config
-    let moltbot = cfg.generate_config(None, None, None);
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
     // Best effort retrieval of local LLM port (it might represent zero if not running, that's fine)
     // Since we don't have access to sidecar state here easily without locking,
     // we'll rely on the fact that `generate_config` and `write_config` logic
@@ -563,7 +705,14 @@ pub async fn save_brave_key(
 
     let result = cfg.update_brave_key(key);
 
-    let moltbot = cfg.generate_config(None, None, None);
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
     cfg.write_config(&moltbot, None)
         .map_err(|e| e.to_string())?;
 
@@ -590,7 +739,14 @@ pub async fn clawdbot_toggle_secret_access(
     let result = cfg.toggle_secret_access(&secret, granted);
 
     // Regenerate config to reflect access change in auth-profiles.json
-    let moltbot = cfg.generate_config(None, None, None);
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
     cfg.write_config(&moltbot, None)
         .map_err(|e| e.to_string())?;
 
@@ -624,7 +780,14 @@ pub async fn set_hf_token(state: State<'_, ClawdbotManager>, token: String) -> R
     let result = cfg.update_huggingface_token(val);
 
     // Regenerate config/profiles
-    let moltbot = cfg.generate_config(None, None, None);
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
     cfg.write_config(&moltbot, None)
         .map_err(|e| e.to_string())?;
 
@@ -1993,22 +2156,4 @@ pub async fn clawdbot_web_login_telegram(
     state: State<'_, ClawdbotManager>,
 ) -> Result<serde_json::Value, String> {
     ws_rpc(state, |h| async move { h.web_login_telegram().await }).await
-}
-
-/// Get stored Anthropic API key
-#[tauri::command]
-#[specta::specta]
-pub async fn get_anthropic_key(
-    state: State<'_, ClawdbotManager>,
-) -> Result<Option<String>, String> {
-    let cfg = state.get_config().await.ok_or("Config not initialized")?;
-    Ok(cfg.anthropic_api_key.clone())
-}
-
-/// Get stored Brave Search API key
-#[tauri::command]
-#[specta::specta]
-pub async fn get_brave_key(state: State<'_, ClawdbotManager>) -> Result<Option<String>, String> {
-    let cfg = state.get_config().await.ok_or("Config not initialized")?;
-    Ok(cfg.brave_search_api_key.clone())
 }

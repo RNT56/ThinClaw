@@ -559,6 +559,11 @@ function AppearanceSettings() {
                 </div>
             </div>
 
+            <div className="pt-6 border-t border-border/10 space-y-1">
+                <h3 className="text-xl font-bold tracking-tight">Syntax Highlight Palettes</h3>
+                <p className="text-sm text-muted-foreground">Choose how code blocks and transcripts are rendered in your workspace.</p>
+            </div>
+
             {/* Dark Mode Group */}
             <div className="space-y-4">
                 <div className="flex items-center gap-3 px-1">

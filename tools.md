@@ -17,6 +17,21 @@ The Native agent is built on `rig-core`. It is designed for high-performance, co
 | `rag_tool` | `RAGTool` | Hooks into the local USearch vector store to retrieve relevant document snippets based on embeddings. | `rag_tool.rs` |
 | `generate_image` | `ImageGenTool`| Interface for the Stable Diffusion (`sd`) sidecar to generate visual assets from textual prompts. | `image_gen_tool.rs` |
 
+### 🔍 The Integrated "Scraping" Workflow (Deep Search)
+
+In Scrappy, **Websearch and Scraping are inseparable**. When the `web_search` tool is triggered, it follows a multi-stage **Deep Search** pipeline to ensure the LLM receives high-quality, up-to-date context rather than just metadata snippets:
+
+1.  **DuckDuckGo Search:** Performs an initial search via DuckDuckGo HTML to find relevant candidate URLs.
+2.  **Ranking:** Results are filtered and ranked. "Trusted sources" (e.g., official documentation, Wikipedia, GitHub) are prioritized and moved to the top.
+3.  **Automatic Scraping (The Core Trigger):** The tool automatically attempts to scrape the full content of the top results (configurable via `scrape_concurrency_limit`, usually the top 2-5 results):
+    *   **Fast Path:** It first attempts a simple HTTP GET to extract text quickly.
+    *   **Full Path (Chromium):** If the page requires JavaScript (detected via heuristics like "Enable JS" messages or low text density), it spawns a **Headless Chromium Browser** sidecar to render the page and extract the final text.
+4.  **AI Analysis (Map-Reduce):** The scraped text is sent to a **Summarizer LLM** (a specialized local model). This model scores the content for relevancy to the user's query and compresses large pages into concise, fact-dense summaries.
+5.  **Context Injection:** The summarized, scraped content is fed back to the main chat LLM as a `<tool_result>` block, allowing it to answer with "grounded" real-time information.
+
+This pipeline ensures that Scrappy doesn't just "talk about" the web, but actually "reads" it before responding.
+
+
 ### 🛠️ How to Create & Register a Native Tool
 
 #### 1. Implement the `Tool` Trait

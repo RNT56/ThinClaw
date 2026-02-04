@@ -39,6 +39,16 @@ pub struct ScrappyIdentity {
     #[serde(default)]
     pub huggingface_token: Option<String>,
     #[serde(default)]
+    pub huggingface_granted: bool,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    #[serde(default)]
+    pub openai_granted: bool,
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter_granted: bool,
+    #[serde(default)]
     pub gateway_mode: String,
     #[serde(default)]
     pub remote_url: Option<String>,
@@ -71,6 +81,11 @@ pub struct ClawdbotConfig {
     pub brave_search_api_key: Option<String>,
     pub brave_granted: bool,
     pub huggingface_token: Option<String>,
+    pub huggingface_granted: bool,
+    pub openai_api_key: Option<String>,
+    pub openai_granted: bool,
+    pub openrouter_api_key: Option<String>,
+    pub openrouter_granted: bool,
     /// Gateway port
     pub port: u16,
     /// Gateway mode (local or remote)
@@ -337,6 +352,11 @@ impl ClawdbotConfig {
             brave_search_api_key: identity.brave_search_api_key,
             brave_granted: identity.brave_granted,
             huggingface_token: identity.huggingface_token,
+            huggingface_granted: identity.huggingface_granted,
+            openai_api_key: identity.openai_api_key,
+            openai_granted: identity.openai_granted,
+            openrouter_api_key: identity.openrouter_api_key,
+            openrouter_granted: identity.openrouter_granted,
             port,
             gateway_mode: identity.gateway_mode,
             remote_url: identity.remote_url,
@@ -380,11 +400,36 @@ impl ClawdbotConfig {
         self.save_identity()
     }
 
+    /// Update OpenAI API key and persist to identity.json
+    pub fn update_openai_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        self.openai_api_key = key;
+        if self.openai_api_key.is_none() {
+            self.openai_granted = false;
+        }
+        self.save_identity()
+    }
+
+    /// Update OpenRouter API key and persist to identity.json
+    pub fn update_openrouter_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        self.openrouter_api_key = key;
+        if self.openrouter_api_key.is_none() {
+            self.openrouter_granted = false;
+        }
+        self.save_identity()
+    }
+
     /// Toggle secret access for OpenClaw
     pub fn toggle_secret_access(&mut self, secret: &str, granted: bool) -> std::io::Result<()> {
+        println!(
+            "[clawdbot] toggling secret access: {} -> {}",
+            secret, granted
+        );
         match secret {
             "anthropic" => self.anthropic_granted = granted,
             "brave" => self.brave_granted = granted,
+            "openai" => self.openai_granted = granted,
+            "openrouter" => self.openrouter_granted = granted,
+            "huggingface" => self.huggingface_granted = granted,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -397,6 +442,9 @@ impl ClawdbotConfig {
 
     pub fn update_huggingface_token(&mut self, token: Option<String>) -> std::io::Result<()> {
         self.huggingface_token = token;
+        if self.huggingface_token.is_none() {
+            self.huggingface_granted = false;
+        }
         self.save_identity()
     }
 
@@ -433,6 +481,10 @@ impl ClawdbotConfig {
             anthropic_granted: self.anthropic_granted,
             brave_search_api_key: self.brave_search_api_key.clone(),
             brave_granted: self.brave_granted,
+            openai_api_key: self.openai_api_key.clone(),
+            openai_granted: self.openai_granted,
+            openrouter_api_key: self.openrouter_api_key.clone(),
+            openrouter_granted: self.openrouter_granted,
             gateway_mode: self.gateway_mode.clone(),
             remote_url: self.remote_url.clone(),
             remote_token: self.remote_token.clone(),
@@ -444,6 +496,7 @@ impl ClawdbotConfig {
             expose_inference: self.expose_inference,
             setup_completed: self.setup_completed,
             huggingface_token: self.huggingface_token.clone(),
+            huggingface_granted: self.huggingface_granted,
         };
         if let Ok(json) = serde_json::to_string_pretty(&identity) {
             std::fs::write(id_path, json)?;
@@ -546,6 +599,49 @@ impl ClawdbotConfig {
                         { "id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet" },
                         { "id": "claude-3-5-haiku-latest", "name": "Claude 3.5 Haiku" },
                         { "id": "claude-3-opus-latest", "name": "Claude 3 Opus" }
+                    ]
+                }),
+            );
+        }
+
+        // 1.5. OpenAI Provider (Cloud)
+        if self.openai_granted
+            && self
+                .openai_api_key
+                .as_ref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false)
+        {
+            providers.insert(
+                "openai".into(),
+                serde_json::json!({
+                    "api": "openai",
+                    "models": [
+                        { "id": "gpt-4o", "name": "GPT-4o" },
+                        { "id": "gpt-4o-mini", "name": "GPT-4o Mini" },
+                        { "id": "o1", "name": "o1 (Reasoning)" }
+                    ]
+                }),
+            );
+        }
+
+        // 1.6. OpenRouter Provider (Cloud)
+        if self.openrouter_granted
+            && self
+                .openrouter_api_key
+                .as_ref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false)
+        {
+            providers.insert(
+                "openrouter".into(),
+                serde_json::json!({
+                    "api": "openai",
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "models": [
+                        { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet (via OR)" },
+                        { "id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (via OR)" },
+                        { "id": "deepseek/deepseek-chat", "name": "DeepSeek V3 (via OR)" }
                     ]
                 }),
             );
@@ -672,6 +768,57 @@ impl ClawdbotConfig {
                             "provider": "anthropic",
                             "key": key,
                             "label": "Anthropic (Scrappy)"
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Add OpenAI if available AND granted
+        if self.openai_granted {
+            if let Some(ref key) = self.openai_api_key {
+                if !key.trim().is_empty() {
+                    profiles.insert(
+                        "openai:default".into(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "provider": "openai",
+                            "key": key,
+                            "label": "OpenAI (Scrappy)"
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Add OpenRouter if available AND granted
+        if self.openrouter_granted {
+            if let Some(ref key) = self.openrouter_api_key {
+                if !key.trim().is_empty() {
+                    profiles.insert(
+                        "openrouter:default".into(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "provider": "openrouter",
+                            "key": key,
+                            "label": "OpenRouter (Scrappy)"
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Add Hugging Face if available AND granted
+        if self.huggingface_granted {
+            if let Some(ref token) = self.huggingface_token {
+                if !token.trim().is_empty() {
+                    profiles.insert(
+                        "huggingface:default".into(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "provider": "huggingface",
+                            "key": token,
+                            "label": "Hugging Face (Scrappy)"
                         }),
                     );
                 }
