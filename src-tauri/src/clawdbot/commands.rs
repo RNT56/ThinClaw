@@ -315,6 +315,7 @@ pub struct ClawdbotStatus {
     pub custom_secrets: Vec<super::config::CustomSecret>,
     pub node_host_enabled: bool,
     pub local_inference_enabled: bool,
+    pub selected_cloud_brain: Option<String>,
 }
 
 /// Slack configuration input
@@ -530,6 +531,9 @@ pub async fn get_clawdbot_status(
             .as_ref()
             .map(|cfg| cfg.local_inference_enabled)
             .unwrap_or(false),
+        selected_cloud_brain: config
+            .as_ref()
+            .and_then(|cfg| cfg.selected_cloud_brain.clone()),
     })
 }
 
@@ -753,6 +757,38 @@ pub async fn clawdbot_toggle_secret_access(
     result.map_err(|e| e.to_string())?;
     *state.config.write().await = Some(cfg);
 
+    Ok(())
+}
+
+/// Select the cloud brain to use for the agent
+#[tauri::command]
+#[specta::specta]
+pub async fn select_clawdbot_brain(
+    state: State<'_, ClawdbotManager>,
+    brain: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    cfg.update_selected_cloud_brain(brain)
+        .map_err(|e| e.to_string())?;
+
+    // Regenerate config/profiles
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
+    cfg.write_config(&moltbot, None)
+        .map_err(|e| e.to_string())?;
+
+    *state.config.write().await = Some(cfg);
     Ok(())
 }
 

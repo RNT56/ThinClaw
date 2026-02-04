@@ -21,6 +21,8 @@ pub struct ChatServerOptions {
     pub template: Option<String>,
     pub mmproj: Option<String>,
     pub expose: bool,
+    pub mlock: bool,
+    pub quantize_kv: bool,
 }
 
 impl SidecarProcess {
@@ -99,6 +101,8 @@ impl SidecarManager {
         let template_name = options.template;
         let mmproj_path_override = options.mmproj;
         let expose = options.expose;
+        let mlock = options.mlock;
+        let quantize_kv = options.quantize_kv;
 
         // Resolve Template
         let template_opt = match template_name.as_deref() {
@@ -191,6 +195,17 @@ impl SidecarManager {
             "--slot-save-path".to_string(),
             cache_path_str,
         ];
+
+        if mlock {
+            args.push("--mlock".to_string());
+        }
+
+        if quantize_kv {
+            args.push("--cache-type-k".to_string());
+            args.push("q4_0".to_string());
+            args.push("--cache-type-v".to_string());
+            args.push("q4_0".to_string());
+        }
 
         if let Some(t) = template_opt {
             args.push("--chat-template".to_string());
@@ -748,6 +763,8 @@ pub async fn start_chat_server(
     template: Option<String>,
     mmproj: Option<String>,
     expose_network: Option<bool>,
+    mlock: Option<bool>,
+    quantize_kv: Option<bool>,
 ) -> Result<(), String> {
     // 1. Start Chat Server
     // Clone app handle for the closure
@@ -763,6 +780,8 @@ pub async fn start_chat_server(
                 template,
                 mmproj,
                 expose: expose_network.unwrap_or(false),
+                mlock: mlock.unwrap_or(false),
+                quantize_kv: quantize_kv.unwrap_or(false),
             },
             move |code| {
                 // This callback runs when the process terminates

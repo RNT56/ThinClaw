@@ -602,15 +602,29 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
                                         remarkPlugins={[remarkGfm]}
                                         rehypePlugins={[rehypeHighlight]}
                                         components={{
-                                            a: ({ node, ...props }) => (
-                                                <a
-                                                    {...props}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-primary hover:underline cursor-pointer relative z-10"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                />
-                                            ),
+                                            a: ({ node, href, children, ...props }) => {
+                                                const isLocalPath = href && (href.startsWith('/') || href.startsWith('file://') || (typeof children === 'string' && (children.startsWith('/') || children.startsWith('./'))));
+
+                                                return (
+                                                    <a
+                                                        {...props}
+                                                        href={href}
+                                                        target={isLocalPath ? undefined : "_blank"}
+                                                        rel="noopener noreferrer"
+                                                        className="text-primary hover:underline cursor-pointer relative z-10"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (isLocalPath && href) {
+                                                                e.preventDefault();
+                                                                import('../../lib/clawdbot').then(m => m.revealPath(href.replace('file://', '')));
+                                                                toast.info("Revealing in Finder", { description: href });
+                                                            }
+                                                        }}
+                                                    >
+                                                        {children}
+                                                    </a>
+                                                );
+                                            },
                                             pre: ({ node, children, ...props }) => {
                                                 let codeText = "";
                                                 if (isValidElement(children)) {

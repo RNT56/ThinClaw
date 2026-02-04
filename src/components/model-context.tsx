@@ -214,80 +214,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         }
     }, []);
 
-    // Check hardware and recommend model on first empty run
-    useEffect(() => {
-        const checkHardware = async () => {
-            try {
-                // Fetch System Specs
-                const specs = await commands.getSystemSpecs();
-                if (specs) {
-                    setSystemSpecs(specs);
-
-                    // Check if we need to recommend
-                    const hasChecked = localStorage.getItem(FIRST_RUN_KEY);
-                    const models = await refreshModels();
-
-                    if (!hasChecked && models.length === 0) {
-                        const ramGB = specs.total_memory / (1024 * 1024 * 1024);
-
-                        let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
-                        if (ramGB >= 24) recommendedId = "gemma-3-27b-it-qat";
-                        else if (ramGB >= 8) recommendedId = "gemma-3-12b-it-qat";
-
-                        const model = MODEL_LIBRARY.find(m => m.id === recommendedId);
-
-                        if (model) {
-                            toast("Hardware Detected", {
-                                description: `We recommend ${model.name} for your system (${Math.round(ramGB)}GB RAM).`,
-                                action: {
-                                    label: "Download",
-                                    onClick: () => startDownload(model, model.variants[0])
-                                },
-                                duration: 10000,
-                            });
-                        }
-                        localStorage.setItem(FIRST_RUN_KEY, "true");
-                    }
-                }
-            } catch (error) {
-                console.error("Failed to init system specs:", error);
-            }
-        };
-
-        checkHardware();
-    }, []);
-
-    // Listen for download progress globally
-    useEffect(() => {
-        const unlisten = listen<DownloadEvent>("download_progress", (event) => {
-            console.log("Received download progress:", event.payload.filename, event.payload.percentage);
-            setDownloading(prev => ({
-                ...prev,
-                [event.payload.filename]: event.payload.percentage
-            }));
-
-            if (event.payload.percentage >= 100) {
-                // Download complete
-                console.log("Download complete event for", event.payload.filename);
-                // Ensure refresh happens after a slight delay to allow filesystem to settle/close handle
-                setTimeout(() => {
-                    refreshModels();
-                    setDownloading(prev => {
-                        const copy = { ...prev };
-                        delete copy[event.payload.filename];
-                        return copy;
-                    });
-                    toast.success(`Download complete: ${event.payload.filename} `);
-                }, 1000);
-            }
-        });
-
-        return () => {
-            unlisten.then(f => f());
-        }
-    }, [refreshModels]);
-
-    const startDownload = async (model: ModelDefinition, variant?: ModelVariant) => {
+    const startDownload = useCallback(async (model: ModelDefinition, variant?: ModelVariant) => {
         const v = variant || (model.variants && model.variants.length > 0 ? model.variants[0] : null);
 
         if (!v) {
@@ -376,7 +303,93 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 return c;
             });
         }
-    };
+    }, [downloading]);
+
+    // Check hardware and recommend model on first empty run
+    useEffect(() => {
+        const checkHardware = async () => {
+            try {
+                // Fetch System Specs
+                const specs = await commands.getSystemSpecs();
+                if (specs) {
+                    setSystemSpecs(specs);
+
+                    // Check if we need to recommend
+                    const hasChecked = localStorage.getItem(FIRST_RUN_KEY);
+                    const models = await refreshModels();
+
+                    if (!hasChecked && models.length === 0) {
+                        const ramGB = specs.total_memory / (1024 * 1024 * 1024);
+
+                        let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
+                        if (ramGB >= 24) recommendedId = "gemma-3-27b-it-qat";
+                        else if (ramGB >= 8) recommendedId = "gemma-3-12b-it-qat";
+
+                        const model = MODEL_LIBRARY.find(m => m.id === recommendedId);
+
+                        if (model) {
+                            toast("Hardware Detected", {
+                                description: `We recommend ${model.name} for your system (${Math.round(ramGB)}GB RAM).`,
+                                action: {
+                                    label: "Download",
+                                    onClick: () => startDownload(model, model.variants[0])
+                                },
+                                duration: 10000,
+                            });
+                        }
+                        localStorage.setItem(FIRST_RUN_KEY, "true");
+                    }
+                }
+            } catch (error) {
+                console.error("Failed to init system specs:", error);
+            }
+        };
+
+        checkHardware();
+
+        // Polling loop for real-time resource tracking (30 second default)
+        const interval = setInterval(async () => {
+            try {
+                const specs = await commands.getSystemSpecs();
+                if (specs) setSystemSpecs(specs);
+            } catch (e) {
+                console.error("Health poll failed:", e);
+            }
+        }, 30000);
+
+        return () => clearInterval(interval);
+    }, [refreshModels, startDownload]);
+
+    // Listen for download progress globally
+    useEffect(() => {
+        const unlisten = listen<DownloadEvent>("download_progress", (event) => {
+            console.log("Received download progress:", event.payload.filename, event.payload.percentage);
+            setDownloading(prev => ({
+                ...prev,
+                [event.payload.filename]: event.payload.percentage
+            }));
+
+            if (event.payload.percentage >= 100) {
+                // Download complete
+                console.log("Download complete event for", event.payload.filename);
+                // Ensure refresh happens after a slight delay to allow filesystem to settle/close handle
+                setTimeout(() => {
+                    refreshModels();
+                    setDownloading(prev => {
+                        const copy = { ...prev };
+                        delete copy[event.payload.filename];
+                        return copy;
+                    });
+                    toast.success(`Download complete: ${event.payload.filename} `);
+                }, 1000);
+            }
+        });
+
+        return () => {
+            unlisten.then(f => f());
+        }
+    }, [refreshModels]);
+
 
     const cancelDownload = async (filename: string) => {
         try {

@@ -70,6 +70,17 @@ pub struct UserConfig {
 
     #[serde(default = "default_persona")]
     pub selected_persona: String,
+    #[serde(default)]
+    pub selected_chat_provider: Option<String>, // "local", "anthropic", "openai", "openrouter"
+
+    #[serde(default = "default_memory_reservation")]
+    pub memory_reservation_gb: u32,
+    #[serde(default = "default_true")]
+    pub enable_memory_reservation: bool,
+    #[serde(default = "default_false")]
+    pub mlock: bool,
+    #[serde(default = "default_false")]
+    pub quantize_kv: bool,
 }
 
 impl Default for UserConfig {
@@ -90,6 +101,11 @@ impl Default for UserConfig {
             custom_personas: vec![],
             image_prompt_enhance_enabled: false,
             selected_persona: default_persona(),
+            selected_chat_provider: None,
+            memory_reservation_gb: default_memory_reservation(),
+            enable_memory_reservation: true,
+            mlock: false,
+            quantize_kv: false,
         }
     }
 }
@@ -133,6 +149,13 @@ fn default_false() -> bool {
 }
 fn default_persona() -> String {
     "scrappy".to_string()
+}
+fn default_memory_reservation() -> u32 {
+    4
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct ConfigManager {

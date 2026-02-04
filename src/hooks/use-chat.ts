@@ -138,7 +138,7 @@ export function useChat() {
 
     const startServer = useCallback(async (path: string) => {
         try {
-            unwrap(await commands.startChatServer(path, maxContext, currentModelTemplate, null, false));
+            unwrap(await commands.startChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
             setModelRunning(true);
         } catch (e) {
             console.error("Server start error:", e);

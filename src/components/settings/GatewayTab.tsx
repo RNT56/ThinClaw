@@ -33,6 +33,18 @@ interface StatusInfo {
     nodeHostEnabled: boolean;
     localInferenceEnabled: boolean;
     exposeInference: boolean;
+    hasHuggingfaceToken: boolean;
+    huggingfaceGranted: boolean;
+    hasAnthropicKey: boolean;
+    anthropicGranted: boolean;
+    hasBraveKey: boolean;
+    braveGranted: boolean;
+    hasOpenaiKey: boolean;
+    openaiGranted: boolean;
+    hasOpenrouterKey: boolean;
+    openrouterGranted: boolean;
+    customSecrets: any[];
+    selectedCloudBrain: string | null;
 }
 
 export function GatewayTab({ className }: GatewayTabProps) {
@@ -50,8 +62,22 @@ export function GatewayTab({ className }: GatewayTabProps) {
         stateDir: '',
         nodeHostEnabled: false,
         localInferenceEnabled: false,
-        exposeInference: false
+        exposeInference: false,
+        hasHuggingfaceToken: false,
+        huggingfaceGranted: false,
+        hasAnthropicKey: false,
+        anthropicGranted: false,
+        hasBraveKey: false,
+        braveGranted: false,
+        hasOpenaiKey: false,
+        openaiGranted: false,
+        hasOpenrouterKey: false,
+        openrouterGranted: false,
+        customSecrets: [],
+        selectedCloudBrain: null
     });
+
+    const [showBrainSelector, setShowBrainSelector] = useState(false);
 
     const [permissions, setPermissions] = useState<PermissionStatus>({
         accessibility: false,
@@ -88,7 +114,19 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 stateDir: s.state_dir,
                 nodeHostEnabled: s.node_host_enabled,
                 localInferenceEnabled: s.local_inference_enabled,
-                exposeInference: (s as any).expose_inference || false // Handle potentially missing field during update
+                exposeInference: (s as any).expose_inference || false,
+                hasHuggingfaceToken: s.has_huggingface_token,
+                huggingfaceGranted: s.huggingface_granted,
+                hasAnthropicKey: s.has_anthropic_key,
+                anthropicGranted: s.anthropic_granted,
+                hasBraveKey: s.has_brave_key,
+                braveGranted: s.brave_granted,
+                hasOpenaiKey: s.has_openai_key,
+                openaiGranted: s.openai_granted,
+                hasOpenrouterKey: s.has_openrouter_key,
+                openrouterGranted: s.openrouter_granted,
+                customSecrets: (s as any).custom_secrets || [],
+                selectedCloudBrain: s.selected_cloud_brain
             });
 
             const perms = await clawdbot.getPermissionStatus();
@@ -125,6 +163,15 @@ export function GatewayTab({ className }: GatewayTabProps) {
     };
 
     const handleStart = async () => {
+        // Mandatory Inference Provider Check
+        const cloudGranted = status.anthropicGranted || status.openaiGranted || status.openrouterGranted;
+        if (!status.localInferenceEnabled && !cloudGranted) {
+            toast.error("Cognitive engine required", {
+                description: "Please enable Local Neural Link or authorize a Cloud Brain before starting the gateway."
+            });
+            return;
+        }
+
         if (status.gatewayMode === 'local' && maxContext < 32768) {
             setShowContextWarning(true);
             return;
@@ -329,7 +376,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <Zap className="w-6 h-6 text-primary" />
                         </div>
                         <div>
-                            <h2 className="text-2xl font-bold tracking-tight">Gateway Control</h2>
+                            <h2 className="text-2xl font-bold tracking-tight">OpenClaw Gateway</h2>
                             <p className="text-sm text-muted-foreground font-medium">Runtime Management & Connection Orchestration</p>
                         </div>
                     </div>
@@ -387,11 +434,22 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 )}
 
                 <div className="p-8 rounded-3xl bg-card border border-border/50 shadow-xl space-y-6">
-                    <div className="flex items-center gap-3 border-b border-border/50 pb-4">
-                        <Monitor className="w-6 h-6 text-amber-500" />
-                        <div>
-                            <h4 className="font-bold text-lg">Agent Tuning</h4>
-                            <p className="text-xs text-muted-foreground">Configuration for autonomous behavior and intelligence.</p>
+                    <div className="flex items-center justify-between border-b border-border/50 pb-4">
+                        <div className="flex items-center gap-3">
+                            <Monitor className="w-6 h-6 text-amber-500" />
+                            <div>
+                                <h4 className="font-bold text-lg">Agent Tuning</h4>
+                                <p className="text-xs text-muted-foreground">Configuration for autonomous behavior and intelligence.</p>
+                            </div>
+                        </div>
+                        <div className={cn(
+                            "px-3 py-1 rounded-lg text-[10px] font-bold border flex items-center gap-2",
+                            status.localInferenceEnabled
+                                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                                : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                        )}>
+                            <div className={cn("w-1.5 h-1.5 rounded-full animate-pulse", status.localInferenceEnabled ? "bg-emerald-500" : "bg-amber-500")} />
+                            {status.localInferenceEnabled ? "NEURAL LINK ACTIVE" : "CLOUD BRAIN ACTIVE"}
                         </div>
                     </div>
 
@@ -402,20 +460,171 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </p>
                     </div>
 
-                    <div className="space-y-2">
-                        <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Cloud Brain: Anthropic API Key</label>
-                        <input
-                            type="password"
-                            placeholder="sk-ant-..."
-                            className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-none font-mono"
-                            onBlur={(e) => {
-                                if (!e.target.value) return;
-                                clawdbot.saveAnthropicKey(e.target.value)
-                                    .then(() => toast.success('Agent logic key synchronized'))
-                                    .catch((err) => toast.error('Sync failed', { description: String(err) }));
-                            }}
-                        />
-                        <p className="text-[10px] text-muted-foreground italic pl-1">Key is ephemeralized and stored securely in identity.json</p>
+                    {/* Granted Brains Section */}
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                            <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Authorized Intelligence Channels</label>
+                            {!status.localInferenceEnabled && !status.anthropicGranted && !status.openaiGranted && !status.openrouterGranted && (
+                                <span className="text-[10px] font-bold text-rose-500 animate-pulse">ACTION REQUIRED: NO BRAIN CONFIGURED</span>
+                            )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {/* Local Brain Status */}
+                            <div className={cn(
+                                "p-4 rounded-2xl border transition-all flex items-center justify-between group",
+                                status.localInferenceEnabled
+                                    ? "bg-emerald-500/5 border-emerald-500/20"
+                                    : "bg-muted/10 border-transparent opacity-50"
+                            )}>
+                                <div className="flex items-center gap-3">
+                                    <div className={cn("p-2 rounded-xl", status.localInferenceEnabled ? "bg-emerald-500/10" : "bg-muted")}>
+                                        <Zap className={cn("w-4 h-4", status.localInferenceEnabled ? "text-emerald-500" : "text-muted-foreground")} />
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-bold">Local Host</p>
+                                        <p className="text-[10px] text-muted-foreground">{status.localInferenceEnabled ? "Primary Path" : "Disabled"}</p>
+                                    </div>
+                                </div>
+                                {status.localInferenceEnabled && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                            </div>
+
+                            {/* Anthropic Status */}
+                            {status.anthropicGranted && (
+                                <button
+                                    onClick={async () => {
+                                        if (status.localInferenceEnabled) return;
+                                        await clawdbot.selectClawdbotBrain('anthropic');
+                                        await fetchStatus();
+                                        toast.success('Anthropic Claude selected as primary brain');
+                                    }}
+                                    className={cn(
+                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
+                                        status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled
+                                            ? "bg-indigo-500/10 border-indigo-500/40 shadow-sm"
+                                            : "bg-indigo-500/5 border-indigo-500/10 hover:border-indigo-500/30"
+                                    )}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-xl bg-indigo-500/10">
+                                            <Shield className="w-4 h-4 text-indigo-500" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-bold">Anthropic Claude</p>
+                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
+                                        </div>
+                                    </div>
+                                    {(status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                                </button>
+                            )}
+
+                            {/* OpenAI Status */}
+                            {status.openaiGranted && (
+                                <button
+                                    onClick={async () => {
+                                        if (status.localInferenceEnabled) return;
+                                        await clawdbot.selectClawdbotBrain('openai');
+                                        await fetchStatus();
+                                        toast.success('OpenAI GPT selected as primary brain');
+                                    }}
+                                    className={cn(
+                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
+                                        status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled
+                                            ? "bg-blue-500/10 border-blue-500/40 shadow-sm"
+                                            : "bg-blue-500/5 border-blue-500/10 hover:border-blue-500/30"
+                                    )}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-xl bg-blue-500/10">
+                                            <Play className="w-4 h-4 text-blue-500" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-bold">OpenAI GPT</p>
+                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
+                                        </div>
+                                    </div>
+                                    {(status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                                </button>
+                            )}
+
+                            {/* OpenRouter Status */}
+                            {status.openrouterGranted && (
+                                <button
+                                    onClick={async () => {
+                                        if (status.localInferenceEnabled) return;
+                                        await clawdbot.selectClawdbotBrain('openrouter');
+                                        await fetchStatus();
+                                        toast.success('OpenRouter selected as primary brain');
+                                    }}
+                                    className={cn(
+                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
+                                        status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled
+                                            ? "bg-purple-500/10 border-purple-500/40 shadow-sm"
+                                            : "bg-purple-500/5 border-purple-500/10 hover:border-purple-500/30"
+                                    )}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-xl bg-purple-500/10">
+                                            <RefreshCw className="w-4 h-4 text-purple-500" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-bold">OpenRouter</p>
+                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
+                                        </div>
+                                    </div>
+                                    {(status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Critical Warning if nothing is set up */}
+                        {!status.localInferenceEnabled && !status.anthropicGranted && !status.openaiGranted && !status.openrouterGranted && (
+                            <div className="p-6 border-2 border-dashed border-rose-500/20 rounded-2xl bg-rose-500/5 text-center space-y-3">
+                                <p className="text-sm font-medium text-rose-600 dark:text-rose-400">
+                                    No cognitive engine is configured for the agent.
+                                </p>
+                                <div className="flex gap-2 justify-center">
+                                    <button
+                                        onClick={async () => {
+                                            try {
+                                                const newState = !status.localInferenceEnabled;
+                                                await clawdbot.toggleClawdbotLocalInference(newState);
+                                                await fetchStatus();
+
+                                                if (!newState) {
+                                                    // Local link deactivated, check if we need to prompt for cloud brain
+                                                    const cloudGrantedCount = [status.anthropicGranted, status.openaiGranted, status.openrouterGranted].filter(Boolean).length;
+                                                    if (cloudGrantedCount > 1 || (cloudGrantedCount === 0 && !status.selectedCloudBrain)) {
+                                                        setShowBrainSelector(true);
+                                                    } else if (cloudGrantedCount === 1 && !status.selectedCloudBrain) {
+                                                        // If only one cloud brain is granted and none is selected, select it automatically
+                                                        if (status.anthropicGranted) await clawdbot.selectClawdbotBrain('anthropic');
+                                                        else if (status.openaiGranted) await clawdbot.selectClawdbotBrain('openai');
+                                                        else if (status.openrouterGranted) await clawdbot.selectClawdbotBrain('openrouter');
+                                                        await fetchStatus();
+                                                    }
+                                                }
+
+                                                toast.success(newState ? 'Local Neural Link active' : 'Local link deactivated');
+                                            } catch (e) { toast.error('Link toggle failed'); }
+                                        }}
+                                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
+                                    >
+                                        <Zap className="w-3.5 h-3.5" /> ENABLE LOCAL LINK
+                                    </button>
+                                    <a
+                                        href="#secrets"
+                                        className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold hover:opacity-90 transition-all flex items-center gap-2 shadow-lg shadow-primary/20"
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            window.dispatchEvent(new CustomEvent('open-settings', { detail: 'secrets' }));
+                                        }}
+                                    >
+                                        <Shield className="w-3.5 h-3.5" /> AUTHORIZE CLOUD BRAIN
+                                    </a>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -709,47 +918,115 @@ export function GatewayTab({ className }: GatewayTabProps) {
             </div>
 
             {/* Context Warning Dialog */}
-            {showContextWarning && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
+            {
+                showContextWarning && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-sm w-full space-y-6 text-center"
+                        >
+                            <div className="mx-auto p-4 bg-amber-500/20 rounded-full w-fit">
+                                <AlertTriangle className="w-8 h-8 text-amber-500" />
+                            </div>
+                            <div className="space-y-2">
+                                <h3 className="text-xl font-bold tracking-tight">Intelligence Ceiling</h3>
+                                <p className="text-sm text-muted-foreground leading-relaxed">
+                                    The OpenClaw engine requires <span className="text-foreground font-bold italic">32,768 tokens</span> of context to operate effectively.
+                                </p>
+                            </div>
+                            <div className="p-4 rounded-2xl bg-muted/50 border border-border flex justify-between items-center text-xs font-bold">
+                                <span className="text-muted-foreground uppercase tracking-widest">Current</span>
+                                <span className="text-amber-500 underline underline-offset-4">{maxContext / 1024}k</span>
+                            </div>
+                            <div className="flex flex-col gap-3">
+                                <button
+                                    onClick={() => {
+                                        setMaxContext(32768);
+                                        setShowContextWarning(false);
+                                        toast.success("Context set to recommended minimum");
+                                    }}
+                                    className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold hover:opacity-90 transition-all shadow-lg shadow-primary/20"
+                                >
+                                    Auto-Adjust to 32k
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setShowContextWarning(false);
+                                        executeStartGateway();
+                                    }}
+                                    className="w-full py-3 rounded-2xl bg-muted hover:bg-muted/80 text-muted-foreground font-bold transition-all"
+                                >
+                                    Proceed with Caution
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+
+            {/* Brain Selector Modal */}
+            {showBrainSelector && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
                     <motion.div
                         initial={{ opacity: 0, scale: 0.9, y: 20 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
-                        className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-sm w-full space-y-6 text-center"
+                        className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-w-md w-full space-y-6"
                     >
-                        <div className="mx-auto p-4 bg-amber-500/20 rounded-full w-fit">
-                            <AlertTriangle className="w-8 h-8 text-amber-500" />
-                        </div>
-                        <div className="space-y-2">
-                            <h3 className="text-xl font-bold tracking-tight">Intelligence Ceiling</h3>
+                        <div className="space-y-2 text-center">
+                            <div className="mx-auto p-4 bg-primary/10 rounded-full w-fit">
+                                <Zap className="w-8 h-8 text-primary" />
+                            </div>
+                            <h3 className="text-xl font-bold tracking-tight">Select Cloud Brain</h3>
                             <p className="text-sm text-muted-foreground leading-relaxed">
-                                The OpenClaw engine requires <span className="text-foreground font-bold italic">32,768 tokens</span> of context to operate effectively.
+                                Local inference is disabled. Choose which cloud provider to use for the agent's logic.
                             </p>
                         </div>
-                        <div className="p-4 rounded-2xl bg-muted/50 border border-border flex justify-between items-center text-xs font-bold">
-                            <span className="text-muted-foreground uppercase tracking-widest">Current</span>
-                            <span className="text-amber-500 underline underline-offset-4">{maxContext / 1024}k</span>
+
+                        <div className="space-y-3">
+                            {[
+                                { id: 'anthropic', label: 'Anthropic Claude', granted: status.anthropicGranted, color: 'indigo' },
+                                { id: 'openai', label: 'OpenAI GPT-4o', granted: status.openaiGranted, color: 'blue' },
+                                { id: 'openrouter', label: 'OpenRouter', granted: status.openrouterGranted, color: 'purple' }
+                            ].map(brain => (
+                                <button
+                                    key={brain.id}
+                                    disabled={!brain.granted}
+                                    onClick={async () => {
+                                        try {
+                                            await clawdbot.selectClawdbotBrain(brain.id);
+                                            await fetchStatus();
+                                            setShowBrainSelector(false);
+                                            toast.success(`${brain.label} selected as primary brain`);
+                                        } catch (e) { toast.error('Selection failed'); }
+                                    }}
+                                    className={cn(
+                                        "w-full p-4 rounded-2xl border transition-all flex items-center justify-between group",
+                                        brain.granted
+                                            ? `hover:bg-${brain.color}-500/5 hover:border-${brain.color}-500/30`
+                                            : "opacity-40 cursor-not-allowed",
+                                        status.selectedCloudBrain === brain.id ? `bg-${brain.color}-500/10 border-${brain.color}-500/40` : "bg-muted/10 border-transparent"
+                                    )}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className={cn("p-2 rounded-xl bg-card", brain.granted && `text-${brain.color}-500`)}>
+                                            <Shield className="w-4 h-4" />
+                                        </div>
+                                        <span className="text-sm font-bold">{brain.label}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {!brain.granted && <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">NOT GRANTED</span>}
+                                        {status.selectedCloudBrain === brain.id && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                                    </div>
+                                </button>
+                            ))}
                         </div>
-                        <div className="flex flex-col gap-3">
-                            <button
-                                onClick={() => {
-                                    setMaxContext(32768);
-                                    setShowContextWarning(false);
-                                    toast.success("Context set to recommended minimum");
-                                }}
-                                className="w-full py-3 rounded-2xl bg-primary text-primary-foreground font-bold hover:opacity-90 transition-all shadow-lg shadow-primary/20"
-                            >
-                                Auto-Adjust to 32k
-                            </button>
-                            <button
-                                onClick={() => {
-                                    setShowContextWarning(false);
-                                    executeStartGateway();
-                                }}
-                                className="w-full py-3 rounded-2xl bg-muted hover:bg-muted/80 text-muted-foreground font-bold transition-all"
-                            >
-                                Proceed with Caution
-                            </button>
-                        </div>
+
+                        <button
+                            onClick={() => setShowBrainSelector(false)}
+                            className="w-full py-3 text-xs font-bold text-muted-foreground hover:text-foreground transition-all"
+                        >
+                            Cancel
+                        </button>
                     </motion.div>
                 </div>
             )}

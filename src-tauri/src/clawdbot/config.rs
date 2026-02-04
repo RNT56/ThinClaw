@@ -64,6 +64,8 @@ pub struct ScrappyIdentity {
     pub expose_inference: bool,
     #[serde(default)]
     pub setup_completed: bool,
+    #[serde(default)]
+    pub selected_cloud_brain: Option<String>, // "anthropic", "openai", "openrouter"
 }
 
 /// Clawdbot configuration manager
@@ -109,6 +111,8 @@ pub struct ClawdbotConfig {
     pub expose_inference: bool,
     /// Whether the user has completed the onboarding wizard
     pub setup_completed: bool,
+    /// Selected cloud brain when local inference is off
+    pub selected_cloud_brain: Option<String>,
 }
 
 /// Slack connector configuration
@@ -368,6 +372,7 @@ impl ClawdbotConfig {
             local_inference_enabled: identity.local_inference_enabled,
             expose_inference: identity.expose_inference,
             setup_completed: identity.setup_completed,
+            selected_cloud_brain: identity.selected_cloud_brain,
         }
     }
 
@@ -448,6 +453,11 @@ impl ClawdbotConfig {
         self.save_identity()
     }
 
+    pub fn update_selected_cloud_brain(&mut self, brain: Option<String>) -> std::io::Result<()> {
+        self.selected_cloud_brain = brain;
+        self.save_identity()
+    }
+
     /// Update gateway settings and persist to identity.json
     pub fn update_gateway_settings(
         &mut self,
@@ -495,6 +505,7 @@ impl ClawdbotConfig {
             local_inference_enabled: self.local_inference_enabled,
             expose_inference: self.expose_inference,
             setup_completed: self.setup_completed,
+            selected_cloud_brain: self.selected_cloud_brain.clone(),
             huggingface_token: self.huggingface_token.clone(),
             huggingface_granted: self.huggingface_granted,
         };
@@ -576,10 +587,41 @@ impl ClawdbotConfig {
 
         if self.local_inference_enabled {
             agent_model = "local/model".to_string();
-        } else if _has_anthropic {
-            agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
         } else {
-            agent_model = "local/model".to_string();
+            // Priority: Explicit selection > Anthropic > OpenAI > OpenRouter > Local fallback
+            if let Some(ref brain) = self.selected_cloud_brain {
+                match brain.as_str() {
+                    "anthropic" if self.anthropic_granted => {
+                        agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
+                    }
+                    "openai" if self.openai_granted => {
+                        agent_model = "openai/gpt-4o".to_string();
+                    }
+                    "openrouter" if self.openrouter_granted => {
+                        agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
+                    }
+                    _ => {
+                        // If selection isn't granted, fallback
+                        if self.anthropic_granted {
+                            agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
+                        } else if self.openai_granted {
+                            agent_model = "openai/gpt-4o".to_string();
+                        } else if self.openrouter_granted {
+                            agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
+                        } else {
+                            agent_model = "local/model".to_string();
+                        }
+                    }
+                }
+            } else if self.anthropic_granted {
+                agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
+            } else if self.openai_granted {
+                agent_model = "openai/gpt-4o".to_string();
+            } else if self.openrouter_granted {
+                agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
+            } else {
+                agent_model = "local/model".to_string();
+            }
         }
 
         // We always include both providers in the config if keys are present,

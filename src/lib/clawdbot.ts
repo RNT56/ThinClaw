@@ -23,8 +23,19 @@ export interface ClawdbotStatus {
     device_id: string;
     auth_token: string;
     state_dir: string;
+    has_huggingface_token: boolean;
+    huggingface_granted: boolean;
+    has_anthropic_key: boolean;
+    anthropic_granted: boolean;
+    has_brave_key: boolean;
+    brave_granted: boolean;
+    has_openai_key: boolean;
+    openai_granted: boolean;
+    has_openrouter_key: boolean;
+    openrouter_granted: boolean;
     node_host_enabled: boolean;
     local_inference_enabled: boolean;
+    selected_cloud_brain: string | null;
 }
 
 export interface SlackConfigInput {
@@ -341,6 +352,10 @@ export async function toggleClawdbotLocalInference(enabled: boolean): Promise<Cl
 
 export async function toggleClawdbotExposeInference(enabled: boolean): Promise<ClawdbotRpcResponse> {
     return invoke('clawdbot_toggle_expose_inference', { enabled });
+}
+
+export async function selectClawdbotBrain(brain: string | null): Promise<void> {
+    return invoke('select_clawdbot_brain', { brain });
 }
 
 export async function installClawdbotSkillRepo(repoUrl: string): Promise<string> {

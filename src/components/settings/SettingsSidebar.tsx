@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'clawdbot-slack' | 'clawdbot-telegram' | 'clawdbot-gateway' | 'secrets';
+export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'clawdbot-slack' | 'clawdbot-telegram' | 'clawdbot-gateway' | 'secrets';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -29,6 +29,7 @@ const NAV_ITEMS = [
         section: "General",
         items: [
             { id: 'models', label: 'Models', icon: Cpu },
+            { id: 'inference', label: 'Chat Provider', icon: Radio },
             { id: 'secrets', label: 'Secrets', icon: KeyRound },
             { id: 'appearance', label: 'Appearance', icon: Palette },
         ]

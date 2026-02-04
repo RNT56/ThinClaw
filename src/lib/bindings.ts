@@ -25,9 +25,9 @@ async countTokens(conversationId: string) : Promise<Result<TokenUsage, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async startChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null) : Promise<Result<null, string>> {
+async startChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1027,7 +1027,7 @@ export type ClawdbotSessionsResponse = { sessions: ClawdbotSession[] }
 /**
  * Clawdbot status response
  */
-export type ClawdbotStatus = { gateway_running: boolean; ws_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; local_inference_enabled: boolean }
+export type ClawdbotStatus = { gateway_running: boolean; ws_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; local_inference_enabled: boolean; selected_cloud_brain: string | null }
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
 export type CreateProjectRequest = { name: string; description: string | null }
 export type CustomPersona = { id: string; name: string; description: string; instructions: string }
@@ -1050,14 +1050,14 @@ export type SidecarStatus = { chat_running: boolean; embedding_running: boolean;
 export type SlackConfigInput = { enabled: boolean; bot_token: string | null; app_token: string | null }
 export type StandardAsset = { name: string; category: string; filename: string; url: string; size: number }
 export type StreamChunk = { content: string; done: boolean; usage: TokenUsage | null; context_update: Message[] | null }
-export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string }
+export type SystemSpecs = { total_memory: number; used_memory: number; cpu_brand: string; cpu_usage: number; cpu_cores: number; platform: string; app_memory: number; memory_bandwidth_gbps: number }
 export type TAURI_CHANNEL<TSend> = null
 /**
  * Telegram configuration input
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string }
+export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean }
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/

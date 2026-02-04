@@ -7,6 +7,7 @@ import { SlackTab } from './SlackTab';
 import { TelegramTab } from './TelegramTab';
 import { GatewayTab } from './GatewayTab';
 import { SecretsTab } from './SecretsTab';
+import { ChatProviderTab } from './ChatProviderTab';
 import { SettingsPage } from './SettingsSidebar';
 import {
     Cpu,
@@ -17,8 +18,13 @@ import {
     FolderOpen,
     ImageIcon,
     Settings,
+    KeyRound,
+    Radio,
+    ChevronDown,
+    Zap,
+    AlertTriangle,
     ShieldAlert,
-    KeyRound
+    Box
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
 import { useState, useEffect, useCallback } from 'react';
@@ -28,6 +34,7 @@ import { cn, unwrap } from '../../lib/utils';
 import { ThemeToggle, useTheme } from '../theme-provider';
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, SyntaxTheme } from '../../lib/syntax-themes';
 import { APP_THEMES, AppTheme } from '../../lib/app-themes';
+import * as Switch from '@radix-ui/react-switch';
 
 interface SettingsContentProps {
     activePage: SettingsPage;
@@ -41,16 +48,37 @@ interface MemoryAnalysis {
     risk: "Safe" | "Moderate" | "Critical";
     totalNeededRef: number; // in GB
     details: string;
+    predictedTokensPerSec: number;
 }
 
 function analyzeMemoryConstraints(
     ctx: number,
     totalRamBytes: number,
     modelSizeBytes: number,
+    reservationGb: number,
+    enableReservation: boolean,
+    usedMemoryBytes: number,
+    appMemoryBytes: number,
+    quantizeKv: boolean,
+    bandwidthGbps: number,
     metadata?: GGUFMetadata
 ): MemoryAnalysis {
-    const reserve = Math.max(4 * GB, totalRamBytes * 0.2);
-    const availableForAI = Math.max(0, totalRamBytes - reserve);
+    let availableForAI = 0;
+    let limitLabel = "";
+
+    // Calculate physical headroom: total RAM minus what the OS and other apps are using (excluding our app's AI usage)
+    const physicalHeadroomForAI = totalRamBytes - (usedMemoryBytes - appMemoryBytes);
+
+    if (enableReservation) {
+        const quotaBytes = reservationGb * GB;
+        // The effective limit is the MIN of user quota and actual physical headroom
+        availableForAI = Math.min(quotaBytes, physicalHeadroomForAI);
+
+        limitLabel = availableForAI < quotaBytes ? "Physical Limit (System Full)" : `${reservationGb}GB AI Quota`;
+    } else {
+        availableForAI = Math.max(0, physicalHeadroomForAI);
+        limitLabel = "Physical Headroom";
+    }
 
     // GGUF models are already quantized, so weightLoad is basically the file size
     const weightLoad = modelSizeBytes * 1.05;
@@ -67,12 +95,15 @@ function analyzeMemoryConstraints(
         const head_dim = n_heads > 0 ? n_embd / n_heads : 128;
 
         // llama.cpp default KV is F16 (2 bytes)
-        const bytes_per_token = 2 * n_layers * n_heads_kv * head_dim * 2;
+        // If quantizeKv is true, we use Q4_0 (0.5 bytes approx / 4-bit)
+        const bytes_per_element = quantizeKv ? 0.5 : 2.0;
+        const bytes_per_token = 2 * n_layers * n_heads_kv * head_dim * bytes_per_element;
         kvLoad = ctx * bytes_per_token;
 
         breakdown = `${metadata.architecture.toUpperCase()} ${n_layers}L. `;
     } else {
-        kvLoad = ctx * 204800;
+        const baseKv = 204800;
+        kvLoad = ctx * (quantizeKv ? baseKv * 0.25 : baseKv);
         breakdown = "Estimate: ";
     }
 
@@ -83,13 +114,34 @@ function analyzeMemoryConstraints(
     if (totalNeeded > availableForAI * 0.9) risk = "Critical";
     else if (totalNeeded > availableForAI * 0.7) risk = "Moderate";
 
+    // Speed (tok/s) = Bandwidth / (Model weights + KV Cache)
+    // We add a 20% penalty for system overhead and 4-bit KV boost if active
+    const kvBoost = quantizeKv ? 1.05 : 1.0; // Minimal scaling for decoding
+    const totalDataToRead = weightLoad + kvLoad;
+    const predictedTokensPerSec = (bandwidthGbps / (totalDataToRead / GB)) * 0.85 * kvBoost;
+
     return {
         canRun: totalNeeded <= availableForAI,
         risk,
         totalNeededRef: totalNeededGB,
-        details: `${breakdown}Weights: ${(weightLoad / GB).toFixed(1)}GB + Cache: ${(kvLoad / GB).toFixed(1)}GB ≈ ${totalNeededGB.toFixed(1)}GB. Limit: ${(availableForAI / GB).toFixed(1)}GB.`
+        predictedTokensPerSec,
+        details: `${breakdown}Weights: ${(weightLoad / GB).toFixed(1)}GB + Cache: ${(kvLoad / GB).toFixed(2)}GB ≈ ${totalNeededGB.toFixed(1)}GB. Limit: ${(availableForAI / GB).toFixed(1)}GB (${limitLabel}).`
     };
 }
+
+const OptimizedIcon = () => (
+    <div className="relative flex items-center justify-center w-4 h-4">
+        <div className="absolute inset-0 bg-emerald-500/20 rounded-full animate-pulse" />
+        <Zap className="w-3 h-3 text-emerald-500 fill-emerald-500/20" />
+    </div>
+);
+
+const RiskIcon = () => (
+    <div className="relative flex items-center justify-center w-4 h-4">
+        <div className="absolute inset-0 bg-amber-500/20 rounded-full animate-ping opacity-20" />
+        <AlertTriangle className="w-3 h-3 text-amber-500" />
+    </div>
+);
 
 export function SettingsContent({ activePage }: SettingsContentProps) {
     return (
@@ -116,6 +168,7 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'clawdbot-telegram' && <TelegramTab />}
                         {activePage === 'clawdbot-gateway' && <GatewayTab />}
                         {activePage === 'secrets' && <SecretsTab />}
+                        {activePage === 'inference' && <ChatProviderTab />}
                     </div>
                 </motion.div>
             </AnimatePresence>
@@ -129,6 +182,11 @@ function PageHeader({ page }: { page: SettingsPage }) {
             title: "Model Management",
             description: "Download and configure your local LLMs, Vision, and Image models.",
             icon: Cpu
+        },
+        inference: {
+            title: "Chat Provider",
+            description: "Select the primary intelligence engine for your workspace.",
+            icon: Radio
         },
         persona: {
             title: "My Persona",
@@ -166,9 +224,9 @@ function PageHeader({ page }: { page: SettingsPage }) {
             icon: Settings
         },
         'clawdbot-gateway': {
-            title: "Gateway Control",
-            description: "Manage Clawdbot runtime services.",
-            icon: Server
+            title: "OpenClaw Gateway",
+            description: "Manage autonomy, connectivity and agent runtime.",
+            icon: Radio
         },
         'secrets': {
             title: "API Secrets",
@@ -192,6 +250,98 @@ function PageHeader({ page }: { page: SettingsPage }) {
     );
 }
 
+function CustomSelect({
+    value,
+    onChange,
+    options,
+    disabled,
+    placeholder = "Select option..."
+}: {
+    value: number,
+    onChange: (val: number) => void,
+    options: { value: number, label: string, disabled?: boolean, risk?: "Safe" | "Moderate" | "Critical" }[],
+    disabled?: boolean,
+    placeholder?: string
+}) {
+    const [isOpen, setIsOpen] = useState(false);
+    const selectedOption = options.find(o => o.value === value);
+
+    // Close on click outside
+    useEffect(() => {
+        if (!isOpen) return;
+        const handleClick = () => setIsOpen(false);
+        window.addEventListener('click', handleClick);
+        return () => window.removeEventListener('click', handleClick);
+    }, [isOpen]);
+
+    return (
+        <div className="relative w-[220px]" onClick={e => e.stopPropagation()}>
+            <button
+                type="button"
+                onClick={() => !disabled && setIsOpen(!isOpen)}
+                disabled={disabled}
+                className={cn(
+                    "flex h-11 w-full items-center justify-between rounded-xl border bg-background/50 px-4 py-2 text-sm shadow-sm transition-all duration-200 backdrop-blur-md",
+                    isOpen ? "border-primary ring-2 ring-primary/20 shadow-lg" : "border-border/50 hover:border-border",
+                    disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+                )}
+            >
+                <span className="truncate font-medium">
+                    {selectedOption ? selectedOption.label : placeholder}
+                </span>
+                <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform duration-300", isOpen && "rotate-180")} />
+            </button>
+
+            <AnimatePresence>
+                {isOpen && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                        transition={{ duration: 0.15, ease: "easeOut" }}
+                        className="absolute right-0 top-[calc(100%+8px)] z-50 w-full min-w-[200px] overflow-hidden rounded-xl border border-border/50 bg-card/90 p-1.5 shadow-2xl backdrop-blur-xl"
+                    >
+                        <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
+                            {options.map((option) => (
+                                <button
+                                    key={option.value}
+                                    type="button"
+                                    disabled={option.disabled}
+                                    onClick={() => {
+                                        onChange(option.value);
+                                        setIsOpen(false);
+                                    }}
+                                    className={cn(
+                                        "flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm transition-all duration-200 mb-0.5 last:mb-0",
+                                        option.value === value ? "bg-primary/10 text-primary font-bold" : "hover:bg-muted/50 text-foreground",
+                                        option.disabled ? "opacity-40 cursor-not-allowed grayscale-[50%]" : "cursor-pointer"
+                                    )}
+                                >
+                                    <span className="flex items-center gap-2">
+                                        {option.label}
+                                        {option.disabled && <RiskIcon />}
+                                    </span>
+                                    {option.risk && !option.disabled && (
+                                        <div className="flex items-center gap-2">
+                                            {option.value < 32768 && <OptimizedIcon />}
+                                            <div className={cn(
+                                                "w-1.5 h-1.5 rounded-full",
+                                                option.risk === "Critical" ? "bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]" :
+                                                    option.risk === "Moderate" ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]" :
+                                                        "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                                            )} />
+                                        </div>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+}
+
 function ServerSettings() {
     const [status, setStatus] = useState<SidecarStatus | null>(null);
     const {
@@ -204,6 +354,11 @@ function ServerSettings() {
     } = useModelContext();
     const [loading, setLoading] = useState(false);
     const [metadata, setMetadata] = useState<GGUFMetadata | undefined>();
+    const [config, setConfig] = useState<any>(null);
+
+    useEffect(() => {
+        commands.getUserConfig().then(setConfig);
+    }, []);
 
     useEffect(() => {
         if (modelPath && modelPath !== "auto") {
@@ -235,7 +390,7 @@ function ServerSettings() {
         setLoading(true);
         const toastId = toast.loading("Restarting server manually...");
         try {
-            await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false);
+            await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
             await checkStatus();
 
             // Attempt dynamic config update for Clawdbot
@@ -344,36 +499,58 @@ function ServerSettings() {
                             Higher values require more RAM/VRAM.
                         </p>
                     </div>
-                    <select
+                    <CustomSelect
                         value={maxContext}
-                        onChange={(e) => setMaxContext(parseInt(e.target.value))}
-                        className="h-10 w-[180px] rounded-xl border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        onChange={setMaxContext}
                         disabled={loading}
-                    >
-                        {[2048, 4096, 8192, 16384, 32768, 65536, 131072].map(size => {
-                            if (!systemSpecs) return <option key={size} value={size}>{size / 1024}k</option>;
+                        options={[2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576].map(size => {
+                            const label = size >= 1048576 ? '1.0M' : (size / 1024) + 'k';
+                            if (!systemSpecs) return { value: size, label };
+
                             const currentModelFile = localModels.find(m => m.path === modelPath);
                             const modelSize = currentModelFile ? currentModelFile.size : 5 * GB;
-                            const analysis = analyzeMemoryConstraints(size, systemSpecs.total_memory, modelSize, metadata);
-
-                            return (
-                                <option
-                                    key={size}
-                                    value={size}
-                                    disabled={!analysis.canRun}
-                                    className={analysis.risk === "Critical" ? "text-rose-600 dark:text-rose-400" : ""}
-                                >
-                                    {size / 1024}k {analysis.canRun ? (size < 32768 ? "(Min 32k for Agent)" : "") : "(Unsafe)"}
-                                </option>
+                            const reservation = config?.memory_reservation_gb ?? 4;
+                            const enableRes = config?.enable_memory_reservation ?? true;
+                            const analysis = analyzeMemoryConstraints(
+                                size,
+                                systemSpecs.total_memory,
+                                modelSize,
+                                reservation,
+                                enableRes,
+                                systemSpecs.used_memory,
+                                systemSpecs.app_memory,
+                                config?.quantize_kv ?? false,
+                                systemSpecs.memory_bandwidth_gbps,
+                                metadata
                             );
+
+                            return {
+                                value: size,
+                                label: config?.quantize_kv ? `${label} (Optimized)` : label,
+                                disabled: !analysis.canRun,
+                                risk: analysis.risk
+                            };
                         })}
-                    </select>
+                    />
                 </div>
 
                 {systemSpecs && (() => {
                     const currentModelFile = localModels.find(m => m.path === modelPath);
                     const modelSize = currentModelFile ? currentModelFile.size : 5 * GB;
-                    const analysis = analyzeMemoryConstraints(maxContext, systemSpecs.total_memory, modelSize, metadata);
+                    const reservation = config?.memory_reservation_gb ?? 4;
+                    const enableRes = config?.enable_memory_reservation ?? true;
+                    const analysis = analyzeMemoryConstraints(
+                        maxContext,
+                        systemSpecs.total_memory,
+                        modelSize,
+                        reservation,
+                        enableRes,
+                        systemSpecs.used_memory,
+                        systemSpecs.app_memory,
+                        config?.quantize_kv ?? false,
+                        systemSpecs.memory_bandwidth_gbps,
+                        metadata
+                    );
 
                     return (
                         <div className="bg-muted/30 p-4 rounded-xl text-sm space-y-3 border border-border/50">
@@ -396,11 +573,250 @@ function ServerSettings() {
                                     <ShieldAlert className="w-4 h-4" /> This setting exceeds your system's safety limits.
                                 </p>
                             )}
+
+                            <div className="flex items-center gap-2 pt-2 border-t border-border/10">
+                                <Zap className="w-3 h-3 text-amber-500" />
+                                <span className="text-[11px] font-medium opacity-80">
+                                    Predicted Performance:
+                                    <span className="text-primary ml-1 font-bold">
+                                        {analysis.predictedTokensPerSec.toFixed(1)} tokens/sec
+                                    </span>
+                                    <span className="ml-2 opacity-50 font-normal">
+                                        (via {systemSpecs.memory_bandwidth_gbps}GB/s hardware bus)
+                                    </span>
+                                </span>
+                            </div>
                         </div>
                     );
                 })()}
             </div>
-        </div>
+
+            <div className="p-6 border rounded-xl bg-card space-y-6 shadow-sm">
+                <div className="flex items-center justify-between">
+                    <div className="space-y-1">
+                        <label className="text-base font-semibold">
+                            Dedicated AI Memory Quota
+                        </label>
+                        <p className="text-sm text-muted-foreground mr-4">
+                            Commit a specific portion of your hardware to the AI models.
+                        </p>
+                    </div>
+                    <Switch.Root
+                        checked={config?.enable_memory_reservation ?? true}
+                        onCheckedChange={async (val) => {
+                            if (!config) return;
+                            const newConfig = { ...config, enable_memory_reservation: val };
+                            setConfig(newConfig);
+                            await commands.updateUserConfig(newConfig);
+                        }}
+                        className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-none"
+                    >
+                        <Switch.Thumb className="block w-[21px] h-[21px] bg-white rounded-full shadow-[0_2px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
+                    </Switch.Root>
+                </div>
+
+                <AnimatePresence>
+                    {(config?.enable_memory_reservation ?? true) && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: "auto" }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="space-y-6 pt-2 border-t border-border/10"
+                        >
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-1">
+                                    <label className="text-sm font-medium opacity-80">
+                                        Allocation Limit (Quota)
+                                    </label>
+                                    <p className="text-xs text-muted-foreground">
+                                        Current: <span className="text-primary font-bold">{(systemSpecs?.total_memory ? systemSpecs.total_memory / GB : 0).toFixed(0)}GB Total</span>
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-4">
+                                    <span className="text-lg font-bold w-12 text-right">{config?.memory_reservation_gb ?? 4}GB</span>
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max={(() => {
+                                            if (!systemSpecs) return 16;
+                                            const appUsedGb = systemSpecs.app_memory / GB;
+                                            const freeGb = (systemSpecs.total_memory - systemSpecs.used_memory) / GB;
+                                            // Max is app usage + 90% of currently free
+                                            return Math.max(1, Math.floor(appUsedGb + (freeGb * 0.9)));
+                                        })()}
+                                        step="1"
+                                        value={config?.memory_reservation_gb ?? 4}
+                                        onChange={async (e) => {
+                                            if (!config) return;
+                                            const val = parseInt(e.target.value);
+                                            const newConfig = { ...config, memory_reservation_gb: val };
+                                            setConfig(newConfig);
+                                            await commands.updateUserConfig(newConfig);
+                                        }}
+                                        className="w-[200px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+                                    />
+                                </div>
+                            </div>
+                            <p className="text-[11px] opacity-70 italic text-primary bg-primary/5 p-3 rounded-lg border border-primary/10 leading-relaxed">
+                                <b>Note on "Reservation":</b> This creates a <b>Virtual Safety Limit</b> for models. The app prevents models from starting if they would encroach on this buffer.
+                            </p>
+
+                            <div className="flex items-center justify-between pt-2">
+                                <div className="space-y-0.5">
+                                    <label className="text-sm font-medium opacity-90">
+                                        Hard Memory Locking (mlock)
+                                    </label>
+                                    <p className="text-[10px] text-muted-foreground max-w-xs">
+                                        Forces the OS to keep the AI model pinned in physical RAM.
+                                        Prevents swapping/stuttering but may impact system responsiveness.
+                                    </p>
+                                </div>
+                                <Switch.Root
+                                    checked={config?.mlock ?? false}
+                                    onCheckedChange={async (val) => {
+                                        if (!config) return;
+                                        const newConfig = { ...config, mlock: val };
+                                        setConfig(newConfig);
+                                        await commands.updateUserConfig(newConfig);
+                                        toast.info("Memory locking strategy updated. Restart server to apply.", { icon: <RotateCcw className="w-4 h-4" /> });
+                                    }}
+                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-none"
+                                >
+                                    <Switch.Thumb className="block w-[16px] h-[16px] bg-white rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
+                                </Switch.Root>
+                            </div>
+
+                            <div className="flex items-center justify-between pt-4 border-t border-border/10">
+                                <div className="space-y-0.5">
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-sm font-medium opacity-90">
+                                            High Capacity Context (4-bit KV)
+                                        </label>
+                                        <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-bold uppercase tracking-tighter">Reduced RAM</span>
+                                    </div>
+                                    <p className="text-[10px] text-muted-foreground max-w-xs">
+                                        Compresses the model's memory (KV cache). Reduces RAM usage by ~70%,
+                                        enabling 4x larger context windows with minimal intelligence loss.
+                                    </p>
+                                </div>
+                                <Switch.Root
+                                    checked={config?.quantize_kv ?? false}
+                                    onCheckedChange={async (val) => {
+                                        if (!config) return;
+                                        const newConfig = { ...config, quantize_kv: val };
+                                        setConfig(newConfig);
+                                        await commands.updateUserConfig(newConfig);
+                                        toast.info("Context optimization updated. Restart server to apply.", { icon: <Box className="w-4 h-4" /> });
+                                    }}
+                                    className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-none"
+                                >
+                                    <Switch.Thumb className="block w-[16px] h-[16px] bg-white rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform duration-100 translate-x-0.5 will-change-transform data-[state=checked]:translate-x-[19px]" />
+                                </Switch.Root>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                {systemSpecs && (() => {
+                    const appUsagePercent = (systemSpecs.app_memory / systemSpecs.total_memory) * 100;
+                    const systemUsagePercent = ((systemSpecs.used_memory - systemSpecs.app_memory) / systemSpecs.total_memory) * 100;
+                    const quotaGb = config?.enable_memory_reservation ? (config.memory_reservation_gb ?? 4) : 0;
+                    const quotaPercent = (quotaGb * GB / systemSpecs.total_memory) * 100;
+
+                    // Physical Reality: How much can AI actually use?
+                    const totalUsedPercent = (systemSpecs.used_memory / systemSpecs.total_memory) * 100;
+                    const physicalFreePercent = 100 - totalUsedPercent;
+
+                    // Widths for the bar:
+                    // 1. AI ACTIVE
+                    const aiActiveWidth = appUsagePercent;
+
+                    // 2. AI QUOTA (AVAILABLE) - Part of quota that is physically free
+                    const aiQuotaAvailableWidth = Math.min(Math.max(0, quotaPercent - appUsagePercent), physicalFreePercent);
+
+                    // 3. AI QUOTA (CONTENDED) - Part of quota the OS is sitting on
+                    const aiQuotaContendedWidth = Math.max(0, quotaPercent - appUsagePercent - aiQuotaAvailableWidth);
+
+                    // 4. SYSTEM (OTHER) - System usage outside of AI quota
+                    const systemRemainingWidth = Math.max(0, systemUsagePercent - aiQuotaContendedWidth);
+
+                    // 5. UNRESERVED FREE - Total breathing room
+
+                    return (
+                        <div className="space-y-4">
+                            <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                <span>AI Resource Allocation</span>
+                                <span className={`${quotaGb > 0 ? "text-primary" : "text-muted-foreground"}`}>
+                                    {quotaGb > 0
+                                        ? `${((systemSpecs.app_memory / (quotaGb * GB)) * 100).toFixed(0)}% Quota Used`
+                                        : `${((systemSpecs.app_memory / systemSpecs.total_memory) * 100).toFixed(1)}% Total RAM Load`
+                                    }
+                                </span>
+                            </div>
+
+                            <div className="w-full h-5 bg-muted/20 rounded-lg overflow-hidden flex border border-border/10 p-0.5">
+                                {/* AI ACTIVE */}
+                                <div
+                                    className="h-full bg-primary rounded-sm transition-all duration-700 ease-out relative group"
+                                    style={{ width: `${aiActiveWidth}%` }}
+                                >
+                                    <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 bg-popover text-popover-foreground text-[10px] px-2 py-1 rounded shadow-xl whitespace-nowrap z-20">
+                                        Active AI (App + Sidecars): {(systemSpecs.app_memory / GB).toFixed(1)}GB
+                                    </div>
+                                </div>
+
+                                {/* AI QUOTA AVAILABLE (FREE) */}
+                                <div
+                                    className="h-full bg-primary/20 rounded-sm mx-0.5 transition-all duration-700 ease-out relative group border border-primary/20"
+                                    style={{ width: `${aiQuotaAvailableWidth}%`, backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(var(--primary), 0.05) 2px, rgba(var(--primary), 0.05) 4px)' }}
+                                >
+                                    <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 bg-popover text-popover-foreground text-[10px] px-2 py-1 rounded shadow-xl whitespace-nowrap z-20 border border-primary/20">
+                                        Free Quota Space: {(aiQuotaAvailableWidth * systemSpecs.total_memory / (100 * GB)).toFixed(1)}GB
+                                    </div>
+                                </div>
+
+                                {/* AI QUOTA CONTENDED (OS TAKEN) */}
+                                {aiQuotaContendedWidth > 0 && (
+                                    <div
+                                        className="h-full bg-rose-500/20 rounded-sm mx-0.5 transition-all duration-700 ease-out relative group border border-rose-500/30"
+                                        style={{ width: `${aiQuotaContendedWidth}%`, backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(239, 68, 68, 0.1) 2px, rgba(239, 68, 68, 0.1) 4px)' }}
+                                    >
+                                        <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 bg-popover text-popover-foreground text-[10px] px-2 py-1 rounded shadow-xl whitespace-nowrap z-20 border border-rose-500/30">
+                                            Quota Taken by OS: {(aiQuotaContendedWidth * systemSpecs.total_memory / (100 * GB)).toFixed(1)}GB
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* SYSTEM & OTHERS */}
+                                <div
+                                    className="h-full bg-muted-foreground/20 rounded-sm transition-all duration-700 ease-out relative group"
+                                    style={{ width: `${systemRemainingWidth}%` }}
+                                >
+                                    <div className="absolute hidden group-hover:block bottom-full mb-2 left-1/2 -translate-x-1/2 bg-popover text-popover-foreground text-[10px] px-2 py-1 rounded shadow-xl whitespace-nowrap z-20">
+                                        System (Outside Quota): {(systemRemainingWidth * systemSpecs.total_memory / (100 * GB)).toFixed(1)}GB
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2 text-[10px] text-muted-foreground/80">
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-primary" />
+                                    <span>AI Active: {(systemSpecs.app_memory / GB).toFixed(1)}GB</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-primary/20 border border-primary/30" />
+                                    <span>AI Quota: {quotaGb}GB</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-muted-foreground/30" />
+                                    <span>System: {((systemSpecs.used_memory - systemSpecs.app_memory) / GB).toFixed(1)}GB</span>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })()}
+            </div>
+        </div >
     );
 }
 

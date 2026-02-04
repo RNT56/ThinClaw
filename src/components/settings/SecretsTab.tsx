@@ -1,7 +1,7 @@
 
 import { useState, useEffect } from 'react';
 import { commands } from '../../lib/bindings';
-import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Bot, Search, Loader2, Trash2, Plus, Key, X } from 'lucide-react';
+import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Bot, Search, Loader2, Trash2, Plus, Key, X, Radio, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 
@@ -485,89 +485,118 @@ export function SecretsTab() {
                 <p className="text-muted-foreground">Manage your credentials and control agent access permissions.</p>
             </div>
 
-            <div className="grid gap-6">
-                <SecretCard
-                    title="Anthropic API Key"
-                    description="Used for Claude 4.5 Sonnet / Opus and other world-class models."
-                    icon={<Bot className="w-5 h-5 text-purple-500" />}
-                    placeholder="sk-ant-api03-..."
-                    hasKey={!!(status?.has_anthropic_key ?? status?.hasAnthropicKey)}
-                    granted={!!(status?.anthropic_granted ?? status?.anthropicGranted)}
-                    onSave={handleAnthropicSave}
-                    onToggle={(g) => handleToggle('anthropic', g)}
-                    onFetch={handleAnthropicFetch}
-                    onDelete={handleAnthropicDelete}
-                />
+            <div className="grid gap-8">
+                {/* Inference Providers Section */}
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between border-b border-border/10 pb-4">
+                        <div className="flex items-center gap-2">
+                            <Bot className="w-5 h-5 text-primary" />
+                            <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-foreground">Inference Cloud Brains</h3>
+                        </div>
+                        <button
+                            onClick={() => window.dispatchEvent(new CustomEvent('open-settings', { detail: 'inference' }))}
+                            className="text-[10px] font-bold text-primary hover:text-primary/80 transition-colors flex items-center gap-2 bg-primary/5 px-3 py-1.5 rounded-lg border border-primary/10 group"
+                        >
+                            <Radio className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                            SET CLOUD CHAT BRAIN
+                        </button>
+                    </div>
 
-                <SecretCard
-                    title="Brave Search API Key"
-                    description="Enables web search, current news, and weather tools for agents."
-                    icon={<Search className="w-5 h-5 text-orange-500" />}
-                    placeholder="BSA..."
-                    hasKey={!!(status?.has_brave_key ?? status?.hasBraveKey)}
-                    granted={!!(status?.brave_granted ?? status?.braveGranted)}
-                    onSave={handleBraveSave}
-                    onToggle={(g) => handleToggle('brave', g)}
-                    onFetch={handleBraveFetch}
-                    onDelete={handleBraveDelete}
-                />
+                    <div className="grid gap-6">
+                        <SecretCard
+                            title="Anthropic API Key"
+                            description="Used for Claude 4.5 Sonnet / Opus and other world-class models."
+                            icon={<Bot className="w-5 h-5 text-purple-500" />}
+                            placeholder="sk-ant-api03-..."
+                            hasKey={!!(status?.has_anthropic_key ?? status?.hasAnthropicKey)}
+                            granted={!!(status?.anthropic_granted ?? status?.anthropicGranted)}
+                            onSave={handleAnthropicSave}
+                            onToggle={(g) => handleToggle('anthropic', g)}
+                            onFetch={handleAnthropicFetch}
+                            onDelete={handleAnthropicDelete}
+                        />
 
-                <SecretCard
-                    title="OpenAI API Key"
-                    description="For GPT 5.2, specialized reasoning and advanced coding models."
-                    icon={<Bot className="w-5 h-5 text-emerald-500" />}
-                    placeholder="sk-..."
-                    hasKey={!!(status?.has_openai_key ?? status?.hasOpenaiKey)}
-                    granted={!!(status?.openai_granted ?? status?.openaiGranted)}
-                    onSave={handleOpenAISave}
-                    onToggle={(g) => handleToggle('openai', g)}
-                    onFetch={handleOpenAIFetch}
-                    onDelete={handleOpenAIDelete}
-                />
+                        <SecretCard
+                            title="OpenAI API Key"
+                            description="For GPT 5.2, specialized reasoning and advanced coding models."
+                            icon={<Bot className="w-5 h-5 text-emerald-500" />}
+                            placeholder="sk-..."
+                            hasKey={!!(status?.has_openai_key ?? status?.hasOpenaiKey)}
+                            granted={!!(status?.openai_granted ?? status?.openaiGranted)}
+                            onSave={handleOpenAISave}
+                            onToggle={(g) => handleToggle('openai', g)}
+                            onFetch={handleOpenAIFetch}
+                            onDelete={handleOpenAIDelete}
+                        />
 
-                <SecretCard
-                    title="OpenRouter API Key"
-                    description="Universal access to hundreds of open-source and proprietary models."
-                    icon={<Bot className="w-5 h-5 text-indigo-500" />}
-                    placeholder="sk-or-v1-..."
-                    hasKey={!!(status?.has_openrouter_key ?? status?.hasOpenrouterKey)}
-                    granted={!!(status?.openrouter_granted ?? status?.openrouterGranted)}
-                    onSave={handleOpenRouterSave}
-                    onToggle={(g) => handleToggle('openrouter', g)}
-                    onFetch={handleOpenRouterFetch}
-                    onDelete={handleOpenRouterDelete}
-                />
+                        <SecretCard
+                            title="OpenRouter API Key"
+                            description="Universal access to hundreds of open-source and proprietary models."
+                            icon={<Bot className="w-5 h-5 text-indigo-500" />}
+                            placeholder="sk-or-v1-..."
+                            hasKey={!!(status?.has_openrouter_key ?? status?.hasOpenrouterKey)}
+                            granted={!!(status?.openrouter_granted ?? status?.openrouterGranted)}
+                            onSave={handleOpenRouterSave}
+                            onToggle={(g) => handleToggle('openrouter', g)}
+                            onFetch={handleOpenRouterFetch}
+                            onDelete={handleOpenRouterDelete}
+                        />
+                    </div>
+                </div>
 
-                <SecretCard
-                    title="Hugging Face Token"
-                    description="Required for downloading gated models and datasets."
-                    icon={<Bot className="w-5 h-5 text-yellow-500" />}
-                    placeholder="hf_..."
-                    hasKey={!!(status?.has_huggingface_token ?? status?.hasHuggingfaceToken)}
-                    granted={!!(status?.huggingface_granted ?? status?.huggingfaceGranted)}
-                    onSave={async (key) => {
-                        const value = key.trim() || "";
-                        console.log(`[SecretsTab] Saving HF token:`, value ? "REDACTED" : "empty (delete)");
-                        const res = await commands.setHfToken(value);
-                        if (res.status === 'ok') {
-                            await loadStatus();
-                            toast.success("Hugging Face token saved");
-                        } else {
-                            console.error("Failed to save HF token:", res);
-                            toast.error("Failed to save HF token");
-                        }
-                    }}
-                    onToggle={(g) => handleToggle('huggingface', g)}
-                    onFetch={async () => {
-                        const res = await commands.getHfToken();
-                        return res.status === 'ok' ? res.data : null;
-                    }}
-                    onDelete={async () => {
-                        const res = await commands.setHfToken("");
-                        if (res.status === 'ok') await loadStatus();
-                        else toast.error("Failed to delete HF token");
-                    }}
-                />
+                {/* System & Data Tools Section */}
+                <div className="space-y-6">
+                    <div className="flex items-center gap-2 border-b border-border/10 pb-4">
+                        <KeyRound className="w-5 h-5 text-muted-foreground" />
+                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">System & Data Tools</h3>
+                    </div>
+
+                    <div className="grid gap-6">
+                        <SecretCard
+                            title="Brave Search API Key"
+                            description="Enables web search, current news, and weather tools for agents."
+                            icon={<Search className="w-5 h-5 text-orange-500" />}
+                            placeholder="BSA..."
+                            hasKey={!!(status?.has_brave_key ?? status?.hasBraveKey)}
+                            granted={!!(status?.brave_granted ?? status?.braveGranted)}
+                            onSave={handleBraveSave}
+                            onToggle={(g) => handleToggle('brave', g)}
+                            onFetch={handleBraveFetch}
+                            onDelete={handleBraveDelete}
+                        />
+
+                        <SecretCard
+                            title="Hugging Face Token"
+                            description="Required for downloading gated models and datasets."
+                            icon={<Bot className="w-5 h-5 text-yellow-500" />}
+                            placeholder="hf_..."
+                            hasKey={!!(status?.has_huggingface_token ?? status?.hasHuggingfaceToken)}
+                            granted={!!(status?.huggingface_granted ?? status?.huggingfaceGranted)}
+                            onSave={async (key) => {
+                                const value = key.trim() || "";
+                                console.log(`[SecretsTab] Saving HF token:`, value ? "REDACTED" : "empty (delete)");
+                                const res = await commands.setHfToken(value);
+                                if (res.status === 'ok') {
+                                    await loadStatus();
+                                    toast.success("Hugging Face token saved");
+                                } else {
+                                    console.error("Failed to save HF token:", res);
+                                    toast.error("Failed to save HF token");
+                                }
+                            }}
+                            onToggle={(g) => handleToggle('huggingface', g)}
+                            onFetch={async () => {
+                                const res = await commands.getHfToken();
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.setHfToken("");
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error("Failed to delete HF token");
+                            }}
+                        />
+                    </div>
+                </div>
 
                 {status?.custom_secrets && status.custom_secrets.length > 0 && (
                     <div className="space-y-6 pt-4">
@@ -599,7 +628,7 @@ export function SecretsTab() {
                     </div>
                 )}
 
-                <div className="pt-4">
+                <div className="pt-4 border-t border-border/10">
                     <AddSecretForm onAdd={handleAddCustomSecret} />
                 </div>
             </div>

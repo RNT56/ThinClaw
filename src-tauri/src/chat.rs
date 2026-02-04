@@ -56,13 +56,16 @@ pub async fn chat_stream(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
+    clawdbot: State<'_, crate::clawdbot::commands::ClawdbotManager>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
     // Acquisition of Global Generation Lock (Queuing)
     let _guard = state.generation_lock.lock().await;
 
-    let (port, token, context_size) = state.get_chat_config().ok_or("Chat server not running")?;
+    // Default to Local Sidecar
+    let (mut port, mut token, mut context_size) =
+        state.get_chat_config().ok_or("Chat server not running")?;
 
     // Reset Cancellation Token for the CURRENT active job
     state
@@ -74,6 +77,63 @@ pub async fn chat_stream(
 
     // General Knowledge Injection
     let user_config = config.get_config();
+
+    // Provider Routing Logic
+    let (base_url, model_name) = match user_config.selected_chat_provider.as_deref() {
+        Some("anthropic") => {
+            let claw_cfg = clawdbot
+                .get_config()
+                .await
+                .ok_or("Clawdbot config not found")?;
+            let key = claw_cfg
+                .anthropic_api_key
+                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
+            token = key;
+            context_size = 200000; // Cloud context
+            (
+                "https://api.anthropic.com/v1".to_string(),
+                "claude-3-5-sonnet-latest".to_string(),
+            )
+        }
+        Some("openai") => {
+            let claw_cfg = clawdbot
+                .get_config()
+                .await
+                .ok_or("Clawdbot config not found")?;
+            let key = claw_cfg
+                .openai_api_key
+                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
+            token = key;
+            context_size = 128000;
+            (
+                "https://api.openai.com/v1".to_string(),
+                "gpt-4o".to_string(),
+            )
+        }
+        Some("openrouter") => {
+            let claw_cfg = clawdbot
+                .get_config()
+                .await
+                .ok_or("Clawdbot config not found")?;
+            let key = claw_cfg
+                .openrouter_api_key
+                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
+            token = key;
+            context_size = 128000;
+            (
+                "https://openrouter.ai/api/v1".to_string(),
+                "anthropic/claude-3.5-sonnet".to_string(),
+            )
+        }
+        _ => {
+            // Local case - ensure local and cloud are checked
+            let _ = state.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
+            (
+                format!("http://127.0.0.1:{}/v1", port),
+                "default".to_string(),
+            )
+        }
+    };
 
     // Collect enabled knowledge bits
     let gk_content = user_config
@@ -226,7 +286,7 @@ pub async fn chat_stream(
 
     let manager = RigManager::new(
         base_url,
-        "default".to_string(),
+        model_name,
         Some(app.clone()),
         Some(token.clone()),
         context_size as usize,
