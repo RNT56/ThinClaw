@@ -262,8 +262,13 @@ pub fn run() {
         if let (Ok(quit_i), Ok(show_i)) = (quit_i, show_i) {
             let menu = Menu::with_items(&app, &[&show_i, &quit_i]);
             if let Ok(menu) = menu {
+                let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
+                    "../icons/tray-iconTemplate.png"
+                ))
+                .expect("failed to load tray icon");
+
                 let _ = TrayIconBuilder::new()
-                    .icon(app.default_window_icon().unwrap().clone())
+                    .icon(tray_icon)
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {

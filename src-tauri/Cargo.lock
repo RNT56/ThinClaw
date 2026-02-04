@@ -9,6 +9,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
+name = "Scrappy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chromiumoxide",
+ "chrono",
+ "ed25519-dalek",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "html2text",
+ "image",
+ "ndarray",
+ "ort",
+ "pdf-extract",
+ "pkcs8",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "rig-core",
+ "scraper",
+ "serde",
+ "serde_json",
+ "sha2",
+ "specta",
+ "specta-typescript",
+ "sqlx",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-fs",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "tauri-specta",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tungstenite 0.24.0",
+ "urlencoding",
+ "usearch",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5256,58 +5308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scrappy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chromiumoxide",
- "chrono",
- "ed25519-dalek",
- "eventsource-stream",
- "futures",
- "futures-util",
- "html2text",
- "image",
- "ndarray",
- "ort",
- "pdf-extract",
- "pkcs8",
- "rand 0.8.5",
- "reqwest 0.12.28",
- "rig-core",
- "scraper",
- "serde",
- "serde_json",
- "sha2",
- "specta",
- "specta-typescript",
- "sqlx",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-fs",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "tauri-specta",
- "tempfile",
- "thiserror 1.0.69",
- "tokenizers",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tungstenite 0.24.0",
- "urlencoding",
- "usearch",
- "uuid",
- "zip",
-]
-
-[[package]]
 name = "scratch"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6349,6 +6349,7 @@ dependencies = [
  "heck 0.5.0",
  "http 1.4.0",
  "http-range",
+ "image",
  "jni",
  "libc",
  "log",
