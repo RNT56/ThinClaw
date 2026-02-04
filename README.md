@@ -6,20 +6,20 @@ Scrappy is a professional, open-source AI cockpit designed for executive-level w
 
 ---
 
-## 🌟 Vision & Key Capabilities
+## Vision & Key Capabilities
 
-*   **📡 OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
-*   **🦀 Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
-*   **🤖 Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
-*   **🔐 Custom Secrets & Privacy**: Securely manage Anthropic, Brave, and custom API keys with granular "Grant Access" controls.
-*   **🌍 Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
-*   **🛡️ Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
-*   **📚 Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`) and re-ranking.
-*   **🌐 Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
+*   **OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
+*   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
+*   **Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
+*   **Custom Secrets & Privacy**: Securely manage Anthropic, Brave, and custom API keys with granular "Grant Access" controls.
+*   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
+*   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
+*   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`) and re-ranking.
+*   **Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
 
 ---
 
-## 🏗️ Technical Architecture
+## Technical Architecture
 
 Scrappy uses a **Modular Sidecar Architecture**. The Rust core orchestrates several specialized processes to keep the main application lightweight and responsive.
 
@@ -72,7 +72,7 @@ A specialized agent engine built using **Rig**. It focuses on performance and re
 
 ---
 
-## 🛠️ OpenClaw Configuration & Lifecycle
+## OpenClaw Configuration & Lifecycle
 
 OpenClaw is highly configurable through a combination of system files and workspace-level markdown instructions.
 
@@ -102,7 +102,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ### Backend (`src-tauri/`)
 -   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
@@ -118,7 +118,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 
 ---
 
-## 🛠️ Developer Guide: Extending Scrappy
+## Developer Guide: Extending Scrappy
 
 ### Adding a New Prompt Template
 Templates are defined in `src-tauri/src/templates.rs`. To add one:
@@ -138,7 +138,7 @@ Tools are implemented in the **OpenClaw** engine:
 
 ---
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 For a deep dive into environment configuration, see the specialized **[macOS (Apple Silicon) Setup Guide](setup.md)**.
 
@@ -167,7 +167,7 @@ npm run tauri dev
 
 ---
 
-## 🔒 Security & Safety Philosophy
+## Security & Safety Philosophy
 
 1.  **Strict Local-First**: Your data and AI transcripts stay on your machine.
 2.  **Isolated Secrets**: API keys are only injected into the agent environment when explicitly allowed.
@@ -176,7 +176,7 @@ npm run tauri dev
 
 ---
 
-## 🤝 Contributing & Community
+## Contributing & Community
 
 Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
@@ -185,6 +185,6 @@ Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, n
 
 ---
 
-## 📜 License
+## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the **GNU General Public License v3.0** (Strong Copyleft). See `License.md` for more information and attribution requirements.

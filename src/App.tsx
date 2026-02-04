@@ -35,7 +35,7 @@ function App() {
   if (!checked) return null; // Or a splash screen
 
   return (
-    <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
+    <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
       <ModelProvider>
         <ChatProvider>
           {showOnboarding ? (
