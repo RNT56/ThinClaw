@@ -30,13 +30,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const [selectedPackage, setSelectedPackage] = useState<ModelPackageType>('none');
     const [expandedPackage, setExpandedPackage] = useState<ModelPackageType | null>(null);
     const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState<string>('mxbai-embed-xsmall-v1');
-    const [selectedDiffusionModel, setSelectedDiffusionModel] = useState<string>('flux-2-klein-9b-unsloth');
-    const [selectedBaseLLM, setSelectedBaseLLM] = useState<string>('ministral-3-8b-instruct');
+    const [selectedDiffusionModel, setSelectedDiffusionModel] = useState<string>('flux-2-klein-4b');
+    const [selectedBaseLLM, setSelectedBaseLLM] = useState<string>('ministral-3-3b-instruct');
     const [packageQuantSettings, setPackageQuantSettings] = useState<Record<string, string>>({
         'ministral-3-8b-instruct': 'Q8_0',
         'ministral-3-3b-instruct': 'Q8_0',
         'sd-3.5-medium-second-state': 'Q8_0',
-        'flux-2-klein-9b-unsloth': 'Q5_K_S'
+        'flux-2-klein-9b-unsloth': 'Q4_K_S',
+        'flux-2-klein-4b': 'Base 4B Q4_0'
     });
 
     const [hfToken, setHfToken] = useState<string>('');
@@ -417,15 +418,24 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                                         <h5 className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70 px-1">Image Generation Engine</h5>
                                                                         <div className="grid grid-cols-2 gap-2">
                                                                             {[
-                                                                                { id: 'flux-2-klein-9b-unsloth', label: 'Flux Klein', desc: 'Fast & High Quality' },
+                                                                                { id: 'flux-klein', label: 'Flux Klein', desc: 'Fast & High Quality' },
                                                                                 { id: 'sd-3.5-medium-second-state', label: 'SD 3.5 Medium', desc: 'Versatile GGUF' }
                                                                             ].map(choice => (
                                                                                 <button
                                                                                     key={choice.id}
-                                                                                    onClick={() => setSelectedDiffusionModel(choice.id)}
+                                                                                    onClick={() => {
+                                                                                        if (choice.id === 'flux-klein') {
+                                                                                            // Don't change ID if it's already one of the klein variants
+                                                                                            if (!selectedDiffusionModel.startsWith('flux-2-klein')) {
+                                                                                                setSelectedDiffusionModel('flux-2-klein-9b-unsloth');
+                                                                                            }
+                                                                                        } else {
+                                                                                            setSelectedDiffusionModel(choice.id);
+                                                                                        }
+                                                                                    }}
                                                                                     className={cn(
                                                                                         "p-2 rounded-lg border text-left transition-all",
-                                                                                        selectedDiffusionModel === choice.id
+                                                                                        (choice.id === 'flux-klein' ? selectedDiffusionModel.startsWith('flux-2-klein') : selectedDiffusionModel === choice.id)
                                                                                             ? "border-primary bg-primary/10"
                                                                                             : "border-border bg-background/50 hover:border-primary/50"
                                                                                     )}
@@ -435,6 +445,29 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                                                 </button>
                                                                             ))}
                                                                         </div>
+
+                                                                        {/* Sub-selector for Flux Klein variants */}
+                                                                        {selectedDiffusionModel.startsWith('flux-2-klein') && (
+                                                                            <div className="flex gap-2 p-1 bg-background/50 rounded-lg border border-border">
+                                                                                {[
+                                                                                    { id: 'flux-2-klein-4b', label: '4B (Ultra-Light)' },
+                                                                                    { id: 'flux-2-klein-9b-unsloth', label: '9B (High Quality)' }
+                                                                                ].map(v => (
+                                                                                    <button
+                                                                                        key={v.id}
+                                                                                        onClick={() => setSelectedDiffusionModel(v.id)}
+                                                                                        className={cn(
+                                                                                            "flex-1 py-1 text-[10px] font-bold rounded-md transition-all",
+                                                                                            selectedDiffusionModel === v.id
+                                                                                                ? "bg-primary text-primary-foreground shadow-sm"
+                                                                                                : "text-muted-foreground hover:text-foreground"
+                                                                                        )}
+                                                                                    >
+                                                                                        {v.label}
+                                                                                    </button>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                         {isSelectedModelGated && (
                                                                             <div className="mt-2 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg space-y-2">
                                                                                 <div className="flex items-center gap-2 text-yellow-500">

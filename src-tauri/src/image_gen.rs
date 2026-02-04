@@ -27,6 +27,73 @@ pub struct ImageGenParams {
     pub sampling_method: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum DiffusionArchitecture {
+    Flux1,
+    Flux2Klein,
+    SD15,
+    SD21,
+    SDXL,
+    SD35Medium,
+    SD35LargeTurbo,
+    QwenImage,
+    Wan21,
+    Unknown,
+}
+
+impl DiffusionArchitecture {
+    fn detect(model_path: &str) -> Self {
+        let lower = model_path.to_lowercase();
+        if lower.contains("flux") {
+            if lower.contains("klein") {
+                DiffusionArchitecture::Flux2Klein
+            } else {
+                DiffusionArchitecture::Flux1
+            }
+        } else if lower.contains("sd3.5") || lower.contains("sd 3.5") || lower.contains("sd35") {
+            if lower.contains("turbo") {
+                DiffusionArchitecture::SD35LargeTurbo
+            } else {
+                DiffusionArchitecture::SD35Medium
+            }
+        } else if lower.contains("sdxl") {
+            DiffusionArchitecture::SDXL
+        } else if lower.contains("qwen") && (lower.contains("image") || lower.contains("diffusion"))
+        {
+            DiffusionArchitecture::QwenImage
+        } else if lower.contains("wan2") {
+            DiffusionArchitecture::Wan21
+        } else if lower.contains("sd1.5") || lower.contains("sd 1.5") || lower.contains("sd15") {
+            DiffusionArchitecture::SD15
+        } else if lower.contains("sd2.1") || lower.contains("sd 2.1") || lower.contains("sd21") {
+            DiffusionArchitecture::SD21
+        } else if lower.contains("sd3") {
+            // Standard SD3 (treat as 3.5 Medium logic for flags)
+            DiffusionArchitecture::SD35Medium
+        } else {
+            DiffusionArchitecture::Unknown
+        }
+    }
+
+    fn is_flux(&self) -> bool {
+        matches!(self, Self::Flux1 | Self::Flux2Klein)
+    }
+
+    fn is_modern_dit(&self) -> bool {
+        // Models that use --diffusion-model and --diffusion-fa
+        self.is_flux()
+            || matches!(
+                self,
+                Self::SD35Medium | Self::SD35LargeTurbo | Self::QwenImage | Self::Wan21
+            )
+    }
+
+    fn needs_model_flag(&self) -> bool {
+        // Flux, Qwen and Wan strictly require --diffusion-model
+        self.is_flux() || matches!(self, Self::QwenImage | Self::Wan21)
+    }
+}
+
 async fn run_inference(
     app: &AppHandle,
     model_path: &str,
@@ -55,28 +122,39 @@ async fn run_inference(
         std::cmp::max(t, 2) as u32
     };
 
+    let arch = DiffusionArchitecture::detect(model_path);
+    let is_flux = arch.is_flux();
+    let is_klein = matches!(arch, DiffusionArchitecture::Flux2Klein);
+    let is_sd35 = matches!(
+        arch,
+        DiffusionArchitecture::SD35Medium | DiffusionArchitecture::SD35LargeTurbo
+    );
+
     let mut final_steps = steps_val;
     if params.steps.is_none() {
-        let lower_model = model_path.to_lowercase();
-        if lower_model.contains("turbo") || lower_model.contains("lightning") {
-            final_steps = "4".to_string();
-        } else if lower_model.contains("klein") {
-            final_steps = "50".to_string(); // User requested 50 for Base Klein
-        } else if lower_model.contains("lcm") {
-            final_steps = "8".to_string();
+        match arch {
+            DiffusionArchitecture::SD35LargeTurbo => {
+                final_steps = "4".to_string();
+            }
+            DiffusionArchitecture::Flux2Klein => {
+                final_steps = "50".to_string(); // User requested 50 for Base Klein
+            }
+            _ => {
+                let lower_model = model_path.to_lowercase();
+                if lower_model.contains("turbo") || lower_model.contains("lightning") {
+                    final_steps = "4".to_string();
+                } else if lower_model.contains("lcm") {
+                    final_steps = "8".to_string();
+                }
+            }
         }
     }
 
     // --- ARGUMENT BUILDING ---
     let mut args = Vec::new();
 
-    let lower_model = model_path.to_lowercase();
-    let is_flux = lower_model.contains("flux");
-    let is_sd3 = lower_model.contains("sd3");
-    let is_klein = lower_model.contains("klein");
-
     // Model selection
-    if is_flux || is_sd3 {
+    if arch.needs_model_flag() {
         args.push("--diffusion-model".to_string());
         args.push(model_path.to_string());
     } else {
@@ -98,7 +176,7 @@ async fn run_inference(
     args.push("--vae-tiling".to_string());
 
     // Performance & Modern Features
-    if is_flux || is_sd3 {
+    if arch.is_modern_dit() {
         args.push("--diffusion-fa".to_string());
     }
 
@@ -110,12 +188,11 @@ async fn run_inference(
         } else {
             threads.to_string()
         });
-        // args.push("--mmap".to_string()); // REMOVED: Potentially causing VRAM release lag on M-series
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        if is_flux || is_sd3 {
+        if arch.is_modern_dit() {
             args.push("--offload-to-cpu".to_string());
         }
     }
@@ -123,12 +200,37 @@ async fn run_inference(
     if let Some(cfg) = params.cfg_scale {
         args.push("--cfg-scale".into());
         args.push(cfg.to_string());
-    } else if is_flux {
-        args.push("--cfg-scale".into());
-        if is_klein {
-            args.push("4.0".into()); // User requested guide value
-        } else {
-            args.push("1.0".into()); // Standard Flux
+    } else {
+        match arch {
+            DiffusionArchitecture::Flux2Klein => {
+                args.push("--cfg-scale".into());
+                args.push("4.0".into());
+            }
+            DiffusionArchitecture::Flux1 => {
+                args.push("--cfg-scale".into());
+                args.push("1.0".into());
+            }
+            DiffusionArchitecture::SD35Medium | DiffusionArchitecture::SD35LargeTurbo => {
+                args.push("--cfg-scale".into());
+                args.push("4.5".into());
+            }
+            DiffusionArchitecture::QwenImage => {
+                args.push("--cfg-scale".into());
+                args.push("2.5".into());
+            }
+            DiffusionArchitecture::Wan21 => {
+                args.push("--cfg-scale".into());
+                args.push("5.0".into());
+            }
+            DiffusionArchitecture::SDXL => {
+                args.push("--cfg-scale".into());
+                args.push("7.0".into());
+            }
+            DiffusionArchitecture::SD15 | DiffusionArchitecture::SD21 => {
+                args.push("--cfg-scale".into());
+                args.push("7.5".into());
+            }
+            _ => {}
         }
     }
 
@@ -141,9 +243,13 @@ async fn run_inference(
 
     args.push("-v".into()); // Verbose logging to debug Metal initialization
 
-    if is_flux || is_sd3 {
+    if arch.is_modern_dit() {
         args.push("--flow-shift".into());
-        args.push("1.15".into()); // CRITICAL: Restored to avoid "INF" noise
+        if matches!(arch, DiffusionArchitecture::QwenImage) {
+            args.push("3.0".into());
+        } else {
+            args.push("1.15".into()); // CRITICAL: Restored for Flux/SD35
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -159,11 +265,7 @@ async fn run_inference(
 
     if is_flux {
         args.push("--guidance".into());
-        if is_klein {
-            args.push("3.5".into()); // Default Flux guidance
-        } else {
-            args.push("3.5".into());
-        }
+        args.push("3.5".into());
     }
 
     if !neg.is_empty() {
@@ -247,11 +349,33 @@ async fn run_inference(
 
     // Text Encoders
     // Flux Klein uses Qwen as LLM. Standard Flux uses T5XXL + CLIP_L.
+    // SD 3.5 requires Triple Mapping (CLIP_L, CLIP_G, T5XXL)
     let mut has_llm_or_t5 = false;
 
-    // Explicit T5XXL (or Qwen-based LLM for Klein)
+    // Explicit CLIP_G (Required for SD 3.5)
+    if let Some(cg) = &params.clip_g {
+        args.push("--clip_g".into());
+        args.push(cg.clone());
+    } else if is_sd35 && use_standard_fallbacks {
+        if let Some(found) = find_standard_fallback("clip", "clip_g") {
+            args.push("--clip_g".into());
+            args.push(found);
+        }
+    } else if is_sd35 {
+        // Look in model dir for clip_g
+        if let Some(found) = model_dir.and_then(|d| find_in_dir(d, "clip_g")) {
+            args.push("--clip_g".into());
+            args.push(found);
+        }
+    }
+
+    // Explicit T5XXL (or Qwen-based LLM for QwenImage/Klein)
     if let Some(t) = &params.t5xxl {
-        if t.to_lowercase().contains("qwen") {
+        if matches!(
+            arch,
+            DiffusionArchitecture::QwenImage | DiffusionArchitecture::Flux2Klein
+        ) || t.to_lowercase().contains("qwen")
+        {
             args.push("--llm".into());
         } else {
             args.push("--t5xxl".into());
@@ -267,6 +391,12 @@ async fn run_inference(
     } else if !is_klein && use_standard_fallbacks {
         // Only fallback to standard CLIP_L if NOT Klein
         if let Some(found) = find_standard_fallback("clip", "clip_l") {
+            args.push("--clip_l".into());
+            args.push(found);
+        }
+    } else if (is_flux || is_sd35) && !is_klein {
+        // Look in model dir for clip_l
+        if let Some(found) = model_dir.and_then(|d| find_in_dir(d, "clip_l")) {
             args.push("--clip_l".into());
             args.push(found);
         }

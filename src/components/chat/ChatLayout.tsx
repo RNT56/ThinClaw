@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { toast } from "sonner";
 import { MessageBubble } from './MessageBubble';
 import { useChat } from '../../hooks/use-chat';
@@ -262,6 +262,77 @@ export function ChatLayout() {
     const filteredDocs = mentionQuery !== null
         ? availableDocs.filter(d => d.name.toLowerCase().includes(mentionQuery.toLowerCase()))
         : [];
+
+    const slashSuggestions = useMemo(() => {
+        if (slashQuery === null) return [];
+
+        const baseCommands = [
+            { id: "style", label: "style", type: "command" as const, desc: "Apply an artistic style to image generation" },
+            { id: "image", label: "image", type: "command" as const, desc: "Toggle Image Generation mode" },
+            { id: "search", label: "search", type: "command" as const, desc: "Toggle Web Search capability" },
+            { id: "clear", label: "clear", type: "command" as const, desc: "Clear conversation history" },
+            { id: "reset", label: "reset", type: "command" as const, desc: "Alias for clear" },
+        ];
+
+        if (slashQuery === "/") return baseCommands;
+
+        if (slashQuery.startsWith("/style")) {
+            const subQuery = slashQuery.replace(/^\/style[_ ]?/, "").toLowerCase().trim();
+            if (!subQuery) return STYLE_LIBRARY.map(s => ({ id: s.id, label: s.label, type: "style" as const, desc: s.description }));
+
+            return STYLE_LIBRARY
+                .filter(s => s.id.toLowerCase().includes(subQuery) || s.label.toLowerCase().includes(subQuery))
+                .map(s => ({ id: s.id, label: s.label, type: "style" as const, desc: s.description }));
+        }
+
+        const q = slashQuery.slice(1).toLowerCase().trim();
+        return baseCommands.filter(c => c.label.includes(q));
+    }, [slashQuery]);
+
+    const handleSlashCommandExecute = (suggestion: { id: string, label: string, type: 'command' | 'style' }) => {
+        if (suggestion.type === 'style') {
+            setIsImageMode(true);
+            setIsWebSearchEnabled(false); // Mutual exclusivity
+            setActiveStyleId(suggestion.id);
+            const styleDef = findStyle(suggestion.id);
+            setInput("");
+            setSlashQuery(null);
+            if (styleDef) toast.success(`Style Locked: ${styleDef.label}`, { icon: "🎨" });
+        } else {
+            switch (suggestion.id) {
+                case 'style':
+                    setInput("/style ");
+                    setSlashQuery("/style ");
+                    break;
+                case 'image':
+                    const nextImageMode = !isImageMode;
+                    setIsImageMode(nextImageMode);
+                    if (nextImageMode) setIsWebSearchEnabled(false);
+                    setSlashQuery(null);
+                    setInput("");
+                    break;
+                case 'search':
+                    const nextSearchMode = !isWebSearchEnabled;
+                    setIsWebSearchEnabled(nextSearchMode);
+                    if (nextSearchMode) setIsImageMode(false);
+                    setSlashQuery(null);
+                    setInput("");
+                    break;
+                case 'clear':
+                case 'reset':
+                    clearMessages();
+                    setSlashQuery(null);
+                    setInput("");
+                    toast.success("Conversation Cleared");
+                    break;
+                case 'help':
+                    setSlashQuery("/"); // Show base commands
+                    break;
+                default:
+                    setSlashQuery(null);
+            }
+        }
+    };
 
     const handleEditMessage = async (messageId: string, newContent: string) => {
         try {
@@ -1132,38 +1203,15 @@ export function ChatLayout() {
                                                             }
 
                                                             // Handle Slash Commands
-                                                            if (slashQuery !== null) {
-                                                                // Filter suggestions based on query
-                                                                let suggestions: { id: string, label: string, type: 'command' | 'style', snippet?: string }[] = [];
-                                                                if (slashQuery === "/") {
-                                                                    suggestions = [{ id: "style", label: "style", type: "command" }];
-                                                                } else if (slashQuery.startsWith("/style")) {
-                                                                    const subQuery = slashQuery.replace("/style", "").replace("_", "").toLowerCase();
-                                                                    suggestions = STYLE_LIBRARY
-                                                                        .filter(s => s.id.toLowerCase().includes(subQuery) || s.label.toLowerCase().includes(subQuery))
-                                                                        .map(s => ({ id: s.id, label: s.label, type: "style" }));
+                                                            if (slashQuery !== null && slashSuggestions.length > 0) {
+                                                                if (e.key === 'ArrowUp') { e.preventDefault(); setSlashSelectedIndex(prev => Math.max(0, prev - 1)); return; }
+                                                                if (e.key === 'ArrowDown') { e.preventDefault(); setSlashSelectedIndex(prev => Math.min(slashSuggestions.length - 1, prev + 1)); return; }
+                                                                if (e.key === 'Enter' || e.key === 'Tab') {
+                                                                    e.preventDefault();
+                                                                    handleSlashCommandExecute(slashSuggestions[slashSelectedIndex]);
+                                                                    return;
                                                                 }
-
-                                                                if (suggestions.length > 0) {
-                                                                    if (e.key === 'ArrowUp') { e.preventDefault(); setSlashSelectedIndex(prev => Math.max(0, prev - 1)); return; }
-                                                                    if (e.key === 'ArrowDown') { e.preventDefault(); setSlashSelectedIndex(prev => Math.min(suggestions.length - 1, prev + 1)); return; }
-                                                                    if (e.key === 'Enter' || e.key === 'Tab') {
-                                                                        e.preventDefault();
-                                                                        const selected = suggestions[slashSelectedIndex];
-                                                                        if (selected.type === 'command') {
-                                                                            setInput("/style_");
-                                                                            setSlashQuery("/style_");
-                                                                        } else {
-                                                                            setIsImageMode(true);
-                                                                            setActiveStyleId(selected.id);
-                                                                            setInput("");
-                                                                            setSlashQuery(null);
-                                                                            toast.success(`Style Locked: ${selected.label}`, { icon: "🎨" });
-                                                                        }
-                                                                        return;
-                                                                    }
-                                                                    if (e.key === 'Escape') { setSlashQuery(null); return; }
-                                                                }
+                                                                if (e.key === 'Escape') { setSlashQuery(null); return; }
                                                             }
 
                                                             if (e.key === 'Enter' && !e.shiftKey) {
@@ -1379,19 +1427,9 @@ export function ChatLayout() {
                                                                 className="max-h-64 overflow-y-auto p-1.5 custom-scrollbar"
                                                             >
                                                                 {(() => {
-                                                                    let suggestions: { id: string, label: string, type: 'command' | 'style' }[] = [];
-                                                                    if (slashQuery === "/") {
-                                                                        suggestions = [{ id: "style", label: "style", type: "command" }];
-                                                                    } else if (slashQuery.startsWith("/style")) {
-                                                                        const subQuery = slashQuery.replace("/style", "").replace("_", "").toLowerCase();
-                                                                        suggestions = STYLE_LIBRARY
-                                                                            .filter(s => s.id.toLowerCase().includes(subQuery) || s.label.toLowerCase().includes(subQuery))
-                                                                            .map(s => ({ id: s.id, label: s.label, type: "style" }));
-                                                                    }
+                                                                    if (slashSuggestions.length === 0) return <div className="p-3 text-xs text-muted-foreground text-center italic">No matches found</div>;
 
-                                                                    if (suggestions.length === 0) return <div className="p-3 text-xs text-muted-foreground text-center italic">No matches found</div>;
-
-                                                                    return suggestions.map((s, i) => (
+                                                                    return slashSuggestions.map((s, i) => (
                                                                         <button
                                                                             key={s.id}
                                                                             className={cn(
@@ -1400,18 +1438,7 @@ export function ChatLayout() {
                                                                                     ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20 translate-x-1"
                                                                                     : "hover:bg-muted text-foreground"
                                                                             )}
-                                                                            onClick={() => {
-                                                                                if (s.type === 'command') {
-                                                                                    setInput("/style ");
-                                                                                    setSlashQuery("/style ");
-                                                                                } else {
-                                                                                    setIsImageMode(true);
-                                                                                    setActiveStyleId(s.id);
-                                                                                    setInput("");
-                                                                                    setSlashQuery(null);
-                                                                                    toast.success(`Style Locked: ${s.label}`, { icon: "🎨" });
-                                                                                }
-                                                                            }}
+                                                                            onClick={() => handleSlashCommandExecute(s)}
                                                                         >
                                                                             <div className="flex items-center gap-3">
                                                                                 <div className={cn(
@@ -1426,7 +1453,7 @@ export function ChatLayout() {
                                                                                         "text-[10px]",
                                                                                         i === slashSelectedIndex ? "text-primary/70" : "text-muted-foreground"
                                                                                     )}>
-                                                                                        {s.type === 'command' ? "Activate style mode" : "Apply artistic style"}
+                                                                                        {s.desc}
                                                                                     </span>
                                                                                 </div>
                                                                             </div>
