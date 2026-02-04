@@ -900,7 +900,7 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         gated: true,
         components: [
             { type: 'vae', filename: 'flux2_vae.safetensors', url: 'https://huggingface.co/ai-toolkit/flux2_vae/resolve/main/ae.safetensors?download=true', size: '0.33 GB' },
-            { type: 't5xxl', filename: 'Qwen3-4B-Q5_K_M.gguf', url: 'https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q5_K_M.gguf?download=true', size: '2.89 GB' },
+            { type: 't5xxl', filename: 'Qwen3-8B-Q4_K_M.gguf', url: 'https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf?download=true', size: '5.03 GB' },
             { type: 'extra', filename: 'scheduler_config.json', url: 'https://huggingface.co/black-forest-labs/FLUX.2-dev/resolve/main/scheduler/scheduler_config.json?download=true', size: '1 KB' }
         ],
         variants: [
