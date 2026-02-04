@@ -1,10 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    CheckCircle, ChevronRight, Monitor, Globe, Cpu, Code, HardDrive, Info
+    CheckCircle, ChevronRight, Monitor, Globe, Cpu, Code, HardDrive, Info, Palette, Moon, Sun
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as clawdbot from '../../lib/clawdbot';
+import { useTheme } from '../theme-provider';
+import { APP_THEMES } from '../../lib/app-themes';
 import { toast } from 'sonner';
 // Use ModelDefinition from lib to avoid interface conflicts if re-exported differently in model-context
 import { MODEL_LIBRARY } from '../../lib/model-library';
@@ -16,7 +18,7 @@ interface OnboardingWizardProps {
     onComplete: () => void;
 }
 
-type Step = 'welcome' | 'mode' | 'models' | 'permissions' | 'complete';
+type Step = 'welcome' | 'style' | 'mode' | 'models' | 'permissions' | 'complete';
 type ModelPackageType = 'none' | 'llm' | 'llm_whisper' | 'llm_diffusion' | 'full';
 
 export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
@@ -49,6 +51,20 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         return !!m?.gated;
     }, [selectedDiffusionModel]);
 
+    const {
+        theme: uiTheme,
+        setTheme: setUiTheme,
+        appThemeId,
+        setAppThemeId
+    } = useTheme();
+
+    const currentMode = useMemo(() => {
+        if (uiTheme === 'system') {
+            return window.matchMedia("(prefers-color-scheme: dark)").matches ? 'dark' : 'light';
+        }
+        return uiTheme as 'dark' | 'light';
+    }, [uiTheme]);
+
     // Access Model Context to trigger downloads and set paths
     const {
         startDownload,
@@ -75,7 +91,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     const handleNext = () => {
-        if (step === 'welcome') setStep('mode');
+        if (step === 'welcome') setStep('style');
+        else if (step === 'style') setStep('mode');
         else if (step === 'mode') setStep('models');
         else if (step === 'models') setStep('permissions');
         else if (step === 'permissions') setStep('complete');
@@ -208,10 +225,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         className="h-full bg-primary"
                         initial={{ width: "0%" }}
                         animate={{
-                            width: step === 'welcome' ? "20%" :
-                                step === 'mode' ? "40%" :
-                                    step === 'models' ? "60%" :
-                                        step === 'permissions' ? "80%" : "100%"
+                            width: step === 'welcome' ? "15%" :
+                                step === 'style' ? "30%" :
+                                    step === 'mode' ? "45%" :
+                                        step === 'models' ? "60%" :
+                                            step === 'permissions' ? "80%" : "100%"
                         }}
                     />
                 </div>
@@ -233,6 +251,132 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 <p className="text-lg text-muted-foreground max-w-md mx-auto">
                                     Your secure, private, and open-source AI desktop. Let's configure your OpenClaw experience.
                                 </p>
+                            </motion.div>
+                        )}
+
+                        {step === 'style' && (
+                            <motion.div
+                                key="style"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                className="space-y-8"
+                            >
+                                <div className="text-center">
+                                    <h2 className="text-2xl font-bold font-display">Workspace Aesthetics</h2>
+                                    <p className="text-muted-foreground">Personalize your environment. Choose a theme that fits your workflow.</p>
+                                </div>
+
+                                <div className="grid md:grid-cols-2 gap-8 items-start">
+                                    <div className="space-y-4">
+                                        <div className="flex items-center justify-between px-1">
+                                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Select Theme</span>
+                                            <div className="flex gap-1 p-0.5 bg-muted/20 rounded-lg border border-border/50">
+                                                <button
+                                                    onClick={() => setUiTheme("light")}
+                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'light' ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                >
+                                                    <Sun className="w-3.5 h-3.5" />
+                                                </button>
+                                                <button
+                                                    onClick={() => setUiTheme("dark")}
+                                                    className={cn("p-1.5 rounded-md transition-all", currentMode === 'dark' ? 'bg-background shadow-sm text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                >
+                                                    <Moon className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-3">
+                                            {APP_THEMES.map((t) => {
+                                                const isActive = appThemeId === t.id;
+                                                const colors = currentMode === 'dark' ? t.dark : t.light;
+                                                return (
+                                                    <button
+                                                        key={t.id}
+                                                        onClick={() => setAppThemeId(t.id)}
+                                                        className={cn(
+                                                            "group p-3 rounded-xl border-2 text-left transition-all space-y-3",
+                                                            isActive
+                                                                ? "border-primary bg-primary/5 shadow-md"
+                                                                : "border-border hover:border-primary/50 bg-card"
+                                                        )}
+                                                    >
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="text-xs font-bold">{t.label}</span>
+                                                            {isActive && <CheckCircle className="w-3 h-3 text-primary" />}
+                                                        </div>
+                                                        <div className="flex gap-1.5 p-1 rounded-lg w-full border border-border/10 justify-center" style={{ backgroundColor: `hsl(${colors.background})` }}>
+                                                            <div className="w-3 h-3 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.primary})` }} />
+                                                            <div className="w-3 h-3 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.accent})` }} />
+                                                            <div className="w-3 h-3 rounded-full border border-black/10 dark:border-white/10" style={{ backgroundColor: `hsl(${colors.secondary})` }} />
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    {/* Real-time Preview Area */}
+                                    <div className="space-y-4">
+                                        <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 px-1">Live Preview</span>
+                                        <div className="aspect-[4/3] rounded-2xl border border-border bg-card shadow-2xl overflow-hidden flex flex-col relative group">
+                                            {/* Window Controls */}
+                                            <div className="h-8 bg-muted/40 border-b border-border/50 flex items-center px-3 gap-1.5">
+                                                <div className="w-2.5 h-2.5 rounded-full bg-rose-500/20" />
+                                                <div className="w-2.5 h-2.5 rounded-full bg-amber-500/20" />
+                                                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/20" />
+                                            </div>
+
+                                            {/* Mock Chat Interface */}
+                                            <div className="flex-1 p-4 space-y-4 overflow-hidden">
+                                                <div className="flex gap-2">
+                                                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                                        <Cpu className="w-4 h-4 text-primary" />
+                                                    </div>
+                                                    <div className="space-y-2 flex-1">
+                                                        <div className="h-2 bg-primary/20 rounded-full w-1/2" />
+                                                        <div className="h-2 bg-muted rounded-full w-3/4" />
+                                                        <div className="h-2 bg-muted rounded-full w-2/3" />
+                                                    </div>
+                                                </div>
+                                                <div className="flex gap-2 justify-end">
+                                                    <div className="space-y-2 flex-1 items-end flex flex-col">
+                                                        <div className="h-2 bg-secondary rounded-full w-1/3" />
+                                                    </div>
+                                                    <div className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center shrink-0">
+                                                        <div className="w-4 h-4 rounded-full bg-primary/40" />
+                                                    </div>
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                                        <Cpu className="w-4 h-4 text-primary" />
+                                                    </div>
+                                                    <div className="space-y-2 flex-1">
+                                                        <div className="h-2 bg-muted rounded-full w-5/6" />
+                                                        <div className="h-2 bg-muted rounded-full w-1/2" />
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Mock Input */}
+                                            <div className="p-4 border-t border-border/50 bg-muted/10 h-16 flex items-center gap-2 mt-auto">
+                                                <div className="flex-1 h-8 rounded-lg bg-background border border-border" />
+                                                <div className="w-8 h-8 rounded-lg bg-primary" />
+                                            </div>
+
+                                            {/* Hover indicator for "Great UX" feel */}
+                                            <div className="absolute inset-0 pointer-events-none bg-gradient-to-t from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
+                                        </div>
+
+                                        <div className="flex items-center gap-3 p-4 bg-primary/5 rounded-xl border border-primary/10 text-xs text-muted-foreground leading-relaxed animate-in fade-in slide-in-from-bottom-2 duration-500">
+                                            <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                                                <Palette className="w-4 h-4 text-primary" />
+                                            </div>
+                                            <span>The entire interface updates in real-time as you switch themes. You can always refine these in Settings later.</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </motion.div>
                         )}
 
@@ -646,7 +790,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     {step !== 'welcome' && step !== 'complete' ? (
                         <button
                             onClick={() => {
-                                if (step === 'mode') setStep('welcome');
+                                if (step === 'style') setStep('welcome');
+                                else if (step === 'mode') setStep('style');
                                 else if (step === 'models') setStep('mode');
                                 else if (step === 'permissions') setStep('models');
                             }}
