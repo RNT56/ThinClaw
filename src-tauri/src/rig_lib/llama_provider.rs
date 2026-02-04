@@ -434,6 +434,7 @@ impl LlamaProvider {
     pub async fn stream_raw_completion(
         &self,
         messages: Vec<serde_json::Value>,
+        temperature: Option<f64>,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, String>> + Send>>,
         String,
@@ -463,7 +464,7 @@ impl LlamaProvider {
             messages: final_messages,
             model: "default".to_string(),
             stream: true,
-            temperature: None,
+            temperature,
             top_p: None,
             tools: vec![],
             stop: Some(vec![

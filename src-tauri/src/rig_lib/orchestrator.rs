@@ -107,8 +107,10 @@ impl Orchestrator {
                         // Let's use `stream_raw_completion` and collect.
 
                         let mut summary_text = String::new();
-                        if let Ok(mut stream) =
-                            rig_clone.provider.stream_raw_completion(summary_req).await
+                        if let Ok(mut stream) = rig_clone
+                            .provider
+                            .stream_raw_completion(summary_req, Some(0.1))
+                            .await
                         {
                             use futures::StreamExt;
                             while let Some(res) = stream.next().await {
@@ -293,8 +295,11 @@ impl Orchestrator {
                     "content": query.clone()
                 }));
 
-                // Stream directly using raw completion (supports images in history better)
-                if let Ok(mut stream) = rig_clone.provider.stream_raw_completion(conversation).await
+                // Stream directly using raw completion
+                if let Ok(mut stream) = rig_clone
+                    .provider
+                    .stream_raw_completion(conversation, None)
+                    .await
                 {
                     while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
                         let _ = tx.send(chunk).await;
@@ -332,9 +337,14 @@ impl Orchestrator {
             if perms.allow_web_search {
                 grounding_rules.push_str("
 **GROUNDED RESEARCH MODE**: 
-1. **ALWAYS SEARCH FOR FACTS**: If the user's query requires any factual information, news, data, or current events, you MUST use `web_search`. Even if you think you know the answer, verify it.
-2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries for the tool. Find out what the user really wants.
-3. **GREETINGS EXCEPTION**: If the user only says 'Hello', 'Hey', 'Hi' or similar without a request, DO NOT call tools. Reply naturally and ask what they would like to research.
+1. **ALWAYS SEARCH FOR FACTS**: If the user's query requires any factual information, news, data, current events, or specific details you do not have in your local training data, you MUST use `web_search`.
+2. **KNOWLEDGE GAP**: You are a small model and your training data is from 2024. For any question about specifics (games, software, people, news), IMMEDIATELY search.
+3. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries.
+4. **GREETINGS EXCEPTION**: If the user only says 'Hello', 'Hey', 'Hi' or similar without a request, reply naturally and ask what they would like to research.
+
+Start EVERY response with a Thought:
+Thought: I need to check the latest information regarding [Topic] to avoid hallucinating. I will use the web_search tool.
+<tool_code>...
 ");
             }
 
@@ -345,7 +355,7 @@ Current Date: {}
 CORE RULES:
 1. Conversational? Reply directly with depth and insight.
 2. Need Facts/Actions? Use Tools.
-3. Attached files? Use read_file to analyze them if you need their full content.
+3. NEVER assume you know details about specific entities, media, or current events. ALWAYS VERIFY.
 
 TOOL USAGE:
 To use a tool, output valid JSON inside <tool_code> tags.
@@ -519,6 +529,14 @@ Example:
                 conversation.push(vmsg);
             }
 
+            // Final Grounding Reminder (Crucial for small models)
+            if perms.allow_web_search {
+                conversation.push(json!({
+                    "role": "system",
+                    "content": "REMINDER: You are in GROUNDED RESEARCH MODE. For any factual questions, you MUST use `web_search`. Do not answer from your training data if the user asks for news, details, or real-time info. Formalize your query first."
+                }));
+            }
+
             conversation.push(json!({
                 "role": "user",
                 "content": effective_query
@@ -547,7 +565,7 @@ Example:
                 use futures::StreamExt;
                 let mut stream = match rig_clone
                     .provider
-                    .stream_raw_completion(conversation.clone())
+                    .stream_raw_completion(conversation.clone(), Some(0.1))
                     .await
                 {
                     Ok(s) => s,
