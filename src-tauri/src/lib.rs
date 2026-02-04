@@ -160,7 +160,7 @@ pub fn run() {
     #[cfg(debug_assertions)]
     specta_builder
         .export(
-            specta_typescript::Typescript::default(),
+            specta_typescript::Typescript::default().header("// @ts-nocheck\n"),
             "../src/lib/bindings.ts",
         )
         .expect("Failed to export typescript bindings");

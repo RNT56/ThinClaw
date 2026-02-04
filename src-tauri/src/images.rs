@@ -60,10 +60,10 @@ pub async fn get_image_path(app: AppHandle, id: String) -> Result<String, String
 
     // Try png first (SD output), then jpg (Upload output)
     let mut path = images_dir.join(format!("{}.png", id));
-    println!("[images] Checking path: {:?}", path);
+    println!("[images] Checking PNG path: {:?}", path);
     if !path.exists() {
         path = images_dir.join(format!("{}.jpg", id));
-        println!("[images] Checking fallback path: {:?}", path);
+        println!("[images] Checking JPG fallback path: {:?}", path);
     }
 
     if !path.exists() {

@@ -434,11 +434,24 @@ export function useChat() {
                 });
 
                 const data = await response.json();
-                const enhanced = data.choices?.[0]?.message?.content?.trim();
+                let enhanced = data.choices?.[0]?.message?.content?.trim();
+
                 if (enhanced) {
-                    finalPrompt = enhanced;
-                    console.log("[PromptEnhancer] Enhanced:", finalPrompt);
-                    // Update the status message to show the enhanced prompt is ready
+                    // Strip common chat template pollution and thinking blocks
+                    enhanced = enhanced.replace(/<\|im_start\|>.*?<\|im_end\|>/gs, '');
+                    enhanced = enhanced.replace(/<\|im_start\|>assistant/g, '');
+                    enhanced = enhanced.replace(/<think>[\s\S]*?<\/think>/g, '');
+                    enhanced = enhanced.replace(/<\|im_end\|>/g, '');
+                    enhanced = enhanced.trim();
+
+                    if (enhanced.length > 0) {
+                        finalPrompt = enhanced;
+                        console.log("[PromptEnhancer] Cleaned Enhanced:", finalPrompt);
+                    } else {
+                        console.warn("[PromptEnhancer] Enhanced prompt was empty after cleaning, using original.");
+                    }
+
+                    // Update the status message
                     setDbMessages(prev => {
                         const next = [...prev];
                         const last = next[next.length - 1];

@@ -7,7 +7,7 @@ import { Message, commands, WebSearchResult } from '../../lib/bindings';
 import { useEffect, useState, isValidElement, useRef } from 'react';
 import DOMPurify from 'dompurify';
 import { listen } from '@tauri-apps/api/event';
-import { readFile } from '@tauri-apps/plugin-fs';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
@@ -22,7 +22,7 @@ function extractText(node: any): string {
     return '';
 }
 
-const ImageAttachment = ({ id }: { id: string }) => {
+const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolean }) => {
     const [src, setSrc] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(false);
@@ -39,7 +39,7 @@ const ImageAttachment = ({ id }: { id: string }) => {
 
     // Safety States
     const [isReadyToView, setIsReadyToView] = useState(false);
-    const [userRequestedView, setUserRequestedView] = useState(false);
+    const [userRequestedView, setUserRequestedView] = useState(!isFresh);
 
     useEffect(() => {
         if (id === "pending_generation") {
@@ -100,28 +100,30 @@ const ImageAttachment = ({ id }: { id: string }) => {
         } else {
             // Not pending = Ready to view
             setIsReadyToView(true);
+            // Auto-load if it's already "revealed" (like historical messages)
+            if (userRequestedView && !src && !isLoading && !error) {
+                console.log("[ImageAttachment] Auto-triggering load for ID:", id);
+                loadContent();
+            }
         }
-    }, [id]);
+    }, [id, isFresh, userRequestedView, src, isLoading, error]);
 
     const loadContent = async () => {
         if (id === "pending_generation") return;
         setIsLoading(true);
+        console.log("[ImageAttachment] Loading content for ID:", id);
         try {
             const res = await commands.getImagePath(id);
             if (res.status === "ok") {
-                const contents = await readFile(res.data);
-
-                // Determine MIME type from extension
-                const ext = res.data.split('.').pop()?.toLowerCase();
-                const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
-
-                const blob = new Blob([contents], { type: mimeType });
-                const assetUrl = URL.createObjectURL(blob);
+                console.log("[ImageAttachment] Found path:", res.data);
+                const assetUrl = convertFileSrc(res.data);
                 setSrc(assetUrl);
             } else {
+                console.error("[ImageAttachment] Path not found for ID:", id, res.error);
                 setError(true);
             }
         } catch (e) {
+            console.error("[ImageAttachment] Error loading path for ID:", id, e);
             setError(true);
         } finally {
             setIsLoading(false);
@@ -172,7 +174,7 @@ const ImageAttachment = ({ id }: { id: string }) => {
     };
 
     if (overrideId) {
-        return <ImageAttachment id={overrideId} />;
+        return <ImageAttachment id={overrideId} isFresh={true} />;
     }
 
     if (id === "pending_generation") {

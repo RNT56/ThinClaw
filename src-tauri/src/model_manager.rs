@@ -217,8 +217,8 @@ pub async fn download_model(
 
     let total_size = res.content_length().unwrap_or(0);
 
-    // Safety check: LLM models are usually large. If it's < 1MB, it's likely an error page or LFS pointer
-    if total_size > 0 && total_size < 1024 * 1024 {
+    // Safety check: LLM models are usually large. Small files might be error pages, but config files are ~1KB.
+    if total_size > 0 && total_size < 1024 {
         return Err(format!("File too small ({} bytes). Check URL.", total_size));
     }
 

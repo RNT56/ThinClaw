@@ -249,9 +249,13 @@ async fn run_inference(
     // Flux Klein uses Qwen as LLM. Standard Flux uses T5XXL + CLIP_L.
     let mut has_llm_or_t5 = false;
 
-    // Explicit T5XXL
+    // Explicit T5XXL (or Qwen-based LLM for Klein)
     if let Some(t) = &params.t5xxl {
-        args.push("--t5xxl".into());
+        if t.to_lowercase().contains("qwen") {
+            args.push("--llm".into());
+        } else {
+            args.push("--t5xxl".into());
+        }
         args.push(t.clone());
         has_llm_or_t5 = true;
     }
@@ -379,10 +383,23 @@ async fn run_inference(
 
     let id = Uuid::new_v4().to_string();
     let final_path = images_dir.join(format!("{}.png", id));
+
+    println!("[image_gen] Saving result to: {:?}", final_path);
     std::fs::copy(&output_png, &final_path).map_err(|e| format!("Failed to copy image: {}", e))?;
     let _ = std::fs::remove_file(&output_png);
 
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    // Emit success event so UI can update immediately
+    println!("[image_gen] Emitting image_gen_success for ID: {}", id);
+    app.emit(
+        "image_gen_success",
+        serde_json::json!({
+            "original_id": "pending_generation",
+            "final_id": id
+        }),
+    )
+    .ok();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     Ok(ImageResponse {
         id,
