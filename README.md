@@ -1,6 +1,6 @@
 # Scrappy: The Open-Source AI Command Center
 
-Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw (Moltbot)** Node.js engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
+Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** Node.js engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
 
 ![Scrappy App Preview](assets/app-preview.png)
 
@@ -10,9 +10,9 @@ Scrappy is a professional, open-source AI cockpit designed for executive-level w
 
 *   **📡 OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
 *   **🦀 Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
-*   **🤖 Autonomous Agency**: The `Openclaw Bot` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
+*   **🤖 Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
 *   **🔐 Custom Secrets & Privacy**: Securely manage Anthropic, Brave, and custom API keys with granular "Grant Access" controls.
-*   **🌍 Standalone Gateway Support**: Connect to local Moltbot sidecars or remote gateways for distributed agent control.
+*   **🌍 Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
 *   **🛡️ Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
 *   **📚 Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`) and re-ranking.
 *   **🌐 Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
@@ -39,7 +39,7 @@ graph TD
     end
     
     subgraph Sidecars [Sidecar Processes]
-        Moltbot[Moltbot Node.js Agent]
+        OpenClaw[OpenClaw Node.js Agent]
         Llama[Llama.cpp Inference]
         Chromium[Chromium Web Scraper]
     end
@@ -53,12 +53,12 @@ graph TD
     UI <-->|IPC Events| Tauri
     Tauri -->|Spawns/Monitors| Sidecars
     Tauri <-->|Reads/Writes| Storage
-    Moltbot <-->|ACP WebSockets| UI
-    Gateway <-->|Remote/Local| Moltbot
+    OpenClaw <-->|ACP WebSockets| UI
+    Gateway <-->|Remote/Local| OpenClaw
     RigAgent -->|Tools| Sidecars
 ```
 
-### 1. The OpenClaw Engine (`Clawdbot/Moltbot`)
+### 1. The OpenClaw Engine
 The heart of Scrappy's autonomous agency. Based on the **Pi agent runtime**, it executes an iterative **Think-Act-Observe** loop:
 -   **Session Management**: Each conversation has a dedicated "lane" and JSONL transcript.
 -   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, and `skill` extensions.
@@ -72,14 +72,14 @@ A specialized agent engine built using **Rig**. It focuses on performance and re
 
 ---
 
-## 🛠️ OpenClaw (Clawdbot) Configuration & Lifecycle
+## 🛠️ OpenClaw Configuration & Lifecycle
 
-Clawdbot (powered by the OpenClaw engine) is highly configurable through a combination of system files and workspace-level markdown instructions.
+OpenClaw is highly configurable through a combination of system files and workspace-level markdown instructions.
 
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`~/Library/Application Support/scrappy cursor/Clawdbot/state/identity.json`) - Your persistent device ID, auth token, and Ed25519 keys.
-- **`moltbot.json`**: Core runtime config defining the gateway port (default `18789`), model providers (Anthropic, Local), and channel settings.
+- **`identity.json`**: (`~/Library/Application Support/scrappy cursor/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, and Ed25519 keys.
+- **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers (Anthropic, Local), and channel settings.
 - **`auth-profiles.json`**: Secure storage for API keys (Anthropic, Brave, etc.) that the agent is permitted to use.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
@@ -98,14 +98,14 @@ The agent's personality and rules are defined by markdown files in its workspace
 ### 4. Management & Visibility
 - **Settings Tab**: Manage API keys, model selection, and gateway connection modes.
 - **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time.
-- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `Clawdbot/agents/main/sessions/`.
+- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
 
 ---
 
 ## 📂 Project Structure
 
 ### Backend (`src-tauri/`)
--   `src/clawdbot/`: OpenClaw gateway logic and session orchestration.
+-   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
 -   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
 -   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium).
 -   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral) used for model formatting.
@@ -113,7 +113,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 
 ### Frontend (`src/`)
 -   `components/chat/`: The high-performance chat interface.
--   `components/clawdbot/`: Visualizations for agent status and tool execution.
+-   `components/openclaw/`: Visualizations for agent status and tool execution.
 -   `hooks/use-openclaw-stream.ts`: Real-time agent event processing.
 
 ---
@@ -125,9 +125,9 @@ Templates are defined in `src-tauri/src/templates.rs`. To add one:
 1.  Define a new `pub const` with your Jinja-like template.
 2.  Add it to the renderer logic in the model manager.
 
-### Adding a New OpenClaw Tool (Moltbot)
-Tools are implemented in the `moltbot` engine:
-1.  Create a tool definition with a JSON schema in the moltbot skill directory.
+### Adding a New OpenClaw Tool
+Tools are implemented in the **OpenClaw** engine:
+1.  Create a tool definition with a JSON schema in the OpenClaw skill directory.
 2.  Implement the `execute` logic (Node.js).
 3.  The UI will automatically handle rendering based on the ACP metadata.
 
@@ -151,7 +151,7 @@ For a deep dive into environment configuration, see the specialized **[macOS (Ap
 ```bash
 # 1. Install project dependencies
 npm install
-npm run setup:moltbot
+npm run setup:openclaw
 
 # 2. Automated sidecar initialization (Node, Chromium, AI)
 npm run setup:all
@@ -181,7 +181,7 @@ npm run tauri dev
 Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
 1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check the `src-tauri/src/clawdbot/commands.rs` and `rig_lib/agent.rs` for backend extension points.
+2.  Check the `src-tauri/src/openclaw/commands.rs` and `rig_lib/agent.rs` for backend extension points.
 
 ---
 
