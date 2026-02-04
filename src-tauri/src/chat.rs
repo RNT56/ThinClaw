@@ -275,7 +275,14 @@ pub async fn chat_stream(
 
     // Pass permissions
     let persona_name = user_config.selected_persona.clone();
-    let persona_instructions = crate::personas::get_persona_instructions(&persona_name).to_string();
+
+    // Check if it's a custom persona first, then fallback to built-in
+    let persona_instructions = user_config
+        .custom_personas
+        .iter()
+        .find(|p| p.id == persona_name)
+        .map(|p| p.instructions.clone())
+        .unwrap_or_else(|| crate::personas::get_persona_instructions(&persona_name).to_string());
 
     match orchestrator
         .run_turn(

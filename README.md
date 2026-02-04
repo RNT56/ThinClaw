@@ -101,7 +101,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 
 ### 4. Management & Visibility
 - **Settings Tab**: Manage API keys, model selection, and gateway connection modes.
-- **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time.
+- **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `src-tauri/src/personas.rs`.
 - **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
 
 ---

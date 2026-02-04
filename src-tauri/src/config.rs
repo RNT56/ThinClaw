@@ -12,6 +12,14 @@ pub struct KnowledgeBit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct CustomPersona {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct UserConfig {
     // --- Web Search & Scraping ---
     #[serde(default = "default_search_concurrency")]
@@ -54,6 +62,9 @@ pub struct UserConfig {
     #[serde(default)]
     pub knowledge_bits: Vec<KnowledgeBit>,
 
+    #[serde(default)]
+    pub custom_personas: Vec<CustomPersona>,
+
     #[serde(default = "default_false")]
     pub image_prompt_enhance_enabled: bool,
 
@@ -76,6 +87,7 @@ impl Default for UserConfig {
             vector_dimensions: default_vector_dims(),
             sd_threads: default_sd_threads(),
             knowledge_bits: vec![],
+            custom_personas: vec![],
             image_prompt_enhance_enabled: false,
             selected_persona: default_persona(),
         }
