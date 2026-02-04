@@ -162,7 +162,7 @@ npm run tauri dev
 
 ### 3. Setup Advice
 - **Secrets**: Go to **Settings > Secrets** to add your Anthropic or Brave keys. Remember to toggle "Grant Access" for the agent to use them.
-- **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models and support files. You can add this in **Settings > Models**.
+- **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models and support files. You can add this in **Settings > Secrets**.
 - **Models**: Download GGUF models and point Scrappy to them in **Settings > Models**.
 
 ---
