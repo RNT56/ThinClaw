@@ -24,7 +24,9 @@ import {
     Zap,
     AlertTriangle,
     ShieldAlert,
-    Box
+    Box,
+    Command,
+    Sparkles
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
 import { useState, useEffect, useCallback } from 'react';
@@ -998,6 +1000,19 @@ function AppearanceSettings() {
         setAppThemeId
     } = useTheme();
 
+    const [config, setConfig] = useState<any>(null);
+
+    useEffect(() => {
+        commands.getUserConfig().then(setConfig);
+    }, []);
+
+    const updateShortcut = async (val: string) => {
+        if (!config) return;
+        const newConfig = { ...config, spotlight_shortcut: val };
+        setConfig(newConfig);
+        await commands.updateUserConfig(newConfig);
+    };
+
     const effectiveMode = theme === 'system'
         ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? 'dark' : 'light')
         : theme as 'light' | 'dark';
@@ -1076,6 +1091,40 @@ function AppearanceSettings() {
                         />
                     ))}
                 </div>
+            </div>
+
+            {/* Global Hotkeys */}
+            <div className="pt-6 border-t border-border/10 space-y-4">
+                <div className="space-y-1">
+                    <h3 className="text-xl font-bold tracking-tight">Global Hotkeys</h3>
+                    <p className="text-sm text-muted-foreground">Configure shortcuts to trigger Scrappy from anywhere on your system.</p>
+                </div>
+
+                <div className="p-6 border rounded-xl bg-card/50 flex items-center justify-between shadow-sm border-border/50">
+                    <div className="space-y-1">
+                        <label className="text-sm font-semibold flex items-center gap-2 text-foreground">
+                            <Sparkles className="w-4 h-4 text-primary" />
+                            Spotlight Chat Shortcut
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                            Press this to instantly open the liquid glass chat bar.
+                        </p>
+                    </div>
+                    <div className="relative">
+                        <input
+                            value={config?.spotlight_shortcut ?? "Command+Shift+K"}
+                            onChange={(e) => updateShortcut(e.currentTarget.value)}
+                            placeholder="e.g. Command+Shift+K"
+                            className="bg-background border border-border/50 rounded-lg px-3 py-2 text-sm w-48 font-mono focus:ring-2 focus:ring-primary outline-none transition-all text-foreground"
+                        />
+                        <span className="absolute right-3 top-2.5 opacity-30 pointer-events-none">
+                            <Command className="w-4 h-4 text-foreground" />
+                        </span>
+                    </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground italic px-2 flex items-center gap-2">
+                    <AlertTriangle className="w-3 h-3 text-amber-500" /> Note: Shortcut changes require application restart to register properly with the OS.
+                </p>
             </div>
 
             {/* Hint Box */}

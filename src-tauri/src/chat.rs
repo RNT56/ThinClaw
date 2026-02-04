@@ -64,7 +64,7 @@ pub async fn chat_stream(
     let _guard = state.generation_lock.lock().await;
 
     // Default to Local Sidecar
-    let (mut port, mut token, mut context_size) =
+    let (port, mut token, mut context_size) =
         state.get_chat_config().ok_or("Chat server not running")?;
 
     // Reset Cancellation Token for the CURRENT active job
@@ -79,7 +79,7 @@ pub async fn chat_stream(
     let user_config = config.get_config();
 
     // Provider Routing Logic
-    let (base_url, model_name) = match user_config.selected_chat_provider.as_deref() {
+    let (_base_url, model_name) = match user_config.selected_chat_provider.as_deref() {
         Some("anthropic") => {
             let claw_cfg = clawdbot
                 .get_config()

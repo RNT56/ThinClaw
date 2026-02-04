@@ -81,6 +81,9 @@ pub struct UserConfig {
     pub mlock: bool,
     #[serde(default = "default_false")]
     pub quantize_kv: bool,
+
+    #[serde(default = "default_spotlight_shortcut")]
+    pub spotlight_shortcut: String,
 }
 
 impl Default for UserConfig {
@@ -106,6 +109,7 @@ impl Default for UserConfig {
             enable_memory_reservation: true,
             mlock: false,
             quantize_kv: false,
+            spotlight_shortcut: default_spotlight_shortcut(),
         }
     }
 }
@@ -156,6 +160,10 @@ fn default_memory_reservation() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_spotlight_shortcut() -> String {
+    "Command+Shift+K".to_string()
 }
 
 pub struct ConfigManager {

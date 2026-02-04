@@ -984,6 +984,12 @@ async getPermissionStatus() : Promise<PermissionStatus> {
 },
 async requestPermission(permission: string) : Promise<void> {
     await TAURI_INVOKE("request_permission", { permission });
+},
+async toggleSpotlight() : Promise<void> {
+    await TAURI_INVOKE("toggle_spotlight");
+},
+async hideSpotlight() : Promise<void> {
+    await TAURI_INVOKE("hide_spotlight");
 }
 }
 
@@ -1057,7 +1063,7 @@ export type TAURI_CHANNEL<TSend> = null
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean }
+export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string }
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/

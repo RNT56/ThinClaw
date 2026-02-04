@@ -85,7 +85,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 // Save User Message
                 const storageDocs = attachedDocs;
                 const resSave = await commands.saveMessage(id, "user", content, images.length > 0 ? images : null, storageDocs.length > 0 ? storageDocs : null, null);
-                if (resSave.status === "error") throw new Error(resSave.error);
+                if (resSave.status === "error") throw new Error(resSave.error || "Could not save user message");
 
                 let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
 
@@ -183,7 +183,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
             } catch (e: any) {
                 console.error("Context Generation Error:", e);
-                toast.error(`Generation failed: ${e.message}`);
+                const errorMessage = e?.message || String(e);
+                toast.error(`Generation failed: ${errorMessage}`);
                 removeJob(id);
             }
         };

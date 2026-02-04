@@ -8,6 +8,53 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+#[specta::specta]
+fn hide_spotlight(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("spotlight") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+fn toggle_spotlight(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("spotlight") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.set_focus();
+            let _ = window.show();
+        }
+    } else {
+        let mut win_builder = tauri::WebviewWindowBuilder::new(
+            &app,
+            "spotlight",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .visible(false)
+        .inner_size(800.0, 600.0)
+        .center()
+        .skip_taskbar(true);
+
+        #[cfg(target_os = "macos")]
+        {
+            win_builder = win_builder
+                .hidden_title(true)
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .visible_on_all_workspaces(true);
+        }
+
+        if let Ok(window) = win_builder.build() {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
 pub mod chat;
 pub mod clawdbot;
 pub mod config;
@@ -31,12 +78,13 @@ pub mod vector_store;
 pub mod web_search;
 
 use sidecar::SidecarManager;
+use std::str::FromStr;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -159,6 +207,8 @@ pub fn run() {
         clawdbot::commands::set_hf_token,
         permissions::get_permission_status,
         permissions::request_permission,
+        toggle_spotlight,
+        hide_spotlight,
     ]);
 
     #[cfg(debug_assertions)]
@@ -171,7 +221,22 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let config_manager = app.state::<config::ConfigManager>();
+                        let _sc_str = config_manager.get_config().spotlight_shortcut;
+
+                        // If the shortcut matches "Command+Shift+K" (or whatever is in config)
+                        // In a real app we'd compare the shortcut object or its string representation.
+                        // For now, let's just trigger toggle_spotlight if ANY registered shortcut is pressed,
+                        // or check if it matches our intended one.
+                        toggle_spotlight(app.clone());
+                    }
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(specta_builder.invoke_handler())
@@ -299,8 +364,16 @@ pub fn run() {
         }
 
         // 3. Global Shortcut
-        let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
-        let _ = app.global_shortcut().register(shortcut);
+        let config_manager = app.state::<config::ConfigManager>();
+        let shortcut_str = config_manager.get_config().spotlight_shortcut;
+
+        if let Ok(shortcut) = Shortcut::from_str(&shortcut_str) {
+            let _ = app.global_shortcut().register(shortcut);
+        } else {
+            // Fallback
+            let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
+            let _ = app.global_shortcut().register(shortcut);
+        }
     }
 
     app.run(|_app_handle, _event| {
