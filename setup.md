@@ -78,12 +78,12 @@ The build system will automatically target the current architecture (Silicon) an
 ## Apple Silicon Optimization
 
 ### 1. Unified Memory Support
-Scrappy is designed to take advantage of macOS Unified Memory. In **Settings > Models**, ensure you allocate sufficient RAM for your GGUF models. Metal handles the distribution between CPU/GPU automatically.
+Scrappy is designed to take advantage of macOS Unified Memory. In **Settings > Server & Memory**, ensure you allocate sufficient RAM for your GGUF models. Metal handles the distribution between CPU/GPU automatically.
 
 ### 2. Local Models (GGUF)
 - Use **GGUF** models exclusively for local inference.
 - Recommended models: Llama-3-8B-Instruct (Q4_K_M or Q8_0) or Mistral-7B.
-- Place models in a dedicated folder and link it in **Settings**.
+- Models added manually must be placed in a folder named after the model within the structure of the application's models directory. You can find and link your models folder in **Settings > Troubleshooting**.
 
 ### 3. Native Scraper (Chromium)
 The bundled Chromium instance is set up to run natively on Apple Silicon, ensuring minimal overhead when the agent browses the web.
@@ -94,6 +94,8 @@ The bundled Chromium instance is set up to run natively on Apple Silicon, ensuri
 
 While Scrappy can run fully local AI, its advanced features benefit from the following:
 - **Anthropic API**: Supports **Claude 4.5 Sonnet** and **Claude 4.5 Opus**. [Get a Key](https://console.anthropic.com/)
+- **OpenAI API**: For GPT-4o and specialized reasoning models. [Get a Key](https://platform.openai.com/)
+- **OpenRouter API**: Provides access to a vast array of open-source and proprietary models through a single interface. [Get a Key](https://openrouter.ai/keys)
 - **Brave Search API**: Enables the agent to perform deep web research. [Get a Key](https://brave.com/search/api/)
 - **Hugging Face Token**: A **Read Access Token** is required to download gated models (like Llama 3 or Gemma). Add this in **Settings > Secrets**. [Get a Token](https://huggingface.co/settings/tokens)
 
