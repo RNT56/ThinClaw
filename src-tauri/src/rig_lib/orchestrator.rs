@@ -328,10 +328,21 @@ impl Orchestrator {
             }
 
             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let mut grounding_rules = String::new();
+            if perms.allow_web_search {
+                grounding_rules.push_str("
+**GROUNDED RESEARCH MODE**: 
+1. **ALWAYS SEARCH FOR FACTS**: If the user's query requires any factual information, news, data, or current events, you MUST use `web_search`. Even if you think you know the answer, verify it.
+2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries for the tool. Find out what the user really wants.
+3. **GREETINGS EXCEPTION**: If the user only says 'Hello', 'Hey', 'Hi' or similar without a request, DO NOT call tools. Reply naturally and ask what they would like to research.
+");
+            }
+
             let system_prompt = format!(
                 r#"{}.
 Current Date: {}
-CORE RULE:
+{}
+CORE RULES:
 1. Conversational? Reply directly with depth and insight.
 2. Need Facts/Actions? Use Tools.
 3. Attached files? Use read_file to analyze them if you need their full content.
@@ -342,18 +353,18 @@ Example:
 <tool_code>
 {{
   "name": "web_search",
-  "arguments": {{ "query": "ancient moral philosophies" }}
+  "arguments": {{ "query": "latest news about X" }}
 }}
 </tool_code>
 
 {}
 "#,
-                persona_instructions, date, tools_desc
+                persona_instructions, date, grounding_rules, tools_desc
             );
 
             conversation.push(json!({
-                "role": "user",
-                "content": format!("System Instructions:\n{}", system_prompt)
+                "role": "system",
+                "content": system_prompt
             }));
 
             // 2. History Conversion

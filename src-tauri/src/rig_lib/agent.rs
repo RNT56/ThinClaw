@@ -42,7 +42,20 @@ Current Date: {}
             date
         );
 
-        base_preamble.push_str("
+        if enable_web_search {
+            base_preamble.push_str("
+**GROUNDED RESEARCH MODE**: 
+1. **ALWAYS SEARCH FOR FACTS**: If the user's query requires any factual information, news, data, or current events, you MUST use `web_search`. Smaller models must rely on tools for all factual claims.
+2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`. Find out what the user really wants.
+3. **GREETINGS EXCEPTION**: If the user only says 'Hello', 'Hey', 'Hi' or similar without a request, DO NOT call tools. Reply naturally and ask what they would like to research.
+
+Start your response with a clear thought:
+'Thought: User asked for current events. This requires Research. I will formalize a query and search.'
+or
+'Thought: User said hello. This is just a greeting. I will reply directly.'
+");
+        } else {
+            base_preamble.push_str("
 CORE RULES:
 1. **NO TOOLS FOR CHAT**: If the user says 'Hello', 'Hi', asks a question about you, or asks for code/logic -> YOU MUST REPLY DIRECTLY. Do not call any tools.
 2. **SEARCH ONLY FOR FACTS**: Only use `web_search` if the user explicitly asks for real-time news, prices, or specific data you do not know.
@@ -53,6 +66,7 @@ Start your response with a clear thought:
 or
 'Thought: User asked for price. This is a fact. I will search.'
 ");
+        }
 
         if let Some(ctx) = user_context {
             base_preamble.push_str(&format!(
