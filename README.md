@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="160" alt="Scrappy Logo">
+</p>
+
 # Scrappy: The Open-Source AI Command Center
 
 Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** Node.js engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
