@@ -15,6 +15,7 @@ export type ExtendedMessage = Message & {
     searchMessage?: string;
     is_summary?: boolean | null;
     original_messages?: Message[] | null;
+    isStreaming?: boolean;
 };
 
 export function useChat() {
@@ -60,7 +61,8 @@ export function useChat() {
                 searchStatus: activeJob.searchStatus,
                 searchMessage: activeJob.searchMessage,
                 is_summary: false,
-                original_messages: null
+                original_messages: null,
+                isStreaming: activeJob.isStreaming
             };
         } else if (lastIndex >= 0 && merged[lastIndex].role === "user") {
             // Fallback: If Assistant message hasn't appeared in DB yet but job is active, push a live one
@@ -71,7 +73,8 @@ export function useChat() {
                 attached_docs: null,
                 web_search_results: activeJob.searchResults,
                 is_summary: false,
-                original_messages: null
+                original_messages: null,
+                isStreaming: activeJob.isStreaming
             });
         }
 

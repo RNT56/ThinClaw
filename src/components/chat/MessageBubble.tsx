@@ -13,6 +13,7 @@ import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
 import { revealPath } from '../../lib/clawdbot';
+import { ThinkingDots } from './ThinkingDots';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -371,7 +372,7 @@ function CopyButton({ content, className }: { content: string, className?: strin
     return (
         <button
             onClick={handleCopy}
-            className={cn("p-1.5 rounded-md transition-all duration-200 border bg-background/80 backdrop-blur-sm shadow-sm hover:bg-accent hover:text-accent-foreground", className)}
+            className={cn("p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground", className)}
             title="Copy Text"
         >
             {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-muted-foreground" />}
@@ -386,6 +387,7 @@ type ExtendedMessage = Message & {
     searchMessage?: string;
     is_summary?: boolean | null;
     original_messages?: Message[] | null;
+    isStreaming?: boolean;
 };
 
 export function MessageBubble({ message, conversationId, isLastUser, onResend }: { message: ExtendedMessage, conversationId: string | null, isLast?: boolean, isLastUser?: boolean, onResend?: (id: string, content: string) => void }) {
@@ -591,62 +593,66 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
                             prose-pre:bg-[hsl(var(--hljs-bg))] prose-pre:border prose-pre:border-border/50 prose-pre:rounded-xl prose-pre:my-4 prose-pre:relative prose-pre:group/code
                             prose-code:bg-[hsl(var(--hljs-bg))] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none prose-code:font-mono prose-code:text-[0.9em]
                         ">
-                            {parseContent(sanitizedContent as string).map((part, idx) => {
-                                if (part.type === 'status') {
-                                    return <StatusIndicator key={idx} type={part.props.type} query={part.props.query} />;
-                                }
-                                if (!part.content) return null;
+                            {(!sanitizedContent && message.isStreaming) ? (
+                                <ThinkingDots />
+                            ) : (
+                                parseContent(sanitizedContent as string).map((part, idx) => {
+                                    if (part.type === 'status') {
+                                        return <StatusIndicator key={idx} type={part.props.type} query={part.props.query} />;
+                                    }
+                                    if (!part.content) return null;
 
-                                return (
-                                    <ReactMarkdown
-                                        key={idx}
-                                        remarkPlugins={[remarkGfm]}
-                                        rehypePlugins={[rehypeHighlight]}
-                                        components={{
-                                            a: ({ node, href, children, ...props }) => {
-                                                const isLocalPath = href && (href.startsWith('/') || href.startsWith('file://') || (typeof children === 'string' && (children.startsWith('/') || children.startsWith('./'))));
+                                    return (
+                                        <ReactMarkdown
+                                            key={idx}
+                                            remarkPlugins={[remarkGfm]}
+                                            rehypePlugins={[rehypeHighlight]}
+                                            components={{
+                                                a: ({ node, href, children, ...props }) => {
+                                                    const isLocalPath = href && (href.startsWith('/') || href.startsWith('file://') || (typeof children === 'string' && (children.startsWith('/') || children.startsWith('./'))));
 
-                                                return (
-                                                    <a
-                                                        {...props}
-                                                        href={href}
-                                                        target={isLocalPath ? undefined : "_blank"}
-                                                        rel="noopener noreferrer"
-                                                        className="text-primary hover:underline cursor-pointer relative z-10"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (isLocalPath && href) {
-                                                                e.preventDefault();
-                                                                revealPath(href.replace('file://', ''));
-                                                                toast.info("Revealing in Finder", { description: href });
-                                                            }
-                                                        }}
-                                                    >
-                                                        {children}
-                                                    </a>
-                                                );
-                                            },
-                                            pre: ({ node, children, ...props }) => {
-                                                let codeText = "";
-                                                if (isValidElement(children)) {
-                                                    codeText = extractText((children.props as any).children).replace(/\n$/, '');
+                                                    return (
+                                                        <a
+                                                            {...props}
+                                                            href={href}
+                                                            target={isLocalPath ? undefined : "_blank"}
+                                                            rel="noopener noreferrer"
+                                                            className="text-primary hover:underline cursor-pointer relative z-10"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                if (isLocalPath && href) {
+                                                                    e.preventDefault();
+                                                                    revealPath(href.replace('file://', ''));
+                                                                    toast.info("Revealing in Finder", { description: href });
+                                                                }
+                                                            }}
+                                                        >
+                                                            {children}
+                                                        </a>
+                                                    );
+                                                },
+                                                pre: ({ node, children, ...props }) => {
+                                                    let codeText = "";
+                                                    if (isValidElement(children)) {
+                                                        codeText = extractText((children.props as any).children).replace(/\n$/, '');
+                                                    }
+
+                                                    return (
+                                                        <pre {...props} className="relative group/code">
+                                                            <div className="absolute top-2 right-2 opacity-0 group-hover/code:opacity-100 transition-opacity z-10">
+                                                                <CopyButton content={codeText} />
+                                                            </div>
+                                                            {children}
+                                                        </pre>
+                                                    )
                                                 }
-
-                                                return (
-                                                    <pre {...props} className="relative group/code">
-                                                        <div className="absolute top-2 right-2 opacity-0 group-hover/code:opacity-100 transition-opacity z-10">
-                                                            <CopyButton content={codeText} />
-                                                        </div>
-                                                        {children}
-                                                    </pre>
-                                                )
-                                            }
-                                        }}
-                                    >
-                                        {part.content}
-                                    </ReactMarkdown>
-                                );
-                            })}
+                                            }}
+                                        >
+                                            {part.content}
+                                        </ReactMarkdown>
+                                    );
+                                })
+                            )}
                         </div>
                     )
                 }
