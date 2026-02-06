@@ -399,7 +399,7 @@ export function ChatLayout() {
                 try {
                     // Start with appropriate template (null lets
                     if (finalModelPath) {
-                        await commands.startChatServer(finalModelPath, maxContext, null, null, false);
+                        await commands.startChatServer(finalModelPath, maxContext, null, null, false, false, false);
                     }
                     toast.dismiss(tId);
                 } catch (e) {
@@ -707,7 +707,7 @@ export function ChatLayout() {
                             mmproj = `${modelsDir}/${mDef.mmproj.filename}`;
                         }
                         // Increase context back to 8192 if needed, matching common usage
-                        await commands.startChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false);
+                        await commands.startChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
                         toast.success("Ready to chat", { id: tId });
                     } catch (e) {
                         console.error("Auto-resume failed:", e);
@@ -1291,7 +1291,7 @@ export function ChatLayout() {
                                                             if (model) {
                                                                 toast.loading("Starting Chat Server...");
                                                                 try {
-                                                                    await commands.startChatServer(model, maxContext, currentModelTemplate, null, false);
+                                                                    await commands.startChatServer(model, maxContext, currentModelTemplate, null, false, false, false);
                                                                     toast.dismiss();
                                                                     toast.success("Server Started");
                                                                 } catch (e) { toast.error("Start failed"); }

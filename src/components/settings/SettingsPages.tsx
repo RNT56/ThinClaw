@@ -462,7 +462,7 @@ function ServerSettings() {
 
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between p-6 border rounded-xl bg-card shadow-sm">
+            <div className="flex items-center justify-between p-6 border border-border/50 rounded-xl bg-card shadow-sm">
                 <div className="space-y-1">
                     <div className="flex items-center font-semibold text-lg">
                         Local AI Inference
@@ -490,7 +490,7 @@ function ServerSettings() {
                 </button>
             </div>
 
-            <div className="p-6 border rounded-xl bg-card space-y-6 shadow-sm">
+            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-sm">
                 <div className="flex items-center justify-between">
                     <div className="space-y-1">
                         <label className="text-base font-semibold">
@@ -593,7 +593,7 @@ function ServerSettings() {
                 })()}
             </div>
 
-            <div className="p-6 border rounded-xl bg-card space-y-6 shadow-sm">
+            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-sm">
                 <div className="flex items-center justify-between">
                     <div className="space-y-1">
                         <label className="text-base font-semibold">
@@ -861,7 +861,7 @@ function TroubleshootingSettings() {
     return (
         <div className="space-y-6">
             <div className="grid gap-4 md:grid-cols-2">
-                <div className="p-6 border rounded-xl bg-card space-y-4 font-mono text-sm shadow-sm">
+                <div className="p-6 border border-border/50 rounded-xl bg-card space-y-4 font-mono text-sm shadow-sm">
                     <h4 className="font-semibold font-sans mb-4">System Details</h4>
                     <div className="flex justify-between border-b border-border/50 pb-2">
                         <span className="text-muted-foreground">Embedding Server:</span>
@@ -877,24 +877,24 @@ function TroubleshootingSettings() {
                     </div>
                 </div>
 
-                <div className="p-6 border rounded-xl bg-card space-y-4 shadow-sm">
+                <div className="p-6 border border-border/50 rounded-xl bg-card space-y-4 shadow-sm">
                     <h4 className="font-semibold mb-4">Diagnostic Links</h4>
                     <div className="flex flex-col gap-2">
                         <button
                             onClick={openModelsFolder}
-                            className="w-full bg-background border hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
+                            className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
                         >
                             <FolderOpen className="w-4 h-4 mr-2 text-primary" /> Open Models Folder
                         </button>
                         <button
                             onClick={async () => unwrap(await commands.openImagesFolder())}
-                            className="w-full bg-background border hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
+                            className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
                         >
                             <ImageIcon className="w-4 h-4 mr-2 text-pink-500" /> Open Generated Images
                         </button>
                         <button
                             onClick={async () => unwrap(await commands.openConfigFile())}
-                            className="w-full bg-background border hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
+                            className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-sm"
                         >
                             <Settings className="w-4 h-4 mr-2 text-muted-foreground" /> Open User Config
                         </button>
@@ -902,7 +902,7 @@ function TroubleshootingSettings() {
                 </div>
             </div>
 
-            <div className="p-6 border rounded-xl bg-card space-y-4 shadow-sm">
+            <div className="p-6 border border-border/50 rounded-xl bg-card space-y-4 shadow-sm">
                 <h4 className="font-semibold">Model Path Validation</h4>
                 <div className="space-y-2">
                     <label className="text-sm text-muted-foreground">Current Model Absolute Path</label>
@@ -1100,7 +1100,7 @@ function AppearanceSettings() {
                     <p className="text-sm text-muted-foreground">Configure shortcuts to trigger Scrappy from anywhere on your system.</p>
                 </div>
 
-                <div className="p-6 border rounded-xl bg-card/50 flex items-center justify-between shadow-sm border-border/50">
+                <div className="p-6 border border-border/50 rounded-xl bg-card/50 flex items-center justify-between shadow-sm border-border/50">
                     <div className="space-y-1">
                         <label className="text-sm font-semibold flex items-center gap-2 text-foreground">
                             <Sparkles className="w-4 h-4 text-primary" />

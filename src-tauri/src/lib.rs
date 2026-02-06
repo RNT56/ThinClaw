@@ -160,6 +160,11 @@ pub fn run() {
         clawdbot::commands::get_openai_key,
         clawdbot::commands::save_openrouter_key,
         clawdbot::commands::get_openrouter_key,
+        clawdbot::commands::save_gemini_key,
+        clawdbot::commands::get_gemini_key,
+        clawdbot::commands::save_groq_key,
+        clawdbot::commands::get_groq_key,
+        clawdbot::commands::save_selected_cloud_model,
         clawdbot::commands::clawdbot_toggle_secret_access,
         clawdbot::commands::save_slack_config,
         clawdbot::commands::save_telegram_config,
@@ -204,6 +209,7 @@ pub fn run() {
         clawdbot::commands::clawdbot_toggle_local_inference,
         clawdbot::commands::clawdbot_toggle_expose_inference,
         clawdbot::commands::clawdbot_set_setup_completed,
+        clawdbot::commands::clawdbot_toggle_auto_start,
         clawdbot::commands::set_hf_token,
         permissions::get_permission_status,
         permissions::request_permission,
@@ -317,6 +323,28 @@ pub fn run() {
             let clawdbot_state = handle.state::<clawdbot::ClawdbotManager>();
             if let Err(e) = clawdbot_state.init_config().await {
                 eprintln!("[main] Failed to init Clawdbot config: {}", e);
+            } else {
+                // Check if we should auto-start the gateway
+                if let Some(cfg) = clawdbot_state.get_config().await {
+                    if cfg.auto_start_gateway {
+                        println!("[main] Auto-starting Clawdbot gateway...");
+                        let handle_clone = handle.clone();
+
+                        tauri::async_runtime::spawn(async move {
+                            let clawdbot_mgr = handle_clone.state::<clawdbot::ClawdbotManager>();
+                            let sidecar_mgr = handle_clone.state::<SidecarManager>();
+
+                            if let Err(e) =
+                                clawdbot::commands::start_gateway_core(&clawdbot_mgr, &sidecar_mgr)
+                                    .await
+                            {
+                                eprintln!("[main] Failed to auto-start Clawdbot gateway: {}", e);
+                            } else {
+                                println!("[main] Clawdbot gateway auto-started successfully.");
+                            }
+                        });
+                    }
+                }
             }
         });
 

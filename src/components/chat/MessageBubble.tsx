@@ -12,6 +12,7 @@ import { toast } from 'sonner';
 import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
+import { revealPath } from '../../lib/clawdbot';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -616,7 +617,7 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
                                                             e.stopPropagation();
                                                             if (isLocalPath && href) {
                                                                 e.preventDefault();
-                                                                import('../../lib/clawdbot').then(m => m.revealPath(href.replace('file://', '')));
+                                                                revealPath(href.replace('file://', ''));
                                                                 toast.info("Revealing in Finder", { description: href });
                                                             }
                                                         }}

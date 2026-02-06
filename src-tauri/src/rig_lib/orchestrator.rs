@@ -1,5 +1,5 @@
 use crate::rig_lib::RigManager;
-use futures::Stream;
+// use futures::Stream;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -28,11 +28,11 @@ impl Orchestrator {
         persona_instructions: String,
         conversation_id: Option<String>,
     ) -> Result<
-        impl Stream<Item = Result<crate::rig_lib::llama_provider::ProviderEvent, String>>,
+        impl futures::Stream<Item = Result<crate::rig_lib::unified_provider::ProviderEvent, String>>,
         String,
     > {
         use crate::chat::{Message, TokenUsage};
-        use crate::rig_lib::llama_provider::ProviderEvent;
+        use crate::rig_lib::unified_provider::ProviderEvent;
 
         let (tx, rx) = mpsc::channel(100);
         let rig_clone = self.rig.clone();
@@ -351,11 +351,11 @@ Thought: I need to check the latest information regarding [Topic] to avoid hallu
             let system_prompt = format!(
                 r#"{}.
 Current Date: {}
-{}
+
 CORE RULES:
-1. Conversational? Reply directly with depth and insight.
-2. Need Facts/Actions? Use Tools.
-3. NEVER assume you know details about specific entities, media, or current events. ALWAYS VERIFY.
+1. ALWAYS use tools for factual queries.
+2. If the request is purely creative or conversational, answer directly.
+3. If uncertainty exists about any fact, specific entity, or current event, use `web_search`.
 
 TOOL USAGE:
 To use a tool, output valid JSON inside <tool_code> tags.
@@ -363,13 +363,12 @@ Example:
 <tool_code>
 {{
   "name": "web_search",
-  "arguments": {{ "query": "latest news about X" }}
+  "arguments": {{ "query": "..." }}
 }}
 </tool_code>
 
-{}
-"#,
-                persona_instructions, date, grounding_rules, tools_desc
+{}"#,
+                persona_instructions, date, tools_desc
             );
 
             conversation.push(json!({
@@ -529,17 +528,21 @@ Example:
                 conversation.push(vmsg);
             }
 
-            // Final Grounding Reminder (Crucial for small models)
-            if perms.allow_web_search {
-                conversation.push(json!({
-                    "role": "system",
-                    "content": "REMINDER: You are in GROUNDED RESEARCH MODE. For any factual questions, you MUST use `web_search`. Do not answer from your training data if the user asks for news, details, or real-time info. Formalize your query first."
-                }));
-            }
+            // Start turn with a strong grounding injection if searching is allowed
+            let final_query = if perms.allow_web_search {
+                format!(
+                    "**GROUNDING INSTRUCTION**: You are a small model with limited knowledge. For any factual claims, entities, people, or events, you MUST call `web_search` now. Do not rely on your training data. Formalize a precise query.
+                    
+                    Request: {}",
+                    effective_query
+                )
+            } else {
+                effective_query
+            };
 
             conversation.push(json!({
                 "role": "user",
-                "content": effective_query
+                "content": final_query
             }));
 
             // 4. ReAct Loop
@@ -622,116 +625,124 @@ Example:
                 }
 
                 // Parse Tool
-                // ... (Tool parsing and execution logic largely same, just wrapping tx.send in ProviderEvent::Content)
                 let mut tool_executed = false;
                 if let Some(start) = full_response.find("<tool_code>") {
                     if let Some(end) = full_response.find("</tool_code>") {
                         let json_str = &full_response[start + 11..end].trim();
+                        let json_str = if json_str.starts_with("```json") {
+                            json_str
+                                .trim_start_matches("```json")
+                                .trim_end_matches("```")
+                                .trim()
+                        } else if json_str.starts_with("```") {
+                            json_str
+                                .trim_start_matches("```")
+                                .trim_end_matches("```")
+                                .trim()
+                        } else {
+                            json_str
+                        };
+
+                        let tool_call = match serde_json::from_str::<serde_json::Value>(json_str) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!(
+                                    "Failed to parse tool JSON: {} in Turn {}",
+                                    e, current_turn
+                                );
+                                if !_final_answer_streaming {
+                                    let _ = tx
+                                        .send(Ok(ProviderEvent::Content(
+                                            "\n[Tool Parse Error - Proceeding with answer]\n"
+                                                .into(),
+                                        )))
+                                        .await;
+                                }
+                                break;
+                            }
+                        };
 
                         conversation.push(json!({
                             "role": "assistant",
                             "content": full_response
                         }));
 
-                        match serde_json::from_str::<serde_json::Value>(json_str) {
-                            Ok(tool_call) => {
-                                // ... Tool execution ...
-                                let name = tool_call["name"].as_str().unwrap_or("");
-                                let args = tool_call["arguments"].clone();
-                                let result;
-                                // ... (Mappings)
-                                let allowed_web = perms.allow_web_search;
-                                let allowed_file = perms.allow_file_search;
-                                let allowed_img = perms.allow_image_gen;
-
-                                match name {
-                                    "web_search" if allowed_web => {
-                                        let q = args["query"].as_str().unwrap_or("");
-                                        let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"web_search\" query=\"{}\" />\n", q).into()))).await;
-                                        result = rig_clone.explicit_search(q).await;
-                                    }
-                                    "rag_search" if allowed_file => {
-                                        let q = args["query"].as_str().unwrap_or("");
-                                        let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"rag_search\" query=\"{}\" />\n", q).into()))).await;
-                                        // ... RAG Call ...
-                                        if let Some(app) = &rig_clone.app_handle {
-                                            // ... (RAG Logic wrapper) ...
-                                            use tauri::Manager;
-                                            let context_res =
-                                                crate::rag::retrieve_context_internal(
-                                                    rig_clone.app_handle.clone(),
-                                                    app.state::<crate::sidecar::SidecarManager>()
-                                                        .inner(),
-                                                    app.state::<sqlx::SqlitePool>().inner().clone(),
-                                                    app.state::<crate::vector_store::VectorStore>()
-                                                        .inner()
-                                                        .clone(),
-                                                    app.state::<crate::reranker::RerankerWrapper>()
-                                                        .inner(),
-                                                    q.to_string(),
-                                                    conversation_id_clone.clone(),
-                                                    if all_doc_ids.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(all_doc_ids.clone())
-                                                    },
-                                                    project_id_clone.clone(),
-                                                )
-                                                .await;
-                                            result = match context_res {
-                                                Ok(r) => r.join("\n\n"),
-                                                Err(e) => format!("Error: {}", e),
-                                            };
+                        // Tool execution
+                        let name = tool_call["name"].as_str().unwrap_or("");
+                        let args = tool_call["arguments"].clone();
+                        let allowed_web = perms.allow_web_search;
+                        let allowed_file = perms.allow_file_search;
+                        let allowed_img = perms.allow_image_gen;
+                        let result = match name {
+                            "web_search" if allowed_web => {
+                                let q = args["query"].as_str().unwrap_or("");
+                                let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"web_search\" query=\"{}\" />\n", q).into()))).await;
+                                rig_clone.explicit_search(q).await
+                            }
+                            "rag_search" if allowed_file => {
+                                let q = args["query"].as_str().unwrap_or("");
+                                let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"rag_search\" query=\"{}\" />\n", q).into()))).await;
+                                if let Some(app) = &rig_clone.app_handle {
+                                    use tauri::Manager;
+                                    let context_res = crate::rag::retrieve_context_internal(
+                                        rig_clone.app_handle.clone(),
+                                        app.state::<crate::sidecar::SidecarManager>().inner(),
+                                        app.state::<sqlx::SqlitePool>().inner().clone(),
+                                        app.state::<crate::vector_store::VectorStore>()
+                                            .inner()
+                                            .clone(),
+                                        app.state::<crate::reranker::RerankerWrapper>().inner(),
+                                        q.to_string(),
+                                        conversation_id_clone.clone(),
+                                        if all_doc_ids.is_empty() {
+                                            None
                                         } else {
-                                            result = "App state missing".into();
-                                        }
+                                            Some(all_doc_ids.clone())
+                                        },
+                                        project_id_clone.clone(),
+                                    )
+                                    .await;
+                                    match context_res {
+                                        Ok(r) => r.join("\n\n"),
+                                        Err(e) => format!("Error: {}", e),
                                     }
-                                    "read_file" if allowed_file => {
-                                        let path = args["path"].as_str().unwrap_or("");
-                                        let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"tool_call\" query=\"Reading {}\" />\n", path).into()))).await;
-                                        // ... File Logic ...
-                                        // Simplified return for brevity, assuming existing logic pattern
-                                        if std::path::Path::new(path).exists() {
-                                            if let Ok(c) = std::fs::read_to_string(path) {
-                                                result = if c.len() > 20000 {
-                                                    format!("{}... (truncated)", &c[..20000])
-                                                } else {
-                                                    c
-                                                };
-                                            } else {
-                                                result = "Read failed".into();
-                                            }
-                                        } else {
-                                            result = "File not found".into();
-                                        }
-                                    }
-                                    "generate_image" if allowed_img => {
-                                        let _ = tx
-                                            .send(Ok(ProviderEvent::Content(
-                                                "\n<scrappy_status type=\"image_gen\" />\n".into(),
-                                            )))
-                                            .await;
-                                        result = "Image Generation Triggered".into();
-                                    }
-                                    _ => {
-                                        result = "Unknown tool".into();
-                                    }
+                                } else {
+                                    "App state missing".into()
                                 }
+                            }
+                            "read_file" if allowed_file => {
+                                let path = args["path"].as_str().unwrap_or("");
+                                let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"tool_call\" query=\"Reading {}\" />\n", path).into()))).await;
+                                if std::path::Path::new(path).exists() {
+                                    if let Ok(c) = std::fs::read_to_string(path) {
+                                        if c.len() > 20000 {
+                                            format!("{}... (truncated)", &c[..20000])
+                                        } else {
+                                            c
+                                        }
+                                    } else {
+                                        "Read failed".into()
+                                    }
+                                } else {
+                                    "File not found".into()
+                                }
+                            }
+                            "generate_image" if allowed_img => {
+                                let _ = tx
+                                    .send(Ok(ProviderEvent::Content(
+                                        "\n<scrappy_status type=\"image_gen\" />\n".into(),
+                                    )))
+                                    .await;
+                                "Image Generation Triggered".to_string()
+                            }
+                            _ => "Unknown tool or permission denied".to_string(),
+                        };
 
-                                conversation.push(json!({
-                                    "role": "user",
-                                    "content": format!("<tool_result>\n{}\n</tool_result>", result)
-                                }));
-                                tool_executed = true;
-                            }
-                            Err(e) => {
-                                conversation.push(json!({
-                                    "role": "user",
-                                    "content": format!("System: Invalid JSON: {}", e)
-                                }));
-                                tool_executed = true;
-                            }
-                        }
+                        conversation.push(json!({
+                            "role": "user",
+                            "content": format!("<tool_result>\n{}\n</tool_result>", result)
+                        }));
+                        tool_executed = true;
                     }
                 }
 

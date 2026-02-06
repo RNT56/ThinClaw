@@ -1,17 +1,17 @@
-use crate::rig_lib::llama_provider::LlamaProvider;
 use crate::rig_lib::tools::image_gen_tool::ImageGenTool;
 use crate::rig_lib::tools::rag_tool::RAGTool;
 use crate::rig_lib::tools::web_search::DDGSearchTool;
 use crate::rig_lib::tools::ScrapePageTool;
+use crate::rig_lib::unified_provider::{ProviderKind, UnifiedProvider};
 use rig::agent::Agent;
 use rig::completion::{Chat, Prompt};
 
 #[derive(Clone)]
 pub struct RigManager {
     // Switch to our custom provider
-    pub agent: std::sync::Arc<Agent<LlamaProvider>>,
-    pub provider: LlamaProvider, // Store copy for direct access
-    pub summarizer_provider: Option<LlamaProvider>,
+    pub agent: std::sync::Arc<Agent<UnifiedProvider>>,
+    pub provider: UnifiedProvider, // Store copy for direct access
+    pub summarizer_provider: Option<UnifiedProvider>,
     pub app_handle: Option<tauri::AppHandle>,
     pub context_window: usize,
     pub conversation_id: Option<String>,
@@ -19,12 +19,13 @@ pub struct RigManager {
 
 impl RigManager {
     pub fn new(
+        kind: ProviderKind,
         base_url: String,
-        _model_name: String, // model_name is ignored by llama-server usually, or passed via provider if needed
+        model_name: String,
         app_handle: Option<tauri::AppHandle>,
         token: Option<String>,
         context_window: usize,
-        summarizer_provider: Option<LlamaProvider>,
+        summarizer_provider: Option<UnifiedProvider>,
         enable_web_search: bool,
         user_context: Option<String>,
         conversation_id: Option<String>,
@@ -32,7 +33,7 @@ impl RigManager {
         let api_key = token.unwrap_or_else(|| "sk-no-key-required".to_string());
 
         // Initialize custom provider
-        let provider = LlamaProvider::new(&base_url, &api_key);
+        let provider = UnifiedProvider::new(kind, &base_url, &api_key, &model_name);
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut base_preamble = format!(

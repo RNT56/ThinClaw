@@ -1,15 +1,34 @@
 import { useState, useEffect, useRef } from 'react';
 import { useModelContext, RECOMMENDED_MODELS } from '../model-context';
 import { ChevronDown, Check, Box, Sparkles } from 'lucide-react';
+import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 
 export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { onManageClick: () => void, isAutoMode: boolean, toggleAutoMode: (v: boolean) => void }) {
     const { localModels, currentModelPath: modelPath, setModelPath, downloading, setIsRestarting } = useModelContext();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
+    const [status, setStatus] = useState<any>(null);
+    const [config, setConfig] = useState<any>(null);
+
+    useEffect(() => {
+        const loadStatus = async () => {
+            try {
+                const [s, cfg] = await Promise.all([
+                    commands.getClawdbotStatus(),
+                    commands.getUserConfig()
+                ]);
+                if (s.status === 'ok') setStatus(s.data);
+                setConfig(cfg);
+            } catch (e) {
+                console.error("Failed to load status in ModelSelector", e);
+            }
+        };
+        loadStatus();
+    }, [isOpen]);
 
     // Filter out dedicated embedding models AND downloading models AND image gen models
-    const models = localModels.filter(m => {
+    const filteredLocal = localModels.filter(m => {
         // Exclude if currently downloading
         if (downloading[m.name]) return false;
 
@@ -40,6 +59,30 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
 
         return true;
     });
+    const cloudModels = RECOMMENDED_MODELS.filter(m => {
+        if ((m as any).category !== "Cloud") return false;
+
+        // Check if provider (family) is configured
+        const family = m.family.toLowerCase();
+        if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
+        if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
+        if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
+        if (family === "groq") return !!(status?.has_groq_key || status?.hasGroqKey);
+        if (family === "openrouter") return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+
+        return false;
+    });
+
+    const models = [
+        ...filteredLocal.map(m => ({ ...m, type: 'local' as const })),
+        ...cloudModels.map(m => ({
+            path: m.id,
+            name: m.name,
+            type: 'cloud' as const,
+            family: m.family,
+            id: m.id
+        }))
+    ];
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -51,16 +94,68 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const handleSelect = async (path: string) => {
+    const handleSelect = async (path: string, type: 'local' | 'cloud') => {
         if (path === "auto") {
             toggleAutoMode(!isAutoMode);
             setIsOpen(false);
             return;
         }
 
-        if (path === modelPath) {
+        if (type === 'cloud') {
+            try {
+                const modelDef = cloudModels.find(m => m.id === path);
+                if (!modelDef) return;
+
+                const brain = modelDef.family.toLowerCase();
+                const modelId = modelDef.id.split('-').slice(1).join('-');
+
+                const newConfig = {
+                    ...config,
+                    selected_chat_provider: brain,
+                };
+
+                await commands.updateUserConfig(newConfig);
+                if ((commands as any).saveSelectedCloudModel) {
+                    await (commands as any).saveSelectedCloudModel(modelId);
+                }
+
+                // Refresh state to reflect new cloud model
+                const [s, cfg] = await Promise.all([
+                    commands.getClawdbotStatus(),
+                    commands.getUserConfig()
+                ]);
+                if (s.status === 'ok') setStatus(s.data);
+                setConfig(cfg);
+
+                setIsOpen(false);
+                // We don't setModelPath for cloud models yet as it's handled by provider routing in backend
+                // but we might want to update local UI state if needed.
+                return;
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        if (path === modelPath && config?.selected_chat_provider === "local") {
             setIsOpen(false);
             return;
+        }
+
+        // If current provider is not local, switch it back to local
+        if (config?.selected_chat_provider && config.selected_chat_provider !== "local") {
+            try {
+                const newConfig = { ...config, selected_chat_provider: "local" };
+                await commands.updateUserConfig(newConfig);
+                // Refresh both to be safe
+                const [s, cfg] = await Promise.all([
+                    commands.getClawdbotStatus(),
+                    commands.getUserConfig()
+                ]);
+                if (s.status === 'ok') setStatus(s.data);
+                setConfig(cfg);
+            } catch (e) {
+                console.error("Failed to update config to local", e);
+            }
         }
 
         // Trigger immediate UI block
@@ -81,7 +176,11 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 <div className={cn("inline-flex items-center gap-2", isAutoMode && "text-yellow-500 font-bold")}>
                     {isAutoMode ? <Box className="w-4 h-4" /> : <Box className="w-4 h-4 text-primary" />}
                     <span className="max-w-[150px] truncate">
-                        {(models.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()) || "Select Model"} {isAutoMode && "(Auto)"}
+                        {isAutoMode ? "Auto Mode" : (
+                            config?.selected_chat_provider && config.selected_chat_provider !== "local"
+                                ? status?.selected_cloud_model || (config.selected_chat_provider.toUpperCase())
+                                : (localModels.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()) || "Select Model"
+                        )}
                     </span>
                 </div>
                 <ChevronDown className={cn("w-3 h-3 transition-transform opacity-50", isOpen && "rotate-180")} />
@@ -95,7 +194,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                         ) : (
                             <>
                                 <button
-                                    onClick={() => handleSelect("auto")}
+                                    onClick={() => handleSelect("auto", "local")}
                                     className="w-full text-left px-3 py-2 text-sm rounded-lg flex items-center gap-2 hover:bg-accent text-foreground group transition-colors mb-1 border-b border-border/50 pb-2"
                                 >
                                     <div className="p-1 bg-yellow-500/10 rounded flex items-center justify-center">
@@ -104,25 +203,29 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                     <span className="truncate flex-1 font-medium text-yellow-600 dark:text-yellow-400">Auto Mode</span>
                                     {isAutoMode && <Check className="w-3.5 h-3.5 shrink-0 text-yellow-500" />}
                                 </button>
-                                {models.map((model) => {
-                                    const filename = model.name.split(/[\\/]/).pop() || model.name;
-                                    const def = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename));
+                                {models.map((model: any) => {
+                                    const filename = model.type === 'local' ? (model.name.split(/[\\/]/).pop() || model.name) : model.name;
+                                    const def = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename) || k.id === model.id);
                                     const isRecommended = def?.recommendedForAgent;
+                                    const isActive = model.type === 'local'
+                                        ? (model.path === modelPath && config?.selected_chat_provider === "local")
+                                        : (config?.selected_chat_provider === model.family?.toLowerCase() && status?.selected_cloud_model === model.id?.split('-').slice(1).join('-'));
 
                                     return (
                                         <button
                                             key={model.path}
-                                            onClick={() => handleSelect(model.path)}
+                                            onClick={() => handleSelect(model.path, model.type)}
                                             className={cn(
                                                 "w-full text-left px-3 py-2 text-sm rounded-lg flex items-center justify-between group transition-colors",
-                                                model.path === modelPath ? "bg-primary/10 text-primary" : "hover:bg-accent text-foreground"
+                                                isActive ? "bg-primary/10 text-primary font-bold" : "hover:bg-accent text-foreground"
                                             )}
                                         >
                                             <div className="flex items-center gap-2 truncate flex-1 mr-2">
                                                 <span className="truncate">{filename}</span>
+                                                {model.type === 'cloud' && <span className="text-[9px] bg-indigo-500/10 text-indigo-500 px-1 rounded border border-indigo-500/20 uppercase font-bold">{model.family}</span>}
                                                 {isRecommended && <Sparkles className="w-3 h-3 text-yellow-500 shrink-0" />}
                                             </div>
-                                            {model.path === modelPath && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                            {isActive && <Check className="w-3.5 h-3.5 shrink-0" />}
                                         </button>
                                     );
                                 })

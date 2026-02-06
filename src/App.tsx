@@ -23,9 +23,9 @@ function App() {
 
   const checkSetup = async () => {
     try {
-      const config = await clawdbot.getClawdbotConfig();
-      // If config is empty or setup_completed is missing/false, show wizard
-      if (!config || !(config as any).setup_completed) {
+      const status = await clawdbot.getClawdbotStatus();
+      // If status is empty or setup_completed is missing/false, show wizard
+      if (!status || !status.setup_completed) {
         setShowOnboarding(true);
       }
     } catch (e) {

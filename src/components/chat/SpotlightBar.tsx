@@ -80,10 +80,11 @@ export function SpotlightBar() {
             await deleteConversation(idToDelete);
         }
 
-        if ((commands as any).hideSpotlight) {
-            (commands as any).hideSpotlight();
+        if (commands.hideSpotlight) {
+            commands.hideSpotlight();
         } else {
-            import('@tauri-apps/api/core').then(m => m.invoke('hide_spotlight'));
+            // Fallback for older versions if needed, but commands should have it
+            (commands as any).hideSpotlight?.();
         }
     }, [deleteConversation]);
 

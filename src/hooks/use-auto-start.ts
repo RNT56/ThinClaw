@@ -66,7 +66,7 @@ export function useAutoStart() {
 
                 // Use user-defined context size (removing 32k enforcement to prevent OOM on low-spec machines)
                 try {
-                    await commands.startChatServer(cleanPath, maxContext, template, mmprojPath, false);
+                    await commands.startChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
                     toast.success("AI Servers Ready", {
                         id: toastId,
                         description: `Chat: ${cleanPath.split('/').pop()}\nCtx: ${maxContext}`

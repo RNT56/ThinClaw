@@ -45,6 +45,7 @@ interface StatusInfo {
     openrouterGranted: boolean;
     customSecrets: any[];
     selectedCloudBrain: string | null;
+    autoStartGateway: boolean;
 }
 
 export function GatewayTab({ className }: GatewayTabProps) {
@@ -74,7 +75,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
         hasOpenrouterKey: false,
         openrouterGranted: false,
         customSecrets: [],
-        selectedCloudBrain: null
+        selectedCloudBrain: null,
+        autoStartGateway: false
     });
 
     const [showBrainSelector, setShowBrainSelector] = useState(false);
@@ -126,7 +128,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 hasOpenrouterKey: s.has_openrouter_key,
                 openrouterGranted: s.openrouter_granted,
                 customSecrets: (s as any).custom_secrets || [],
-                selectedCloudBrain: s.selected_cloud_brain
+                selectedCloudBrain: s.selected_cloud_brain,
+                autoStartGateway: s.auto_start_gateway || false
             });
 
             const perms = await clawdbot.getPermissionStatus();
@@ -350,7 +353,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         disabled={isLoading}
                         className={cn(
                             "px-6 py-4 rounded-2xl font-bold transition-all shadow-xl hover:scale-[1.02] active:scale-[0.98]",
-                            "flex items-center justify-center gap-2 bg-card border border-border group",
+                            "flex items-center justify-center gap-2 bg-card border border-border/50 group",
                             isLoading && "opacity-50 cursor-wait"
                         )}
                         title="Pulse Restart"
@@ -756,6 +759,39 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </div>
                         <p className="text-xs text-muted-foreground leading-relaxed">
                             Expose your high-performance local LLMs to the gateway for zero-latency agentic thought.
+                        </p>
+                    </div>
+
+                    {/* Auto-Start Gateway Card */}
+                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-blue-500/10 rounded-xl group-hover:bg-blue-500/20 transition-colors">
+                                    <RotateCcw className="w-5 h-5 text-blue-500" />
+                                </div>
+                                <h4 className="font-bold text-base">Persistent Engine</h4>
+                            </div>
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        await clawdbot.toggleClawdbotAutoStart(!status.autoStartGateway);
+                                        await fetchStatus();
+                                        toast.success(`Auto-start ${!status.autoStartGateway ? 'enabled' : 'disabled'}`);
+                                    } catch (e) { toast.error('Toggle failed'); }
+                                }}
+                                className={cn(
+                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
+                                    status.autoStartGateway ? "bg-blue-600" : "bg-muted"
+                                )}
+                            >
+                                <span className={cn(
+                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
+                                    status.autoStartGateway ? "translate-x-5" : "translate-x-0"
+                                )} />
+                            </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                            Automatically engage the gateway on application launch for immediate agent availability.
                         </p>
                     </div>
                 </div>

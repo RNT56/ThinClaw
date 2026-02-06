@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { commands, Message, Conversation } from "../lib/bindings";
+import { listen } from "@tauri-apps/api/event";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
 import { useChatContext } from "../components/chat/chat-context";
@@ -174,36 +175,33 @@ export function useChat() {
         const onFocus = () => checkStatus();
         window.addEventListener('focus', onFocus);
 
-        let unlisten: (() => void) | undefined;
-        import("@tauri-apps/api/event").then(({ listen }) => {
-            listen<any>("sidecar_event", (event) => {
-                const payload = event.payload;
-                if (payload.type === "Crashed") {
-                    if (payload.service === "chat" && isRestarting) return;
-                    if (payload.service === "chat") {
-                        setModelRunning(false);
-                        toast.error("Chat Server Crashed", {
-                            id: "chat-crashed",
-                            description: `The local AI server stopped unexpectedly.`,
-                            action: { label: "Restart", onClick: () => startServer(currentModelPath) },
-                            duration: Infinity,
-                        });
-                    }
-                } else if (payload.type === "Started") {
-                    if (payload.service === "chat") {
-                        setModelRunning(true);
-                        toast.dismiss("chat-crashed");
-                    }
-                } else if (payload.type === "Stopped") {
-                    if (payload.service === "chat") setModelRunning(false);
+        const unlisten = listen<any>("sidecar_event", (event) => {
+            const payload = event.payload;
+            if (payload.type === "Crashed") {
+                if (payload.service === "chat" && isRestarting) return;
+                if (payload.service === "chat") {
+                    setModelRunning(false);
+                    toast.error("Chat Server Crashed", {
+                        id: "chat-crashed",
+                        description: `The local AI server stopped unexpectedly.`,
+                        action: { label: "Restart", onClick: () => startServer(currentModelPath) },
+                        duration: Infinity,
+                    });
                 }
-                checkStatus();
-            }).then(u => unlisten = u);
+            } else if (payload.type === "Started") {
+                if (payload.service === "chat") {
+                    setModelRunning(true);
+                    toast.dismiss("chat-crashed");
+                }
+            } else if (payload.type === "Stopped") {
+                if (payload.service === "chat") setModelRunning(false);
+            }
+            checkStatus();
         });
 
         return () => {
             window.removeEventListener('focus', onFocus);
-            if (unlisten) unlisten();
+            unlisten.then(f => f());
         };
     }, [fetchConversations, currentModelPath, startServer, isRestarting]);
 

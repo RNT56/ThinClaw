@@ -312,10 +312,17 @@ pub struct ClawdbotStatus {
     pub openai_granted: bool,
     pub has_openrouter_key: bool,
     pub openrouter_granted: bool,
+    pub has_gemini_key: bool,
+    pub gemini_granted: bool,
+    pub has_groq_key: bool,
+    pub groq_granted: bool,
     pub custom_secrets: Vec<super::config::CustomSecret>,
     pub node_host_enabled: bool,
     pub local_inference_enabled: bool,
     pub selected_cloud_brain: Option<String>,
+    pub selected_cloud_model: Option<String>,
+    pub setup_completed: bool,
+    pub auto_start_gateway: bool,
 }
 
 /// Slack configuration input
@@ -486,6 +493,23 @@ pub async fn get_clawdbot_status(
         .map(|cfg| cfg.openrouter_granted)
         .unwrap_or(false);
 
+    let has_gemini_key = config
+        .as_ref()
+        .and_then(|cfg| cfg.gemini_api_key.as_ref())
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let gemini_granted = config
+        .as_ref()
+        .map(|cfg| cfg.gemini_granted)
+        .unwrap_or(false);
+
+    let has_groq_key = config
+        .as_ref()
+        .and_then(|cfg| cfg.groq_api_key.as_ref())
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let groq_granted = config.as_ref().map(|cfg| cfg.groq_granted).unwrap_or(false);
+
     let has_huggingface_token = config
         .as_ref()
         .and_then(|cfg| cfg.huggingface_token.as_ref())
@@ -519,6 +543,10 @@ pub async fn get_clawdbot_status(
         openai_granted,
         has_openrouter_key,
         openrouter_granted,
+        has_gemini_key,
+        gemini_granted,
+        has_groq_key,
+        groq_granted,
         custom_secrets: config
             .as_ref()
             .map(|cfg| cfg.custom_secrets.clone())
@@ -534,6 +562,17 @@ pub async fn get_clawdbot_status(
         selected_cloud_brain: config
             .as_ref()
             .and_then(|cfg| cfg.selected_cloud_brain.clone()),
+        selected_cloud_model: config
+            .as_ref()
+            .and_then(|cfg| cfg.selected_cloud_model.clone()),
+        setup_completed: config
+            .as_ref()
+            .map(|cfg| cfg.setup_completed)
+            .unwrap_or(false),
+        auto_start_gateway: config
+            .as_ref()
+            .map(|cfg| cfg.auto_start_gateway)
+            .unwrap_or(false),
     })
 }
 
@@ -601,6 +640,85 @@ pub async fn save_openrouter_key(
     };
 
     let result = cfg.update_openrouter_key(key);
+
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
+    cfg.write_config(&moltbot, None)
+        .map_err(|e| e.to_string())?;
+
+    result.map_err(|e| e.to_string())?;
+    *state.config.write().await = Some(cfg);
+    Ok(())
+}
+
+/// Get Gemini API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_gemini_key(state: State<'_, ClawdbotManager>) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.gemini_api_key))
+}
+
+/// Save Gemini API key
+#[tauri::command]
+#[specta::specta]
+pub async fn save_gemini_key(
+    state: State<'_, ClawdbotManager>,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let result = cfg.update_gemini_key(key);
+
+    let existing_moltbot = cfg.load_config().ok();
+    let moltbot = cfg.generate_config(
+        existing_moltbot.as_ref().map(|m| m.channels.slack.clone()),
+        existing_moltbot
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        None,
+    );
+    cfg.write_config(&moltbot, None)
+        .map_err(|e| e.to_string())?;
+
+    result.map_err(|e| e.to_string())?;
+    *state.config.write().await = Some(cfg);
+
+    Ok(())
+}
+
+/// Get Groq API key
+#[tauri::command]
+#[specta::specta]
+pub async fn get_groq_key(state: State<'_, ClawdbotManager>) -> Result<Option<String>, String> {
+    let config = state.get_config().await;
+    Ok(config.and_then(|cfg| cfg.groq_api_key))
+}
+
+/// Save Groq API key
+#[tauri::command]
+#[specta::specta]
+pub async fn save_groq_key(
+    state: State<'_, ClawdbotManager>,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let result = cfg.update_groq_key(key);
 
     let existing_moltbot = cfg.load_config().ok();
     let moltbot = cfg.generate_config(
@@ -1128,6 +1246,14 @@ pub async fn start_clawdbot_gateway(
     state: State<'_, ClawdbotManager>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
 ) -> Result<(), String> {
+    start_gateway_core(&state, &sidecar).await
+}
+
+/// Core logic for starting the gateway, reusable for auto-start
+pub async fn start_gateway_core(
+    state: &ClawdbotManager,
+    sidecar: &crate::sidecar::SidecarManager,
+) -> Result<(), String> {
     // Get or initialize config
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -1193,21 +1319,22 @@ pub async fn start_clawdbot_gateway(
         event_tx,
     );
 
-    tokio::spawn(async move {
+    *state.ws_handle.write().await = Some(handle);
+    *state.running.write().await = true;
+
+    // Run the client in the background
+    tauri::async_runtime::spawn(async move {
         client.run_forever().await;
     });
 
     // Step 4: Start event listener task to emit to UI
     let app_handle = state.app.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             info!("[clawdbot] Emitting UI event: {:?}", event);
             let _ = app_handle.emit("clawdbot-event", event);
         }
     });
-
-    *state.ws_handle.write().await = Some(handle);
-    *state.running.write().await = true;
 
     info!(
         "Started Clawdbot gateway context. Mode: {}, URL: {}",
@@ -2155,6 +2282,25 @@ pub async fn clawdbot_set_setup_completed(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn clawdbot_toggle_auto_start(
+    state: State<'_, ClawdbotManager>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    cfg.auto_start_gateway = enabled;
+    cfg.save_identity().map_err(|e| e.to_string())?;
+
+    *state.config.write().await = Some(cfg);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn clawdbot_system_presence(
     state: State<'_, ClawdbotManager>,
 ) -> Result<serde_json::Value, String> {
@@ -2192,4 +2338,23 @@ pub async fn clawdbot_web_login_telegram(
     state: State<'_, ClawdbotManager>,
 ) -> Result<serde_json::Value, String> {
     ws_rpc(state, |h| async move { h.web_login_telegram().await }).await
+}
+/// Save selected cloud model
+#[tauri::command]
+#[specta::specta]
+pub async fn save_selected_cloud_model(
+    state: State<'_, ClawdbotManager>,
+    model: Option<String>,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    let result = cfg.update_selected_cloud_model(model);
+    result.map_err(|e| e.to_string())?;
+
+    *state.config.write().await = Some(cfg);
+    Ok(())
 }

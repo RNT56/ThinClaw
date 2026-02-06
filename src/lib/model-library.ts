@@ -34,7 +34,7 @@ export interface ExtendedModelDefinition extends Omit<ModelDefinition, 'variants
     manual_download?: boolean;
     info_url?: string;
     template?: 'chatml' | 'llama3' | 'mistral' | 'gemma' | 'qwen' | 'auto';
-    category?: 'LLM' | 'Diffusion' | 'Embedding' | 'STT' | 'TTS';
+    category?: 'LLM' | 'Diffusion' | 'Embedding' | 'STT' | 'TTS' | 'Cloud';
     recommendedForAgent?: boolean;
     family: string;
     tags?: string[];
@@ -922,5 +922,87 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 recommended_min_ram: 8,
             }
         ]
+    },
+    // --- CLOUD BRAINS ---
+    {
+        id: "anthropic-claude-4.5-sonnet",
+        name: "Claude 4.5 Sonnet",
+        description: "Anthropic's most intelligent model. Superior reasoning, coding, and creative writing.",
+        family: "Anthropic",
+        tags: ["Cloud", "SOTA", "Vision"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "anthropic-claude-4.5-opus",
+        name: "Claude 4.5 Opus",
+        description: "Anthropic's most powerful model for highly complex tasks.",
+        family: "Anthropic",
+        tags: ["Cloud", "Expert"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "openai-gpt-5.2",
+        name: "GPT-5.2",
+        description: "OpenAI's latest flagship model. Fast, multimodal, and highly capable.",
+        family: "OpenAI",
+        tags: ["Cloud", "SOTA", "Multimodal"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "openai-gpt-5.2-mini",
+        name: "GPT-5.2 Mini",
+        description: "OpenAI's efficient model. High performance for a small price.",
+        family: "OpenAI",
+        tags: ["Cloud", "Fast", "Efficient"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "openai-gpt-5.2-nano",
+        name: "GPT-5.2 Nano",
+        description: "OpenAI's new smallest model for fast reasoning and coding tasks.",
+        family: "OpenAI",
+        tags: ["Cloud", "Reasoning", "Fast"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "google-gemini-3.0-flash",
+        name: "Gemini 3.0 Flash",
+        description: "Google's high-speed model with 1M+ context window and advanced multi-modality.",
+        family: "Gemini",
+        tags: ["Cloud", "Long Context", "Fast"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "google-gemini-3.0-pro",
+        name: "Gemini 3.0 Pro",
+        description: "Google's most capable model with massive context window (2M+).",
+        family: "Gemini",
+        tags: ["Cloud", "Long Context", "Advanced"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-llama-3.3-70b-versatile",
+        name: "Llama 3.3 70B (Groq)",
+        description: "Meta's powerful open model hosted on Groq for ultra-fast inference.",
+        family: "Groq",
+        tags: ["Cloud", "Open Model", "Ultra-Fast"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-mixtral-8x7b-32768",
+        name: "Mixtral 8x7B (Groq)",
+        description: "High-quality MoE model optimized for speed on Groq hardware.",
+        family: "Groq",
+        tags: ["Cloud", "Open Model", "Fast"],
+        category: "Cloud",
+        variants: []
     },
 ];

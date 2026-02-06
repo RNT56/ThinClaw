@@ -2,6 +2,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2, Terminal, CheckCircle2, ChevronRight, ChevronDown, Brain, Zap, Globe, MousePointer2, FileCode, Search, Image as ImageIcon } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
 import { StreamRun } from '../../hooks/use-openclaw-stream';
 import { ApprovalCard } from './ApprovalCard';
@@ -27,19 +28,16 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
     useEffect(() => {
         if (run.status !== 'running') return;
 
-        let unlisten: (() => void) | undefined;
-        import("@tauri-apps/api/event").then(({ listen }) => {
-            listen<any>("sidecar_event", (event) => {
-                if (event.payload.type === 'Progress' && event.payload.service === 'chat') {
-                    setProgress({ message: event.payload.message, value: event.payload.progress });
-                    if (event.payload.progress >= 0.99) {
-                        setTimeout(() => setProgress(null), 800);
-                    }
+        const unlisten = listen<any>("sidecar_event", (event) => {
+            if (event.payload.type === 'Progress' && event.payload.service === 'chat') {
+                setProgress({ message: event.payload.message, value: event.payload.progress });
+                if (event.payload.progress >= 0.99) {
+                    setTimeout(() => setProgress(null), 800);
                 }
-            }).then(u => unlisten = u);
+            }
         });
 
-        return () => { if (unlisten) unlisten(); }
+        return () => { unlisten.then(f => f()); }
     }, [run.status]);
 
     // Clear progress when text starts streaming

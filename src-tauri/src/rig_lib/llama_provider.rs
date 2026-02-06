@@ -8,13 +8,15 @@ use serde_json::json;
 pub struct LlamaProvider {
     base_url: String,
     api_key: String,
+    model: String,
 }
 
 impl LlamaProvider {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
+            model: model.to_string(),
         }
     }
 }
@@ -312,7 +314,7 @@ impl LlamaProvider {
 
         let body = LlamaChatRequest {
             messages,
-            model: "default".to_string(),
+            model: self.model.clone(),
             stream: true,
             temperature: None,
             top_p: None,
@@ -462,7 +464,7 @@ impl LlamaProvider {
 
         let body = LlamaChatRequest {
             messages: final_messages,
-            model: "default".to_string(),
+            model: self.model.clone(),
             stream: true,
             temperature,
             top_p: None,
@@ -473,8 +475,14 @@ impl LlamaProvider {
                 "<|endoftext|>".to_string(),
                 "<|user|>".to_string(),
                 "<|assistant|>".to_string(),
+                "<|end_of_text|>".to_string(),
+                "<|eot_id|>".to_string(),
+                "user\n".to_string(),
+                "assistant\n".to_string(),
                 "&lt;|im_start|&gt;".to_string(),
                 "&lt;|im_end|&gt;".to_string(),
+                "&lt;|user|&gt;".to_string(),
+                "&lt;|assistant|&gt;".to_string(),
             ]),
         };
 
@@ -531,8 +539,4 @@ impl LlamaProvider {
     }
 }
 
-pub enum ProviderEvent {
-    Content(String),
-    Usage(crate::chat::TokenUsage),
-    ContextUpdate(Vec<crate::chat::Message>),
-}
+use crate::rig_lib::unified_provider::ProviderEvent;

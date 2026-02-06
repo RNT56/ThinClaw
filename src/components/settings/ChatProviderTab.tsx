@@ -83,6 +83,24 @@ export function ChatProviderTab() {
             color: 'purple',
             configured: !!(status?.has_openrouter_key || status?.hasOpenrouterKey),
             status: !!(status?.has_openrouter_key || status?.hasOpenrouterKey) ? 'Configured' : 'Missing Token'
+        },
+        {
+            id: 'gemini',
+            name: 'Google Gemini',
+            description: 'Google\'s most capable models. Advanced multimodal reasoning.',
+            icon: Bot,
+            color: 'cyan',
+            configured: !!(status?.has_gemini_key || status?.hasGeminiKey),
+            status: !!(status?.has_gemini_key || status?.hasGeminiKey) ? 'Configured' : 'Missing Token'
+        },
+        {
+            id: 'groq',
+            name: 'Groq Cloud',
+            description: 'LPU-powered inference for blazing-fast responses.',
+            icon: Bot,
+            color: 'orange',
+            configured: !!(status?.has_groq_key || status?.hasGroqKey),
+            status: !!(status?.has_groq_key || status?.hasGroqKey) ? 'Configured' : 'Missing Token'
         }
     ];
 

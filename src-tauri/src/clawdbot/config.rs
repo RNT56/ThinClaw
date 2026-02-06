@@ -65,7 +65,19 @@ pub struct ScrappyIdentity {
     #[serde(default)]
     pub setup_completed: bool,
     #[serde(default)]
-    pub selected_cloud_brain: Option<String>, // "anthropic", "openai", "openrouter"
+    pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub gemini_granted: bool,
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    #[serde(default)]
+    pub groq_granted: bool,
+    #[serde(default)]
+    pub selected_cloud_brain: Option<String>,
+    #[serde(default)]
+    pub selected_cloud_model: Option<String>,
+    #[serde(default)]
+    pub auto_start_gateway: bool,
 }
 
 /// Clawdbot configuration manager
@@ -88,6 +100,10 @@ pub struct ClawdbotConfig {
     pub openai_granted: bool,
     pub openrouter_api_key: Option<String>,
     pub openrouter_granted: bool,
+    pub gemini_api_key: Option<String>,
+    pub gemini_granted: bool,
+    pub groq_api_key: Option<String>,
+    pub groq_granted: bool,
     /// Gateway port
     pub port: u16,
     /// Gateway mode (local or remote)
@@ -104,15 +120,14 @@ pub struct ClawdbotConfig {
     pub custom_secrets: Vec<CustomSecret>,
     /// Node host (OS automation) enabled
     pub node_host_enabled: bool,
-    /// Local inference (exposing local LLM to gateway) enabled
-    /// Local inference (exposing local LLM to gateway) enabled
     pub local_inference_enabled: bool,
     /// Expose inference server to network (0.0.0.0)
     pub expose_inference: bool,
     /// Whether the user has completed the onboarding wizard
     pub setup_completed: bool,
-    /// Selected cloud brain when local inference is off
     pub selected_cloud_brain: Option<String>,
+    pub selected_cloud_model: Option<String>,
+    pub auto_start_gateway: bool,
 }
 
 /// Slack connector configuration
@@ -361,6 +376,10 @@ impl ClawdbotConfig {
             openai_granted: identity.openai_granted,
             openrouter_api_key: identity.openrouter_api_key,
             openrouter_granted: identity.openrouter_granted,
+            gemini_api_key: identity.gemini_api_key,
+            gemini_granted: identity.gemini_granted,
+            groq_api_key: identity.groq_api_key,
+            groq_granted: identity.groq_granted,
             port,
             gateway_mode: identity.gateway_mode,
             remote_url: identity.remote_url,
@@ -373,6 +392,8 @@ impl ClawdbotConfig {
             expose_inference: identity.expose_inference,
             setup_completed: identity.setup_completed,
             selected_cloud_brain: identity.selected_cloud_brain,
+            selected_cloud_model: identity.selected_cloud_model,
+            auto_start_gateway: identity.auto_start_gateway,
         }
     }
 
@@ -423,6 +444,24 @@ impl ClawdbotConfig {
         self.save_identity()
     }
 
+    /// Update Gemini API key and persist to identity.json
+    pub fn update_gemini_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        self.gemini_api_key = key;
+        if self.gemini_api_key.is_none() {
+            self.gemini_granted = false;
+        }
+        self.save_identity()
+    }
+
+    /// Update Groq API key and persist to identity.json
+    pub fn update_groq_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        self.groq_api_key = key;
+        if self.groq_api_key.is_none() {
+            self.groq_granted = false;
+        }
+        self.save_identity()
+    }
+
     /// Toggle secret access for OpenClaw
     pub fn toggle_secret_access(&mut self, secret: &str, granted: bool) -> std::io::Result<()> {
         println!(
@@ -434,6 +473,8 @@ impl ClawdbotConfig {
             "brave" => self.brave_granted = granted,
             "openai" => self.openai_granted = granted,
             "openrouter" => self.openrouter_granted = granted,
+            "gemini" => self.gemini_granted = granted,
+            "groq" => self.groq_granted = granted,
             "huggingface" => self.huggingface_granted = granted,
             _ => {
                 return Err(std::io::Error::new(
@@ -455,6 +496,11 @@ impl ClawdbotConfig {
 
     pub fn update_selected_cloud_brain(&mut self, brain: Option<String>) -> std::io::Result<()> {
         self.selected_cloud_brain = brain;
+        self.save_identity()
+    }
+
+    pub fn update_selected_cloud_model(&mut self, model: Option<String>) -> std::io::Result<()> {
+        self.selected_cloud_model = model;
         self.save_identity()
     }
 
@@ -495,6 +541,10 @@ impl ClawdbotConfig {
             openai_granted: self.openai_granted,
             openrouter_api_key: self.openrouter_api_key.clone(),
             openrouter_granted: self.openrouter_granted,
+            gemini_api_key: self.gemini_api_key.clone(),
+            gemini_granted: self.gemini_granted,
+            groq_api_key: self.groq_api_key.clone(),
+            groq_granted: self.groq_granted,
             gateway_mode: self.gateway_mode.clone(),
             remote_url: self.remote_url.clone(),
             remote_token: self.remote_token.clone(),
@@ -506,8 +556,10 @@ impl ClawdbotConfig {
             expose_inference: self.expose_inference,
             setup_completed: self.setup_completed,
             selected_cloud_brain: self.selected_cloud_brain.clone(),
+            selected_cloud_model: self.selected_cloud_model.clone(),
             huggingface_token: self.huggingface_token.clone(),
             huggingface_granted: self.huggingface_granted,
+            auto_start_gateway: self.auto_start_gateway,
         };
         if let Ok(json) = serde_json::to_string_pretty(&identity) {
             std::fs::write(id_path, json)?;
@@ -592,13 +644,42 @@ impl ClawdbotConfig {
             if let Some(ref brain) = self.selected_cloud_brain {
                 match brain.as_str() {
                     "anthropic" if self.anthropic_granted => {
-                        agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
+                        agent_model = format!(
+                            "anthropic/{}",
+                            self.selected_cloud_model
+                                .as_deref()
+                                .unwrap_or("claude-3-5-sonnet-latest")
+                        );
                     }
                     "openai" if self.openai_granted => {
-                        agent_model = "openai/gpt-4o".to_string();
+                        agent_model = format!(
+                            "openai/{}",
+                            self.selected_cloud_model.as_deref().unwrap_or("gpt-4o")
+                        );
                     }
                     "openrouter" if self.openrouter_granted => {
-                        agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
+                        agent_model = format!(
+                            "openrouter/{}",
+                            self.selected_cloud_model
+                                .as_deref()
+                                .unwrap_or("anthropic/claude-3.5-sonnet")
+                        );
+                    }
+                    "gemini" if self.gemini_granted => {
+                        agent_model = format!(
+                            "gemini/{}",
+                            self.selected_cloud_model
+                                .as_deref()
+                                .unwrap_or("gemini-2.0-flash")
+                        );
+                    }
+                    "groq" if self.groq_granted => {
+                        agent_model = format!(
+                            "groq/{}",
+                            self.selected_cloud_model
+                                .as_deref()
+                                .unwrap_or("llama-3.3-70b-versatile")
+                        );
                     }
                     _ => {
                         // If selection isn't granted, fallback
@@ -606,6 +687,10 @@ impl ClawdbotConfig {
                             agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
                         } else if self.openai_granted {
                             agent_model = "openai/gpt-4o".to_string();
+                        } else if self.gemini_granted {
+                            agent_model = "gemini/gemini-2.0-flash".to_string();
+                        } else if self.groq_granted {
+                            agent_model = "groq/llama-3.3-70b-versatile".to_string();
                         } else if self.openrouter_granted {
                             agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
                         } else {
@@ -617,6 +702,10 @@ impl ClawdbotConfig {
                 agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
             } else if self.openai_granted {
                 agent_model = "openai/gpt-4o".to_string();
+            } else if self.gemini_granted {
+                agent_model = "gemini/gemini-2.0-flash".to_string();
+            } else if self.groq_granted {
+                agent_model = "groq/llama-3.3-70b-versatile".to_string();
             } else if self.openrouter_granted {
                 agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
             } else {
@@ -684,6 +773,49 @@ impl ClawdbotConfig {
                         { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet (via OR)" },
                         { "id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (via OR)" },
                         { "id": "deepseek/deepseek-chat", "name": "DeepSeek V3 (via OR)" }
+                    ]
+                }),
+            );
+        }
+
+        // 1.7. Gemini Provider (Cloud)
+        if self.gemini_granted
+            && self
+                .gemini_api_key
+                .as_ref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false)
+        {
+            providers.insert(
+                "gemini".into(),
+                serde_json::json!({
+                    "api": "gemini",
+                    "models": [
+                        { "id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash" },
+                        { "id": "gemini-2.0-flash-thinking-exp", "name": "Gemini 2.0 Thinking" },
+                        { "id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro" }
+                    ]
+                }),
+            );
+        }
+
+        // 1.8. Groq Provider (Cloud)
+        if self.groq_granted
+            && self
+                .groq_api_key
+                .as_ref()
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false)
+        {
+            providers.insert(
+                "groq".into(),
+                serde_json::json!({
+                    "api": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "models": [
+                        { "id": "llama-3.3-70b-versatile", "name": "Llama 3.3 70B (Groq)" },
+                        { "id": "llama-3.1-8b-instant", "name": "Llama 3.1 8B (Groq)" },
+                        { "id": "mixtral-8x7b-32768", "name": "Mixtral 8x7B (Groq)" }
                     ]
                 }),
             );
@@ -844,6 +976,40 @@ impl ClawdbotConfig {
                             "provider": "openrouter",
                             "key": key,
                             "label": "OpenRouter (Scrappy)"
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Add Gemini if available AND granted
+        if self.gemini_granted {
+            if let Some(ref key) = self.gemini_api_key {
+                if !key.trim().is_empty() {
+                    profiles.insert(
+                        "gemini:default".into(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "provider": "gemini",
+                            "key": key,
+                            "label": "Gemini (Scrappy)"
+                        }),
+                    );
+                }
+            }
+        }
+
+        // Add Groq if available AND granted
+        if self.groq_granted {
+            if let Some(ref key) = self.groq_api_key {
+                if !key.trim().is_empty() {
+                    profiles.insert(
+                        "groq:default".into(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "provider": "groq",
+                            "key": key,
+                            "label": "Groq (Scrappy)"
                         }),
                     );
                 }

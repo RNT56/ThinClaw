@@ -1,4 +1,4 @@
-use crate::rig_lib::llama_provider::LlamaProvider;
+use crate::rig_lib::unified_provider::UnifiedProvider;
 use crate::rig_lib::tools::trusted_sources;
 use futures::{stream, StreamExt};
 use rig::completion::ToolDefinition;
@@ -51,7 +51,7 @@ use crate::config::ConfigManager;
 pub struct DDGSearchTool {
     pub app: Option<tauri::AppHandle>,
     pub max_total_chars: usize,
-    pub summarizer: Option<LlamaProvider>,
+    pub summarizer: Option<UnifiedProvider>,
     pub conversation_id: Option<String>,
 }
 

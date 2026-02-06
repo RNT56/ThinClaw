@@ -10,12 +10,43 @@ Scrappy is a professional, open-source AI cockpit designed for executive-level w
 
 ---
 
+## Installation & Setup
+
+For a deep dive into environment configuration, see the specialized **[macOS (Apple Silicon) Setup Guide](setup.md)**.
+
+### 1. Requirements
+- **macOS / Linux / Windows** (Tauri v2 compatible).
+- **Node.js 22.x+** and **npm**.
+- **Rust (Stable)**.
+
+### 2. Quick Start (macOS)
+```bash
+# 1. Install project dependencies
+npm install
+npm run setup:openclaw
+
+# 2. Automated sidecar initialization (Node, Chromium, AI)
+npm run setup:all
+
+# 3. Launch in Developer Mode
+npm run tauri dev
+```
+
+### 3. Setup Advice
+- **Secrets**: Go to **Settings > Secrets** to add your API keys. Scrappy now supports **Anthropic**, **OpenAI**, **Google Gemini**, **Groq**, **OpenRouter**, and **Brave Search**. Remember to toggle "Grant Access" for each key to enable them for the agent.
+- **Custom Secrets**: You can now add arbitrary custom secrets for specialized agent workflows.
+- **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models. You can add this in **Settings > Secrets**.
+- **Models**: Download GGUF models and point Scrappy to them in **Settings > Models**.
+
+---
+
 ## Vision & Key Capabilities
 
 *   **OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
 *   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
 *   **Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
-*   **Custom Secrets & Privacy**: Securely manage Anthropic, Brave, and custom API keys with granular "Grant Access" controls.
+*   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
+*   **Hybrid Inference Engine**: Seamlessly switch between local GGUF models (Llama 3, Gemma 3) and bleeding-edge cloud models (GPT-5.2, Claude 4.5) in a single workflow.
 *   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
 *   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
 *   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`) and re-ranking.
@@ -82,9 +113,9 @@ OpenClaw is highly configurable through a combination of system files and worksp
 
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`~/Library/Application Support/scrappy cursor/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, and Ed25519 keys.
-- **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers (Anthropic, Local), and channel settings.
-- **`auth-profiles.json`**: Secure storage for API keys (Anthropic, Brave, etc.) that the agent is permitted to use.
+- **`identity.json`**: (`~/Library/Application Support/scrappy cursor/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, and API keys for Cloud Providers (Anthropic, OpenAI, Gemini, Groq, OpenRouter).
+- **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
+- **`auth-profiles.json`**: Secure storage for API keys that the agent is permitted to use, including Brave Search and Custom Secrets.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
 The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
@@ -103,6 +134,15 @@ The agent's personality and rules are defined by markdown files in its workspace
 - **Settings Tab**: Manage API keys, model selection, and gateway connection modes.
 - **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `src-tauri/src/personas.rs`.
 - **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
+
+### 5. Cloud Inference Providers
+Scrappy 2026 features native integration with the world's most powerful inference engines:
+- **Anthropic**: Support for **Claude 4.5 Sonnet** and **Opus** with native Tool Use (Computer Use coming soon).
+- **OpenAI**: First-class support for **GPT-5.2**, **Mini**, and **Nano** variants.
+- **Google Gemini**: Integrated **Gemini 3.0 Flash/Pro** with support for massive 1M+ token contexts.
+- **Groq**: Ultra-fast inference for open models like **Llama 3.3 70B** and **Mixtral**.
+- **OpenRouter**: Gateway access to 100+ specialized models via a single API key.
+- **Custom Secrets**: Define and grant access to any external API key for use in custom agent tools.
 
 ---
 
@@ -139,35 +179,6 @@ Tools are implemented in the **OpenClaw** engine:
 1.  Implement the `Tool` trait in `src-tauri/src/rig_lib/tools/`.
 2.  Register the tool in `RigManager::new` within `src-tauri/src/rig_lib/agent.rs`.
 3.  Ensure the tool emits progress events to the UI if long-running.
-
----
-
-## Installation & Setup
-
-For a deep dive into environment configuration, see the specialized **[macOS (Apple Silicon) Setup Guide](setup.md)**.
-
-### 1. Requirements
-- **macOS / Linux / Windows** (Tauri v2 compatible).
-- **Node.js 22.x+** and **npm**.
-- **Rust (Stable)**.
-
-### 2. Quick Start (macOS)
-```bash
-# 1. Install project dependencies
-npm install
-npm run setup:openclaw
-
-# 2. Automated sidecar initialization (Node, Chromium, AI)
-npm run setup:all
-
-# 3. Launch in Developer Mode
-npm run tauri dev
-```
-
-### 3. Setup Advice
-- **Secrets**: Go to **Settings > Secrets** to add your Anthropic or Brave keys. Remember to toggle "Grant Access" for the agent to use them.
-- **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models and support files. You can add this in **Settings > Secrets**.
-- **Models**: Download GGUF models and point Scrappy to them in **Settings > Models**.
 
 ---
 

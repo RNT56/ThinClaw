@@ -6,6 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 
 // ============================================================================
 // Types (matching Rust types from commands.rs)
@@ -36,6 +37,8 @@ export interface ClawdbotStatus {
     node_host_enabled: boolean;
     local_inference_enabled: boolean;
     selected_cloud_brain: string | null;
+    setup_completed: boolean;
+    auto_start_gateway: boolean;
 }
 
 export interface SlackConfigInput {
@@ -305,12 +308,10 @@ export async function writeClawdbotFile(path: string, content: string): Promise<
  * Open a path in the system file manager
  */
 export async function openPath(path: string): Promise<void> {
-    const { openPath: tauriOpenPath } = await import('@tauri-apps/plugin-opener');
     return tauriOpenPath(path);
 }
 
 export async function revealPath(path: string): Promise<void> {
-    const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
     return revealItemInDir(path);
 }
 
@@ -410,4 +411,8 @@ export async function requestPermission(permission: string): Promise<void> {
 
 export async function setSetupCompleted(completed: boolean): Promise<void> {
     return invoke('clawdbot_set_setup_completed', { completed });
+}
+
+export async function toggleClawdbotAutoStart(enabled: boolean): Promise<void> {
+    return invoke('clawdbot_toggle_auto_start', { enabled });
 }

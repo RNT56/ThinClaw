@@ -4,6 +4,7 @@ pub mod llama_provider;
 pub mod orchestrator;
 pub mod router;
 pub mod tools;
+pub mod unified_provider;
 
 pub use agent::RigManager;
 
@@ -24,7 +25,7 @@ pub async fn rig_check_web_search(query: String) -> Result<String, String> {
     tool.call(args).await.map_err(|e| e.to_string())
 }
 
-use crate::rig_lib::llama_provider::LlamaProvider;
+// use crate::rig_lib::llama_provider::LlamaProvider;
 
 #[command]
 #[specta::specta]
@@ -38,7 +39,12 @@ pub async fn agent_chat(
     // Check for summarizer
     let summarizer_provider = if let Some((sum_port, _sum_token)) = state.get_summarizer_config() {
         let sum_url = format!("http://127.0.0.1:{}/v1", sum_port);
-        Some(LlamaProvider::new(&sum_url, "sk-no-key-required"))
+        Some(crate::rig_lib::unified_provider::UnifiedProvider::new(
+            crate::rig_lib::unified_provider::ProviderKind::Local,
+            &sum_url,
+            "sk-no-key-required",
+            "default",
+        ))
     } else {
         None
     };
@@ -47,6 +53,7 @@ pub async fn agent_chat(
     // TODO: Ideally we should cache this or manage it in state, but updating it on port change is tricky.
     // For now, cheap construction is fine.
     let manager = RigManager::new(
+        crate::rig_lib::unified_provider::ProviderKind::Local,
         base_url,
         "default".to_string(),
         None,

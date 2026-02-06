@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useModelContext, RECOMMENDED_MODELS } from "../model-context";
 import { useEffect, useMemo, useState } from "react";
 import { commands } from "../../lib/bindings";
+import { toast } from "sonner";
 
 export function ModelBrowser() {
     const {
@@ -41,6 +42,52 @@ export function ModelBrowser() {
     const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
     const [activeCategory, setActiveCategory] = useState("All");
     const [selectedModelVariants, setSelectedModelVariants] = useState<{ model: any, isOpen: boolean } | null>(null);
+    const [status, setStatus] = useState<any>(null);
+    const [config, setConfig] = useState<any>(null);
+
+    useEffect(() => {
+        const load = async () => {
+            try {
+                const [s, cfg] = await Promise.all([
+                    commands.getClawdbotStatus(),
+                    commands.getUserConfig()
+                ]);
+                if (s.status === 'ok') setStatus(s.data);
+                setConfig(cfg);
+            } catch (e) {
+                console.error(e);
+            }
+        };
+        load();
+    }, []);
+
+    const isActiveCloud = (model: any) => {
+        if (!config || !status || !model?.family || !model?.id) return false;
+        const brain = model.family.toLowerCase();
+        const modelId = model.id.split('-').slice(1).join('-');
+        return config.selected_chat_provider === brain && status.selected_cloud_model === modelId;
+    };
+
+    const isCloudConfigured = (model: any) => {
+        if (model?.category !== "Cloud") return true;
+        if (!status) return false;
+        const family = model.family?.toLowerCase();
+        if (!family) return false;
+        if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
+        if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
+        if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
+        if (family === "groq") return !!(status?.has_groq_key || status?.hasGroqKey);
+        if (family === "openrouter") return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+        return false;
+    };
+
+    const hasAnyCloud = !!(
+        status?.has_anthropic_key || status?.hasAnthropicKey ||
+        status?.has_openai_key || status?.hasOpenaiKey ||
+        status?.has_gemini_key || status?.hasGeminiKey ||
+        status?.has_groq_key || status?.hasGroqKey ||
+        status?.has_openrouter_key || status?.hasOpenrouterKey
+    );
 
     const unifiedModels = useMemo(() => {
         const merged = [...RECOMMENDED_MODELS];
@@ -74,7 +121,7 @@ export function ModelBrowser() {
             );
 
             const isLocal = downloadedVariants.length > 0;
-            const activeVariant = downloadedVariants[0] || m.variants[0];
+            const activeVariant = downloadedVariants[0] || m.variants[0] || { filename: "" };
             const local = localModels.find(l => getBasename(l.name) === activeVariant.filename);
 
             // Track status of components
@@ -93,7 +140,7 @@ export function ModelBrowser() {
                 localPath: local?.path || null,
                 isLocal: isLocal,
                 isCurated: true,
-                displaySize: m.variants[0]?.size || "Unknown",
+                displaySize: m.variants[0]?.size || "Cloud",
                 filename: activeVariant.filename,
                 relativeFilename: local?.name || activeVariant.filename,
                 componentsStatus,
@@ -165,40 +212,31 @@ export function ModelBrowser() {
         });
 
         const allModels = [...curatedDisplay, ...localDisplay].filter(m => {
-            if (!searchQuery) return true;
-            const q = searchQuery.toLowerCase();
-            return m.name.toLowerCase().includes(q) ||
-                m.description.toLowerCase().includes(q) ||
-                m.filename.toLowerCase().includes(q) ||
-                (m.tags && m.tags.some(t => t.toLowerCase().includes(q)));
+            if (searchQuery.trim() === "") return true;
+            const query = searchQuery.toLowerCase();
+            return (
+                m.name.toLowerCase().includes(query) ||
+                m.description.toLowerCase().includes(query) ||
+                m.family.toLowerCase().includes(query) ||
+                m.tags?.some(t => t.toLowerCase().includes(query)) ||
+                m.filename.toLowerCase().includes(query)
+            );
         });
 
-        // Sorting Logic: Active -> Downloaded -> Downloadable
+        // Sorting: Local first, then by family/name
         return allModels.sort((a, b) => {
-            const isAActive = (a.localPath === currentModelPath) ||
-                (a.localPath === currentEmbeddingModelPath) ||
-                (a.localPath === currentVisionModelPath) ||
-                (a.localPath === currentSttModelPath) ||
-                (a.localPath === currentImageGenModelPath) ||
-                (a.localPath === currentSummarizerModelPath);
-
-            const isBActive = (b.localPath === currentModelPath) ||
-                (b.localPath === currentEmbeddingModelPath) ||
-                (b.localPath === currentVisionModelPath) ||
-                (b.localPath === currentSttModelPath) ||
-                (b.localPath === currentImageGenModelPath) ||
-                (b.localPath === currentSummarizerModelPath);
-
-            if (isAActive && !isBActive) return -1;
-            if (!isAActive && isBActive) return 1;
+            // If one is cloud and other isn't, cloud usually at bottom unless in Cloud tab
+            if (activeCategory === "Cloud Brains") {
+                // Group by family
+                if (a.family !== b.family) return a.family.localeCompare(b.family);
+                return a.name.localeCompare(b.name);
+            }
 
             if (a.isLocal && !b.isLocal) return -1;
             if (!a.isLocal && b.isLocal) return 1;
-
-            return 0;
+            return a.name.localeCompare(b.name);
         });
-
-    }, [localModels, searchQuery, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath]);
+    }, [localModels, searchQuery, activeCategory, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath]);
 
     const isActive = (path: string | null) => path && currentModelPath && path === currentModelPath;
     const isEmbeddingActive = (path: string | null) => path && currentEmbeddingModelPath && path === currentEmbeddingModelPath;
@@ -230,7 +268,7 @@ export function ModelBrowser() {
                 </div>
 
                 <div className="flex gap-2 pb-1 overflow-x-auto w-full min-w-0 no-scrollbar mask-fade-right scroll-smooth snap-x">
-                    {["All", "Chat", "Summarizer", "Diffusion", "STT", "Embedding", "Standard"].map((cat) => (
+                    {["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Summarizer", "Diffusion", "STT", "Embedding", "Standard"].map((cat) => (
                         <button
                             key={cat}
                             onClick={() => {
@@ -254,16 +292,16 @@ export function ModelBrowser() {
                 {/* Standard Assets Section */}
                 {activeCategory === "Standard" && (
                     <div className="space-y-4">
-                        <div className="text-xs text-muted-foreground bg-muted/20 p-3 rounded border flex justify-between items-center">
-                            <span>
+                        <div className="text-xs text-muted-foreground bg-muted/20 p-4 rounded-2xl border border-border/40 flex justify-between items-center">
+                            <span className="leading-relaxed">
                                 These standard components (VAE, CLIP, T5, etc.) are used as fallbacks if your model is missing them.
                                 If a folder is empty, click download to restore the asset.
                             </span>
                             <button
                                 onClick={() => commands.openStandardModelsFolder()}
-                                className="bg-background border hover:bg-accent text-accent-foreground px-2 py-1 rounded transition-colors text-xs flex items-center shrink-0 ml-4"
+                                className="bg-background border border-border/50 hover:bg-accent hover:border-border text-foreground px-3 py-1.5 rounded-xl transition-all text-xs font-medium flex items-center shrink-0 ml-4 shadow-sm"
                             >
-                                <FolderOpen className="w-3 h-3 mr-1" /> Open Folder
+                                <FolderOpen className="w-3.5 h-3.5 mr-1.5" /> Open Folder
                             </button>
                         </div>
                         {standardAssets.length === 0 ? (
@@ -275,16 +313,16 @@ export function ModelBrowser() {
                                 const progress = downloading[asset.filename];
                                 const isDownloading = progress !== undefined;
                                 return (
-                                    <div key={asset.filename} className="flex flex-col p-4 border rounded-lg bg-card/50 hover:bg-card transition-colors">
-                                        <div className="flex items-start justify-between mb-3">
-                                            <div>
-                                                <h3 className="font-semibold text-base flex items-center gap-2" title={asset.name}>
-                                                    <span className="truncate max-w-[200px]">{asset.name}</span>
-                                                    <span className="text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded-full uppercase font-bold tracking-wider border border-amber-500/5">{asset.category}</span>
+                                    <div key={asset.filename} className="flex flex-col p-5 border border-border/50 rounded-2xl bg-card/40 hover:bg-card/60 transition-all duration-300">
+                                        <div className="flex items-start justify-between mb-4">
+                                            <div className="min-w-0">
+                                                <h3 className="font-semibold text-base flex items-center gap-2 mb-1" title={asset.name}>
+                                                    <span className="truncate">{asset.name}</span>
+                                                    <span className="text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded-md uppercase font-bold tracking-wider border border-amber-500/20">{asset.category}</span>
                                                 </h3>
-                                                <p className="text-sm text-muted-foreground truncate max-w-[300px]" title={asset.filename}>{asset.filename}</p>
+                                                <p className="text-sm text-muted-foreground truncate" title={asset.filename}>{asset.filename}</p>
                                             </div>
-                                            <div className="text-xs font-mono bg-muted px-2 py-1 rounded text-muted-foreground whitespace-nowrap">
+                                            <div className="text-[11px] font-mono bg-muted/50 px-2.5 py-1 rounded-lg text-muted-foreground border border-border/5 whitespace-nowrap">
                                                 {(asset.size / 1024 / 1024).toFixed(1)} MB
                                             </div>
                                         </div>
@@ -300,7 +338,7 @@ export function ModelBrowser() {
                                         ) : (
                                             <button
                                                 onClick={() => downloadStandardAsset(asset.filename)}
-                                                className="w-full border border-primary/20 hover:bg-primary/5 text-primary py-2 px-4 rounded-md text-sm font-medium flex items-center justify-center transition-colors"
+                                                className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]"
                                             >
                                                 <Download className="w-4 h-4 mr-2" /> Download Missing Asset
                                             </button>
@@ -313,9 +351,15 @@ export function ModelBrowser() {
                 )}
 
                 {activeCategory !== "Standard" && unifiedModels.filter(m => {
+                    // Global visibility check: only show cloud models if configured
+                    if (!isCloudConfigured(m)) return false;
+
                     if (activeCategory === "All") return true;
-                    if (activeCategory === "Chat") return !m.tags?.some(t => ["Image Gen", "STT", "Embedding"].includes(t));
-                    if (activeCategory === "Summarizer") return !m.tags?.some(t => ["Image Gen", "STT", "Embedding"].includes(t)); // Same as Chat
+                    if (activeCategory === "Cloud Brains") return (m as any).category === "Cloud";
+                    if (activeCategory === "Chat" || activeCategory === "Summarizer") {
+                        // Include local LLMs and configured Cloud brains
+                        return !m.tags?.some(t => ["Image Gen", "STT", "Embedding"].includes(t));
+                    }
                     if (activeCategory === "Diffusion") return m.tags?.includes("Image Gen");
                     if (activeCategory === "STT") return m.tags?.includes("STT");
                     if (activeCategory === "Embedding") return m.tags?.includes("Embedding");
@@ -328,13 +372,13 @@ export function ModelBrowser() {
                     // Use ?? to ensure 0 is treated as a valid value
                     const progress = downloading[fullPath] ?? downloading[model.filename];
                     const isDownloading = progress !== undefined;
-                    const active = isActive(model.localPath);
+                    const isModelActive = (model as any).category === 'Cloud' ? isActiveCloud(model) : isActive(model.localPath);
                     const isEmbedding = isEmbeddingActive(model.localPath);
                     const isVision = isVisionActive(model.localPath);
                     const isStt = isSttActive(model.localPath);
                     const isImageGen = isImageGenActive(model.localPath);
                     const isSummarizer = isSummarizerActive(model.localPath);
-                    const isDownloaded = model.isLocal;
+                    const isDownloaded = model.isLocal || (model as any).category === "Cloud";
                     const modelAny = model as any;
                     const rFilename = modelAny.relativeFilename || model.filename;
                     const isConfirming = confirmingDelete === rFilename;
@@ -346,7 +390,7 @@ export function ModelBrowser() {
                     return (
                         <div key={model.filename} className={cn(
                             "flex flex-col p-5 border rounded-2xl transition-all duration-300",
-                            active
+                            isModelActive
                                 ? "bg-accent/40 border-primary/20 shadow-inner"
                                 : "bg-card/40 border-border/50 hover:border-border hover:bg-card/60 shadow-sm"
                         )}>
@@ -355,14 +399,15 @@ export function ModelBrowser() {
                                     <h3 className="font-semibold text-base mb-1.5 flex items-center gap-2" title={model.name}>
                                         <span className="truncate">{model.name}</span>
                                         <div className="flex gap-1 flex-wrap">
-                                            {active && <span className="text-[10px] uppercase tracking-wider font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-md">Chat</span>}
-                                            {isSummarizer && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Summarizer</span>}
-                                            {isEmbedding && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Embedder</span>}
-                                            {isVision && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Vision</span>}
-                                            {isStt && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">STT</span>}
+                                            {isModelActive && <span className="text-[10px] uppercase tracking-wider font-bold bg-primary text-primary-foreground px-2 py-0.5 rounded-md">Primary</span>}
+                                            {isSummarizer && <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500 text-white px-2 py-0.5 rounded-md">Summarizer</span>}
+                                            {isEmbedding && <span className="text-[10px] uppercase tracking-wider font-bold bg-cyan-500 text-white px-2 py-0.5 rounded-md">Embedding</span>}
+                                            {isVision && <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500 text-white px-2 py-0.5 rounded-md">Vision</span>}
+                                            {isStt && <span className="text-[10px] uppercase tracking-wider font-bold bg-amber-500 text-white px-2 py-0.5 rounded-md">STT</span>}
                                             {isImageGen && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Image Gen</span>}
                                             {model.isCurated && model.isLocal && <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500/5 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-md border border-emerald-500/10">Installed</span>}
                                             {!model.isCurated && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted/50 text-muted-foreground/50 px-2 py-0.5 rounded-md border border-border/10">Local</span>}
+                                            {category === "Cloud" && <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500/10 text-indigo-500 border border-indigo-500/20 px-2 py-0.5 rounded-md">Cloud Brain</span>}
                                         </div>
                                     </h3>
                                     <p className="text-sm text-muted-foreground line-clamp-2" title={model.description}>{model.description}</p>
@@ -498,16 +543,29 @@ export function ModelBrowser() {
                                         {!hasEmbeddingTag && !hasSttTag && !hasImageGenTag && (
                                             <>
                                                 <button
-                                                    onClick={() => model.localPath && setModelPath(model.localPath, (model as any).template)}
+                                                    onClick={async () => {
+                                                        if (model.localPath) {
+                                                            if (config?.selected_chat_provider !== "local") {
+                                                                try {
+                                                                    const newConfig = { ...config, selected_chat_provider: "local" };
+                                                                    await commands.updateUserConfig(newConfig);
+                                                                    setConfig(newConfig);
+                                                                } catch (e) {
+                                                                    console.error(e);
+                                                                }
+                                                            }
+                                                            setModelPath(model.localPath, (model as any).template);
+                                                        }
+                                                    }}
                                                     className={cn(
                                                         "flex-1 py-2 px-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
-                                                        active
+                                                        isModelActive
                                                             ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shadow-sm ring-1 ring-emerald-500/10"
                                                             : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-sm hover:translate-y-[-1px]"
                                                     )}
-                                                    disabled={!!active}
+                                                    disabled={!!isModelActive}
                                                 >
-                                                    {active ? "Active" : "Chat"}
+                                                    {isModelActive ? "Active" : "Chat"}
                                                 </button>
                                                 <button
                                                     onClick={() => model.localPath && setSummarizerModelPath(model.localPath)}
@@ -585,27 +643,104 @@ export function ModelBrowser() {
                                         )}
                                     </div>
                                 </div>
+                            ) : (model as any).category === "Cloud" ? (
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={async () => {
+                                            try {
+                                                const brain = model.family.toLowerCase();
+                                                const modelId = model.id.split('-').slice(1).join('-'); // e.g. "anthropic-claude-3.5-sonnet" -> "claude-3-5-sonnet"
+
+                                                // Actually the IDs in library should match what the provider expects
+                                                // Looking at config.rs, it expects "claude-3-5-sonnet-latest" etc.
+                                                // Wait, I should probably use the specific model ID from the library
+
+                                                // We need to set BOTH the brain (provider) and the model
+                                                const cfg = await commands.getUserConfig();
+                                                const newConfig = {
+                                                    ...cfg,
+                                                    selected_chat_provider: brain,
+                                                    selected_cloud_brain: brain,
+                                                    selected_cloud_model: modelId
+                                                };
+                                                await commands.updateUserConfig(newConfig);
+                                                // Also call the specific command if needed, but update_user_config should handle it if synced
+                                                if ((commands as any).saveSelectedCloudModel) {
+                                                    await (commands as any).saveSelectedCloudModel(modelId);
+                                                }
+
+                                                toast.success(`${model.name} selected as active Cloud Brain`);
+                                            } catch (e) {
+                                                toast.error("Failed to select cloud model");
+                                            }
+                                        }}
+                                        className={cn(
+                                            "flex-1 py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider transition-all",
+                                            // How do we know if it's active? We need to check config.selected_cloud_model
+                                            "bg-primary/10 text-primary border border-primary/20 hover:bg-primary hover:text-primary-foreground",
+                                            isModelActive && "bg-primary text-primary-foreground"
+                                        )}
+                                    >
+                                        {isModelActive ? "Active Cloud Brain" : "Select Brain"}
+                                    </button>
+                                </div>
                             ) : (
-                                <button
-                                    onClick={() => {
-                                        if (model.isCurated && (model as any).manual_download) {
-                                            const url = (model as any).info_url || (model as any).url;
-                                            if (url) invoke('open_url', { url });
-                                        } else if (model.isCurated && (model as any).variants?.length > 1) {
-                                            setSelectedModelVariants({ model, isOpen: true });
-                                        } else if (model.isCurated && (model as any).variants?.length === 1) {
-                                            startDownload(model as any, (model as any).variants[0]);
-                                        } else {
-                                            // Local model or legacy handled by select buttons
-                                        }
-                                    }}
-                                    className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]"
-                                >
-                                    <Download className="w-4 h-4 mr-2" />
-                                    {model.isCurated && (model as any).manual_download
-                                        ? "Manual Download"
-                                        : (model.isCurated && (model as any).variants?.length > 1 ? "Select Quantization" : "Download")}
-                                </button>
+                                <div className="flex gap-2">
+                                    {(isModelActive || isEmbedding || isVision || isStt || isImageGen || isSummarizer) && (
+                                        <button
+                                            onClick={async () => {
+                                                if (isModelActive) {
+                                                    if ((model as any).category === 'Cloud') {
+                                                        // For cloud models, deactivation means switching back to Local Neural Link
+                                                        const newConfig = { ...config, selected_chat_provider: null, selected_cloud_model: null };
+                                                        await commands.updateUserConfig(newConfig);
+                                                        if ((commands as any).saveSelectedCloudModel) {
+                                                            await (commands as any).saveSelectedCloudModel(null);
+                                                        }
+                                                        toast.success("Switched to Local Neural Link");
+                                                        // Refresh local status
+                                                        const s = await commands.getClawdbotStatus();
+                                                        if (s.status === 'ok') setStatus(s.data);
+                                                        setConfig(newConfig);
+                                                    } else {
+                                                        setModelPath("");
+                                                    }
+                                                }
+                                                if (isEmbedding) setEmbeddingModelPath("");
+                                                if (isVision) setVisionModelPath("");
+                                                if (isStt) setSttModelPath("");
+                                                if (isImageGen) setImageGenModelPath("");
+                                                if (isSummarizer) setSummarizerModelPath("");
+                                            }}
+                                            className="flex-1 py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider transition-all bg-destructive/10 text-destructive border border-destructive/20 hover:bg-destructive hover:text-destructive-foreground"
+                                        >
+                                            Deactivate
+                                        </button>
+                                    )}
+
+                                    {(!isModelActive || !isEmbedding || !isVision || !isStt || !isImageGen || !isSummarizer) && (
+                                        <button
+                                            onClick={() => {
+                                                if (model.isCurated && (model as any).manual_download) {
+                                                    const url = (model as any).info_url || (model as any).url;
+                                                    if (url) invoke('open_url', { url });
+                                                } else if (model.isCurated && (model as any).variants?.length > 1) {
+                                                    setSelectedModelVariants({ model, isOpen: true });
+                                                } else if (model.isCurated && (model as any).variants?.length === 1) {
+                                                    startDownload(model as any, (model as any).variants[0]);
+                                                } else {
+                                                    // Local model or legacy handled by select buttons
+                                                }
+                                            }}
+                                            className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-sm hover:translate-y-[-1px]"
+                                        >
+                                            <Download className="w-4 h-4 mr-2" />
+                                            {model.isCurated && (model as any).manual_download
+                                                ? "Manual Download"
+                                                : (model.isCurated && (model as any).variants?.length > 1 ? "Select Quantization" : "Download")}
+                                        </button>
+                                    )}
+                                </div>
                             )}
                         </div>
                     );
@@ -642,21 +777,27 @@ export function ModelBrowser() {
 
                                     const isDownloading = progress !== undefined;
 
+                                    const isVariantActive = (selectedModelVariants.model as any).category === 'Cloud'
+                                        ? isActiveCloud(selectedModelVariants.model)
+                                        : (isLocal && localModels.find(l => (l.name.split(/[\\/]/).pop() || l.name) === v.filename)?.path === currentModelPath);
+
                                     return (
                                         <button
                                             key={v.filename}
-                                            disabled={isLocal || isDownloading}
+                                            disabled={(isLocal && !isVariantActive) || isDownloading}
                                             onClick={() => {
+                                                if (isVariantActive) return;
                                                 startDownload(selectedModelVariants.model, v);
                                                 setSelectedModelVariants(null);
                                             }}
                                             className={cn(
                                                 "w-full flex items-center justify-between p-4 rounded-xl border transition-all text-left group",
-                                                isLocal
+                                                (isLocal && !isVariantActive)
                                                     ? "bg-muted/50 border-border/50 opacity-60 cursor-default"
                                                     : isDownloading
                                                         ? "bg-primary/5 border-primary/20 animate-pulse"
-                                                        : "bg-card border-border/50 hover:bg-accent hover:border-border"
+                                                        : "bg-card border-border/50 hover:bg-accent hover:border-border",
+                                                isVariantActive && "border-primary/50 bg-primary/5"
                                             )}
                                         >
                                             <div className="space-y-1">
@@ -670,10 +811,36 @@ export function ModelBrowser() {
                                                     <span>•</span>
                                                     <span>{v.size}</span>
                                                 </div>
+                                                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                                    <span className={cn(
+                                                        "text-[10px] px-2 py-0.5 rounded-full uppercase font-bold tracking-wider border",
+                                                        category === "Cloud" ? "bg-indigo-500/10 text-indigo-500 border-indigo-500/20" :
+                                                            category === "Diffusion" ? "bg-pink-500/10 text-pink-500 border-pink-500/20" :
+                                                                category === "STT" ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
+                                                                    category === "Embedding" ? "bg-cyan-500/10 text-cyan-500 border-cyan-500/20" :
+                                                                        "bg-primary/10 text-primary border-primary/20"
+                                                    )}>
+                                                        {category === "Cloud" ? "Cloud Provider" : category}
+                                                    </span>
+                                                    {selectedModelVariants.model.tags?.map((tag: string) => (
+                                                        <span key={tag} className="text-[10px] bg-muted text-muted-foreground px-2 py-0.5 rounded-full border border-border/50">
+                                                            {tag}
+                                                        </span>
+                                                    ))}
+                                                </div>
                                             </div>
-                                            {!isLocal && !isDownloading && (
-                                                <Download className="w-4 h-4 text-primary opacity-0 group-hover:opacity-100 transition-opacity" />
-                                            )}
+                                            <div className="flex items-center gap-2">
+                                                {isVariantActive ? (
+                                                    <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 text-primary rounded-full text-[10px] font-bold uppercase tracking-wider border border-primary/20">
+                                                        <CheckCircle2 className="w-3.5 h-3.5" />
+                                                        Active
+                                                    </div>
+                                                ) : (
+                                                    !isLocal && !isDownloading && (
+                                                        <Download className="w-4 h-4 text-primary opacity-0 group-hover:opacity-100 transition-opacity" />
+                                                    )
+                                                )}
+                                            </div>
                                         </button>
                                     );
                                 })}

@@ -79,7 +79,7 @@ function SecretCard({
     };
 
     return (
-        <div className="p-6 border rounded-xl bg-card shadow-sm space-y-4">
+        <div className="p-6 border border-border/50 rounded-2xl bg-card/40 hover:bg-card/60 transition-all duration-300 space-y-4">
             <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
                     <div className="p-2 bg-primary/10 rounded-lg">
@@ -139,19 +139,19 @@ function SecretCard({
                 </div>
             </div>
 
-            <div className="flex gap-2 max-w-2xl">
+            <div className="flex gap-3 max-w-2xl">
                 <div className="relative flex-1">
                     <input
                         type={showKey ? "text" : "password"}
                         value={key}
                         onChange={(e) => setKey(e.target.value)}
                         placeholder={hasKey ? "••••••••••••••••" : placeholder}
-                        className="w-full h-10 rounded-lg border bg-background px-3 py-2 text-sm pr-10 font-mono"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm pr-12 font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
                     />
                     <button
                         onClick={() => setShowKey(!showKey)}
                         disabled={fetching}
-                        className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground transition-colors"
+                        className="absolute right-3.5 top-3 text-muted-foreground hover:text-foreground transition-colors"
                     >
                         {fetching ? <Loader2 className="w-4 h-4 animate-spin" /> : (showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />)}
                     </button>
@@ -160,8 +160,8 @@ function SecretCard({
                     onClick={handleSave}
                     disabled={loading || !key}
                     className={cn(
-                        "px-4 h-10 rounded-lg bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors shrink-0",
-                        (loading || !key) && "opacity-50 cursor-not-allowed"
+                        "px-6 h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-sm hover:translate-y-[-1px]",
+                        (loading || !key) && "opacity-50 cursor-not-allowed transform-none"
                     )}
                 >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
@@ -170,7 +170,7 @@ function SecretCard({
             </div>
 
             {hasKey && (
-                <div className="pt-4 border-t flex items-center justify-between">
+                <div className="pt-4 border-t border-border/50 flex items-center justify-between">
                     <div>
                         <div className="text-sm font-medium">Access for OpenClaw Agents</div>
                         <div className="text-xs text-muted-foreground">Allow agents to use this key for autonomous tasks</div>
@@ -223,16 +223,16 @@ function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, descrip
         return (
             <button
                 onClick={() => setIsOpen(true)}
-                className="w-full p-4 border border-dashed rounded-xl flex items-center justify-center gap-2 text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-all group"
+                className="w-full p-6 border border-dashed border-border/60 rounded-2xl flex items-center justify-center gap-2 text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-primary/5 transition-all group"
             >
                 <Plus className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                <span className="font-medium">Add Custom API Secret</span>
+                <span className="font-bold uppercase tracking-wider text-xs">Add Custom API Secret</span>
             </button>
         );
     }
 
     return (
-        <form onSubmit={handleSubmit} className="p-6 border rounded-xl bg-card shadow-md space-y-4 animate-in fade-in zoom-in-95 duration-200">
+        <form onSubmit={handleSubmit} className="p-6 border border-border/50 rounded-2xl bg-card/60 backdrop-blur-md shadow-2xl space-y-6 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 font-semibold">
                     <Key className="w-4 h-4 text-primary" />
@@ -243,35 +243,35 @@ function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, descrip
                 </button>
             </div>
 
-            <div className="grid gap-4">
-                <div className="space-y-1.5">
-                    <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Secret Name</label>
+            <div className="grid gap-5">
+                <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 ml-1">Secret Name</label>
                     <input
                         autoFocus
                         value={name}
                         onChange={(e) => setName(e.target.value)}
                         placeholder="e.g. OpenAI, ElevenLabs, etc."
-                        className="w-full h-10 rounded-lg border bg-background px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all cursor-pointer"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
                         required
                     />
                 </div>
-                <div className="space-y-1.5">
-                    <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Description (Optional)</label>
+                <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 ml-1">Description (Optional)</label>
                     <input
                         value={description}
                         onChange={(e) => setDescription(e.target.value)}
                         placeholder="What is this key used for?"
-                        className="w-full h-10 rounded-lg border bg-background px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none transition-all cursor-pointer"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
                     />
                 </div>
-                <div className="space-y-1.5">
-                    <label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Secret Token / Value</label>
+                <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 ml-1">Secret Token / Value</label>
                     <input
                         type="password"
                         value={value}
                         onChange={(e) => setValue(e.target.value)}
                         placeholder="Paste your key here"
-                        className="w-full h-10 rounded-lg border bg-background px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 outline-none transition-all cursor-pointer"
+                        className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
                         required
                     />
                 </div>
@@ -281,13 +281,13 @@ function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, descrip
                 <button
                     type="button"
                     onClick={() => setIsOpen(false)}
-                    className="px-4 h-9 rounded-lg text-sm font-medium hover:bg-muted transition-colors cursor-pointer"
+                    className="px-6 h-10 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-muted transition-colors"
                 >
                     Cancel
                 </button>
                 <button
                     disabled={loading || !name || !value}
-                    className="px-4 h-9 rounded-lg bg-primary text-primary-foreground font-medium text-sm flex items-center gap-2 hover:bg-primary/90 transition-colors disabled:opacity-50 cursor-pointer"
+                    className="px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shadow-sm hover:translate-y-[-1px] disabled:opacity-50 disabled:transform-none"
                 >
                     {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                     Save Secret
@@ -364,6 +364,28 @@ export function SecretsTab() {
         }
     };
 
+    const handleGeminiSave = async (key: string) => {
+        const value = key.trim() || null;
+        console.log(`[SecretsTab] Saving Gemini key:`, value ? "REDACTED" : "null");
+        const res = await commands.saveGeminiKey(value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleGroqSave = async (key: string) => {
+        const value = key.trim() || null;
+        console.log(`[SecretsTab] Saving Groq key:`, value ? "REDACTED" : "null");
+        const res = await commands.saveGroqKey(value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
     const handleToggle = async (secret: string, granted: boolean) => {
         try {
             const res = await commands.clawdbotToggleSecretAccess(secret, granted);
@@ -395,6 +417,16 @@ export function SecretsTab() {
 
     const handleOpenRouterFetch = async (): Promise<string | null> => {
         const res = await commands.getOpenrouterKey();
+        return res.status === 'ok' ? res.data : null;
+    };
+
+    const handleGeminiFetch = async (): Promise<string | null> => {
+        const res = await commands.getGeminiKey();
+        return res.status === 'ok' ? res.data : null;
+    };
+
+    const handleGroqFetch = async (): Promise<string | null> => {
+        const res = await commands.getGroqKey();
         return res.status === 'ok' ? res.data : null;
     };
 
@@ -433,6 +465,26 @@ export function SecretsTab() {
     const handleOpenRouterDelete = async () => {
         console.log(`[SecretsTab] Deleting OpenRouter key...`);
         const res = await commands.saveOpenrouterKey(null);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleGeminiDelete = async () => {
+        console.log(`[SecretsTab] Deleting Gemini key...`);
+        const res = await commands.saveGeminiKey(null);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            throw new Error(res.error);
+        }
+    };
+
+    const handleGroqDelete = async () => {
+        console.log(`[SecretsTab] Deleting Groq key...`);
+        const res = await commands.saveGroqKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -488,7 +540,7 @@ export function SecretsTab() {
             <div className="grid gap-8">
                 {/* Inference Providers Section */}
                 <div className="space-y-6">
-                    <div className="flex items-center justify-between border-b border-border/10 pb-4">
+                    <div className="flex items-center justify-between border-b border-border/50 pb-4">
                         <div className="flex items-center gap-2">
                             <Bot className="w-5 h-5 text-primary" />
                             <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-foreground">Inference Cloud Brains</h3>
@@ -540,6 +592,32 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('openrouter', g)}
                             onFetch={handleOpenRouterFetch}
                             onDelete={handleOpenRouterDelete}
+                        />
+
+                        <SecretCard
+                            title="Google Gemini API Key"
+                            description="Native access to Gemini 2.0 Flash, Pro and Google's latest frontier models."
+                            icon={<Bot className="w-5 h-5 text-cyan-500" />}
+                            placeholder="AIza..."
+                            hasKey={!!(status?.has_gemini_key ?? status?.hasGeminiKey)}
+                            granted={!!(status?.gemini_granted ?? status?.geminiGranted)}
+                            onSave={handleGeminiSave}
+                            onToggle={(g) => handleToggle('gemini', g)}
+                            onFetch={handleGeminiFetch}
+                            onDelete={handleGeminiDelete}
+                        />
+
+                        <SecretCard
+                            title="Groq API Key"
+                            description="Ultra-fast inference for Llama 3, Mixtral and other open weights models."
+                            icon={<Bot className="w-5 h-5 text-orange-400" />}
+                            placeholder="gsk_..."
+                            hasKey={!!(status?.has_groq_key ?? status?.hasGroqKey)}
+                            granted={!!(status?.groq_granted ?? status?.groqGranted)}
+                            onSave={handleGroqSave}
+                            onToggle={(g) => handleToggle('groq', g)}
+                            onFetch={handleGroqFetch}
+                            onDelete={handleGroqDelete}
                         />
                     </div>
                 </div>
@@ -628,7 +706,7 @@ export function SecretsTab() {
                     </div>
                 )}
 
-                <div className="pt-4 border-t border-border/10">
+                <div className="pt-4 border-t border-border/50">
                     <AddSecretForm onAdd={handleAddCustomSecret} />
                 </div>
             </div>
