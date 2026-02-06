@@ -14,12 +14,14 @@ interface SecretCardProps {
     granted: boolean;
     onSave: (key: string) => Promise<void>;
     onToggle: (granted: boolean) => Promise<void>;
+    isVisible?: boolean;
+    onVisibilityToggle?: (visible: boolean) => Promise<void>;
     onFetch: () => Promise<string | null>;
     onDelete: () => Promise<void>;
 }
 
 function SecretCard({
-    title, description, icon, placeholder, hasKey, granted, onSave, onToggle, onFetch, onDelete
+    title, description, icon, placeholder, hasKey, granted, isVisible, onVisibilityToggle, onSave, onToggle, onFetch, onDelete
 }: SecretCardProps) {
     const [key, setKey] = useState('');
     const [showKey, setShowKey] = useState(false);
@@ -170,25 +172,50 @@ function SecretCard({
             </div>
 
             {hasKey && (
-                <div className="pt-4 border-t border-border/50 flex items-center justify-between">
-                    <div>
-                        <div className="text-sm font-medium">Access for OpenClaw Agents</div>
-                        <div className="text-xs text-muted-foreground">Allow agents to use this key for autonomous tasks</div>
-                    </div>
-                    <button
-                        onClick={() => onToggle(!granted)}
-                        className={cn(
-                            "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
-                            granted ? "bg-primary" : "bg-slate-200 dark:bg-muted"
-                        )}
-                    >
-                        <span
+                <div className="pt-4 border-t border-border/50 space-y-4">
+                    {onVisibilityToggle && (
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <div className="text-sm font-medium">Show models in browser</div>
+                                <div className="text-xs text-muted-foreground">Keep the model list clean by hiding inactive providers</div>
+                            </div>
+                            <button
+                                onClick={() => onVisibilityToggle?.(!isVisible)}
+                                className={cn(
+                                    "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                    isVisible ? "bg-emerald-500" : "bg-slate-200 dark:bg-muted"
+                                )}
+                            >
+                                <span
+                                    className={cn(
+                                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform ring-0",
+                                        isVisible ? "translate-x-6" : "translate-x-1"
+                                    )}
+                                />
+                            </button>
+                        </div>
+                    )}
+
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-sm font-medium">Access for OpenClaw Agents</div>
+                            <div className="text-xs text-muted-foreground">Allow agents to use this key for autonomous tasks</div>
+                        </div>
+                        <button
+                            onClick={() => onToggle(!granted)}
                             className={cn(
-                                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform ring-0",
-                                granted ? "translate-x-6" : "translate-x-1"
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                granted ? "bg-primary" : "bg-slate-200 dark:bg-muted"
                             )}
-                        />
-                    </button>
+                        >
+                            <span
+                                className={cn(
+                                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform ring-0",
+                                    granted ? "translate-x-6" : "translate-x-1"
+                                )}
+                            />
+                        </button>
+                    </div>
                 </div>
             )}
         </div>
@@ -299,20 +326,21 @@ function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, descrip
 
 export function SecretsTab() {
     const [status, setStatus] = useState<any>(null);
+    const [config, setConfig] = useState<any>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        loadStatus();
+        loadData();
     }, []);
 
-    const loadStatus = async () => {
+    const loadData = async () => {
         try {
-            const res = await commands.getClawdbotStatus();
-            if (res.status === 'ok') {
-                setStatus(res.data);
-            } else {
-                toast.error("Failed to load secret status");
-            }
+            const [sRes, cRes] = await Promise.all([
+                commands.getClawdbotStatus(),
+                commands.getUserConfig()
+            ]);
+            if (sRes.status === 'ok') setStatus(sRes.data);
+            setConfig(cRes);
         } catch (e) {
             console.error(e);
         } finally {
@@ -320,11 +348,32 @@ export function SecretsTab() {
         }
     };
 
+    const loadStatus = loadData;
+
+    const toggleProviderVisibility = async (provider: string, visible: boolean) => {
+        if (!config) return;
+        let disabled = [...(config.disabled_providers || [])];
+        if (visible) {
+            disabled = disabled.filter(p => p !== provider);
+        } else {
+            if (!disabled.includes(provider)) disabled.push(provider);
+        }
+        const newConfig = { ...config, disabled_providers: disabled };
+        await commands.updateUserConfig(newConfig);
+        setConfig(newConfig);
+        toast.success(`${provider.charAt(0).toUpperCase() + provider.slice(1)} models ${visible ? 'enabled' : 'disabled'}`);
+    };
+
+    const isProviderVisible = (provider: string) => {
+        return !config?.disabled_providers?.includes(provider);
+    };
+
     const handleAnthropicSave = async (key: string) => {
         const value = key.trim() || null;
         console.log(`[SecretsTab] Saving Anthropic key:`, value ? "REDACTED" : "null");
         const res = await commands.saveAnthropicKey(value);
         if (res.status === 'ok') {
+            if (value) await toggleProviderVisibility('anthropic', true);
             await loadStatus();
         } else {
             throw new Error(res.error);
@@ -347,6 +396,7 @@ export function SecretsTab() {
         console.log(`[SecretsTab] Saving OpenAI key:`, value ? "REDACTED" : "null");
         const res = await commands.saveOpenaiKey(value);
         if (res.status === 'ok') {
+            if (value) await toggleProviderVisibility('openai', true);
             await loadStatus();
         } else {
             throw new Error(res.error);
@@ -358,6 +408,7 @@ export function SecretsTab() {
         console.log(`[SecretsTab] Saving OpenRouter key:`, value ? "REDACTED" : "null");
         const res = await commands.saveOpenrouterKey(value);
         if (res.status === 'ok') {
+            if (value) await toggleProviderVisibility('openrouter', true);
             await loadStatus();
         } else {
             throw new Error(res.error);
@@ -369,6 +420,7 @@ export function SecretsTab() {
         console.log(`[SecretsTab] Saving Gemini key:`, value ? "REDACTED" : "null");
         const res = await commands.saveGeminiKey(value);
         if (res.status === 'ok') {
+            if (value) await toggleProviderVisibility('gemini', true);
             await loadStatus();
         } else {
             throw new Error(res.error);
@@ -380,6 +432,7 @@ export function SecretsTab() {
         console.log(`[SecretsTab] Saving Groq key:`, value ? "REDACTED" : "null");
         const res = await commands.saveGroqKey(value);
         if (res.status === 'ok') {
+            if (value) await toggleProviderVisibility('groq', true);
             await loadStatus();
         } else {
             throw new Error(res.error);
@@ -562,6 +615,8 @@ export function SecretsTab() {
                             placeholder="sk-ant-api03-..."
                             hasKey={!!(status?.has_anthropic_key ?? status?.hasAnthropicKey)}
                             granted={!!(status?.anthropic_granted ?? status?.anthropicGranted)}
+                            isVisible={isProviderVisible('anthropic')}
+                            onVisibilityToggle={(v) => toggleProviderVisibility('anthropic', v)}
                             onSave={handleAnthropicSave}
                             onToggle={(g) => handleToggle('anthropic', g)}
                             onFetch={handleAnthropicFetch}
@@ -575,6 +630,8 @@ export function SecretsTab() {
                             placeholder="sk-..."
                             hasKey={!!(status?.has_openai_key ?? status?.hasOpenaiKey)}
                             granted={!!(status?.openai_granted ?? status?.openaiGranted)}
+                            isVisible={isProviderVisible('openai')}
+                            onVisibilityToggle={(v) => toggleProviderVisibility('openai', v)}
                             onSave={handleOpenAISave}
                             onToggle={(g) => handleToggle('openai', g)}
                             onFetch={handleOpenAIFetch}
@@ -588,6 +645,8 @@ export function SecretsTab() {
                             placeholder="sk-or-v1-..."
                             hasKey={!!(status?.has_openrouter_key ?? status?.hasOpenrouterKey)}
                             granted={!!(status?.openrouter_granted ?? status?.openrouterGranted)}
+                            isVisible={isProviderVisible('openrouter')}
+                            onVisibilityToggle={(v) => toggleProviderVisibility('openrouter', v)}
                             onSave={handleOpenRouterSave}
                             onToggle={(g) => handleToggle('openrouter', g)}
                             onFetch={handleOpenRouterFetch}
@@ -601,6 +660,8 @@ export function SecretsTab() {
                             placeholder="AIza..."
                             hasKey={!!(status?.has_gemini_key ?? status?.hasGeminiKey)}
                             granted={!!(status?.gemini_granted ?? status?.geminiGranted)}
+                            isVisible={isProviderVisible('gemini')}
+                            onVisibilityToggle={(v) => toggleProviderVisibility('gemini', v)}
                             onSave={handleGeminiSave}
                             onToggle={(g) => handleToggle('gemini', g)}
                             onFetch={handleGeminiFetch}
@@ -614,6 +675,8 @@ export function SecretsTab() {
                             placeholder="gsk_..."
                             hasKey={!!(status?.has_groq_key ?? status?.hasGroqKey)}
                             granted={!!(status?.groq_granted ?? status?.groqGranted)}
+                            isVisible={isProviderVisible('groq')}
+                            onVisibilityToggle={(v) => toggleProviderVisibility('groq', v)}
                             onSave={handleGroqSave}
                             onToggle={(g) => handleToggle('groq', g)}
                             onFetch={handleGroqFetch}

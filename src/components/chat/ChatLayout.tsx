@@ -19,6 +19,7 @@ import { findStyle, STYLE_LIBRARY } from "../../lib/style-library";
 import { useAutoStart } from "../../hooks/use-auto-start";
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
 import { useProjects } from '../../hooks/use-projects';
+import { useConfig } from '../../hooks/use-config';
 import { ClawdbotSidebar } from '../clawdbot/ClawdbotSidebar';
 import { ClawdbotChatView } from '../clawdbot/ClawdbotChatView';
 import { ClawdbotDashboard } from '../clawdbot/ClawdbotDashboard';
@@ -59,6 +60,7 @@ export function ChatLayout() {
         fetchConversations,
         tokenUsage
     } = useChat();
+    const { config: userCfg } = useConfig();
     const { projects, createProject, deleteProject, fetchProjects, updateProjectsOrder } = useProjects();
     const {
         currentModelPath: modelPath,
@@ -104,6 +106,8 @@ export function ChatLayout() {
     const [selectedClawdbotSession, setSelectedClawdbotSession] = useState<string | null>(null);
     const [clawdbotGatewayRunning, setClawdbotGatewayRunning] = useState(false);
     const [activeClawdbotPage, setActiveClawdbotPage] = useState<ClawdbotPage>('dashboard');
+
+    const isCloudProvider = useMemo(() => userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local", [userCfg?.selected_chat_provider]);
 
     // Poll clawdbot gateway status
     useEffect(() => {
@@ -363,7 +367,7 @@ export function ChatLayout() {
             return;
         }
 
-        if (!modelRunning && modelPath !== "auto") {
+        if (!isCloudProvider && !modelRunning && modelPath !== "auto") {
             toast.warning("Model is warming up, please wait...");
             return;
         }
@@ -1025,7 +1029,7 @@ export function ChatLayout() {
                                         {messages.length === 0 ? (
                                             <div className="flex-1 flex items-center justify-center text-muted-foreground flex-col gap-4 min-h-[50vh]">
                                                 <Bot className="w-12 h-12 opacity-20" />
-                                                <p>Ready to chat. Check Settings to load a model.</p>
+                                                <p>Ready to chat.</p>
                                                 <div className="flex gap-4 text-xs opacity-50">
                                                     {canSee && <span className="flex items-center gap-1"><ImageIcon className="w-3 h-3" /> Images</span>}
                                                     {isRagCapable && <span className="flex items-center gap-1"><Paperclip className="w-3 h-3" /> Documents</span>}
@@ -1227,7 +1231,13 @@ export function ChatLayout() {
                                                                 }
                                                             }
                                                         }}
-                                                        placeholder={isRestarting ? "Warming up model..." : (!modelRunning ? "Starting model..." : (isImageMode ? "Describe the image you want to generate..." : (canSee ? "Type a message..." : (isRagCapable ? "Type a message..." : "Select a Vision model or start Embedder..."))))}
+                                                        placeholder={
+                                                            isRestarting ? "Warming up model..." : (
+                                                                userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local"
+                                                                    ? "Type a message..."
+                                                                    : (!modelRunning ? "Starting model..." : (isImageMode ? "Describe the image you want to generate..." : (canSee ? "Type a message..." : (isRagCapable ? "Type a message..." : "Select a Vision model or start Embedder..."))))
+                                                            )
+                                                        }
                                                         className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px]"
                                                         rows={1}
                                                         style={{ height: 'auto', minHeight: '44px' }}
@@ -1271,20 +1281,31 @@ export function ChatLayout() {
                                                     </button>
                                                 )}
 
-                                                <button onClick={() => {
-                                                    if (isStreaming) { handleCancelGeneration(); return; }
-                                                    setSlashQuery(null);
-                                                    setMentionQuery(null);
-                                                    if (isImageMode) {
-                                                        handleGenerateImage();
-                                                    } else {
-                                                        handleSend();
-                                                    }
-                                                }} disabled={isRestarting || (!input.trim() && attachedImages.length === 0 && ingestedFiles.length === 0 && !isStreaming) || (!modelRunning && !isImageMode && !isStreaming)} className={cn("p-2 rounded-xl transition-colors disabled:opacity-50", isStreaming ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 animate-stop-pulse shadow-md shadow-red-500/20" : ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0) ? (isImageMode ? "bg-pink-500 hover:bg-pink-600 text-white" : (modelRunning ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground")) : "text-muted-foreground hover:bg-muted"))}>
+                                                <button
+                                                    onClick={() => {
+                                                        if (isStreaming) { handleCancelGeneration(); return; }
+                                                        setSlashQuery(null);
+                                                        setMentionQuery(null);
+                                                        if (isImageMode) {
+                                                            handleGenerateImage();
+                                                        } else {
+                                                            handleSend();
+                                                        }
+                                                    }}
+                                                    disabled={isRestarting || (!input.trim() && attachedImages.length === 0 && ingestedFiles.length === 0 && !isStreaming) || (!isCloudProvider && !modelRunning && !isImageMode && !isStreaming)}
+                                                    className={cn(
+                                                        "p-2 rounded-xl transition-colors disabled:opacity-50",
+                                                        isStreaming ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 animate-stop-pulse shadow-md shadow-red-500/20" :
+                                                            ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0) ?
+                                                                (isImageMode ? "bg-pink-500 hover:bg-pink-600 text-white" :
+                                                                    ((isCloudProvider || modelRunning) ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground"))
+                                                                : "text-muted-foreground hover:bg-muted")
+                                                    )}
+                                                >
                                                     {isStreaming ? <Square className="w-5 h-5 fill-current" /> : (isImageMode ? <Palette className="w-5 h-5" /> : <Send className="w-5 h-5" />)}
                                                 </button>
 
-                                                {!modelRunning && !isImageMode && (
+                                                {!modelRunning && !isImageMode && userCfg?.selected_chat_provider === "local" && (
                                                     <button
                                                         onClick={async () => {
                                                             const model = modelPath || localModels[0]?.path;
@@ -1485,7 +1506,7 @@ export function ChatLayout() {
                         </motion.div>
                     )}
                 </AnimatePresence>
-            </div>
-        </div>
+            </div >
+        </div >
     );
 }

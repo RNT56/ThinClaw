@@ -300,8 +300,11 @@ impl Tool for DDGSearchTool {
                     .collect::<Vec<_>>()
                     .await;
 
+                // Systematic Cleanup
                 let _ = browser.close().await;
                 let _ = handler.await;
+                // Small sleep to ensure the OS handles the socket cleanup before dropping the runtime
+                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
                 Ok::<Vec<SearchResult>, SearchError>(results)
             })

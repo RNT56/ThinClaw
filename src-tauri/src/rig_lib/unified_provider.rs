@@ -1,9 +1,11 @@
+use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use rig::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ModelChoice,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::{error, info};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -12,6 +14,7 @@ pub enum ProviderKind {
     Gemini,
     Groq,  // Usually OpenAI compatible
     Local, // Usually OpenAI compatible
+    OpenRouter,
 }
 
 #[derive(Clone)]
@@ -29,6 +32,19 @@ impl UnifiedProvider {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+        }
+    }
+
+    fn is_reasoning_model(&self) -> bool {
+        let m = self.model.to_lowercase();
+        m.starts_with("o1-") || m.starts_with("o3-") || m == "o1" || m.contains("gpt-5")
+    }
+
+    fn sanitize_temperature(&self, temp: f64) -> Option<f64> {
+        if self.is_reasoning_model() {
+            None
+        } else {
+            Some(temp)
         }
     }
 
@@ -54,10 +70,9 @@ impl UnifiedProvider {
         }
         messages.push(json!({ "role": "user", "content": request.prompt }));
 
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
-            "temperature": 0.7,
             "stream": false,
             "tools": request.tools.iter().map(|t| json!({
                 "type": "function",
@@ -69,13 +84,27 @@ impl UnifiedProvider {
             })).collect::<Vec<_>>()
         });
 
+        if let Some(t) = self.sanitize_temperature(0.7) {
+            body.as_object_mut()
+                .unwrap()
+                .insert("temperature".into(), json!(t));
+        }
+
         let client = reqwest::Client::new();
         let url = format!("{}/chat/completions", self.base_url);
 
-        let resp = client
+        let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
+            .json(&body);
+
+        if matches!(self.kind, ProviderKind::OpenRouter) {
+            request_builder = request_builder
+                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("X-Title", "Scrappy AI Desktop");
+        }
+
+        let resp = request_builder
             .send()
             .await
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
@@ -362,6 +391,12 @@ impl UnifiedProvider {
                 for msg in messages {
                     if let Some(content) = msg["content"].as_str() {
                         total_chars += content.len();
+                    } else if let Some(content_array) = msg["content"].as_array() {
+                        for part in content_array {
+                            if let Some(text) = part["text"].as_str() {
+                                total_chars += text.len();
+                            }
+                        }
                     }
                 }
                 Ok((total_chars / 4) as u32)
@@ -377,8 +412,15 @@ impl UnifiedProvider {
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, String>> + Send>>,
         String,
     > {
+        info!(
+            "[unified_provider] stream_raw_completion for model: {}",
+            self.model
+        );
         match self.kind {
-            ProviderKind::Local | ProviderKind::OpenAI | ProviderKind::Groq => {
+            ProviderKind::Local
+            | ProviderKind::OpenAI
+            | ProviderKind::Groq
+            | ProviderKind::OpenRouter => {
                 let lp = crate::rig_lib::llama_provider::LlamaProvider::new(
                     &self.base_url,
                     &self.api_key,
@@ -406,6 +448,12 @@ impl UnifiedProvider {
             "stream": true,
         });
 
+        if let Some(t) = _temperature.and_then(|temp| self.sanitize_temperature(temp)) {
+            body.as_object_mut()
+                .unwrap()
+                .insert("temperature".into(), json!(t));
+        }
+
         // Handle system message if present in the messages list (Anthropic expects it as a top-level field)
         let mut filtered_messages = Vec::new();
         for msg in messages {
@@ -432,54 +480,50 @@ impl UnifiedProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        let stream = response.bytes_stream();
-        let mut buffer = String::new();
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_default();
+            error!(
+                "[unified_provider] Anthropic API Error ({}): {}",
+                status, err_text
+            );
+            return Err(format!("Anthropic API Error ({}): {}", status, err_text));
+        }
 
+        let stream = response.bytes_stream().eventsource();
         let s = stream
-            .map(move |chunk_res| {
+            .map(|event_res| {
                 let mut events = Vec::new();
-                match chunk_res {
-                    Ok(chunk) => {
-                        let text = String::from_utf8_lossy(&chunk);
-                        buffer.push_str(&text);
+                match event_res {
+                    Ok(event) => {
+                        let data = event.data;
+                        if data == "[DONE]" {
+                            return futures::stream::iter(events);
+                        }
 
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let block = buffer.drain(..pos + 2).collect::<String>();
-                            for line in block.lines() {
-                                if line.starts_with("data: ") {
-                                    let data = &line[6..];
-                                    if data == "[DONE]" || data.is_empty() {
-                                        continue;
-                                    }
-                                    if let Ok(json) = serde_json::from_str::<Value>(data) {
-                                        match json["type"].as_str() {
-                                            Some("content_block_delta") => {
-                                                if let Some(delta) = json["delta"]["text"].as_str()
-                                                {
-                                                    events.push(Ok(ProviderEvent::Content(
-                                                        delta.to_string(),
-                                                    )));
-                                                }
-                                            }
-                                            Some("message_delta") => {
-                                                if let Some(usage) = json["usage"].as_object() {
-                                                    events.push(Ok(ProviderEvent::Usage(
-                                                        crate::chat::TokenUsage {
-                                                            prompt_tokens: 0,
-                                                            completion_tokens: usage
-                                                                .get("output_tokens")
-                                                                .and_then(|v| v.as_u64())
-                                                                .unwrap_or(0)
-                                                                as u32,
-                                                            total_tokens: 0,
-                                                        },
-                                                    )));
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                        if let Ok(json) = serde_json::from_str::<Value>(&data) {
+                            match json["type"].as_str() {
+                                Some("content_block_delta") => {
+                                    if let Some(delta) = json["delta"]["text"].as_str() {
+                                        events.push(Ok(ProviderEvent::Content(delta.to_string())));
                                     }
                                 }
+                                Some("message_delta") => {
+                                    if let Some(usage) = json["usage"].as_object() {
+                                        events.push(Ok(ProviderEvent::Usage(
+                                            crate::chat::TokenUsage {
+                                                prompt_tokens: 0,
+                                                completion_tokens: usage
+                                                    .get("output_tokens")
+                                                    .and_then(|v| v.as_u64())
+                                                    .unwrap_or(0)
+                                                    as u32,
+                                                total_tokens: 0,
+                                            },
+                                        )));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -502,26 +546,64 @@ impl UnifiedProvider {
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, String>> + Send>>,
         String,
     > {
-        let mut contents = Vec::new();
+        info!(
+            "[unified_provider] Starting Gemini stream for model: {}",
+            self.model
+        );
+        let mut contents: Vec<Value> = Vec::new();
+        let mut system_instruction = None;
+
         for msg in messages {
-            let role = if msg["role"] == "assistant" {
-                "model"
-            } else {
-                "user"
-            };
+            let role = msg["role"].as_str().unwrap_or("user");
+            if role == "system" {
+                system_instruction = Some(json!({ "parts": [{ "text": msg["content"] }] }));
+                continue;
+            }
+
+            let gemini_role = if role == "assistant" { "model" } else { "user" };
+
+            // Ensure we don't send consecutive identical roles (Gemini requirement)
+            if let Some(last) = contents.last() {
+                if last["role"] == gemini_role {
+                    // Merge content if roles match
+                    if let Some(last_parts) =
+                        contents.last_mut().and_then(|m| m["parts"].as_array_mut())
+                    {
+                        last_parts.push(json!({ "text": format!("\n\n{}", msg["content"].as_str().unwrap_or_default()) }));
+                        continue;
+                    }
+                }
+            }
+
             contents.push(json!({
-                "role": role,
+                "role": gemini_role,
                 "parts": [{ "text": msg["content"] }]
             }));
         }
 
-        let body = json!({
+        // If history is empty but we have a user msg (not possible here due to how its called, but for safety)
+        if contents.is_empty() {
+            contents.push(json!({ "role": "user", "parts": [{ "text": "Hello" }] }));
+        }
+
+        let mut body = json!({
             "contents": contents,
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 4096,
+                "maxOutputTokens": 8192,
             }
         });
+
+        if let Some(si) = system_instruction {
+            body.as_object_mut()
+                .unwrap()
+                .insert("system_instruction".into(), si);
+        }
+
+        if let Some(t) = self.sanitize_temperature(0.7) {
+            if let Some(obj) = body["generationConfig"].as_object_mut() {
+                obj.insert("temperature".into(), json!(t));
+            }
+        }
 
         let client = reqwest::Client::new();
         let url = format!(
@@ -536,42 +618,61 @@ impl UnifiedProvider {
             .await
             .map_err(|e| e.to_string())?;
 
-        let stream = response.bytes_stream();
-        let mut buffer = String::new();
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown Error".into());
+            error!(
+                "[unified_provider] Gemini API Error ({}): {}",
+                status, err_text
+            );
+            return Err(format!("Gemini API Error ({}): {}", status, err_text));
+        }
+
+        let stream = response.bytes_stream().eventsource();
+        let mut in_thought = false;
 
         let s = stream
-            .map(move |chunk_res| {
+            .map(move |event_res| {
                 let mut events = Vec::new();
-                match chunk_res {
-                    Ok(chunk) => {
-                        let text = String::from_utf8_lossy(&chunk);
-                        buffer.push_str(&text);
+                match event_res {
+                    Ok(event) => {
+                        let data = event.data;
+                        if let Ok(json) = serde_json::from_str::<Value>(&data) {
+                            info!("[unified_provider] Gemini chunk received.");
+                            if let Some(candidates) = json["candidates"].as_array() {
+                                if let Some(candidate) = candidates.first() {
+                                    if let Some(parts) = candidate["content"]["parts"].as_array() {
+                                        for part in parts {
+                                            info!("[unified_provider] Gemini part: {:?}", part);
+                                            // Handle Thinking Process (Gemini 3)
+                                            let is_thought =
+                                                part["thought"].as_bool().unwrap_or(false)
+                                                    || part
+                                                        .get("text")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.contains("<thought>"))
+                                                        .unwrap_or(false);
 
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let block = buffer.drain(..pos + 2).collect::<String>();
-                            for line in block.lines() {
-                                let trimmed = line.trim();
-                                if trimmed.starts_with("data: ") {
-                                    let data = &trimmed[6..];
-                                    if data.is_empty() {
-                                        continue;
-                                    }
-                                    if let Ok(json) = serde_json::from_str::<Value>(data) {
-                                        if let Some(candidates) = json["candidates"].as_array() {
-                                            if let Some(candidate) = candidates.first() {
-                                                if let Some(parts) =
-                                                    candidate["content"]["parts"].as_array()
-                                                {
-                                                    for part in parts {
-                                                        if let Some(text) = part["text"].as_str() {
-                                                            events.push(Ok(
-                                                                ProviderEvent::Content(
-                                                                    text.to_string(),
-                                                                ),
-                                                            ));
-                                                        }
-                                                    }
+                                            if let Some(text) = part["text"].as_str() {
+                                                if text.is_empty() {
+                                                    continue;
                                                 }
+
+                                                let mut final_text = text.to_string();
+
+                                                if is_thought && !in_thought {
+                                                    final_text = format!("<think>\n{}", final_text);
+                                                    in_thought = true;
+                                                } else if !is_thought && in_thought {
+                                                    final_text =
+                                                        format!("</think>\n\n{}", final_text);
+                                                    in_thought = false;
+                                                }
+
+                                                events.push(Ok(ProviderEvent::Content(final_text)));
                                             }
                                         }
                                     }
@@ -597,6 +698,40 @@ impl UnifiedProvider {
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, String>> + Send>>, String>
     {
         match self.kind {
+            ProviderKind::Anthropic => {
+                let mut messages = Vec::new();
+                for msg in history {
+                    messages.push(json!({ "role": msg.role, "content": msg.content }));
+                }
+                messages.push(json!({ "role": "user", "content": prompt }));
+                self.stream_anthropic(messages, None).await.map(|stream| {
+                    Box::pin(stream.map(|res| match res {
+                        Ok(ProviderEvent::Content(c)) => Ok(c),
+                        Ok(_) => Ok("".into()),
+                        Err(e) => Err(e),
+                    }))
+                        as std::pin::Pin<
+                            Box<dyn futures::Stream<Item = Result<String, String>> + Send>,
+                        >
+                })
+            }
+            ProviderKind::Gemini => {
+                let mut messages = Vec::new();
+                for msg in history {
+                    messages.push(json!({ "role": msg.role, "content": msg.content }));
+                }
+                messages.push(json!({ "role": "user", "content": prompt }));
+                self.stream_gemini(messages, None).await.map(|stream| {
+                    Box::pin(stream.map(|res| match res {
+                        Ok(ProviderEvent::Content(c)) => Ok(c),
+                        Ok(_) => Ok("".into()),
+                        Err(e) => Err(e),
+                    }))
+                        as std::pin::Pin<
+                            Box<dyn futures::Stream<Item = Result<String, String>> + Send>,
+                        >
+                })
+            }
             _ => {
                 let lp = crate::rig_lib::llama_provider::LlamaProvider::new(
                     &self.base_url,

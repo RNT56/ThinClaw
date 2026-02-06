@@ -3,6 +3,7 @@ use crate::rig_lib::RigManager;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
 #[derive(Clone, Debug)]
 pub struct ToolPermissions {
@@ -51,6 +52,10 @@ impl Orchestrator {
         let conversation_id_clone = conversation_id.clone(); // Clone for spawn
 
         tokio::spawn(async move {
+            info!(
+                "[orchestrator] Background task started for conversation: {:?}",
+                conversation_id_clone
+            );
             // --- 0. Token Check & Auto-Summarization ---
             // Construct a temporary JSON history to count tokens
             let mut check_history: Vec<serde_json::Value> = Vec::new();
@@ -67,6 +72,7 @@ impl Orchestrator {
             let _summarize_ratio = 0.5; // Summarize oldest 50%
 
             if let Ok(token_count) = rig_clone.provider.count_tokens(check_history.clone()).await {
+                info!("[orchestrator] Token count: {}", token_count);
                 // Send initial usage stats
                 let _ = tx
                     .send(Ok(ProviderEvent::Usage(TokenUsage {
@@ -77,6 +83,9 @@ impl Orchestrator {
                     .await;
 
                 if token_count > (max_context as f32 * threshold) as u32 {
+                    info!(
+                        "[orchestrator] Token count exceeds threshold. Starting summarization..."
+                    );
                     let _ = tx
                         .send(Ok(ProviderEvent::Content(
                             "\n<scrappy_status type=\"summarizing\" />\n".into(),
@@ -101,11 +110,7 @@ impl Orchestrator {
                         let summary_req =
                             vec![json!({ "role": "user", "content": summary_prompt })];
 
-                        // Use a temporary single-turn call
-                        // Note: We use stream_raw_completion but collect it? Or just assume we have a simple completion method?
-                        // rig_lib has `completion`.
-                        // Let's use `stream_raw_completion` and collect.
-
+                        info!("[orchestrator] Requesting summary from provider...");
                         let mut summary_text = String::new();
                         if let Ok(mut stream) = rig_clone
                             .provider
@@ -121,6 +126,7 @@ impl Orchestrator {
                         }
 
                         if !summary_text.is_empty() {
+                            info!("[orchestrator] Summarization complete.");
                             // Create Summary Message
                             let summary_msg = Message {
                                 role: "system".into(), // Or "user" with special marker, but "system" is safer for context injection
@@ -134,26 +140,19 @@ impl Orchestrator {
                             // Prepend summary
                             final_history.insert(0, summary_msg);
 
-                            // Emit Context Update to Frontend
-                            // We have to construct the FULL history update.
-                            // But wait, `final_history` only contains the *past* history.
-                            // The frontend state includes the CURRENT user message (the last one).
-                            // If we send `ContextUpdate(final_history)`, the frontend will replace EVERYTHING?
-                            // We should check how `chat.rs` handles it or how frontend uses it.
-                            // If frontend replaces `messages` with this list, it might LOSE the current user message?
-                            // Typically `context_update` updates the *persisted* history.
-                            // Let's assume frontend logic handles merging or `final_history` should include everything?
-                            // Our `final_history` variable here EXCLUDES the `last_msg` (current turn).
-                            // We should append `last_msg`? No, `last_msg` is current turn, it shouldn't be summarized yet.
-                            // The frontend likely expects the "history up to now".
-
                             let _ = tx
                                 .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
                                 .await;
+                        } else {
+                            warn!("[orchestrator] Summarization failed (empty response).");
                         }
                     }
                 }
+            } else {
+                warn!("[orchestrator] Failed to count tokens.");
             }
+
+            info!("[orchestrator] Proceeding to tool/manual decision...");
 
             // 1. Context & Document Collection (Used for both Manual and Lead turns)
             let mut all_doc_ids = Vec::new();
@@ -296,16 +295,26 @@ impl Orchestrator {
                 }));
 
                 // Stream directly using raw completion
-                if let Ok(mut stream) = rig_clone
+                info!(
+                    "[orchestrator] Starting Manual Mode stream for model: {}",
+                    rig_clone.provider.model
+                );
+
+                match rig_clone
                     .provider
                     .stream_raw_completion(conversation, None)
                     .await
                 {
-                    while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
-                        let _ = tx.send(chunk).await;
+                    Ok(mut stream) => {
+                        info!("[orchestrator] Stream started successfully.");
+                        while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+                            let _ = tx.send(chunk).await;
+                        }
                     }
-                } else {
-                    let _ = tx.send(Err("Failed to start chat stream.".into())).await;
+                    Err(e) => {
+                        error!("[orchestrator] Failed to start chat stream: {}", e);
+                        let _ = tx.send(Err(format!("Chat Error: {}", e))).await;
+                    }
                 }
                 return;
             }

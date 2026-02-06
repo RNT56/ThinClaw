@@ -62,22 +62,32 @@ export function ModelBrowser() {
     }, []);
 
     const isActiveCloud = (model: any) => {
-        if (!config || !status || !model?.family || !model?.id) return false;
-        const brain = model.family.toLowerCase();
-        const modelId = model.id.split('-').slice(1).join('-');
-        return config.selected_chat_provider === brain && status.selected_cloud_model === modelId;
+        if (!config || !status || !model?.id) return false;
+        const parts = model.id.split('-');
+        const provider = parts[0].toLowerCase();
+        const modelId = parts.slice(1).join('-');
+
+        const configProvider = config.selected_chat_provider?.toLowerCase();
+        const effectiveProvider = (provider === "google" || provider === "gemini") ? "gemini" : provider;
+
+        return configProvider === effectiveProvider && status.selected_cloud_model === modelId;
     };
 
     const isCloudConfigured = (model: any) => {
         if (model?.category !== "Cloud") return true;
-        if (!status) return false;
-        const family = model.family?.toLowerCase();
-        if (!family) return false;
-        if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
-        if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
-        if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
-        if (family === "groq") return !!(status?.has_groq_key || status?.hasGroqKey);
-        if (family === "openrouter") return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+        if (!status || !config) return false;
+
+        const id = model.id.toLowerCase();
+
+        // Check if disabled in config
+        if (config.disabled_providers?.some((p: string) => id.startsWith(p.toLowerCase()))) return false;
+
+        if (id.startsWith("anthropic")) return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
+        if (id.startsWith("openai")) return !!(status?.has_openai_key || status?.hasOpenaiKey);
+        if (id.startsWith("gemini") || id.startsWith("google")) return !!(status?.has_gemini_key || status?.hasGeminiKey);
+        if (id.startsWith("groq")) return !!(status?.has_groq_key || status?.hasGroqKey);
+        if (id.startsWith("openrouter")) return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+
         return false;
     };
 
@@ -236,7 +246,7 @@ export function ModelBrowser() {
             if (!a.isLocal && b.isLocal) return 1;
             return a.name.localeCompare(b.name);
         });
-    }, [localModels, searchQuery, activeCategory, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath]);
+    }, [localModels, searchQuery, activeCategory, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath, config, status]);
 
     const isActive = (path: string | null) => path && currentModelPath && path === currentModelPath;
     const isEmbeddingActive = (path: string | null) => path && currentEmbeddingModelPath && path === currentEmbeddingModelPath;
@@ -354,10 +364,16 @@ export function ModelBrowser() {
                     // Global visibility check: only show cloud models if configured
                     if (!isCloudConfigured(m)) return false;
 
+                    const isCloud = (m as any).category === "Cloud";
+
                     if (activeCategory === "All") return true;
-                    if (activeCategory === "Cloud Brains") return (m as any).category === "Cloud";
+                    if (activeCategory === "Cloud Brains") return isCloud;
+
+                    // Exclude Cloud models from all other specific (Local) tabs
+                    if (isCloud) return false;
+
                     if (activeCategory === "Chat" || activeCategory === "Summarizer") {
-                        // Include local LLMs and configured Cloud brains
+                        // Include local LLMs
                         return !m.tags?.some(t => ["Image Gen", "STT", "Embedding"].includes(t));
                     }
                     if (activeCategory === "Diffusion") return m.tags?.includes("Image Gen");
@@ -377,7 +393,9 @@ export function ModelBrowser() {
                     const isVision = isVisionActive(model.localPath);
                     const isStt = isSttActive(model.localPath);
                     const isImageGen = isImageGenActive(model.localPath);
-                    const isSummarizer = isSummarizerActive(model.localPath);
+                    const isSummarizer = (model as any).category === 'Cloud'
+                        ? (currentSummarizerModelPath === model.id)
+                        : isSummarizerActive(model.localPath);
                     const isDownloaded = model.isLocal || (model as any).category === "Cloud";
                     const modelAny = model as any;
                     const rFilename = modelAny.relativeFilename || model.filename;
@@ -388,7 +406,7 @@ export function ModelBrowser() {
                     const hasImageGenTag = model.tags && (model.tags.includes("Image Gen") || model.family === "Stable Diffusion");
 
                     return (
-                        <div key={model.filename} className={cn(
+                        <div key={model.id} className={cn(
                             "flex flex-col p-5 border rounded-2xl transition-all duration-300",
                             isModelActive
                                 ? "bg-accent/40 border-primary/20 shadow-inner"
@@ -644,18 +662,12 @@ export function ModelBrowser() {
                                     </div>
                                 </div>
                             ) : (model as any).category === "Cloud" ? (
-                                <div className="flex gap-2">
+                                <div className="flex gap-2 flex-wrap w-full">
                                     <button
                                         onClick={async () => {
                                             try {
                                                 const brain = model.family.toLowerCase();
-                                                const modelId = model.id.split('-').slice(1).join('-'); // e.g. "anthropic-claude-3.5-sonnet" -> "claude-3-5-sonnet"
-
-                                                // Actually the IDs in library should match what the provider expects
-                                                // Looking at config.rs, it expects "claude-3-5-sonnet-latest" etc.
-                                                // Wait, I should probably use the specific model ID from the library
-
-                                                // We need to set BOTH the brain (provider) and the model
+                                                const modelId = model.id.split('-').slice(1).join('-');
                                                 const cfg = await commands.getUserConfig();
                                                 const newConfig = {
                                                     ...cfg,
@@ -664,24 +676,40 @@ export function ModelBrowser() {
                                                     selected_cloud_model: modelId
                                                 };
                                                 await commands.updateUserConfig(newConfig);
-                                                // Also call the specific command if needed, but update_user_config should handle it if synced
                                                 if ((commands as any).saveSelectedCloudModel) {
                                                     await (commands as any).saveSelectedCloudModel(modelId);
                                                 }
-
                                                 toast.success(`${model.name} selected as active Cloud Brain`);
+
+                                                // Update local state to reflect change immediately
+                                                const s = await commands.getClawdbotStatus();
+                                                if (s.status === 'ok') setStatus(s.data);
+                                                setConfig(newConfig);
                                             } catch (e) {
                                                 toast.error("Failed to select cloud model");
                                             }
                                         }}
                                         className={cn(
-                                            "flex-1 py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider transition-all",
-                                            // How do we know if it's active? We need to check config.selected_cloud_model
-                                            "bg-primary/10 text-primary border border-primary/20 hover:bg-primary hover:text-primary-foreground",
-                                            isModelActive && "bg-primary text-primary-foreground"
+                                            "flex-1 py-2 px-3 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
+                                            isModelActive
+                                                ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 shadow-sm ring-1 ring-indigo-500/10"
+                                                : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-sm hover:translate-y-[-1px]"
                                         )}
+                                        disabled={!!isModelActive}
                                     >
-                                        {isModelActive ? "Active Cloud Brain" : "Select Brain"}
+                                        {isModelActive ? "Active" : "Select Brain"}
+                                    </button>
+                                    <button
+                                        onClick={() => setSummarizerModelPath(model.id)}
+                                        className={cn(
+                                            "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
+                                            isSummarizer
+                                                ? "bg-muted text-muted-foreground border-border/50 cursor-default"
+                                                : "border-input hover:bg-accent hover:text-accent-foreground shadow-sm"
+                                        )}
+                                        disabled={!!isSummarizer}
+                                    >
+                                        {isSummarizer ? "Summ. Active" : "Set Summ."}
                                     </button>
                                 </div>
                             ) : (

@@ -84,6 +84,9 @@ pub struct UserConfig {
 
     #[serde(default = "default_spotlight_shortcut")]
     pub spotlight_shortcut: String,
+
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
 }
 
 impl Default for UserConfig {
@@ -110,6 +113,7 @@ impl Default for UserConfig {
             mlock: false,
             quantize_kv: false,
             spotlight_shortcut: default_spotlight_shortcut(),
+            disabled_providers: vec![],
         }
     }
 }

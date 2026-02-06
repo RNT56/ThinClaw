@@ -62,8 +62,20 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
     const cloudModels = RECOMMENDED_MODELS.filter(m => {
         if ((m as any).category !== "Cloud") return false;
 
-        // Check if provider (family) is configured
+        const id = m.id.toLowerCase();
         const family = m.family.toLowerCase();
+
+        // Check if disabled in config
+        if (config?.disabled_providers?.includes(family)) return false;
+
+        // Determine provider by ID prefix first (robust for aggregators)
+        if (id.startsWith("openrouter-")) return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+        if (id.startsWith("groq-")) return !!(status?.has_groq_key || status?.hasGroqKey);
+        if (id.startsWith("anthropic-")) return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
+        if (id.startsWith("openai-")) return !!(status?.has_openai_key || status?.hasOpenaiKey);
+        if (id.startsWith("google-") || id.startsWith("gemini-")) return !!(status?.has_gemini_key || status?.hasGeminiKey);
+
+        // Fallback to family-based check
         if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
         if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
         if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
@@ -106,7 +118,13 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 const modelDef = cloudModels.find(m => m.id === path);
                 if (!modelDef) return;
 
-                const brain = modelDef.family.toLowerCase();
+                const id = modelDef.id.toLowerCase();
+                const brain = id.startsWith("openrouter-") ? "openrouter" :
+                    id.startsWith("groq-") ? "groq" :
+                        id.startsWith("anthropic-") ? "anthropic" :
+                            id.startsWith("openai-") ? "openai" :
+                                id.startsWith("google-") ? "gemini" :
+                                    modelDef.family.toLowerCase();
                 const modelId = modelDef.id.split('-').slice(1).join('-');
 
                 const newConfig = {
@@ -207,9 +225,16 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                     const filename = model.type === 'local' ? (model.name.split(/[\\/]/).pop() || model.name) : model.name;
                                     const def = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename) || k.id === model.id);
                                     const isRecommended = def?.recommendedForAgent;
+                                    const provider = model.id?.startsWith("openrouter-") ? "openrouter" :
+                                        model.id?.startsWith("groq-") ? "groq" :
+                                            model.id?.startsWith("anthropic-") ? "anthropic" :
+                                                model.id?.startsWith("openai-") ? "openai" :
+                                                    model.id?.startsWith("google-") ? "gemini" :
+                                                        model.family?.toLowerCase();
+
                                     const isActive = model.type === 'local'
                                         ? (model.path === modelPath && config?.selected_chat_provider === "local")
-                                        : (config?.selected_chat_provider === model.family?.toLowerCase() && status?.selected_cloud_model === model.id?.split('-').slice(1).join('-'));
+                                        : (config?.selected_chat_provider === provider && status?.selected_cloud_model === model.id?.split('-').slice(1).join('-'));
 
                                     return (
                                         <button

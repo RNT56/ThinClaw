@@ -2,6 +2,7 @@ use crate::sidecar::SidecarManager;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{ipc::Channel, State};
+use tracing::info;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct AttachedDoc {
@@ -60,12 +61,11 @@ pub async fn chat_stream(
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
+    info!("[chat_stream] Starting chat_stream command...");
+
     // Acquisition of Global Generation Lock (Queuing)
     let _guard = state.generation_lock.lock().await;
-
-    // Default to Local Sidecar
-    let (port, mut token, mut context_size) =
-        state.get_chat_config().ok_or("Chat server not running")?;
+    info!("[chat_stream] Generation lock acquired.");
 
     // Reset Cancellation Token for the CURRENT active job
     state
@@ -79,8 +79,12 @@ pub async fn chat_stream(
     let user_config = config.get_config();
 
     // Provider Routing Logic
-    let (kind, base_url, model_name) = match user_config.selected_chat_provider.as_deref() {
+    let (kind, base_url, model_name, _port, token, context_size) = match user_config
+        .selected_chat_provider
+        .as_deref()
+    {
         Some("anthropic") => {
+            info!("[chat_stream] Routing to Anthropic");
             let claw_cfg = clawdbot
                 .get_config()
                 .await
@@ -88,17 +92,19 @@ pub async fn chat_stream(
             let key = claw_cfg
                 .anthropic_api_key
                 .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
-            token = key;
-            context_size = 200000; // Cloud context
             (
                 crate::rig_lib::unified_provider::ProviderKind::Anthropic,
                 "https://api.anthropic.com/v1".to_string(),
                 claw_cfg
                     .selected_cloud_model
                     .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
+                0,
+                key,
+                200000,
             )
         }
         Some("openai") => {
+            info!("[chat_stream] Routing to OpenAI");
             let claw_cfg = clawdbot
                 .get_config()
                 .await
@@ -106,17 +112,19 @@ pub async fn chat_stream(
             let key = claw_cfg
                 .openai_api_key
                 .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
-            token = key;
-            context_size = 128000;
             (
                 crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 "https://api.openai.com/v1".to_string(),
                 claw_cfg
                     .selected_cloud_model
                     .unwrap_or_else(|| "gpt-4o".to_string()),
+                0,
+                key,
+                128000,
             )
         }
         Some("openrouter") => {
+            info!("[chat_stream] Routing to OpenRouter");
             let claw_cfg = clawdbot
                 .get_config()
                 .await
@@ -124,17 +132,19 @@ pub async fn chat_stream(
             let key = claw_cfg
                 .openrouter_api_key
                 .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
-            token = key;
-            context_size = 128000;
             (
-                crate::rig_lib::unified_provider::ProviderKind::OpenAI,
+                crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
                 "https://openrouter.ai/api/v1".to_string(),
                 claw_cfg
                     .selected_cloud_model
-                    .unwrap_or_else(|| "anthropic/claude-3.5-sonnet".to_string()),
+                    .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string()),
+                0,
+                key,
+                128000,
             )
         }
         Some("gemini") => {
+            info!("[chat_stream] Routing to Gemini");
             let claw_cfg = clawdbot
                 .get_config()
                 .await
@@ -142,17 +152,19 @@ pub async fn chat_stream(
             let key = claw_cfg
                 .gemini_api_key
                 .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
-            token = key;
-            context_size = 128000;
             (
                 crate::rig_lib::unified_provider::ProviderKind::Gemini,
                 "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
                 claw_cfg
                     .selected_cloud_model
                     .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
+                0,
+                key,
+                128000,
             )
         }
         Some("groq") => {
+            info!("[chat_stream] Routing to Groq");
             let claw_cfg = clawdbot
                 .get_config()
                 .await
@@ -160,23 +172,27 @@ pub async fn chat_stream(
             let key = claw_cfg
                 .groq_api_key
                 .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
-            token = key;
-            context_size = 128000;
             (
                 crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 "https://api.groq.com/openai/v1".to_string(),
                 claw_cfg
                     .selected_cloud_model
                     .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
+                0,
+                key,
+                128000,
             )
         }
         _ => {
-            // Local case - ensure local and cloud are checked
-            let _ = state.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
+            info!("[chat_stream] Routing to Local Provider");
+            let cfg = state.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
             (
                 crate::rig_lib::unified_provider::ProviderKind::Local,
-                format!("http://127.0.0.1:{}/v1", port),
+                format!("http://127.0.0.1:{}/v1", cfg.0),
                 "default".to_string(),
+                cfg.0,
+                cfg.1,
+                cfg.2,
             )
         }
     };
@@ -328,10 +344,14 @@ pub async fn chat_stream(
     let effective_auto_mode = payload.auto_mode || payload.web_search_enabled || has_context;
     let enable_tools = effective_auto_mode; // Or always true? Tools are gated by permissions anyway.
 
+    info!(
+        "[chat_stream] Creating RigManager for model: {}",
+        &model_name
+    );
     let manager = RigManager::new(
         kind,
         base_url,
-        model_name,
+        model_name.clone(),
         Some(app.clone()),
         Some(token.clone()),
         context_size as usize,
@@ -389,6 +409,7 @@ pub async fn chat_stream(
         .map(|p| p.instructions.clone())
         .unwrap_or_else(|| crate::personas::get_persona_instructions(&persona_name).to_string());
 
+    info!("[chat_stream] Starting orchestrator turn...");
     match orchestrator
         .run_turn(
             processing_messages,
@@ -400,6 +421,7 @@ pub async fn chat_stream(
         .await
     {
         Ok(mut stream) => {
+            info!("[chat_stream] Orchestrator turn started.");
             if payload.auto_mode || has_context {
                 if let Some(id) = &payload.conversation_id {
                     let _ = app.emit(

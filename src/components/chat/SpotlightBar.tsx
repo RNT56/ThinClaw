@@ -7,9 +7,11 @@ import { commands } from '../../lib/bindings';
 import ReactMarkdown from 'react-markdown';
 import { toast } from 'sonner';
 import { useModelContext } from '../model-context';
+import { useConfig } from '../../hooks/use-config';
 
 export function SpotlightBar() {
     const { messages, isStreaming, sendMessage, clearMessages, modelRunning, currentConversationId, deleteConversation } = useChat();
+    const { config: userCfg } = useConfig();
     const { currentModelPath, maxContext } = useModelContext();
     const [input, setInput] = useState("");
     const inputRef = useRef<HTMLInputElement>(null);
@@ -38,7 +40,9 @@ export function SpotlightBar() {
     const handleSend = async () => {
         if (!input.trim() || isStreaming) return;
 
-        if (!modelRunning) {
+        const isCloud = userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local";
+
+        if (!modelRunning && !isCloud) {
             if (currentModelPath === "auto") {
                 toast.info("Initializing neural link...");
                 try {
@@ -180,7 +184,7 @@ export function SpotlightBar() {
                     {/* Input Bar */}
                     <div className="flex items-center gap-3 px-6 py-4 min-h-[64px]">
                         <div className="w-2 h-2 rounded-full transition-all duration-500 flex-shrink-0"
-                            style={{ backgroundColor: modelRunning ? '#10b981' : 'rgba(255,255,255,0.1)' }} />
+                            style={{ backgroundColor: (modelRunning || (userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local")) ? '#10b981' : 'rgba(255,255,255,0.1)' }} />
 
                         <input
                             ref={inputRef}

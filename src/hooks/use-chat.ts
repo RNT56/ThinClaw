@@ -184,12 +184,15 @@ export function useChat() {
                 if (payload.service === "chat" && isRestarting) return;
                 if (payload.service === "chat") {
                     setModelRunning(false);
-                    toast.error("Chat Server Crashed", {
-                        id: "chat-crashed",
-                        description: `The local AI server stopped unexpectedly.`,
-                        action: { label: "Restart", onClick: () => startServer(currentModelPath) },
-                        duration: Infinity,
-                    });
+                    // Only show crash toast if we are actually using local provider
+                    if (config?.selected_chat_provider === "local") {
+                        toast.error("Chat Server Crashed", {
+                            id: "chat-crashed",
+                            description: `The local AI server stopped unexpectedly.`,
+                            action: { label: "Restart", onClick: () => startServer(currentModelPath) },
+                            duration: Infinity,
+                        });
+                    }
                 }
             } else if (payload.type === "Started") {
                 if (payload.service === "chat") {

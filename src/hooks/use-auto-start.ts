@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
 import { commands } from "../lib/bindings";
 import { useModelContext } from "../components/model-context";
+import { useConfig } from "./use-config";
 import { toast } from "sonner";
 
 export function useAutoStart() {
+    const { config } = useConfig();
     const { currentModelPath: modelPath, currentEmbeddingModelPath: embeddingPath, currentModelTemplate: template, maxContext, setIsRestarting, models, modelsDir } = useModelContext();
     const cleanPath = modelPath.trim();
     const cleanEmbeddingPath = embeddingPath.trim();
@@ -22,6 +24,11 @@ export function useAutoStart() {
             lastStartedTemplate.current === template &&
             lastStartedContext.current === maxContext
         ) return;
+
+        // Skip if using a cloud provider
+        if (config?.selected_chat_provider && config.selected_chat_provider !== "local") {
+            return;
+        }
 
         const init = async () => {
             console.log("[AutoStart] Triggered for context:", maxContext);
@@ -91,5 +98,5 @@ export function useAutoStart() {
         // Debounce slightly to avoid rapid switching churn and allow app hydration
         const timer = setTimeout(init, 1500);
         return () => clearTimeout(timer);
-    }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir]);
+    }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir, config?.selected_chat_provider]);
 }

@@ -147,8 +147,13 @@ impl ScrapePageTool {
         let handler_handle = tokio::task::spawn(async move {
             while let Some(h) = handler.next().await {
                 if let Err(e) = h {
-                    eprintln!("Chromium handler error: {}", e);
-                    // Do not break on deserialization errors, just continue
+                    // Filter out common protocol noise
+                    let err_str = e.to_string();
+                    if !err_str.contains("untagged enum Message")
+                        && !err_str.contains("Channel closed")
+                    {
+                        eprintln!("Chromium handler error: {}", err_str);
+                    }
                 }
             }
         });
@@ -218,8 +223,13 @@ impl ScrapePageTool {
                 };
                 let (mut browser, handler) = scraper.launch_browser().await?;
                 let res = scraper.scrape_url(&browser, &url).await;
+
+                // Systematic Cleanup
                 let _ = browser.close().await;
                 let _ = handler.await;
+                // Small sleep to ensure the OS handles the socket cleanup before dropping the runtime
+                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
                 res
             })
         })

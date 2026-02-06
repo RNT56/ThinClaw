@@ -3,6 +3,7 @@ use rig::completion::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct LlamaProvider {
@@ -18,6 +19,13 @@ impl LlamaProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
         }
+    }
+
+    fn is_reasoning_model(&self) -> bool {
+        let m = self.model.to_lowercase();
+        // OpenAI o1/o3 and models with gpt-5 in the name (often used as placeholders for latest)
+        // do not support temperature values other than 1.
+        m.starts_with("o1-") || m.starts_with("o3-") || m == "o1" || m.contains("gpt-5")
     }
 }
 
@@ -171,16 +179,29 @@ impl CompletionModel for LlamaProvider {
             ]),
         };
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
         let url = format!("{}/chat/completions", self.base_url);
 
-        let resp = client
+        let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .json(&body);
+
+        if self.base_url.contains("openrouter.ai") {
+            request_builder = request_builder
+                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("X-Title", "Scrappy AI Desktop");
+        }
+
+        let resp = request_builder.send().await.map_err(|e| {
+            CompletionError::ProviderError(format!(
+                "Network Error: {}. Check your connection and API key.",
+                e
+            ))
+        })?;
 
         if !resp.status().is_success() {
             return Err(CompletionError::ProviderError(format!(
@@ -254,7 +275,10 @@ impl LlamaProvider {
         use eventsource_stream::Eventsource;
         use futures::StreamExt;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.to_string())?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -288,7 +312,20 @@ impl LlamaProvider {
         for msg in history {
             match msg.role.as_str() {
                 "system" => {
-                    push_msg("user", format!("[SYSTEM INSTRUCTIONS]\n{}", msg.content));
+                    // Use "system" role if not local
+                    let target_role = if self.base_url.contains("127.0.0.1")
+                        || self.base_url.contains("localhost")
+                    {
+                        "user"
+                    } else {
+                        "system"
+                    };
+
+                    if target_role == "user" {
+                        push_msg("user", format!("[SYSTEM INSTRUCTIONS]\n{}", msg.content));
+                    } else {
+                        push_msg("system", msg.content);
+                    }
                 }
                 "tool" => {
                     // Turn 3: Fake Assistant acknowledgement
@@ -312,35 +349,56 @@ impl LlamaProvider {
         }
         push_msg("user", prompt);
 
+        // For Cloud models (OpenAI/Anthropic compat), we should be careful with stop sequences
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+
         let body = LlamaChatRequest {
-            messages,
+            messages: messages.clone(),
             model: self.model.clone(),
             stream: true,
             temperature: None,
             top_p: None,
             tools: vec![],
-            stop: Some(vec![
-                "<|im_start|>".to_string(),
-                "<|im_end|>".to_string(),
-                "<|endoftext|>".to_string(),
-                "<|user|>".to_string(),
-                "<|assistant|>".to_string(),
-                "user\n".to_string(),
-                "assistant\n".to_string(),
-                "&lt;|im_start|&gt;".to_string(),
-                "&lt;|im_end|&gt;".to_string(),
-            ]),
+            stop: if is_local {
+                Some(vec![
+                    "<|im_start|>".to_string(),
+                    "<|im_end|>".to_string(),
+                    "<|endoftext|>".to_string(),
+                    "<|user|>".to_string(),
+                    "<|assistant|>".to_string(),
+                    "user\n".to_string(),
+                    "assistant\n".to_string(),
+                    "&lt;|im_start|&gt;".to_string(),
+                    "&lt;|im_end|&gt;".to_string(),
+                ])
+            } else {
+                None
+            },
         };
 
-        let stream = client
+        let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
+            .json(&body);
+
+        if self.base_url.contains("openrouter.ai") {
+            request_builder = request_builder
+                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("X-Title", "Scrappy AI Desktop");
+        }
+
+        let response = request_builder
             .send()
             .await
-            .map_err(|e| e.to_string())?
-            .bytes_stream()
-            .eventsource();
+            .map_err(|e| format!("Connection Failed: {}. Check your internet or API key.", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_default();
+            return Err(format!("API Error {}: {}", status, err_text));
+        }
+
+        let stream = response.bytes_stream().eventsource();
 
         Ok(stream
             .map(|event| {
@@ -374,26 +432,16 @@ impl LlamaProvider {
     }
 
     pub async fn count_tokens(&self, messages: Vec<serde_json::Value>) -> Result<u32, String> {
-        let client = reqwest::Client::new();
-        // Handle llama-server quirk: /tokenize is at root, but base_url usually ends in /v1 for chat
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3)) // Very short timeout for tokenization
+            .build()
+            .map_err(|e| e.to_string())?;
+
         let url = if self.base_url.ends_with("/v1") {
             format!("{}/tokenize", self.base_url.trim_end_matches("/v1"))
         } else {
             format!("{}/tokenize", self.base_url)
         };
-
-        // Pre-parse content strings for potential JSON/Image arrays
-        // Note: The /tokenize endpoint might expect raw text or a specific format.
-        // Usually, llama.cpp server /tokenize expects {"content": "text"}.
-        // But for chat history, we might need to serialize the whole thing.
-        // Actually, the standard llama.cpp server endpoint /tokenize expects `content`.
-        // If we want to count tokens for a whole chat, we rely on the fact that /tokenize handles one string.
-        // We will approximate by joining messages or assume strict format.
-        // Optimization: For now, we serialize messages to a string as a close-enough approximation for check
-        // OR better: iterate and sum.
-        // But the best is if the server supports `/extras/tokenize` or similar.
-        // Standard OAI compat doesn't have a count endpoint.
-        // llama.cpp has POST /tokenize with json body { content: "..." }.
 
         let mut total_tokens = 0;
         for msg in messages {
@@ -413,18 +461,30 @@ impl LlamaProvider {
             total_tokens += 4;
 
             if !content_str.is_empty() {
+                // Approximate for cloud providers (no /tokenize)
+                if !self.base_url.contains("127.0.0.1") && !self.base_url.contains("localhost") {
+                    total_tokens += (content_str.len() / 4) as u32;
+                    continue;
+                }
+
                 let res = client
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .json(&json!({ "content": content_str }))
                     .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    .await;
 
-                if res.status().is_success() {
-                    let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-                    if let Some(tokens) = body["tokens"].as_array() {
-                        total_tokens += tokens.len() as u32;
+                match res {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(body) = r.json::<serde_json::Value>().await {
+                            if let Some(tokens) = body["tokens"].as_array() {
+                                total_tokens += tokens.len() as u32;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Fallback to char count on error/timeout
+                        total_tokens += (content_str.len() / 4) as u32;
                     }
                 }
             }
@@ -444,12 +504,29 @@ impl LlamaProvider {
         use eventsource_stream::Eventsource;
         use futures::StreamExt;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(45))
+            .build()
+            .map_err(|e| e.to_string())?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut final_messages = Vec::new();
         for msg in messages {
             let mut m = msg.clone();
+            // Map "system" role if cloud
+            if !self.base_url.contains("127.0.0.1") && !self.base_url.contains("localhost") {
+                if m["role"] == "system" {
+                    m["role"] = json!("system");
+                }
+            } else {
+                if m["role"] == "system" {
+                    m["role"] = json!("user");
+                    if let Some(c) = m["content"].as_str() {
+                        m["content"] = json!(format!("[SYSTEM INSTRUCTIONS]\n{}", c));
+                    }
+                }
+            }
+
             if let Some(content_str) = m["content"].as_str() {
                 if content_str.trim().starts_with('[') {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content_str) {
@@ -462,39 +539,69 @@ impl LlamaProvider {
             final_messages.push(m);
         }
 
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+
+        let effective_temp = if self.is_reasoning_model() {
+            None
+        } else {
+            temperature
+        };
+
         let body = LlamaChatRequest {
             messages: final_messages,
             model: self.model.clone(),
             stream: true,
-            temperature,
+            temperature: effective_temp,
             top_p: None,
             tools: vec![],
-            stop: Some(vec![
-                "<|im_start|>".to_string(),
-                "<|im_end|>".to_string(),
-                "<|endoftext|>".to_string(),
-                "<|user|>".to_string(),
-                "<|assistant|>".to_string(),
-                "<|end_of_text|>".to_string(),
-                "<|eot_id|>".to_string(),
-                "user\n".to_string(),
-                "assistant\n".to_string(),
-                "&lt;|im_start|&gt;".to_string(),
-                "&lt;|im_end|&gt;".to_string(),
-                "&lt;|user|&gt;".to_string(),
-                "&lt;|assistant|&gt;".to_string(),
-            ]),
+            stop: if is_local {
+                Some(vec![
+                    "<|im_start|>".to_string(),
+                    "<|im_end|>".to_string(),
+                    "<|endoftext|>".to_string(),
+                    "<|user|>".to_string(),
+                    "<|assistant|>".to_string(),
+                    "<|end_of_text|>".to_string(),
+                    "<|eot_id|>".to_string(),
+                    "user\n".to_string(),
+                    "assistant\n".to_string(),
+                ])
+            } else {
+                None
+            },
         };
 
-        let stream = client
+        info!(
+            "[llama_provider] Sending request to model: {} at url: {}",
+            self.model, url
+        );
+        let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .bytes_stream()
-            .eventsource();
+            .json(&body);
+
+        if self.base_url.contains("openrouter.ai") {
+            request_builder = request_builder
+                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("X-Title", "Scrappy AI Desktop");
+        }
+
+        let response = request_builder.send().await.map_err(|e| {
+            error!("[llama_provider] Network error: {}", e);
+            format!(
+                "Request failed: {}. Check model name '{}' and API key.",
+                e, self.model
+            )
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_text = response.text().await.unwrap_or_default();
+            error!("[llama_provider] API Error ({}): {}", status, err_text);
+            return Err(format!("OpenAI API Error ({}): {}", status, err_text));
+        }
+
+        let stream = response.bytes_stream().eventsource();
 
         Ok(stream
             .map(|event| match event {

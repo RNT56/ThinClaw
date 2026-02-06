@@ -772,7 +772,9 @@ impl ClawdbotConfig {
                     "models": [
                         { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet (via OR)" },
                         { "id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (via OR)" },
-                        { "id": "deepseek/deepseek-chat", "name": "DeepSeek V3 (via OR)" }
+                        { "id": "deepseek/deepseek-r1", "name": "DeepSeek R1 (via OR)" },
+                        { "id": "moonshotai/kimi-k2.5", "name": "Kimi K2.5 (via OR)" },
+                        { "id": "moonshotai/kimi-k2.5:nitro", "name": "Kimi K2.5 (Nitro) (via OR)" }
                     ]
                 }),
             );

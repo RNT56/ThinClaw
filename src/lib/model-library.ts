@@ -925,20 +925,29 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
     },
     // --- CLOUD BRAINS ---
     {
-        id: "anthropic-claude-4.5-sonnet",
-        name: "Claude 4.5 Sonnet",
+        id: "anthropic-claude-sonnet-4-5",
+        name: "Claude Sonnet 4.5",
         description: "Anthropic's most intelligent model. Superior reasoning, coding, and creative writing.",
         family: "Anthropic",
-        tags: ["Cloud", "SOTA", "Vision"],
+        tags: ["Cloud", "SOTA", "Sonnet"],
         category: "Cloud",
         variants: []
     },
     {
-        id: "anthropic-claude-4.5-opus",
-        name: "Claude 4.5 Opus",
+        id: "anthropic-claude-opus-4-6",
+        name: "Claude Opus 4.6",
         description: "Anthropic's most powerful model for highly complex tasks.",
         family: "Anthropic",
-        tags: ["Cloud", "Expert"],
+        tags: ["Cloud", "Opus", "4.6"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "anthropic-claude-haiku-4-5",
+        name: "Claude Haiku 4.5",
+        description: "Anthropic's smallest and fastest model, ideal for quick responses and high-throughput tasks.",
+        family: "Anthropic",
+        tags: ["Cloud", "Fast", "Haiku"],
         category: "Cloud",
         variants: []
     },
@@ -952,8 +961,8 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         variants: []
     },
     {
-        id: "openai-gpt-5.2-mini",
-        name: "GPT-5.2 Mini",
+        id: "openai-gpt-5-mini",
+        name: "GPT-5 Mini",
         description: "OpenAI's efficient model. High performance for a small price.",
         family: "OpenAI",
         tags: ["Cloud", "Fast", "Efficient"],
@@ -961,8 +970,8 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         variants: []
     },
     {
-        id: "openai-gpt-5.2-nano",
-        name: "GPT-5.2 Nano",
+        id: "openai-gpt-5-nano",
+        name: "GPT-5 Nano",
         description: "OpenAI's new smallest model for fast reasoning and coding tasks.",
         family: "OpenAI",
         tags: ["Cloud", "Reasoning", "Fast"],
@@ -970,8 +979,8 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         variants: []
     },
     {
-        id: "google-gemini-3.0-flash",
-        name: "Gemini 3.0 Flash",
+        id: "google-gemini-3-flash-preview",
+        name: "Gemini 3 Flash Preview",
         description: "Google's high-speed model with 1M+ context window and advanced multi-modality.",
         family: "Gemini",
         tags: ["Cloud", "Long Context", "Fast"],
@@ -979,8 +988,8 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         variants: []
     },
     {
-        id: "google-gemini-3.0-pro",
-        name: "Gemini 3.0 Pro",
+        id: "google-gemini-3-pro-preview",
+        name: "Gemini 3 Pro Preview",
         description: "Google's most capable model with massive context window (2M+).",
         family: "Gemini",
         tags: ["Cloud", "Long Context", "Advanced"],
@@ -991,8 +1000,44 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         id: "groq-llama-3.3-70b-versatile",
         name: "Llama 3.3 70B (Groq)",
         description: "Meta's powerful open model hosted on Groq for ultra-fast inference.",
-        family: "Groq",
+        family: "Llama",
         tags: ["Cloud", "Open Model", "Ultra-Fast"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-meta-llama/llama-4-maverick-17b-128e-instruct",
+        name: "Llama 4 Maverick 17B (Groq)",
+        description: "Meta's next-gen multimodal model optimized for multilingual and high-quality generation.",
+        family: "Llama",
+        tags: ["Cloud", "Llama 4", "Multimodal"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-meta-llama/llama-4-scout-17b-16e-instruct",
+        name: "Llama 4 Scout 17B (Groq)",
+        description: "Meta's efficient Llama 4 variant for fast reasoning and text/image understanding.",
+        family: "Llama",
+        tags: ["Cloud", "Llama 4", "Efficient"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-moonshotai/kimi-k2-instruct-0905",
+        name: "Kimi K2-0905 (Groq)",
+        description: "Moonshot AI's state-of-the-art MoE model, excelling in tool use and autonomous problem-solving.",
+        family: "Kimi",
+        tags: ["Cloud", "MoE", "Agentic"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "groq-openai/gpt-oss-120b",
+        name: "GPT-OSS-120B (Groq)",
+        description: "OpenAI's high-capability open-weight MoE model for ultra-fast reasoning and code execution.",
+        family: "GPT",
+        tags: ["Cloud", "MoE", "SOTA"],
         category: "Cloud",
         variants: []
     },
@@ -1000,8 +1045,26 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         id: "groq-mixtral-8x7b-32768",
         name: "Mixtral 8x7B (Groq)",
         description: "High-quality MoE model optimized for speed on Groq hardware.",
-        family: "Groq",
+        family: "Mistral",
         tags: ["Cloud", "Open Model", "Fast"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "openrouter-moonshotai/kimi-k2.5",
+        name: "Kimi K2.5 (OpenRouter)",
+        description: "Moonshot AI's latest state-of-the-art model, excelling in reasoning and long-context understanding.",
+        family: "Kimi",
+        tags: ["Cloud", "SOTA", "Reasoning", "OpenRouter"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "openrouter-moonshotai/kimi-k2.5:nitro",
+        name: "Kimi K2.5 (Nitro/OR)",
+        description: "A faster, nitro-powered version of Kimi K2.5 for rapid inference.",
+        family: "Kimi",
+        tags: ["Cloud", "Fast", "Nitro", "OpenRouter"],
         category: "Cloud",
         variants: []
     },
