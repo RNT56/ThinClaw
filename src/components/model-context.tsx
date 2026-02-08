@@ -84,6 +84,47 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [modelsDir, setModelsDir] = useState<string | null>(null);
     const [downloadSpeed, _setDownloadSpeed] = useState("");
     const [standardAssets, setStandardAssets] = useState<StandardAsset[]>([]);
+    const [models, setModels] = useState<ModelDefinition[]>(MODEL_LIBRARY);
+
+    const syncRemoteCatalog = useCallback(async () => {
+        try {
+            // Check if server is available (currently hardcoded as per spec)
+            const health = await fetch("http://localhost:8000/api/v1/health").catch(() => null);
+            if (!health || !health.ok) {
+                // Fallback to local DB cache
+                const cached = await (commands as any).getRemoteModelCatalog();
+                if (cached?.status === "ok" && cached.data.length > 0) {
+                    setModels(cached.data.map((e: any) => e.metadata as ModelDefinition));
+                }
+                return;
+            }
+
+            const response = await fetch("http://localhost:8000/api/v1/models");
+            if (response.ok) {
+                const remoteModels: ModelDefinition[] = await response.json();
+                setModels(remoteModels);
+
+                // Persist to local DB for offline access
+                const entries = remoteModels.map(m => ({
+                    id: m.id,
+                    name: m.name,
+                    metadata: m,
+                    local_version: null,
+                    remote_version: (m as any).version || "1.0.0",
+                    last_checked_at: Math.floor(Date.now() / 1000),
+                    status: 'available'
+                }));
+
+                await (commands as any).updateRemoteModelCatalog(entries);
+            }
+        } catch (e) {
+            console.warn("Failed to sync remote model catalog:", e);
+        }
+    }, []);
+
+    useEffect(() => {
+        syncRemoteCatalog();
+    }, [syncRemoteCatalog]);
 
     const checkStandardAssets = useCallback(async () => {
         try {
@@ -111,7 +152,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     // }, []);
 
     const selectModel = (modelId: string) => {
-        const model = MODEL_LIBRARY.find(m => m.id === modelId);
+        const model = models.find(m => m.id === modelId);
         if (model) setCurrentModel(model);
     };
 
@@ -316,16 +357,16 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
                     // Check if we need to recommend
                     const hasChecked = localStorage.getItem(FIRST_RUN_KEY);
-                    const models = await refreshModels();
+                    const localFiles = await refreshModels();
 
-                    if (!hasChecked && models.length === 0) {
+                    if (!hasChecked && localFiles.length === 0) {
                         const ramGB = specs.total_memory / (1024 * 1024 * 1024);
 
                         let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
                         if (ramGB >= 24) recommendedId = "gemma-3-27b-it-qat";
                         else if (ramGB >= 8) recommendedId = "gemma-3-12b-it-qat";
 
-                        const model = MODEL_LIBRARY.find(m => m.id === recommendedId);
+                        const model = models.find(m => m.id === recommendedId);
 
                         if (model) {
                             toast("Hardware Detected", {
@@ -421,7 +462,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     return (
         <ModelContext.Provider value={{
-            models: MODEL_LIBRARY,
+            models,
             localModels,
             downloading,
             currentModelPath,

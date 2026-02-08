@@ -78,6 +78,8 @@ pub struct ScrappyIdentity {
     pub selected_cloud_model: Option<String>,
     #[serde(default)]
     pub auto_start_gateway: bool,
+    #[serde(default)]
+    pub dev_mode_wizard: bool,
 }
 
 /// Clawdbot configuration manager
@@ -128,6 +130,7 @@ pub struct ClawdbotConfig {
     pub selected_cloud_brain: Option<String>,
     pub selected_cloud_model: Option<String>,
     pub auto_start_gateway: bool,
+    pub dev_mode_wizard: bool,
 }
 
 /// Slack connector configuration
@@ -394,6 +397,7 @@ impl ClawdbotConfig {
             selected_cloud_brain: identity.selected_cloud_brain,
             selected_cloud_model: identity.selected_cloud_model,
             auto_start_gateway: identity.auto_start_gateway,
+            dev_mode_wizard: identity.dev_mode_wizard,
         }
     }
 
@@ -527,6 +531,11 @@ impl ClawdbotConfig {
         self.save_identity()
     }
 
+    pub fn set_dev_mode_wizard(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.dev_mode_wizard = enabled;
+        self.save_identity()
+    }
+
     pub fn save_identity(&self) -> std::io::Result<()> {
         let id_path = self.base_dir.join("state").join("identity.json");
         println!("[clawdbot] saving identity to: {:?}", id_path);
@@ -560,6 +569,7 @@ impl ClawdbotConfig {
             huggingface_token: self.huggingface_token.clone(),
             huggingface_granted: self.huggingface_granted,
             auto_start_gateway: self.auto_start_gateway,
+            dev_mode_wizard: self.dev_mode_wizard,
         };
         if let Ok(json) = serde_json::to_string_pretty(&identity) {
             std::fs::write(id_path, json)?;

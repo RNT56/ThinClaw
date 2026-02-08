@@ -39,6 +39,7 @@ export interface ClawdbotStatus {
     selected_cloud_brain: string | null;
     setup_completed: boolean;
     auto_start_gateway: boolean;
+    dev_mode_wizard: boolean;
 }
 
 export interface SlackConfigInput {
@@ -415,4 +416,8 @@ export async function setSetupCompleted(completed: boolean): Promise<void> {
 
 export async function toggleClawdbotAutoStart(enabled: boolean): Promise<void> {
     return invoke('clawdbot_toggle_auto_start', { enabled });
+}
+
+export async function setDevModeWizard(enabled: boolean): Promise<void> {
+    return invoke('clawdbot_set_dev_mode_wizard', { enabled });
 }

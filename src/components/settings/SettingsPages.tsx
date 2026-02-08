@@ -26,7 +26,8 @@ import {
     ShieldAlert,
     Box,
     Command,
-    Sparkles
+    Sparkles,
+    FlaskConical
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
 import { useState, useEffect, useCallback } from 'react';
@@ -827,12 +828,27 @@ function TroubleshootingSettings() {
     const [status, setStatus] = useState<SidecarStatus | null>(null);
     const [pathValid, setPathValid] = useState<boolean | null>(null);
 
+    const [clawStatus, setClawStatus] = useState<clawdbot.ClawdbotStatus | null>(null);
+
     const checkStatus = async () => {
         try {
             const s = await commands.getSidecarStatus();
             setStatus(s);
+            const cs = await clawdbot.getClawdbotStatus();
+            setClawStatus(cs);
         } catch (e) {
             console.error(e);
+        }
+    };
+
+    const toggleDevMode = async (enabled: boolean) => {
+        try {
+            await clawdbot.setDevModeWizard(enabled);
+            const cs = await clawdbot.getClawdbotStatus();
+            setClawStatus(cs);
+            toast.success(enabled ? "Dev mode onboarding enabled" : "Dev mode onboarding disabled");
+        } catch (e) {
+            toast.error("Failed to update dev mode");
         }
     };
 
@@ -917,6 +933,34 @@ function TroubleshootingSettings() {
                             {pathValid === false && <XCircle className="h-5 w-5 text-rose-600 dark:text-rose-400" />}
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <div className="p-6 border border-rose-500/20 rounded-xl bg-card/50 space-y-4 shadow-sm">
+                <div className="flex items-center gap-2 mb-2">
+                    <FlaskConical className="w-5 h-5 text-rose-500" />
+                    <h4 className="font-semibold text-rose-500 dark:text-rose-400">Developer Settings</h4>
+                </div>
+
+                <div className="flex items-center justify-between p-4 bg-muted/30 rounded-xl border border-border/50">
+                    <div className="space-y-1">
+                        <span className="text-sm font-medium">Always show Onboarding Wizard</span>
+                        <p className="text-xs text-muted-foreground">Force the onboarding flow to run every time Scrappy starts.</p>
+                    </div>
+                    <button
+                        onClick={() => toggleDevMode(!clawStatus?.dev_mode_wizard)}
+                        className={cn(
+                            "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                            clawStatus?.dev_mode_wizard ? "bg-primary" : "bg-muted"
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                clawStatus?.dev_mode_wizard ? "translate-x-6" : "translate-x-1"
+                            )}
+                        />
+                    </button>
                 </div>
             </div>
         </div>

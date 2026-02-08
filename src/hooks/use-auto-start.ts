@@ -14,55 +14,61 @@ export function useAutoStart() {
     const lastStartedEmbeddingPath = useRef<string | null>(null);
     const lastStartedTemplate = useRef<string | null>(null);
     const lastStartedContext = useRef<number | null>(null);
+    const lastStartedProvider = useRef<string | null>(null);
 
     useEffect(() => {
         if (!cleanPath) return;
 
-        // If we already started this exact configuration, skip
+        // Skip if using a cloud provider
+        if (config?.selected_chat_provider && config.selected_chat_provider !== "local") {
+            console.log("[AutoStart] Cloud provider selected, skipping local init.");
+            lastStartedProvider.current = config.selected_chat_provider;
+            setIsRestarting(false);
+            return;
+        }
+
+        // If we already started this exact local configuration, just ensure we're not stuck in restarting state
         if (lastStartedPath.current === cleanPath &&
             lastStartedEmbeddingPath.current === cleanEmbeddingPath &&
             lastStartedTemplate.current === template &&
-            lastStartedContext.current === maxContext
-        ) return;
-
-        // Skip if using a cloud provider
-        if (config?.selected_chat_provider && config.selected_chat_provider !== "local") {
+            lastStartedContext.current === maxContext &&
+            lastStartedProvider.current === "local"
+        ) {
+            setIsRestarting(false);
             return;
         }
 
         const init = async () => {
-            console.log("[AutoStart] Triggered for context:", maxContext);
-            lastStartedPath.current = cleanPath;
-            lastStartedEmbeddingPath.current = cleanEmbeddingPath;
-            lastStartedTemplate.current = template;
-            lastStartedContext.current = maxContext;
+            console.log("[AutoStart] Initializing Local AI:", cleanPath);
 
             try {
+                // Ensure UI is blocked during init
                 setIsRestarting(true);
+
                 // Check if valid
                 const isValid = await commands.checkModelPath(cleanPath);
                 if (!isValid) {
                     setIsRestarting(false);
                     console.warn("[AutoStart] Invalid model path:", cleanPath);
                     toast.error("Model path invalid", {
-                        description: "Please select a valid model in Settings."
+                        description: "Check your model path in Settings.",
+                        id: "model-path-error"
                     });
                     return;
                 }
 
                 await commands.getSidecarStatus();
-
-                const toastId = toast.loading(`Starting Local AI (${maxContext} tokens)...`);
+                const toastId = toast.loading(`Waking up ${cleanPath.split(/[\\/]/).pop()}...`, {
+                    description: `Context: ${maxContext} tokens`
+                });
 
                 // Determine mmproj path
                 let mmprojPath: string | null = null;
                 const modelDef = models.find(m => m.variants.some(v => cleanPath.endsWith(v.filename)));
                 if (modelDef && modelDef.mmproj) {
-                    // Try to infer directory from the model path
                     const slash = cleanPath.lastIndexOf('/');
                     const backslash = cleanPath.lastIndexOf('\\');
                     const separatorIndex = Math.max(slash, backslash);
-
                     if (separatorIndex !== -1) {
                         const dir = cleanPath.substring(0, separatorIndex);
                         mmprojPath = `${dir}/${modelDef.mmproj.filename}`;
@@ -71,32 +77,32 @@ export function useAutoStart() {
                     }
                 }
 
-                // Use user-defined context size (removing 32k enforcement to prevent OOM on low-spec machines)
-                try {
-                    await commands.startChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
-                    toast.success("AI Servers Ready", {
-                        id: toastId,
-                        description: `Chat: ${cleanPath.split('/').pop()}\nCtx: ${maxContext}`
-                    });
-                } catch (e) {
-                    throw e; // Let the outer catch handle it
-                }
+                await commands.startChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
 
-                // Allow events to settle
-                setTimeout(() => setIsRestarting(false), 2000);
+                // Track success
+                lastStartedPath.current = cleanPath;
+                lastStartedEmbeddingPath.current = cleanEmbeddingPath;
+                lastStartedTemplate.current = template;
+                lastStartedContext.current = maxContext;
+                lastStartedProvider.current = "local";
+
+                toast.success("AI Ready to chat", {
+                    id: toastId,
+                    description: `Server online with ${maxContext} ctx.`
+                });
 
             } catch (e) {
-                setIsRestarting(false);
                 console.error("[AutoStart] Failed:", e);
-                // We DON'T reset lastStartedPath here anymore to prevent infinite retry loops on a bad model/path
-                toast.error("Server Start Failed", {
-                    description: String(e),
-                });
+                toast.error("Server Start Failed", { description: String(e) });
+            } finally {
+                // Always unlock UI after attempt
+                setIsRestarting(false);
             }
         };
 
-        // Debounce slightly to avoid rapid switching churn and allow app hydration
-        const timer = setTimeout(init, 1500);
-        return () => clearTimeout(timer);
+        const timer = setTimeout(init, 500); // 500ms feel faster
+        return () => {
+            clearTimeout(timer);
+        };
     }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir, config?.selected_chat_provider]);
 }

@@ -9,6 +9,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ThemeProvider } from "./components/theme-provider";
 import { ModelProvider } from "./components/model-context";
 import { ChatProvider } from "./components/chat/chat-context";
+import { ConfigProvider } from "./components/config-context";
 
 function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -25,7 +26,8 @@ function App() {
     try {
       const status = await clawdbot.getClawdbotStatus();
       // If status is empty or setup_completed is missing/false, show wizard
-      if (!status || !status.setup_completed) {
+      // Also show if dev_mode_wizard is enabled
+      if (!status || !status.setup_completed || status.dev_mode_wizard) {
         setShowOnboarding(true);
       }
     } catch (e) {
@@ -47,28 +49,32 @@ function App() {
 
     return (
       <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
-        <ModelProvider>
-          <ChatProvider>
-            <SpotlightBar />
-            <Toaster closeButton position="top-right" />
-          </ChatProvider>
-        </ModelProvider>
+        <ConfigProvider>
+          <ModelProvider>
+            <ChatProvider>
+              <SpotlightBar />
+              <Toaster closeButton position="top-right" />
+            </ChatProvider>
+          </ModelProvider>
+        </ConfigProvider>
       </ThemeProvider>
     );
   }
 
   return (
     <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
-      <ModelProvider>
-        <ChatProvider>
-          {showOnboarding ? (
-            <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
-          ) : (
-            <ChatLayout />
-          )}
-          <Toaster closeButton />
-        </ChatProvider>
-      </ModelProvider>
+      <ConfigProvider>
+        <ModelProvider>
+          <ChatProvider>
+            {showOnboarding ? (
+              <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
+            ) : (
+              <ChatLayout />
+            )}
+            <Toaster closeButton position="top-right" richColors expand={true} />
+          </ChatProvider>
+        </ModelProvider>
+      </ConfigProvider>
     </ThemeProvider>
   );
 }

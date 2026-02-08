@@ -1,11 +1,10 @@
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-
 use specta::Type;
 
 #[derive(Serialize, Clone, Type)]
@@ -698,4 +697,77 @@ pub async fn download_standard_asset(
 #[specta::specta]
 pub async fn get_model_metadata(path: String) -> Result<crate::gguf::GGUFMetadata, String> {
     crate::gguf::read_gguf_metadata(&path)
+}
+
+#[derive(Serialize, Deserialize, Clone, Type)]
+pub struct RemoteModelEntry {
+    id: String,
+    name: String,
+    metadata: serde_json::Value,
+    local_version: Option<String>,
+    remote_version: Option<String>,
+    #[specta(type = Option<f64>)]
+    last_checked_at: Option<i64>,
+    status: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_remote_model_catalog(
+    pool: State<'_, sqlx::SqlitePool>,
+    entries: Vec<RemoteModelEntry>,
+) -> Result<(), String> {
+    for entry in entries {
+        let metadata_json = entry.metadata.to_string();
+        sqlx::query(
+            "INSERT INTO models_catalog (id, name, metadata, local_version, remote_version, last_checked_at, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                metadata = excluded.metadata,
+                remote_version = excluded.remote_version,
+                last_checked_at = excluded.last_checked_at,
+                status = excluded.status",
+        )
+        .bind(&entry.id)
+        .bind(&entry.name)
+        .bind(&metadata_json)
+        .bind(&entry.local_version)
+        .bind(&entry.remote_version)
+        .bind(entry.last_checked_at)
+        .bind(&entry.status)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_remote_model_catalog(
+    pool: State<'_, sqlx::SqlitePool>,
+) -> Result<Vec<RemoteModelEntry>, String> {
+    let rows = sqlx::query("SELECT id, name, metadata, local_version, remote_version, last_checked_at, status FROM models_catalog")
+        .fetch_all(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let entries = rows
+        .into_iter()
+        .map(|row| {
+             use sqlx::Row;
+             RemoteModelEntry {
+                id: row.try_get("id").unwrap_or_default(),
+                name: row.try_get("name").unwrap_or_default(),
+                metadata: serde_json::from_str(&row.try_get::<String, _>("metadata").unwrap_or_else(|_| "{}".to_string())).unwrap_or_default(),
+                local_version: row.try_get("local_version").ok(),
+                remote_version: row.try_get("remote_version").ok(),
+                last_checked_at: row.try_get("last_checked_at").ok(),
+                status: row.try_get("status").ok(),
+            }
+        })
+        .collect();
+
+    Ok(entries)
 }

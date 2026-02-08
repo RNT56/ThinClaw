@@ -1220,6 +1220,11 @@ export function ChatLayout() {
 
                                                             if (e.key === 'Enter' && !e.shiftKey) {
                                                                 e.preventDefault();
+
+                                                                // Don't send if button is disabled (blocks Enter while warming up/restarting)
+                                                                const canSend = !isRestarting && ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0 || isStreaming) && (isCloudProvider || modelRunning || isImageMode || isStreaming));
+                                                                if (!canSend) return;
+
                                                                 if (isImageMode) {
                                                                     setSlashQuery(null);
                                                                     setMentionQuery(null);

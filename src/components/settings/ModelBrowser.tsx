@@ -2,13 +2,14 @@ import { Trash2, RefreshCw, Download, Search, CheckCircle2, FolderOpen } from "l
 import * as Progress from '@radix-ui/react-progress';
 import { cn } from "../../lib/utils";
 import { invoke } from "@tauri-apps/api/core";
-import { useModelContext, RECOMMENDED_MODELS } from "../model-context";
+import { useModelContext } from "../model-context";
 import { useEffect, useMemo, useState } from "react";
 import { commands } from "../../lib/bindings";
 import { toast } from "sonner";
 
 export function ModelBrowser() {
     const {
+        models,
         localModels,
         downloading,
         isRefreshing,
@@ -100,22 +101,22 @@ export function ModelBrowser() {
     );
 
     const unifiedModels = useMemo(() => {
-        const merged = [...RECOMMENDED_MODELS];
+        const merged = [...models];
 
         // Helper to get basename
         const getBasename = (path: string) => path.split(/[\\/]/).pop() || path;
 
-        // Collect all component filenames from RECOMMENDED_MODELS
+        // Collect all component filenames from models
         const curatedComponentFilenames = new Set(
-            RECOMMENDED_MODELS.flatMap(m => [
+            models.flatMap(m => [
                 ...(m.components?.map(c => c.filename) || []),
                 ...(m.mmproj ? [m.mmproj.filename] : [])
             ])
         );
 
-        // Collect all variant filenames from RECOMMENDED_MODELS
+        // Collect all variant filenames from models
         const curatedVariantFilenames = new Set(
-            RECOMMENDED_MODELS.flatMap(m => m.variants.map(v => v.filename))
+            models.flatMap(m => m.variants.map(v => v.filename))
         );
 
         const localOnly = localModels.filter(local => {

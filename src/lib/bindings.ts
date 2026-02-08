@@ -234,6 +234,22 @@ async getModelMetadata(path: string) : Promise<Result<GGUFMetadata, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async updateRemoteModelCatalog(entries: RemoteModelEntry[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_remote_model_catalog", { entries }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_remote_model_catalog") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getConversations() : Promise<Result<Conversation[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_conversations") };
@@ -1031,6 +1047,14 @@ async clawdbotToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> 
     else return { status: "error", error: e  as any };
 }
 },
+async clawdbotSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clawdbot_set_dev_mode_wizard", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Save HuggingFace token
  */
@@ -1096,7 +1120,7 @@ export type ClawdbotSessionsResponse = { sessions: ClawdbotSession[] }
 /**
  * Clawdbot status response
  */
-export type ClawdbotStatus = { gateway_running: boolean; ws_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean }
+export type ClawdbotStatus = { gateway_running: boolean; ws_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean }
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
 export type CreateProjectRequest = { name: string; description: string | null }
 export type CustomPersona = { id: string; name: string; description: string; instructions: string }
@@ -1112,6 +1136,7 @@ export type Message = { role: string; content: string; images: string[] | null; 
 export type ModelFile = { name: string; size: number; path: string }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
+export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input

@@ -323,6 +323,7 @@ pub struct ClawdbotStatus {
     pub selected_cloud_model: Option<String>,
     pub setup_completed: bool,
     pub auto_start_gateway: bool,
+    pub dev_mode_wizard: bool,
 }
 
 /// Slack configuration input
@@ -572,6 +573,10 @@ pub async fn get_clawdbot_status(
         auto_start_gateway: config
             .as_ref()
             .map(|cfg| cfg.auto_start_gateway)
+            .unwrap_or(false),
+        dev_mode_wizard: config
+            .as_ref()
+            .map(|cfg| cfg.dev_mode_wizard)
             .unwrap_or(false),
     })
 }
@@ -2294,6 +2299,25 @@ pub async fn clawdbot_toggle_auto_start(
 
     cfg.auto_start_gateway = enabled;
     cfg.save_identity().map_err(|e| e.to_string())?;
+
+    *state.config.write().await = Some(cfg);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn clawdbot_set_dev_mode_wizard(
+    state: State<'_, ClawdbotManager>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    cfg.set_dev_mode_wizard(enabled)
+        .map_err(|e| e.to_string())?;
 
     *state.config.write().await = Some(cfg);
     Ok(())

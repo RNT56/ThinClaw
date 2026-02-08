@@ -1,0 +1,7 @@
+- links in LLM replies are not clickable (except searchbubble) -> fix
+- Project Chats don´t store chat title in history properly -> fix
+- Project Chat LLMs don´t seem to be able to access the knowledge base of the given project (documents) -> fix
+- implement general knowledge - think like rules or general knowledge in text form the user can provide in settings which can be accessed by Chat Agent in any chat (rules for an LLM or addtional context / info about the user or their intents)
+- implement image diffusion prompt enhancer (LLM enhances the prompt before sending it to the diffusion model)
+- Building and incorporating the new Chat Agent (Auto Mode in LLM Dropdown) - will select best model for the job based on the query and available models -> we need to develop proper metrics based on the query and available models
+- direct download of restriced models on HF via HF token set by user in settings UI (secret token implementation)

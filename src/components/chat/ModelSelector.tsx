@@ -3,23 +3,20 @@ import { useModelContext, RECOMMENDED_MODELS } from '../model-context';
 import { ChevronDown, Check, Box, Sparkles } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
+import { useConfig } from '../../hooks/use-config';
 
 export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { onManageClick: () => void, isAutoMode: boolean, toggleAutoMode: (v: boolean) => void }) {
     const { localModels, currentModelPath: modelPath, setModelPath, downloading, setIsRestarting } = useModelContext();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const [status, setStatus] = useState<any>(null);
-    const [config, setConfig] = useState<any>(null);
+    const { config, updateConfig } = useConfig();
 
     useEffect(() => {
         const loadStatus = async () => {
             try {
-                const [s, cfg] = await Promise.all([
-                    commands.getClawdbotStatus(),
-                    commands.getUserConfig()
-                ]);
+                const s = await commands.getClawdbotStatus();
                 if (s.status === 'ok') setStatus(s.data);
-                setConfig(cfg);
             } catch (e) {
                 console.error("Failed to load status in ModelSelector", e);
             }
@@ -132,18 +129,14 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                     selected_chat_provider: brain,
                 };
 
-                await commands.updateUserConfig(newConfig);
+                await updateConfig(newConfig);
                 if ((commands as any).saveSelectedCloudModel) {
                     await (commands as any).saveSelectedCloudModel(modelId);
                 }
 
-                // Refresh state to reflect new cloud model
-                const [s, cfg] = await Promise.all([
-                    commands.getClawdbotStatus(),
-                    commands.getUserConfig()
-                ]);
+                // Refresh status to reflect new cloud model
+                const s = await commands.getClawdbotStatus();
                 if (s.status === 'ok') setStatus(s.data);
-                setConfig(cfg);
 
                 setIsOpen(false);
                 // We don't setModelPath for cloud models yet as it's handled by provider routing in backend
@@ -155,29 +148,28 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         }
 
         if (path === modelPath && config?.selected_chat_provider === "local") {
+            setIsRestarting(false);
             setIsOpen(false);
             return;
         }
 
-        // If current provider is not local, switch it back to local
-        if (config?.selected_chat_provider && config.selected_chat_provider !== "local") {
+        // Trigger immediate UI block
+        setIsRestarting(true);
+
+        // If switching from cloud to local but path is same, we need to force a trigger.
+        // We'll update the config first.
+        if (type === 'local' && config?.selected_chat_provider !== "local") {
             try {
                 const newConfig = { ...config, selected_chat_provider: "local" };
-                await commands.updateUserConfig(newConfig);
-                // Refresh both to be safe
-                const [s, cfg] = await Promise.all([
-                    commands.getClawdbotStatus(),
-                    commands.getUserConfig()
-                ]);
+                await updateConfig(newConfig);
+                // Refresh status to ensure consistency
+                const s = await commands.getClawdbotStatus();
                 if (s.status === 'ok') setStatus(s.data);
-                setConfig(cfg);
             } catch (e) {
                 console.error("Failed to update config to local", e);
             }
         }
 
-        // Trigger immediate UI block
-        setIsRestarting(true);
         // Update path, letting useAutoStart handle the actual server start
         setModelPath(path);
         setIsOpen(false);
