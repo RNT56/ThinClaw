@@ -23,6 +23,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
         } else {
+            let _ = window.center();
             let _ = window.set_focus();
             let _ = window.show();
         }
@@ -33,10 +34,12 @@ fn toggle_spotlight(app: tauri::AppHandle) {
             tauri::WebviewUrl::App("index.html".into()),
         )
         .decorations(false)
-        .resizable(false)
+        .resizable(true)
+        .min_inner_size(600.0, 150.0)
         .always_on_top(true)
         .visible(false)
-        .inner_size(800.0, 600.0)
+        .transparent(true)
+        .inner_size(600.0, 150.0)
         .center()
         .skip_taskbar(true);
 
@@ -44,7 +47,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
         {
             win_builder = win_builder
                 .hidden_title(true)
-                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .shadow(false)
                 .visible_on_all_workspaces(true);
         }
 
@@ -62,6 +65,7 @@ pub mod gguf;
 mod history;
 pub mod image_gen;
 pub mod images;
+pub mod imagine;
 pub mod model_manager;
 pub mod permissions;
 pub mod personas;
@@ -93,6 +97,7 @@ pub fn run() {
     let specta_builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
         greet,
         chat::chat_stream,
+        chat::chat_completion,
         chat::count_tokens,
         sidecar::start_chat_server,
         sidecar::stop_chat_server,
@@ -142,6 +147,12 @@ pub fn run() {
         images::load_image,
         images::get_image_path,
         images::open_images_folder,
+        imagine::imagine_generate,
+        imagine::imagine_list_images,
+        imagine::imagine_search_images,
+        imagine::imagine_toggle_favorite,
+        imagine::imagine_delete_image,
+        imagine::imagine_get_stats,
         system::get_system_specs,
         projects::create_project,
         projects::list_projects,

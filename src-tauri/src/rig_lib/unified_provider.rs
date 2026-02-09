@@ -399,7 +399,7 @@ impl UnifiedProvider {
                         }
                     }
                 }
-                Ok((total_chars / 4) as u32)
+                Ok((total_chars / 3) as u32)
             }
         }
     }

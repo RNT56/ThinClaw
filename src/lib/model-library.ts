@@ -7,6 +7,9 @@ export interface ModelVariant {
     size: string;
     vram_required_gb: number;
     recommended_min_ram: number;
+    min_steps?: number;
+    max_steps?: number;
+    default_steps?: number;
 }
 
 export interface ModelDefinition {
@@ -711,6 +714,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "12.0 GB",
                 vram_required_gb: 16,
                 recommended_min_ram: 24,
+                min_steps: 1,
+                max_steps: 60,
+                default_steps: 30
             }
         ]
     },
@@ -729,6 +735,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "3.5 GB",
                 vram_required_gb: 6,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 12,
+                default_steps: 4
             }
         ]
     },
@@ -747,6 +756,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "2.8 GB",
                 vram_required_gb: 6,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 28
             }
         ]
     },
@@ -765,6 +777,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "12.8 GB",
                 vram_required_gb: 12,
                 recommended_min_ram: 16,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 20
             }
         ]
     },
@@ -783,6 +798,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "6.8 GB",
                 vram_required_gb: 8,
                 recommended_min_ram: 12,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 20
             }
         ]
     },
@@ -807,6 +825,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "2.86 GB",
                 vram_required_gb: 8,
                 recommended_min_ram: 12,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 28
             },
             {
                 name: "Q5_1",
@@ -815,6 +836,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "2.16 GB",
                 vram_required_gb: 6,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 28
             },
             {
                 name: "Q4_1",
@@ -823,6 +847,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "1.88 GB",
                 vram_required_gb: 5,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 28
             }
         ]
     },
@@ -846,6 +873,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "7.1 GB",
                 vram_required_gb: 12,
                 recommended_min_ram: 32,
+                min_steps: 1,
+                max_steps: 50,
+                default_steps: 20
             }
         ]
     },
@@ -871,6 +901,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "2.5 GB",
                 vram_required_gb: 4,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 80,
+                default_steps: 50
             },
             {
                 name: "Base 4B Q4_0",
@@ -887,6 +920,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "4.5 GB",
                 vram_required_gb: 8,
                 recommended_min_ram: 16,
+                min_steps: 1,
+                max_steps: 80,
+                default_steps: 50
             }
         ]
     },
@@ -912,6 +948,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "5.5 GB",
                 vram_required_gb: 8,
                 recommended_min_ram: 12,
+                min_steps: 1,
+                max_steps: 80,
+                default_steps: 50
             },
             {
                 name: "Q2_K",
@@ -920,6 +959,9 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
                 size: "3.4 GB",
                 vram_required_gb: 4,
                 recommended_min_ram: 8,
+                min_steps: 1,
+                max_steps: 80,
+                default_steps: 50
             }
         ]
     },

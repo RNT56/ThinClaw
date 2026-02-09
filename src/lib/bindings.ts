@@ -17,6 +17,14 @@ async chatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Pr
     else return { status: "error", error: e  as any };
 }
 },
+async chatCompletion(payload: ChatPayload) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_completion", { payload }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async countTokens(conversationId: string) : Promise<Result<TokenUsage, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("count_tokens", { conversationId }) };
@@ -384,6 +392,72 @@ async getImagePath(id: string) : Promise<Result<string, string>> {
 async openImagesFolder() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_images_folder") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Main command to generate an image in Imagine mode
+ */
+async imagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_generate", { params }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List all generated images for the gallery
+ */
+async imagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_list_images", { limit, offset, favoritesOnly }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search generated images by prompt
+ */
+async imagineSearchImages(query: string) : Promise<Result<GeneratedImage[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_search_images", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle favorite status for an image
+ */
+async imagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_toggle_favorite", { imageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a generated image
+ */
+async imagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_delete_image", { imageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get image count and stats
+ */
+async imagineGetStats() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("imagine_get_stats") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1128,8 +1202,16 @@ export type CustomSecret = { id: string; name: string; value: string; descriptio
 export type Document = { id: string; path: string; status: string; created_at: number; updated_at: number; project_id: string | null }
 export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
 export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number }
+/**
+ * Metadata for a generated image
+ */
+export type GeneratedImage = { id: string; prompt: string; styleId: string | null; provider: string; aspectRatio: string; resolution: string | null; width: number | null; height: number | null; seed: number; filePath: string; thumbnailPath: string | null; createdAt: string; isFavorite: boolean; tags: string | null }
 export type ImageGenParams = { prompt: string; model: string | null; vae: string | null; clip_l: string | null; clip_g: string | null; t5xxl: string | null; negative_prompt: string | null; width: number | null; height: number | null; steps: number | null; cfg_scale: number | null; seed: number; schedule: string | null; sampling_method: string | null }
 export type ImageResponse = { id: string; path: string }
+/**
+ * Image generation parameters for the Imagine mode
+ */
+export type ImagineParams = { prompt: string; provider: string; aspect_ratio: string; resolution: string | null; style_id: string | null; style_prompt: string | null; source_images: string[] | null; model: string | null; steps: number | null }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
 export type KnowledgeBit = { id: string; label: string; content: string; enabled: boolean }
 export type Message = { role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; is_summary: boolean | null; original_messages: Message[] | null }

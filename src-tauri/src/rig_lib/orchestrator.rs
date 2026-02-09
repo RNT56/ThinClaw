@@ -71,85 +71,105 @@ impl Orchestrator {
             let threshold = 0.6; // 60% to trigger proactive summarization (hardcoded logic)
             let _summarize_ratio = 0.5; // Summarize oldest 50%
 
-            if let Ok(token_count) = rig_clone.provider.count_tokens(check_history.clone()).await {
-                info!("[orchestrator] Token count: {}", token_count);
-                // Send initial usage stats
-                let _ = tx
-                    .send(Ok(ProviderEvent::Usage(TokenUsage {
-                        prompt_tokens: token_count,
-                        completion_tokens: 0,
-                        total_tokens: token_count,
-                    })))
-                    .await;
+            let token_count_res = rig_clone.provider.count_tokens(check_history.clone()).await;
 
-                if token_count > (max_context as f32 * threshold) as u32 {
-                    info!(
-                        "[orchestrator] Token count exceeds threshold. Starting summarization..."
-                    );
+            let mut should_summarize = false;
+
+            match token_count_res {
+                Ok(token_count) => {
+                    info!("[orchestrator] Token count: {}", token_count);
+                    // Send initial usage stats
                     let _ = tx
-                        .send(Ok(ProviderEvent::Content(
-                            "\n<scrappy_status type=\"summarizing\" />\n".into(),
-                        )))
+                        .send(Ok(ProviderEvent::Usage(TokenUsage {
+                            prompt_tokens: token_count,
+                            completion_tokens: 0,
+                            total_tokens: token_count,
+                        })))
                         .await;
 
-                    // Identify chunk to summarize
-                    let messages_to_keep = final_history.len() / 2;
-                    let split_idx = final_history.len().saturating_sub(messages_to_keep);
+                    if token_count > (max_context as f32 * threshold) as u32 {
+                        should_summarize = true;
+                        info!("[orchestrator] Token count exceeds threshold.");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "[orchestrator] Failed to count tokens: {}. Checking message count fallback.",
+                        e
+                    );
+                    if final_history.len() > 20 {
+                        should_summarize = true;
+                        info!("[orchestrator] Message count > 20. Truncating history.");
+                    }
+                }
+            }
 
-                    if split_idx > 0 {
-                        let chunk_to_summarize =
-                            final_history.drain(0..split_idx).collect::<Vec<_>>();
+            if should_summarize {
+                info!("[orchestrator] Starting summarization...");
+                let _ = tx
+                    .send(Ok(ProviderEvent::Content(
+                        "\n<scrappy_status type=\"summarizing\" />\n".into(),
+                    )))
+                    .await;
 
-                        // Prepare summarization prompt
-                        let summary_prompt = format!(
+                // Identify chunk to summarize
+                let messages_to_keep = final_history.len() / 2;
+                let split_idx = final_history.len().saturating_sub(messages_to_keep);
+
+                if split_idx > 0 {
+                    let chunk_to_summarize = final_history.drain(0..split_idx).collect::<Vec<_>>();
+
+                    // Prepare summarization prompt
+                    let summary_prompt = format!(
                              "Summarize the following conversation history into a concise paragraph. Capture key decisions, user preferences, and important context. \n\nHISTORY:\n{}",
                              chunk_to_summarize.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n\n")
                          );
 
-                        // Call LLM for summary (Quick non-streaming call)
-                        let summary_req =
-                            vec![json!({ "role": "user", "content": summary_prompt })];
+                    // Call LLM for summary (Quick non-streaming call)
+                    let summary_req = vec![json!({ "role": "user", "content": summary_prompt })];
 
-                        info!("[orchestrator] Requesting summary from provider...");
-                        let mut summary_text = String::new();
-                        if let Ok(mut stream) = rig_clone
-                            .provider
-                            .stream_raw_completion(summary_req, Some(0.1))
-                            .await
-                        {
-                            use futures::StreamExt;
-                            while let Some(res) = stream.next().await {
-                                if let Ok(ProviderEvent::Content(s)) = res {
-                                    summary_text.push_str(&s);
-                                }
+                    info!("[orchestrator] Requesting summary from provider...");
+                    let mut summary_text = String::new();
+                    if let Ok(mut stream) = rig_clone
+                        .provider
+                        .stream_raw_completion(summary_req, Some(0.1))
+                        .await
+                    {
+                        use futures::StreamExt;
+                        while let Some(res) = stream.next().await {
+                            if let Ok(ProviderEvent::Content(s)) = res {
+                                summary_text.push_str(&s);
                             }
                         }
+                    }
 
-                        if !summary_text.is_empty() {
-                            info!("[orchestrator] Summarization complete.");
-                            // Create Summary Message
-                            let summary_msg = Message {
-                                role: "system".into(), // Or "user" with special marker, but "system" is safer for context injection
-                                content: format!("Previous conversation summary: {}", summary_text),
-                                images: None,
-                                attached_docs: None,
-                                is_summary: Some(true),
-                                original_messages: Some(chunk_to_summarize),
-                            };
+                    if !summary_text.is_empty() {
+                        info!("[orchestrator] Summarization complete.");
+                        // Create Summary Message
+                        let summary_msg = Message {
+                            role: "system".into(), // Or "user" with special marker, but "system" is safer for context injection
+                            content: format!("Previous conversation summary: {}", summary_text),
+                            images: None,
+                            attached_docs: None,
+                            is_summary: Some(true),
+                            original_messages: Some(chunk_to_summarize),
+                        };
 
-                            // Prepend summary
-                            final_history.insert(0, summary_msg);
+                        // Prepend summary
+                        final_history.insert(0, summary_msg);
 
-                            let _ = tx
-                                .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
-                                .await;
-                        } else {
-                            warn!("[orchestrator] Summarization failed (empty response).");
-                        }
+                        let _ = tx
+                            .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
+                            .await;
+                    } else {
+                        warn!("[orchestrator] Summarization failed (empty response). History truncated regardless to save context.");
+                        // Even if summary failed, we already drained the history, so we implicitly truncated it.
+                        // This is desired behavior if we are OOM.
+                        let _ = tx
+                            .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
+                            .await;
                     }
                 }
-            } else {
-                warn!("[orchestrator] Failed to count tokens.");
             }
 
             info!("[orchestrator] Proceeding to tool/manual decision...");

@@ -3,7 +3,7 @@ import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { toast } from "sonner";
 import { MessageBubble } from './MessageBubble';
 import { useChat } from '../../hooks/use-chat';
-import { Bot, Loader2, X, Image as ImageIcon, Paperclip, Layers, Radio, Settings, FileText, ArrowDown } from 'lucide-react';
+import { Bot, Loader2, X, Image as ImageIcon, Paperclip, Layers, FileText, ArrowDown } from 'lucide-react';
 import { ChatInput } from './ChatInput';
 import { cn } from '../../lib/utils';
 import { SettingsSidebar, SettingsPage } from '../settings/SettingsSidebar';
@@ -35,6 +35,11 @@ import { ClawdbotBrain } from '../clawdbot/ClawdbotBrain';
 import { ClawdbotMemory } from '../clawdbot/ClawdbotMemory';
 import { ClawdbotPage } from '../clawdbot/ClawdbotSidebar';
 import * as clawdbotApi from '../../lib/clawdbot';
+import { ModeNavigator, AppMode } from '../navigation/ModeNavigator';
+import { ImagineSidebar, ImagineGeneration, ImagineGallery, ImagineTab } from '../imagine';
+import { imagineGenerate } from '../../lib/imagine';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 
 export function ChatLayout() {
@@ -109,9 +114,21 @@ export function ChatLayout() {
     const [imageSteps, setImageSteps] = useState(20);
     const [showImageSettings, setShowImageSettings] = useState(false);
 
-    const [activeTab, setActiveTab] = useState<SettingsPage | 'chat' | 'clawdbot'>('chat');
-    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'clawdbot';
+    // Mode Management - The activeTab still contains settings pages for backwards compatibility
+    // but we use appMode for the high-level navigation between Chat/Clawdbot/Imagine/Settings
+    const [activeTab, setActiveTab] = useState<SettingsPage | 'chat' | 'clawdbot' | 'imagine'>('chat');
+    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'clawdbot' && activeTab !== 'imagine';
     const isClawdbotMode = activeTab === 'clawdbot';
+    const isImagineMode = activeTab === 'imagine';
+
+    // Compute AppMode from activeTab
+    const appMode: AppMode = isSettingsMode ? 'settings' : activeTab as AppMode;
+
+    // Imagine mode state
+    const [activeImagineTab, setActiveImagineTab] = useState<ImagineTab>('generate');
+    const [imagineGenerating, setImagineGenerating] = useState(false);
+    const [generationProgress, setGenerationProgress] = useState<string | null>(null);
+    const [lastGeneratedImage, setLastGeneratedImage] = useState<string | null>(null);
 
     // Clawdbot mode state
     const [selectedClawdbotSession, setSelectedClawdbotSession] = useState<string | null>(null);
@@ -133,6 +150,41 @@ export function ChatLayout() {
         checkStatus();
         const interval = setInterval(checkStatus, 5000);
         return () => clearInterval(interval);
+    }, []);
+
+    // Listen for image generation progress
+    useEffect(() => {
+        const unlistenPromise = listen<any>('image_gen_progress', (event) => {
+            const payload = event.payload;
+
+            if (typeof payload === 'object' && payload !== null) {
+                // If it's already an object, use it directly but ensure text is a string
+                setGenerationProgress({
+                    ...payload,
+                    text: typeof payload.text === 'object' ? JSON.stringify(payload.text) : String(payload.text || '')
+                });
+            } else if (typeof payload === 'string') {
+                try {
+                    // Try to parse as JSON if it's a string
+                    const parsed = JSON.parse(payload);
+                    setGenerationProgress({
+                        ...parsed,
+                        text: typeof parsed.text === 'object' ? JSON.stringify(parsed.text) : String(parsed.text || '')
+                    });
+                } catch (e) {
+                    // Fallback for raw strings
+                    setGenerationProgress({
+                        stage: 'Processing',
+                        progress: 0,
+                        text: payload
+                    } as any);
+                }
+            }
+        });
+
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
     }, []);
 
     // Listen for requests to open settings
@@ -840,7 +892,22 @@ export function ChatLayout() {
                                 onSelectPage={setActiveClawdbotPage}
                             />
                         </motion.div>
-                    ) : (
+                    ) : isImagineMode ? (
+                        <motion.div
+                            key="imagine-sidebar"
+                            initial={{ opacity: 0, x: 10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            exit={{ opacity: 0, x: 10 }}
+                            transition={{ duration: 0.2 }}
+                            className="flex flex-col flex-1 h-full"
+                        >
+                            <ImagineSidebar
+                                sidebarOpen={sidebarOpen}
+                                activeTab={activeImagineTab}
+                                onTabChange={setActiveImagineTab}
+                            />
+                        </motion.div>
+                    ) : isSettingsMode ? (
                         <motion.div
                             key="settings-sidebar"
                             initial={{ opacity: 0, x: 10 }}
@@ -850,68 +917,28 @@ export function ChatLayout() {
                             className="flex flex-col flex-1 h-full"
                         >
                             <SettingsSidebar
-                                activePage={activeTab}
+                                activePage={activeTab as SettingsPage}
                                 onPageChange={setActiveTab}
                                 onBack={() => setActiveTab('chat')}
                                 sidebarOpen={sidebarOpen}
                             />
                         </motion.div>
-                    )}
+                    ) : null}
                 </AnimatePresence>
 
-                <div className={cn("mt-auto pt-4 border-t border-border/50 transition-all duration-300", sidebarOpen ? "px-0" : "px-1")}>
-                    {activeTab === 'chat' ? (
-                        <div className={cn("flex flex-col gap-2 transition-all duration-300", sidebarOpen ? "items-start" : "items-center")}>
-                            {/* Clawdbot Button */}
-                            <button
-                                onClick={() => setActiveTab('clawdbot')}
-                                className={cn(
-                                    "flex items-center rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground text-sm transition-all duration-300 relative h-10",
-                                    sidebarOpen ? "w-full px-3" : "w-10 justify-center mx-auto"
-                                )}
-                                title="Clawdbot"
-                            >
-                                <Radio className="w-4 h-4 shrink-0" />
-                                <div className={cn("transition-all duration-300 overflow-hidden flex items-center", sidebarOpen ? "w-32 opacity-100 ml-2" : "w-0 opacity-0 ml-0 hidden")}>
-                                    <span className="whitespace-nowrap">Clawdbot</span>
-                                </div>
-                                {clawdbotGatewayRunning && (
-                                    <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                )}
-                            </button>
-                            {/* Settings Button */}
-                            <button
-                                onClick={() => setActiveTab('models')}
-                                className={cn(
-                                    "flex items-center rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground text-sm transition-all duration-300 h-10",
-                                    sidebarOpen ? "w-full px-3" : "w-10 justify-center mx-auto"
-                                )}
-                                title="Settings"
-                            >
-                                <Settings className="w-4 h-4 shrink-0" />
-                                <div className={cn("transition-all duration-300 overflow-hidden flex items-center", sidebarOpen ? "w-32 opacity-100 ml-2" : "w-0 opacity-0 ml-0 hidden")}>
-                                    <span className="whitespace-nowrap">Settings</span>
-                                </div>
-                            </button>
-                        </div>
-                    ) : (
-                        <div className={cn("flex flex-col gap-2 transition-all duration-300", sidebarOpen ? "w-full" : "items-center")}>
-                            <button
-                                onClick={() => setActiveTab('chat')}
-                                className={cn(
-                                    "flex items-center rounded-lg bg-primary text-primary-foreground text-sm transition-all duration-300 shadow-md h-10",
-                                    sidebarOpen ? "w-full px-3" : "w-10 justify-center mx-auto"
-                                )}
-                                title="Back to Chat"
-                            >
-                                <Bot className="w-4 h-4 shrink-0" />
-                                <div className={cn("transition-all duration-300 overflow-hidden flex items-center", sidebarOpen ? "w-32 opacity-100 ml-2" : "w-0 opacity-0 ml-0 hidden")}>
-                                    <span className="whitespace-nowrap font-semibold">Back to Chat</span>
-                                </div>
-                            </button>
-                        </div>
-                    )}
-                </div>
+                {/* Mode Navigator - New unified navigation */}
+                <ModeNavigator
+                    activeMode={appMode}
+                    onModeChange={(mode) => {
+                        if (mode === 'settings') {
+                            setActiveTab('models');
+                        } else {
+                            setActiveTab(mode);
+                        }
+                    }}
+                    sidebarOpen={sidebarOpen}
+                    gatewayRunning={clawdbotGatewayRunning}
+                />
             </div>
 
             {/* Main Area Content (Chat, Clawdbot, or Settings) */}
@@ -954,6 +981,91 @@ export function ChatLayout() {
                                     </div>
                                 )}
                             </div>
+                        </motion.div>
+                    ) : isImagineMode ? (
+                        <motion.div
+                            key="imagine-area"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="flex-1 flex flex-col h-full overflow-hidden"
+                        >
+                            {activeImagineTab === 'generate' ? (
+                                <ImagineGeneration
+                                    isGenerating={imagineGenerating}
+                                    progress={generationProgress}
+                                    lastGeneratedImage={lastGeneratedImage}
+                                    onGenerate={async (prompt, options) => {
+                                        console.log('ChatLayout: Starting generation...');
+                                        setImagineGenerating(true);
+                                        setGenerationProgress({
+                                            stage: 'Initializing',
+                                            progress: 0,
+                                            text: 'Starting generation...'
+                                        } as any);
+
+                                        try {
+                                            const resolvedModelPath = currentImageGenModelPath || localModels.find(m => m.name.toLowerCase().includes("flux") || m.name.toLowerCase().includes("sd") || m.name.toLowerCase().includes("diffusion"))?.path;
+
+                                            let finalPrompt = prompt;
+
+                                            // Prompt Enhancement
+                                            if (userCfg?.image_prompt_enhance_enabled && (modelRunning || userCfg?.selected_chat_provider !== 'local')) {
+                                                try {
+                                                    const { enhanceImagePrompt } = await import('../../lib/prompt-enhancer');
+                                                    finalPrompt = await enhanceImagePrompt(
+                                                        prompt,
+                                                        options.styleId,
+                                                        (status) => setGenerationProgress({ stage: 'Enhancing', progress: 0.05, text: status } as any)
+                                                    );
+                                                } catch (e) {
+                                                    console.warn("Enhancement failed:", e);
+                                                }
+                                            }
+
+                                            // Ensure image server is started if using local provider
+                                            if (options.provider === 'local' && !imageRunning) {
+                                                if (resolvedModelPath) {
+                                                    setGenerationProgress({ stage: 'Initializing', progress: 0.1, text: 'Warming up diffusion engine...' } as any);
+                                                    await commands.startImageServer(resolvedModelPath);
+                                                    // Add a small delay for the backend to register the model
+                                                    await new Promise(r => setTimeout(r, 1000));
+                                                }
+                                            }
+
+                                            // Use the real imagine API
+                                            const result = await imagineGenerate({
+                                                prompt: finalPrompt,
+                                                provider: options.provider,
+                                                aspectRatio: options.aspectRatio,
+                                                resolution: options.resolution,
+                                                styleId: options.styleId,
+                                                stylePrompt: options.styleId ? findStyle(options.styleId)?.promptSnippet : undefined,
+                                                sourceImages: options.sourceImages,
+                                                model: options.provider === 'local' ? (resolvedModelPath || undefined) : undefined,
+                                                steps: options.steps,
+                                            });
+                                            // Set the generated image URL
+                                            setLastGeneratedImage(convertFileSrc(result.filePath));
+                                        } catch (e) {
+                                            console.error('Image generation failed:', e);
+                                            // TODO: specific toast
+                                            alert(`Image generation failed: ${e}`);
+                                        } finally {
+                                            setImagineGenerating(false);
+                                            setGenerationProgress(null);
+                                        }
+                                    }}
+                                />
+                            ) : (
+                                <ImagineGallery
+                                    onImageSelect={(image) => {
+                                        console.log('Selected image:', image);
+                                        setLastGeneratedImage(convertFileSrc(image.filePath));
+                                        setActiveImagineTab('generate');
+                                    }}
+                                />
+                            )}
                         </motion.div>
                     ) : activeTab === 'chat' ? (
                         <div key="chat-area" {...getRootProps()} className="flex-1 flex flex-col h-full overflow-hidden">
@@ -1096,8 +1208,8 @@ export function ChatLayout() {
                                                 <div className="flex gap-3 mb-3 overflow-x-auto pb-1 px-1 scrollbar-hide">
                                                     {attachedImages.map((img, i) => (
                                                         <div key={img.id} className="group relative flex items-center gap-3 p-2 pr-3 rounded-xl border border-border/40 bg-background/40 backdrop-blur-md shadow-sm hover:shadow-md hover:bg-background/60 transition-all duration-300 select-none animate-in fade-in zoom-in-95 slide-in-from-bottom-2">
-                                                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
-                                                                <ImageIcon className="w-5 h-5 text-violet-500" />
+                                                            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center ring-1 ring-inset ring-white/10">
+                                                                <ImageIcon className="w-5 h-5 text-primary" />
                                                             </div>
                                                             <div className="flex flex-col gap-0.5">
                                                                 <span className="text-xs font-semibold text-foreground/90 truncate max-w-[120px]">Image {i + 1}</span>

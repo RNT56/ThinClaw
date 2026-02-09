@@ -95,10 +95,43 @@ export function ThemeProvider({
 
         updateTheme()
 
+        // Re-apply theme when window gains focus (for spotlight window sync)
+        const handleFocus = () => {
+            // Re-read from localStorage in case main window changed theme
+            const storedTheme = localStorage.getItem("vite-ui-theme") as Theme
+            const storedAppTheme = localStorage.getItem("app-theme")
+            const storedDarkSyntax = localStorage.getItem("syntax-theme-dark")
+            const storedLightSyntax = localStorage.getItem("syntax-theme-light")
+
+            if (storedTheme && storedTheme !== theme) {
+                setTheme(storedTheme)
+            }
+            if (storedAppTheme && storedAppTheme !== appThemeId) {
+                setAppThemeId(storedAppTheme)
+            }
+            if (storedDarkSyntax && storedDarkSyntax !== darkSyntaxTheme) {
+                setDarkSyntaxTheme(storedDarkSyntax)
+            }
+            if (storedLightSyntax && storedLightSyntax !== lightSyntaxTheme) {
+                setLightSyntaxTheme(storedLightSyntax)
+            }
+            // Still re-apply regardless to ensure CSS vars are set
+            updateTheme()
+        }
+
+        window.addEventListener('focus', handleFocus)
+
         if (theme === "system") {
             const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)")
             mediaQuery.addEventListener("change", updateTheme)
-            return () => mediaQuery.removeEventListener("change", updateTheme)
+            return () => {
+                mediaQuery.removeEventListener("change", updateTheme)
+                window.removeEventListener('focus', handleFocus)
+            }
+        }
+
+        return () => {
+            window.removeEventListener('focus', handleFocus)
         }
     }, [theme, applySyntaxColors, applyAppTheme])
 

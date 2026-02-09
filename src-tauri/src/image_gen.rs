@@ -2,6 +2,7 @@ use crate::config::ConfigManager;
 use crate::images::ImageResponse;
 use crate::sidecar::SidecarManager;
 use tauri::AppHandle;
+use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 use tauri_plugin_shell::ShellExt;
@@ -471,20 +472,72 @@ async fn run_inference(
         .spawn()
         .map_err(|e| format!("Failed to spawn sd: {}", e))?;
 
-    use tauri::Emitter;
     let mut success = true;
 
     while let Some(event) = rx.recv().await {
         match event {
-            tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
+            tauri_plugin_shell::process::CommandEvent::Stdout(line)
+            | tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
                 let text = String::from_utf8_lossy(&line);
                 println!("[image_gen] {}", text);
-                app.emit("image_gen_progress", &text.to_string()).ok();
-            }
-            tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
-                let text = String::from_utf8_lossy(&line);
-                println!("[image_gen] [Stderr] {}", text);
-                app.emit("image_gen_progress", &text.to_string()).ok();
+
+                // Detect progress bars: |====>   | 28/795
+                if let Some(caps) = regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)")
+                    .unwrap()
+                    .captures(&text)
+                {
+                    let current = caps[2].parse::<f32>().unwrap_or(0.0);
+                    let total = caps[3].parse::<f32>().unwrap_or(1.0);
+                    let progress = current / total;
+
+                    let stage = if total > 100.0 {
+                        "Loading Weights"
+                    } else {
+                        "Generating"
+                    };
+                    let payload = serde_json::json!({
+                        "stage": stage,
+                        "progress": progress,
+                        "text": format!("{} ({:.0}%)", stage, progress * 100.0)
+                    });
+                    app.emit("image_gen_progress", payload).ok();
+                } else if text.contains("loading diffusion model") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.05, "text": "Loading diffusion engine..."})).ok();
+                } else if text.contains("Starting local generation") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.02, "text": "Preparing local engine..."})).ok();
+                } else if text.contains("Strict Mode") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.04, "text": "Starting inference..."})).ok();
+                } else if text.contains("Stopping chat server") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Memory Optimization", "progress": 0.01, "text": "Freeing VRAM..."})).ok();
+                } else if text.contains("loading llm") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.1, "text": "Loading language model..."})).ok();
+                } else if text.contains("loading vae") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.15, "text": "Loading VAE..."})).ok();
+                } else if text.contains("sampling using") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Generating", "progress": 0.2, "text": "Starting sampling..."})).ok();
+                } else if text.contains("sampling completed") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Saving", "progress": 0.9, "text": "Sampling completed..."})).ok();
+                } else if text.contains("decoding") && text.contains("latents") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Saving", "progress": 0.92, "text": "Decoding image..."})).ok();
+                } else if text.contains("latent") && text.contains("decoded") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Saving", "progress": 0.98, "text": "Finalizing image..."})).ok();
+                } else if text.contains("generate_image completed") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Saving", "progress": 1.0, "text": "Generation finished!"})).ok();
+                } else if text.contains("Using Metal backend") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Engine Setup", "progress": 0.25, "text": "Initializing Metal GPU..."})).ok();
+                } else if text.contains("running in Flux2 FLOW mode") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Engine Setup", "progress": 0.3, "text": "Configuring Flux Flow..."})).ok();
+                } else if text.contains("compiling pipeline")
+                    || text.contains("ggml_metal_library_compile_pipeline")
+                    || text.contains("ggml_extend.hpp")
+                {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Engine Setup", "progress": 0.28, "text": "Compiling GPU shaders..."})).ok();
+                } else if text.contains("loading tensors completed") {
+                    app.emit("image_gen_progress", serde_json::json!({"stage": "Generating", "progress": 0.35, "text": "Model ready, starting generation..."})).ok();
+                } else if text.trim().len() > 5 && !text.contains("|") {
+                    // Fallback for other interesting output
+                    app.emit("image_gen_progress", text.trim()).ok();
+                }
             }
             tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
                 if let Some(code) = payload.code {
@@ -545,25 +598,51 @@ pub async fn generate_image(
     config: State<'_, ConfigManager>,
     params: ImageGenParams,
 ) -> Result<ImageResponse, String> {
-    let model_path = params
-        .model
-        .clone()
-        .unwrap_or_else(|| state.get_image_model().unwrap_or_default());
+    // 1. Try params first
+    let mut model_path = params.model.clone().unwrap_or_default();
+
+    // 2. If empty, check SidecarManager (active model)
     if model_path.is_empty() {
-        return Err("No model selected".into());
+        if let Some(active) = state.get_image_model() {
+            model_path = active;
+        }
+    }
+
+    println!(
+        "[image_gen] Resolved model path: '{}' (Input was: '{:?}')",
+        model_path, params.model
+    );
+
+    if model_path.is_empty() {
+        return Err(
+            "No model selected. Please select a model in Settings or the Chat interface.".into(),
+        );
     }
 
     config.reload();
     let user_config = config.get_config();
     let final_params = params;
 
+    println!(
+        "[image_gen] Starting local generation for model: {}",
+        model_path
+    );
+
     // Stop chat server to free GPU memory for heavy Flux models
     // This prevents "CPU backend" fallback and "Black Screen" GPU crashes
     println!("[image_gen] Stopping chat server to free VRAM...");
-    state.stop_chat_server().ok();
+    app.emit("image_gen_progress", serde_json::json!({"stage": "Memory Optimization", "progress": 0.01, "text": "Optimizing memory..."}).to_string()).ok();
+
+    if let Err(e) = state.stop_chat_server() {
+        println!("[image_gen] Warning: Failed to stop chat server: {}", e);
+    }
+
+    // Explicitly emit progress to UI to ensure it knows we are working
+    app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.03, "text": "Starting engine..."}).to_string()).ok();
+
     tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
-    println!("Attempt 1: Strict Mode...");
+    println!("[image_gen] Attempt 1: Strict Mode...");
     let result = match run_inference(
         &app,
         &model_path,

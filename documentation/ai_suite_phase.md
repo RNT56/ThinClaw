@@ -37,13 +37,18 @@ You can extend Scrappy beyond standard text/multimodal LLMs (like Pixtral) by in
 #### 4. **Diffusion Models (Image Generation, e.g., Stable Diffusion)**
    - **Available as GGUF?** Yes, increasingly.
    - **Details**: Projects like **stable-diffusion.cpp** (ggml-based, similar to llama.cpp) support GGUF-quantized diffusion models (e.g., SD 3.5, Flux variants). Some direct GGUF ports exist for Unet/CLIP in diffusion pipelines.
-   - **Integration into Scrappy**:
-     - Bundle stable-diffusion.cpp binary.
-     - Run as separate process: txt2img/img2img commands.
-     - UI: New "Generate Image" tab/job – prompt input, style options, output gallery (glassmorphic previews).
-     - Advanced: Integrate with multimodal LLM (e.g., describe image → generate variation).
-     - Feasibility: Moderate – separate binary, but unified ggml backend makes it similar. VRAM-friendly quants available (e.g., 4-8GB for Flux-like).
-     - Downloads: Extend downloader for diffusion GGUF repos (e.g., gpustack or city96 repos).
+   - **Implementation into Scrappy (COMPLETED)**:
+     - **Sidecar**: Bundled `sd-sidecar` (based on stable-diffusion.cpp) for local inference.
+     - **UI**: Dedicated **Imagine** mode with a premium glassmorphic interface.
+     - **Visuals**: Bespoke custom icon set (`ImagineModeIcon`, `ImagineSendIcon`, `ImagineMainIcon`) with dynamic motion effects.
+     - **Features**: 
+       - Prompt enhancement using Local LLMs.
+       - Integrated **Gallery** (formerly Galleria) for browsing creations with search and favorites.
+       - Style presets and aspect ratio controls.
+       - **Performance**: Defaulted to 512px for high-speed local inference parity with chat-mode, with 1K and 2K resolution options.
+     - **Cloud Fallback**: Support for Google Gemini Imagen 3 (Nano Banana).
+     - **Feasibility**: High – Unified with chat logic using `ImageGenTool`. VRAM-optimized for 16GB systems.
+   - **Downloads**: Extend downloader for diffusion GGUF repos (e.g., gpustack or city96 repos).
 
 #### How to Implement in Scrappy (Similar to LLM Downloads)
 - **Yes, mostly the same way** for downloading: Extend your existing model downloader (hf_hub or reqwest) to include these categories.

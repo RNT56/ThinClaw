@@ -564,3 +564,135 @@ pub async fn count_tokens(
         total_tokens: count,
     })
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn chat_completion(
+    _app: tauri::AppHandle,
+    state: State<'_, SidecarManager>,
+    config: State<'_, crate::config::ConfigManager>,
+    clawdbot: State<'_, crate::clawdbot::commands::ClawdbotManager>,
+    payload: ChatPayload,
+) -> Result<String, String> {
+    info!("[chat_completion] Starting chat_completion...");
+
+    let user_config = config.get_config();
+
+    // Re-use the provider routing logic from chat_stream
+    let (kind, base_url, model_name, _port, token, _context_size) =
+        match user_config.selected_chat_provider.as_deref() {
+            Some("anthropic") => {
+                let claw_cfg = clawdbot
+                    .get_config()
+                    .await
+                    .ok_or("Clawdbot config not found")?;
+                let key = claw_cfg
+                    .anthropic_api_key
+                    .ok_or("Anthropic API key required")?;
+                (
+                    crate::rig_lib::unified_provider::ProviderKind::Anthropic,
+                    "https://api.anthropic.com/v1".to_string(),
+                    claw_cfg
+                        .selected_cloud_model
+                        .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
+                    0,
+                    key,
+                    200000,
+                )
+            }
+            Some("openai") => {
+                let claw_cfg = clawdbot
+                    .get_config()
+                    .await
+                    .ok_or("Clawdbot config not found")?;
+                let key = claw_cfg.openai_api_key.ok_or("OpenAI API key required")?;
+                (
+                    crate::rig_lib::unified_provider::ProviderKind::OpenAI,
+                    "https://api.openai.com/v1".to_string(),
+                    claw_cfg
+                        .selected_cloud_model
+                        .unwrap_or_else(|| "gpt-4o".to_string()),
+                    0,
+                    key,
+                    128000,
+                )
+            }
+            Some("gemini") => {
+                let claw_cfg = clawdbot
+                    .get_config()
+                    .await
+                    .ok_or("Clawdbot config not found")?;
+                let key = claw_cfg.gemini_api_key.ok_or("Gemini API key required")?;
+                (
+                    crate::rig_lib::unified_provider::ProviderKind::Gemini,
+                    "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
+                    claw_cfg
+                        .selected_cloud_model
+                        .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
+                    0,
+                    key,
+                    128000,
+                )
+            }
+            // ... (can add others if needed, but Local is the main standard)
+            _ => {
+                let cfg = state
+                    .get_chat_config()
+                    .ok_or("Local Neural Link not running")?;
+                (
+                    crate::rig_lib::unified_provider::ProviderKind::Local,
+                    format!("http://127.0.0.1:{}/v1", cfg.0),
+                    "default".to_string(),
+                    cfg.0,
+                    cfg.1,
+                    cfg.2,
+                )
+            }
+        };
+
+    let provider = crate::rig_lib::unified_provider::UnifiedProvider::new(
+        kind,
+        &base_url,
+        &token,
+        &model_name,
+    );
+
+    // Construct the request
+    let mut history = Vec::new();
+    let mut system_preamble = None;
+
+    for msg in &payload.messages[..payload.messages.len() - 1] {
+        if msg.role == "system" {
+            system_preamble = Some(msg.content.clone());
+        } else {
+            history.push(rig::completion::Message {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+            });
+        }
+    }
+
+    let last_msg = payload.messages.last().ok_or("No messages")?;
+
+    let request = rig::completion::CompletionRequest {
+        preamble: system_preamble,
+        chat_history: history,
+        prompt: last_msg.content.clone(),
+        documents: vec![],
+        tools: Vec::new(),
+        temperature: Some(payload.temperature as f64),
+        max_tokens: None,
+        additional_params: None,
+    };
+
+    use rig::completion::CompletionModel;
+    let response = provider
+        .completion(request)
+        .await
+        .map_err(|e| format!("Completion failed: {}", e))?;
+
+    match response.choice {
+        rig::completion::ModelChoice::Message(content) => Ok(content),
+        _ => Err("Received tool call instead of message".into()),
+    }
+}

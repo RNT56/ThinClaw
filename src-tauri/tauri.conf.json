@@ -14,19 +14,25 @@
       {
         "title": "Scrappy Inference",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "minWidth": 800,
+        "minHeight": 600
       },
       {
         "label": "spotlight",
         "title": "Spotlight Chat",
-        "width": 800,
-        "height": 600,
+        "width": 600,
+        "height": 150,
+        "minWidth": 600,
+        "minHeight": 150,
         "visible": false,
         "decorations": false,
         "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "center": true
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {
@@ -46,9 +52,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "app"
-    ],
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

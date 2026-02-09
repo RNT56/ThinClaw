@@ -13,9 +13,14 @@ Scrappy is a **personal‑only, local‑first desktop application** built with *
 ```
 Frontend (WebView / JS)
    ↓ invoke()
-Rust Backend (Tauri Commands)
+Rust Backend (Tauri Commands + SidecarManager State)
    ↓ authenticated proxy (localhost)
-llama-server (sidecar, random port)
+Sidecar Ecosystem:
+   - llama-server (Chat + Context)
+   - llama-server (Embedding Indexer)
+   - llama-server (Context Summarizer)
+   - whisper-server (STT / Voice)
+   - Node sidecar (Agent Gateway/Host)
 ```
 
 **Hard rule:**
@@ -39,14 +44,16 @@ All requests go through Rust. This guarantees:
 
 ### Spawn Flow
 
-1. Rust selects free port (`pick_free_port()`)
-2. Rust generates random token
-3. Spawn `llama-server` with:
-   - `--host 127.0.0.1`
-   - `--port <random>`
-   - `--api-key <token>`
-4. Poll `/health` until ready
-5. Mark model "ready" in UI
+1. Rust selects free port via `SidecarManager`.
+2. Rust generates random 32-character Alphanumeric token.
+3. Spawn sidecar (`llama-server`, `whisper-server`, etc.) with host, port, and token.
+4. Track process via `ProcessTracker` (PID management).
+5. Poll `/health` or monitor STDOUT for "started" signals.
+6. Emit `sidecar_event` for progress tracking (e.g., "prompt processing progress").
+7. Mark model "ready" in UI.
+
+### Smart Discovery (Vision)
+The manager automatically detects vision projectors (`.mmproj`) by scanning the model's subfolder for files matching the GGUF name or containing "mmproj" flags, ensuring zero-config multimodal support.
 
 ### Failure Handling
 
@@ -120,15 +127,17 @@ All requests go through Rust. This guarantees:
 ### SQLite as Single Source of Truth
 
 Tables:
-- conversations
-- messages
-- jobs
-- job_runs
-- documents
-- chunks
-- embeddings
-- profiles
-- settings
+- **projects**: High-level containers for logical partitioning of work.
+- conversations (with project_id foreign key)
+- messages (with conversation_id)
+- jobs / job_runs
+- documents / chunks / embeddings (linked to project_id)
+- profiles / settings
+- generated_images (history and metadata)
+
+### Partitioning Strategy
+- Conversations and RAG documents are scoped to a **Project**.
+- Deleting a project triggers a cascading cleanup of all associated transcripts, chunks, and vector indices.
 
 ### Full‑Text Search
 
@@ -138,20 +147,20 @@ Tables:
 
 ---
 
-## 6. Vector Storage (FINAL DECISION)
+## 6. Vector Storage
 
-### Chosen Technology: `sqlite-vec`
+### Technology: `usearch`
 
 **Why:**
-- Same DB file as text
-- No external services
-- Simple backups & export
+- High-performance vector search engine.
+- Direct Rust integration via `usearch` crate.
+- Managed as an external index file (`.usearch`) alongside SQLite.
 
 ### Strategy
 
-- Store embeddings in vec0 virtual table
-- Chunk ID as foreign key
-- Provide “Rebuild Vector Index” tool
+- Store embeddings in a `.usearch` file.
+- Document chunks stored in SQLite with IDs corresponding to vector indices.
+- Provide "Check Vector Index Integrity" tool for synchronization verification.
 
 ---
 
@@ -183,16 +192,12 @@ Tables:
 
 ---
 
-## 8. Reranking (CRITICAL FIX)
+## 8. Reranking
 
-### Implementation (Authoritative)
+### Implementation
 
-- **NO Python sidecar**
-- **NO llama-server reranking**
-
-### Solution
-
-Run a **small ONNX cross‑encoder** in‑process using **`ort` (ONNX Runtime)**.
+- **In-Process:** Run a small ONNX cross-encoder in-process using **`ort` (ONNX Runtime)**.
+- **Graciously Handled:** Using `RerankerWrapper` to handle initialization and optional download of models without blocking the main app.
 
 ### Model
 
@@ -246,7 +251,19 @@ Run a **small ONNX cross‑encoder** in‑process using **`ort` (ONNX Runtime)**
 
 ---
 
-## 11. Profiles System (FINAL)
+## 11. Imagine Studio
+
+### Provider Hybrid Model
+- **Local Diffusion**: Power by `sd-sidecar` for fully offline generation. Supports manual resolution of VAE/CLIP components and real-time sampling progress.
+- **Nano Banana (Gemini)**: High-speed cloud generation via Google Gemini Imagen 3.
+  - `Nano Banana`: Optimized for speed (Gemini 2.5 Flash).
+  - `Nano Banana Pro`: Professional-grade with reasoning/grounding (Gemini 3 Pro).
+
+### Key Features
+- **Premium Performance**: Default 512px base resolution for fast iterations.
+- **Resolution Control**: User-selectable 1K (1024px) and 4K (2048px/interpolated) outputs.
+- **Integrated Gallery**: High-performance persistent storage for creations with Favoriting, Search, and **Settings Restoration** (one-click restore of prompt/styles).
+- **Bespoke Iconography**: Custom `ImagineModeIcon`, `ImagineSendIcon`, and `ImagineMainIcon` with motion particles and gradients.
 
 Profile =
 - model path
@@ -264,7 +281,36 @@ Profile =
 
 ---
 
-## 12. Auto‑Tune Suggestions Engine
+## 12. Agent Engine (Clawdbot / Moltbot)
+
+### Process Model
+The agent runtime is split into two specialized Node sidecars managed by Rust:
+1. **Gateway**: Acts as the communication bridge. Owns Slack/Telegram Socket Mode connections and exposes an authenticated WebSocket control plane to Scrappy.
+2. **Node Host**: The execution engine. Runs the agent's main loop, tool execution (Node skills), and human-in-the-loop (HITL) coordination.
+
+### Secrets Firewall (Privacy & Security)
+Scrappy implements a strict granular permissions model for external agents:
+- **Keys in Escrow**: API keys for Anthropic, OpenAI, etc., are stored in Scrappy's secure identity store.
+- **Explicit Grant**: Agents **cannot** see these keys by default. The user must explicitly toggle the "Grant Access" flag per secret in the Settings panel to expose it to the Moltbot environment.
+
+### Workspace Isolation
+- Each agent operates in a dedicated workspace directory (`Clawdbot/workspace`).
+- Transcripts and artifacts created by agents are isolated from the main chat history to prevent context pollution.
+
+---
+
+## 13. Intelligent Search Grounding
+
+### Logic
+Scrappy features a **Search Grounding** layer that monitors user queries for factual indicators (dates, prices, specific entity questions).
+
+### Behavior
+- **Auto-Trigger**: Even if not explicitly requested, the system can formalize a query and route it through the `DDGSearchTool` + Chromium Scraper.
+- **Exception handling**: Common greetings or abstract philosophical queries bypass grounding to conserve local/API resources.
+
+---
+
+## 14. Auto‑Tune Suggestions Engine
 
 ### Triggers
 
@@ -352,7 +398,7 @@ Excludes:
 | Area | Decision |
 |----|----|
 | Ports | Random + proxy |
-| Vector DB | SQLite + sqlite-vec |
+| Vector DB | USearch Index (`.usearch`) |
 | Reranker | ONNX MiniLM via ort |
 | Multimodal | Base64 image_data |
 | Types | tauri-specta |

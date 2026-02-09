@@ -12,10 +12,10 @@ The Native agent is built on `rig-core`. It is designed for high-performance, co
 
 | Tool Name | Class | Description | Implementation |
 | :--- | :--- | :--- | :--- |
-| `web_search` | `DDGSearchTool` | Multi-stage search: 1. DuckDuckGo lookup, 2. Trusted source ranking, 3. Parallel deep scraping via Chromium, 4. LLM-based summarization of results. | `web_search.rs` |
+| `web_search` | `DDGSearchTool` | Multi-stage search: 1. DuckDuckGo lookup, 2. Trusted source ranking, 3. Parallel deep scraping via Chromium, 4. LLM-based summarization of results. Features **Search Grounding** to automatically trigger for factual queries. | `web_search.rs` |
 | `scrape_page` | `ScrapePageTool` | Directly visits a URL using a bundled Chromium sidecar to extract clean markdown content. | `scrape_page.rs` |
 | `rag_tool` | `RAGTool` | Hooks into the local USearch vector store to retrieve relevant document snippets based on embeddings. | `rag_tool.rs` |
-| `generate_image` | `ImageGenTool`| Interface for the Stable Diffusion (`sd`) sidecar to generate visual assets from textual prompts. | `image_gen_tool.rs` |
+| `generate_image` | `ImageGenTool`| Interface for the Stable Diffusion (`sd.cpp`) sidecar. Supports multiple residents, resolved VAE/CLIP/T5 components, and real-time progress callbacks. | `image_gen_tool.rs` |
 
 ### 🔍 The Integrated "Scraping" Workflow (Deep Search)
 
@@ -28,6 +28,7 @@ In Scrappy, **Websearch and Scraping are inseparable**. When the `web_search` to
     *   **Full Path (Chromium):** If the page requires JavaScript (detected via heuristics like "Enable JS" messages or low text density), it spawns a **Headless Chromium Browser** sidecar to render the page and extract the final text.
 4.  **AI Analysis (Map-Reduce):** The scraped text is sent to a **Summarizer LLM** (a specialized local model). This model scores the content for relevancy to the user's query and compresses large pages into concise, fact-dense summaries.
 5.  **Context Injection:** The summarized, scraped content is fed back to the main chat LLM as a `<tool_result>` block, allowing it to answer with "grounded" real-time information.
+6.  **Search Grounding:** Intelligent logic detects factual queries (e.g., "What is the price of Bitcoin?") and automatically activates the search tool even if not explicitly requested by the user, ensuring up-to-date accuracy.
 
 This pipeline ensures that Scrappy doesn't just "talk about" the web, but actually "reads" it before responding.
 

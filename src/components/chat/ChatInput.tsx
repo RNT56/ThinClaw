@@ -115,10 +115,10 @@ export const ChatInput = memo(function ChatInput({
             )}
             <div className="flex-1 relative flex flex-col">
                 {activeStyleId && (
-                    <div className="absolute -top-10 left-0 flex items-center gap-1.5 bg-pink-500/10 border border-pink-500/30 text-pink-500 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider animate-in slide-in-from-bottom-2">
+                    <div className="absolute -top-10 left-0 flex items-center gap-1.5 bg-primary/10 border border-primary/30 text-primary px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider animate-in slide-in-from-bottom-2">
                         <Sparkles className="w-3 h-3" />
                         <span>Style: {findStyle(activeStyleId)?.label}</span>
-                        <button onClick={() => setActiveStyleId(null)} className="ml-1 hover:text-pink-600">
+                        <button onClick={() => setActiveStyleId(null)} className="ml-1 hover:text-primary">
                             <X className="w-3 h-3" />
                         </button>
                     </div>
@@ -244,7 +244,7 @@ export const ChatInput = memo(function ChatInput({
                             onClick={() => setShowImageSettings(!showImageSettings)}
                             className={cn(
                                 "px-2 py-1 mr-2 text-[10px] font-black uppercase tracking-widest transition-all duration-300 rounded-md border",
-                                showImageSettings ? "bg-pink-500/10 border-pink-500/30 text-pink-500" : "bg-muted/30 border-border/50 text-muted-foreground hover:text-foreground hover:border-border"
+                                showImageSettings ? "bg-primary/10 border-primary/30 text-primary" : "bg-muted/30 border-border/50 text-muted-foreground hover:text-foreground hover:border-border"
                             )}
                         >
                             Settings
@@ -267,7 +267,7 @@ export const ChatInput = memo(function ChatInput({
             </button>
 
             {!autoMode && !isWebSearchEnabled && (
-                <button onClick={() => { setIsImageMode(!isImageMode); }} disabled={isRecording} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isImageMode ? "bg-pink-500 text-white shadow-md shadow-pink-500/20" : (imageRunning ? "text-pink-500 hover:bg-pink-500/10" : "text-muted-foreground hover:bg-muted"))}
+                <button onClick={() => { setIsImageMode(!isImageMode); }} disabled={isRecording} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isImageMode ? "bg-primary text-primary-foreground shadow-md shadow-primary/20" : (imageRunning ? "text-primary hover:bg-primary/10" : "text-muted-foreground hover:bg-muted"))}
                     title={isImageMode ? "Cancel Image Mode" : "Switch to Image Generator"}
                 >
                     <Palette className={cn("w-5 h-5", isImageMode && "fill-current")} />
@@ -290,7 +290,7 @@ export const ChatInput = memo(function ChatInput({
                     "p-2 rounded-xl transition-colors disabled:opacity-50",
                     isStreaming ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 animate-stop-pulse shadow-md shadow-red-500/20" :
                         ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0) ?
-                            (isImageMode ? "bg-pink-500 hover:bg-pink-600 text-white" :
+                            (isImageMode ? "bg-primary hover:bg-primary/90 text-primary-foreground" :
                                 ((isCloudProvider || modelRunning) ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground"))
                             : "text-muted-foreground hover:bg-muted")
                 )}
@@ -339,14 +339,14 @@ export const ChatInput = memo(function ChatInput({
                             <div className="flex flex-col gap-3">
                                 <div className="flex justify-between text-[10px] items-center">
                                     <span className="font-bold text-muted-foreground uppercase opacity-70">Guidance Scale</span>
-                                    <span className="bg-pink-500/10 text-pink-500 px-1.5 py-0.5 rounded font-mono font-bold">{cfgScale.toFixed(1)}</span>
+                                    <span className="bg-primary/10 text-primary px-1.5 py-0.5 rounded font-mono font-bold">{cfgScale.toFixed(1)}</span>
                                 </div>
                                 <input
                                     type="range"
                                     min="1" max="20" step="0.5"
                                     value={cfgScale}
                                     onChange={(e) => setCfgScale(parseFloat(e.target.value))}
-                                    className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-pink-500"
+                                    className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
                                 />
                                 <p className="text-[9px] text-muted-foreground leading-tight italic">Higher values follow prompt more closely but can cause artifacts.</p>
                             </div>

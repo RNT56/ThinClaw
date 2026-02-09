@@ -463,7 +463,7 @@ impl LlamaProvider {
             if !content_str.is_empty() {
                 // Approximate for cloud providers (no /tokenize)
                 if !self.base_url.contains("127.0.0.1") && !self.base_url.contains("localhost") {
-                    total_tokens += (content_str.len() / 4) as u32;
+                    total_tokens += (content_str.len() / 3) as u32;
                     continue;
                 }
 
@@ -484,7 +484,7 @@ impl LlamaProvider {
                     }
                     _ => {
                         // Fallback to char count on error/timeout
-                        total_tokens += (content_str.len() / 4) as u32;
+                        total_tokens += (content_str.len() / 3) as u32;
                     }
                 }
             }

@@ -82,6 +82,16 @@
     @apply bg-background text-foreground;
     font-family: 'Outfit', sans-serif;
   }
+  
+  /* Spotlight window needs to be fully transparent */
+  body.spotlight-window,
+  body.spotlight-window #root {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+  }
 }
 
 /* Syntax Highlighting Overrides - Controlled via ThemeProvider */
@@ -223,5 +233,10 @@ pre code.hljs {
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--muted-foreground) / 0.5);
+  }
+
+  @keyframes progress-bar-stripes {
+    0% { background-position: 24px 0; }
+    100% { background-position: 0 0; }
   }
 }

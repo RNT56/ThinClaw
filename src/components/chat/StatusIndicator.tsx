@@ -35,10 +35,10 @@ export function StatusIndicator({ type, query }: StatusIndicatorProps) {
 
     const getColor = () => {
         switch (type) {
-            case "thinking": return "text-purple-500 bg-purple-500/10 border-purple-200/20";
+            case "thinking": return "text-accent-foreground bg-accent border-accent/20";
             case "web_search": return "text-blue-500 bg-blue-500/10 border-blue-200/20";
             case "rag_search": return "text-emerald-500 bg-emerald-500/10 border-emerald-200/20";
-            case "image_gen": return "text-pink-500 bg-pink-500/10 border-pink-200/20";
+            case "image_gen": return "text-primary bg-primary/10 border-primary/20";
             case "tool_call": return "text-amber-500 bg-amber-500/10 border-amber-200/20";
             case "stopped": return "text-destructive bg-destructive/10 border-destructive/20";
             default: return "text-zinc-500 bg-zinc-500/10 border-zinc-200/20";

@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
 import { useChatContext } from "../components/chat/chat-context";
-import { findStyle } from "../lib/style-library";
 import { toast } from "sonner";
 import { unwrap } from "../lib/utils";
 
@@ -531,60 +530,20 @@ export function useChat() {
         setDbMessages(prev => [...prev, userMsg, assistantMsg]);
 
         let finalPrompt = prompt;
-        if (config?.image_prompt_enhance_enabled && modelRunning) {
+        if (config?.image_prompt_enhance_enabled && (modelRunning || config?.selected_chat_provider !== 'local')) {
             try {
-                const serverConfig = await commands.getChatServerConfig();
-                if (!serverConfig) throw new Error("Chat server config not found");
+                const { enhanceImagePrompt } = await import('../lib/prompt-enhancer');
+                finalPrompt = await enhanceImagePrompt(prompt, styleId);
 
-                const activeStyle = styleId ? findStyle(styleId) : null;
-                const styleSnippet = activeStyle ? `\n\nREQUIRED STYLE: ${activeStyle.promptSnippet}` : "";
-
-                const systemPrompt = `Act as a professional prompt engineer for AI image generation. Rewrite the following user prompt to be more vivid, artistic, and detailed. Add keywords for lighting, style, composition, and high quality. ${styleSnippet} \n\nKeep the output as a single descriptive paragraph under 75 words. Use NO conversational text or headers. Just the enhanced prompt.`;
-
-                const response = await fetch(`http://127.0.0.1:${serverConfig.port}/v1/chat/completions`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${serverConfig.token}`
-                    },
-                    body: JSON.stringify({
-                        messages: [
-                            { role: 'system', content: systemPrompt },
-                            { role: 'user', content: prompt }
-                        ],
-                        temperature: 0.7,
-                        max_tokens: 150
-                    })
-                });
-
-                const data = await response.json();
-                let enhanced = data.choices?.[0]?.message?.content?.trim();
-
-                if (enhanced) {
-                    // Strip common chat template pollution and thinking blocks
-                    enhanced = enhanced.replace(/<\|im_start\|>.*?<\|im_end\|>/gs, '');
-                    enhanced = enhanced.replace(/<\|im_start\|>assistant/g, '');
-                    enhanced = enhanced.replace(/<think>[\s\S]*?<\/think>/g, '');
-                    enhanced = enhanced.replace(/<\|im_end\|>/g, '');
-                    enhanced = enhanced.trim();
-
-                    if (enhanced.length > 0) {
-                        finalPrompt = enhanced;
-                        console.log("[PromptEnhancer] Cleaned Enhanced:", finalPrompt);
-                    } else {
-                        console.warn("[PromptEnhancer] Enhanced prompt was empty after cleaning, using original.");
+                // Update the status message
+                setDbMessages(prev => {
+                    const next = [...prev];
+                    const last = next[next.length - 1];
+                    if (last && last.role === "assistant") {
+                        last.content = "Generating image...";
                     }
-
-                    // Update the status message
-                    setDbMessages(prev => {
-                        const next = [...prev];
-                        const last = next[next.length - 1];
-                        if (last && last.role === "assistant") {
-                            last.content = "Generating image...";
-                        }
-                        return next;
-                    });
-                }
+                    return next;
+                });
             } catch (e) {
                 console.error("Enhancement failed:", e);
             }
@@ -597,12 +556,12 @@ export function useChat() {
             await commands.saveMessage(convId, "user", prompt, null, null, null);
 
             // Start generation
-            const res = await commands.generateImage({
+            const res = await (commands as any).generateImage({
                 prompt: finalPrompt,
                 model: modelPath,
                 ...components
             });
-            const data = unwrap(res);
+            const data = unwrap(res) as any;
 
             // Persist the assistant message with the real image ID - Corrected to 6 arguments
             await commands.saveMessage(convId, "assistant", `Generated image for: ${finalPrompt}`, [data.id], null, null);

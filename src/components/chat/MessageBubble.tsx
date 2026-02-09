@@ -41,7 +41,7 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
 
     // Safety States
     const [isReadyToView, setIsReadyToView] = useState(false);
-    const [userRequestedView, setUserRequestedView] = useState(!isFresh);
+    const [userRequestedView, setUserRequestedView] = useState(true);
 
     useEffect(() => {
         if (id === "pending_generation") {

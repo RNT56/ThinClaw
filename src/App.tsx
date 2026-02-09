@@ -44,8 +44,39 @@ function App() {
   // If we are in the spotlight window, we have a different layout
   if (windowLabel === "spotlight") {
     // Apply transparent background to document for true transparency
-    document.documentElement.style.background = 'transparent';
-    document.body.style.background = 'transparent';
+    // Also remove any potential border styling from the window
+    const html = document.documentElement;
+    const body = document.body;
+
+    html.style.background = 'transparent';
+    html.style.backgroundColor = 'transparent';
+    body.style.background = 'transparent';
+    body.style.backgroundColor = 'transparent';
+    body.style.border = 'none';
+    body.style.outline = 'none';
+    body.style.margin = '0';
+    body.style.padding = '0';
+    body.classList.add('spotlight-window');
+
+    // Also apply a style element to override any CSS that might add borders
+    const styleId = 'spotlight-transparent-override';
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        html, body, #root {
+          background: transparent !important;
+          background-color: transparent !important;
+          border: none !important;
+          outline: none !important;
+          box-shadow: none !important;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    // Force theme sync by ensuring the ThemeProvider applies themes on mount
+    // The ThemeProvider reads from localStorage which is shared across windows
 
     return (
       <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">

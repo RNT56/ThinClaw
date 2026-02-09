@@ -48,9 +48,26 @@ npm run tauri dev
 *   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
 *   **Hybrid Inference Engine**: Seamlessly switch between local GGUF models (Llama 3, Gemma 3) and bleeding-edge cloud models (GPT-5.2, Claude 4.5) in a single workflow.
 *   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
+*   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
 *   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
-*   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`) and re-ranking.
+*   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`), ONNX reranking, and citation-backed generation.
 *   **Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
+*   **Spotlight Command Bar**: An ultra-fast, system-wide AI overlay for quick queries, neural lookups, and rapid brain access (`Cmd+Shift+K`).
+
+---
+
+## Spotlight: Global AI Access
+
+Scrappy includes a premium **Spotlight Bar**—a glassmorphic, system-wide interface that brings the power of your neural engine to any application.
+
+-   **Instant Summon**: Press `Cmd + Shift + K` (macOS) to toggle the Spotlight bar from anywhere.
+-   **Neural Status**: A biological status indicator shows your brain state in real-time (Green = Active/Local Brain Online, Gray = Inactive).
+-   **Transient Intelligence**: Optimized for "quick-tap" queries. By default, Spotlight sessions are purged upon closing to keep your primary history clean and focused.
+-   **Hotkeys**:
+    -   `Cmd + L`: Purge the current spotlight session and start fresh.
+    -   `Esc`: Hide the bar instantly.
+    -   `Enter`: Send prompt.
+    -   `Shift + Enter`: Multi-line input.
 
 ---
 
@@ -103,7 +120,7 @@ The heart of Scrappy's autonomous agency. Based on the **Pi agent runtime**, it 
 A specialized agent engine built using **Rig**. It focuses on performance and reliability for core features:
 -   **RAG Integration**: Direct access to the `usearch` vector store for context injection.
 -   **Deep Search**: Utilizes `DDGSearchTool` and `ScrapePageTool` for gathering real-time information.
--   **Image Generation**: Native integration with image generation sidecars via `ImageGenTool`.
+-   **Image Generation**: Native integration with image generation sidecars via `ImageGenTool`, featuring a premium studio interface with real-time progress tracking, style presets, and multi-resolution support (512px to 2K).
 
 ---
 
@@ -131,15 +148,15 @@ The agent's personality and rules are defined by markdown files in its workspace
 - **`HEARTBEAT.md`**: A proactive, periodic checklist for automated tasks (e.g., checking weather, emails, or project status every 30 minutes).
 
 ### 4. Management & Visibility
-- **Settings Tab**: Manage API keys, model selection, and gateway connection modes.
+- **Settings Tab**: Manage API keys, model selection, gateway connection modes, and customize your **Spotlight Global Shortcut**.
 - **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `src-tauri/src/personas.rs`.
 - **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
 
 ### 5. Cloud Inference Providers
 Scrappy 2026 features native integration with the world's most powerful inference engines:
-- **Anthropic**: Support for **Claude 4.5 Sonnet** and **Opus** with native Tool Use (Computer Use coming soon).
-- **OpenAI**: First-class support for **GPT-5.2**, **Mini**, and **Nano** variants.
-- **Google Gemini**: Integrated **Gemini 3.0 Flash/Pro** with support for massive 1M+ token contexts.
+- **Anthropic**: Support for **Claude 4.5 Sonnet** and **Opus** with native Tool Use.
+- **OpenAI**: First-class support for **GPT-5.2** (with specialized reasoning) and **GPT-4o** variants.
+- **Google Gemini**: Integrated **Gemini 2.0/3.0 Flash/Pro** with support for massive 1M+ token contexts.
 - **Groq**: Ultra-fast inference for open models like **Llama 3.3 70B** and **Mixtral**.
 - **OpenRouter**: Gateway access to 100+ specialized models via a single API key.
 - **Custom Secrets**: Define and grant access to any external API key for use in custom agent tools.
