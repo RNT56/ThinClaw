@@ -4,7 +4,7 @@ import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
 import { Message, commands, WebSearchResult } from '../../lib/bindings';
-import { useEffect, useState, isValidElement, useRef } from 'react';
+import { useEffect, useState, isValidElement, useRef, memo } from 'react';
 import DOMPurify from 'dompurify';
 import { listen } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -382,6 +382,7 @@ function CopyButton({ content, className }: { content: string, className?: strin
 
 type ExtendedMessage = Message & {
     id?: string;
+    realId?: string;
     web_search_results?: WebSearchResult[] | null;
     searchStatus?: WebStatusState;
     searchMessage?: string;
@@ -390,7 +391,7 @@ type ExtendedMessage = Message & {
     isStreaming?: boolean;
 };
 
-export function MessageBubble({ message, conversationId, isLastUser, onResend }: { message: ExtendedMessage, conversationId: string | null, isLast?: boolean, isLastUser?: boolean, onResend?: (id: string, content: string) => void }) {
+function MessageBubbleContent({ message, conversationId, isLastUser, onResend, skipAnimation }: { message: ExtendedMessage, conversationId: string | null, isLast?: boolean, isLastUser?: boolean, onResend?: (id: string, content: string) => void, skipAnimation?: boolean }) {
     const isUser = message.role === 'user';
     const { thoughts, content } = !isUser ? parseThoughts(message.content) : { thoughts: [], content: message.content };
     const rawContent = isUser ? message.content : content;
@@ -407,36 +408,27 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
         }
     }, [message.content, isEditing, isUser]);
 
-    const [webSources, setWebSources] = useState<WebSource[]>([]);
-    const [searchStatus, setSearchStatus] = useState<WebStatusState>('idle');
-    const [statusMessage, setStatusMessage] = useState("");
+    // Derived Web Search State (Stateless to prevent flash on ID change/remount)
+    let webSources: WebSource[] = [];
+    let searchStatus: WebStatusState = 'idle';
+    let statusMessage = "";
 
-    // Sync state with props
-    useEffect(() => {
-        if (isUser) {
-            setWebSources([]);
-            setSearchStatus('idle');
-            setStatusMessage("");
-            return;
-        }
-
-        // If props provide search results, use them
+    if (!isUser) {
         if (message.web_search_results && message.web_search_results.length > 0) {
-            setWebSources(message.web_search_results);
-            setSearchStatus('done');
-            setStatusMessage("");
+            webSources = message.web_search_results;
+            searchStatus = 'done';
+            statusMessage = "";
         } else if (message.searchStatus) {
             // Live status from activeJob mapping
-            setSearchStatus(message.searchStatus);
-            setStatusMessage(message.searchMessage || "");
-            setWebSources([]);
+            searchStatus = message.searchStatus;
+            statusMessage = message.searchMessage || "";
+            webSources = [];
         } else {
-            // Reset for historical messages or chats without search
-            setWebSources([]);
-            setSearchStatus('idle');
-            setStatusMessage("");
+            // Default/Fallback
+            searchStatus = 'idle';
+            statusMessage = "";
         }
-    }, [message.web_search_results, message.searchStatus, message.searchMessage, isUser]);
+    }
 
     if (message.is_summary) {
         return (
@@ -484,7 +476,7 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
     }
 
     return (
-        <div className={cn("flex flex-col w-full animate-in fade-in slide-in-from-bottom-2 duration-300", isUser ? "items-end" : "items-start", isLastUser && "mb-8")}>
+        <div className={cn("flex flex-col w-full", !skipAnimation && "animate-in fade-in slide-in-from-bottom-2 duration-300", isUser ? "items-end" : "items-start", isLastUser && "mb-8")}>
             <div className={cn(
                 "group relative max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-4 shadow-sm overflow-visible",
                 isUser ? "bg-primary text-primary-foreground rounded-br-sm" : "bg-card border border-border/50 rounded-bl-sm"
@@ -557,7 +549,9 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
                                         if (e.key === 'Enter' && !e.shiftKey) {
                                             e.preventDefault();
                                             setIsEditing(false);
-                                            if (message.id) onResend?.(message.id, editContent);
+                                            // Prefer realId for edits, fallback to id
+                                            const targetId = message.realId || message.id;
+                                            if (targetId) onResend?.(targetId, editContent);
                                         }
                                     }}
                                 />
@@ -569,7 +563,12 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
                                         Cancel
                                     </button>
                                     <button
-                                        onClick={() => { setIsEditing(false); if (message.id) onResend?.(message.id, editContent); }}
+                                        onClick={() => {
+                                            setIsEditing(false);
+                                            // Prefer realId for edits, fallback to id
+                                            const targetId = message.realId || message.id;
+                                            if (targetId) onResend?.(targetId, editContent);
+                                        }}
                                         className="p-1 px-3 rounded bg-primary-foreground text-primary font-semibold text-xs hover:opacity-90 transition-opacity shadow-sm flex items-center gap-1"
                                     >
                                         <span>Send</span>
@@ -678,3 +677,29 @@ export function MessageBubble({ message, conversationId, isLastUser, onResend }:
         </div>
     );
 }
+
+export const MessageBubble = memo(MessageBubbleContent, (prev, next) => {
+    // Custom Comparator: Return true if props are equal (skip re-render)
+    if (prev.message.id !== next.message.id) return false;
+    // Check realId if present
+    if (prev.message.realId !== next.message.realId) return false;
+
+    if (prev.message.content !== next.message.content) return false;
+    if (prev.message.isStreaming !== next.message.isStreaming) return false;
+    if (prev.isLast !== next.isLast) return false;
+    if (prev.isLastUser !== next.isLastUser) return false;
+
+    // Check search status
+    if (prev.message.searchStatus !== next.message.searchStatus) return false;
+    if (prev.message.searchMessage !== next.message.searchMessage) return false;
+
+    // Check array lengths (usually enough for distinct identity changes)
+    if ((prev.message.web_search_results?.length || 0) !== (next.message.web_search_results?.length || 0)) return false;
+    if ((prev.message.images?.length || 0) !== (next.message.images?.length || 0)) return false;
+    if ((prev.message.attached_docs?.length || 0) !== (next.message.attached_docs?.length || 0)) return false;
+
+    // Check callbacks (now stable)
+    if (prev.onResend !== next.onResend) return false;
+
+    return true;
+});

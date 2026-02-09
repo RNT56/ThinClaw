@@ -301,9 +301,9 @@ async deleteConversation(id: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getMessages(conversationId: string) : Promise<Result<FrontendMessage[], string>> {
+async getMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_messages", { conversationId }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_messages", { conversationId, limit, beforeCreatedAt }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

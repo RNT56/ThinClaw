@@ -124,17 +124,17 @@ This document outlines a comprehensive strategy to upgrade the application's per
 ## Implementation Checklist & TODOs
 
 ### Immediate (Phase 1)
-- [ ] Refactor `MessageBubble.tsx`: Wrap export in `React.memo`.
-- [ ] Refactor `MessageBubble.tsx`: Ensure `onResend` and other callbacks are stable.
-- [ ] Refactor `useChat.ts`: Optimize `messages` memoization to avoid unnecessary reference changes for historical items.
-- [ ] Refactor `ChatLayout.tsx`: Ensure parent context is not forcing re-renders of the list.
+- [x] Refactor `MessageBubble.tsx`: Wrap export in `React.memo`.
+- [x] Refactor `MessageBubble.tsx`: Ensure `onResend` and other callbacks are stable.
+- [x] Refactor `useChat.ts`: Optimize `messages` memoization to avoid unnecessary reference changes for historical items.
+- [x] Refactor `ChatLayout.tsx`: Ensure parent context is not forcing re-renders of the list.
 
 ### Medium Term (Phase 2 & 3)
-- [ ] Install `react-virtuoso`.
-- [ ] Implement `Virtuoso` in `ChatLayout.tsx`.
-- [ ] Update `history.rs` to support pagination arguments.
-- [ ] Update frontend bindings/types for `get_messages`.
-- [ ] Implement `loadMore` logic in `useChat`.
+- [x] Install `react-virtuoso`.
+- [x] Implement `Virtuoso` in `ChatLayout.tsx`.
+- [x] Update `history.rs` to support pagination arguments.
+- [x] Update frontend bindings/types for `get_messages`.
+- [x] Implement `loadMore` logic in `useChat`.
 
 ### Performance Targets
 - **Typing Latency:** < 16ms (60fps) during generation.

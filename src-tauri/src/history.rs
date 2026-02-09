@@ -168,16 +168,28 @@ pub async fn update_conversations_order(
 pub async fn get_messages(
     state: State<'_, SqlitePool>,
     conversation_id: String,
+    limit: Option<i32>,
+    before_created_at: Option<f64>,
 ) -> Result<Vec<FrontendMessage>, String> {
+    let limit = limit.unwrap_or(50) as i64;
+    let before = before_created_at.map(|t| t as i64).unwrap_or(i64::MAX);
+
     let entries = sqlx::query_as::<_, MessageEntry>(
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+        "SELECT * FROM messages WHERE conversation_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?",
     )
     .bind(conversation_id)
+    .bind(before)
+    .bind(limit)
     .fetch_all(&*state)
     .await
     .map_err(|e| e.to_string())?;
 
-    let msgs = entries
+    // We fetch DESC for pagination logic (getting the *previous* messages), but frontend expects ASC (chronological)
+    // so we reverse them before returning.
+    let mut msgs_asc = entries;
+    msgs_asc.reverse();
+
+    let msgs = msgs_asc
         .into_iter()
         .map(|e| {
             let images = e.images.and_then(|s| serde_json::from_str(&s).ok());

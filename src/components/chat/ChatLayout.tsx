@@ -1,8 +1,10 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { toast } from "sonner";
 import { MessageBubble } from './MessageBubble';
 import { useChat } from '../../hooks/use-chat';
-import { Send, Bot, Layers, ArrowDown, Paperclip, X, Image as ImageIcon, Mic, Palette, Square, Globe, Server, FileText, Settings, Radio, Sparkles, Terminal, ChevronRight } from 'lucide-react';
+import { Bot, Loader2, X, Image as ImageIcon, Paperclip, Layers, Radio, Settings, FileText, ArrowDown } from 'lucide-react';
+import { ChatInput } from './ChatInput';
 import { cn } from '../../lib/utils';
 import { SettingsSidebar, SettingsPage } from '../settings/SettingsSidebar';
 import { SettingsContent } from '../settings/SettingsPages';
@@ -10,6 +12,7 @@ import { useDropzone } from 'react-dropzone';
 import { isVisionCapable } from '../../lib/vision';
 import { useModelContext } from '../model-context';
 import { commands } from '../../lib/bindings';
+import { join } from '@tauri-apps/api/path';
 import { ModelSelector } from './ModelSelector';
 import { ProjectsSidebar } from '../projects/ProjectsSidebar';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -43,8 +46,12 @@ export function ChatLayout() {
         clearMessages,
         conversations,
         loadConversation,
+        loadMoreMessages,
         currentConversationId,
         deleteConversation,
+        loadingHistory,
+        hasMore,
+        isLoadingMore,
         ingestFile,
         modelRunning,
         sttRunning,
@@ -77,12 +84,16 @@ export function ChatLayout() {
     const { isRecording, startRecording, stopRecording } = useAudioRecorder();
     const [input, setInput] = useState("");
     const [sidebarOpen, setSidebarOpen] = useState(false);
-    const messagesEndRef = useRef<HTMLDivElement>(null);
-    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const virtuosoRef = useRef<VirtuosoHandle>(null);
     const [showScrollButton, setShowScrollButton] = useState(false);
     const isUserScrolling = useRef(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const slashCommandContainerRef = useRef<HTMLDivElement>(null);
+    // Use ID tracking to prevent re-animation of messages we've already rendered
+    // This is crucial for avoiding flashes when:
+    // 1. Streaming updates content (ID stays same)
+    // 2. ID Swap happens (streaming -> db persistence) - we spoof ID to keep it stable
+    const seenIds = useRef<Set<string>>(new Set());
 
     // Global drag detection for OS files
     const [isGlobalDrag, setIsGlobalDrag] = useState(false);
@@ -161,16 +172,8 @@ export function ChatLayout() {
         };
     }, []);
 
-    // Auto-scroll logic
-    const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
-        messagesEndRef.current?.scrollIntoView({ behavior });
-    };
-
-    // Scroll on NEW messages (length change) regardless of user scroll
-    useEffect(() => {
-        isUserScrolling.current = false;
-        scrollToBottom();
-    }, [messages.length]);
+    // Use memoized merged data for Virtuoso
+    const virtuosoData = messages;
 
     // Keyboard shortcuts for Settings
     useEffect(() => {
@@ -183,28 +186,7 @@ export function ChatLayout() {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [isSettingsMode]);
 
-    // Keep scrolling if streaming and user hasn't scrolled up (checked via ref)
-    useEffect(() => {
-        if (!isUserScrolling.current) {
-            scrollToBottom();
-        }
-    }, [messages[messages.length - 1]?.content]);
 
-    const handleScroll = () => {
-        if (!scrollContainerRef.current) return;
-        const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-        const distFromBottom = scrollHeight - scrollTop - clientHeight;
-
-        // Use a much smaller threshold (15px) to allow even slight scroll-up to break the pin.
-        // This ensures the auto-scroll doesn't "fight" the user when they try to look up.
-        if (distFromBottom < 15) {
-            isUserScrolling.current = false;
-            setShowScrollButton(false);
-        } else {
-            isUserScrolling.current = true;
-            setShowScrollButton(true);
-        }
-    };
 
     const [attachedImages, setAttachedImages] = useState<{ id: string, path: string }[]>([]);
     const [ingestedFiles, setIngestedFiles] = useState<{ id: string, name: string }[]>([]);
@@ -262,6 +244,11 @@ export function ChatLayout() {
             setAvailableDocs([]);
         }
     }, [selectedProjectId]);
+
+    // Clear seen IDs when conversation changes to ensure fresh animation states
+    useEffect(() => {
+        seenIds.current.clear();
+    }, [currentConversationId]);
 
     const filteredDocs = mentionQuery !== null
         ? availableDocs.filter(d => d.name.toLowerCase().includes(mentionQuery.toLowerCase()))
@@ -325,6 +312,7 @@ export function ChatLayout() {
                 case 'clear':
                 case 'reset':
                     clearMessages();
+                    seenIds.current.clear();
                     setSlashQuery(null);
                     setInput("");
                     toast.success("Conversation Cleared");
@@ -338,7 +326,7 @@ export function ChatLayout() {
         }
     };
 
-    const handleEditMessage = async (messageId: string, newContent: string) => {
+    const handleEditMessage = useCallback(async (messageId: string, newContent: string) => {
         try {
             // Cancel current stream to avoid race conditions
             await cancelGeneration();
@@ -346,7 +334,9 @@ export function ChatLayout() {
             await commands.editMessage(messageId, newContent);
 
             // Reload to truncate history visually immediately
-            await loadConversation(currentConversationId!);
+            if (currentConversationId) {
+                await loadConversation(currentConversationId);
+            }
 
             toast.success("Message edited. Regenerating response...");
             await regenerate();
@@ -354,82 +344,195 @@ export function ChatLayout() {
         } catch (e) {
             toast.error("Failed to edit");
         }
-    };
+    }, [cancelGeneration, currentConversationId, loadConversation, regenerate]);
 
-    const handleSend = async () => {
-        if (mentionQuery !== null) {
-            // If Enter is pressed while menu is open, select the item (handled in onKeyDown), preventing send
+    const handleGenerateImage = useCallback(async () => {
+        if (!input.trim()) {
+            toast.error("Please enter a prompt.");
             return;
         }
+
+        let modelPathToUse = currentImageGenModelPath;
+        if (!modelPathToUse) {
+            const found = localModels.find(m => m.name.toLowerCase().includes("flux") || m.name.toLowerCase().includes("sd") || m.name.toLowerCase().includes("diffusion"));
+            if (found) {
+                modelPathToUse = found.path;
+            } else {
+                toast.error("No image generation model found.", { description: "Please download a Flux or SD model." });
+                return;
+            }
+        }
+
+        // Start Image Server if needed
+        if (!imageRunning) {
+            const tId = toast.loading("Starting Image Engine...");
+            try {
+                const res = await commands.startImageServer(modelPathToUse);
+                if (res.status !== "ok") throw new Error(res.error);
+                // Wait for warm up
+                await new Promise(r => setTimeout(r, 4000));
+                toast.success("Image Engine Ready", { id: tId });
+            } catch (e) {
+                toast.error("Failed to start Image Engine", { id: tId, description: String(e) });
+                return;
+            }
+        }
+
+        try {
+            // Resolve Components (VAE, CLIP, etc)
+            let vae = null, clip_l = null, clip_g = null, t5xxl = null;
+
+            // Find definition in library to know which components are needed
+            const modelDef = models.find(m => m.variants.some(v => modelPathToUse!.endsWith(v.filename)));
+
+            if (modelDef?.components && modelsDir) {
+                for (const comp of modelDef.components) {
+                    // Try to find the component in local models to get absolute path
+                    const localComp = localModels.find(m => m.name === comp.filename);
+                    // Fallback to constructing path manually if not listed (should be listed if present)
+                    const compPath = localComp ? localComp.path : await join(modelsDir, comp.filename);
+
+                    if (comp.type === 'vae') vae = compPath;
+                    if (comp.type === 'clip_l') clip_l = compPath;
+                    if (comp.type === 'clip_g') clip_g = compPath;
+                    if (comp.type === 't5xxl') t5xxl = compPath;
+                }
+            }
+
+            // Parse CLI args
+            let prompt = input;
+            let steps = imageSteps || 20;
+            let cfg = cfgScale || 4.5;
+
+            const stepsMatch = prompt.match(/--steps\s+(\d+)/);
+            if (stepsMatch) {
+                steps = parseInt(stepsMatch[1]);
+                prompt = prompt.replace(stepsMatch[0], "");
+            }
+
+            const cfgMatch = prompt.match(/--cfg\s+([\d.]+)/);
+            if (cfgMatch) {
+                cfg = parseFloat(cfgMatch[1]);
+                prompt = prompt.replace(cfgMatch[0], "");
+            }
+            prompt = prompt.trim();
+
+            const components = {
+                steps,
+                cfg_scale: cfg,
+                width: 512,
+                height: 512,
+                seed: -1,
+                vae, clip_l, clip_g, t5xxl,
+                schedule: "discrete",
+                sampling_method: "euler"
+            };
+
+            // Clear UI
+            setInput("");
+            setAttachedImages([]);
+            setIngestedFiles([]);
+            setIsImageMode(false);
+            setActiveStyleId(null);
+            setSlashQuery(null);
+            setMentionQuery(null);
+
+            // Send
+            await sendImagePrompt(prompt, modelPathToUse, components, activeStyleId || undefined);
+
+            // Auto-restart chat server logic
+            setTimeout(async () => {
+                const chatModel = modelPath;
+                if (chatModel && chatModel !== "auto") {
+                    const tId = toast.loading("Resuming Chat Server...");
+                    try {
+                        let mmproj = null;
+                        const mDef = models.find(m => m.variants.some(v => chatModel.endsWith(v.filename)));
+                        if (mDef && mDef.mmproj && modelsDir) {
+                            mmproj = await join(modelsDir, mDef.mmproj.filename);
+                        }
+                        await commands.startChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
+                        toast.success("Chat Ready", { id: tId });
+                    } catch (e) {
+                        // Silent fail or warn?
+                        console.warn("Failed to resume chat", e);
+                        toast.dismiss(tId);
+                    }
+                }
+            }, 3500);
+
+        } catch (e) {
+            setInput(input); // Restore input
+            setIsImageMode(true);
+            toast.error("Generation Failed", { description: String(e) });
+        }
+    }, [input, imageRunning, currentImageGenModelPath, localModels, modelsDir, models, sendImagePrompt, activeStyleId, imageSteps, cfgScale, maxContext, currentModelTemplate, modelPath]);
+
+    const handleSend = useCallback(async () => {
+        if (mentionQuery !== null) return;
 
         if (isImageMode) {
             await handleGenerateImage();
             return;
         }
 
-        if (!isCloudProvider && !modelRunning && modelPath !== "auto") {
-            toast.warning("Model is warming up, please wait...");
-            return;
-        }
-        if ((!input.trim() && attachedImages.length === 0 && ingestedFiles.length === 0) || isStreaming) return;
+        if ((!input.trim() && attachedImages.length === 0 && ingestedFiles.length === 0)) return;
+        if (isStreaming) return;
 
-        let finalModelPath = modelPath;
+        if (!isCloudProvider && !modelRunning && !isImageMode) {
+            const tId = toast.loading("Starting Local Model...");
+            try {
+                if (modelPath === "auto") {
+                    const isComplex = input.length > 100 || attachedImages.length > 0 || ingestedFiles.length > 0;
+                    const sorted = [...localModels].sort((a, b) => a.size - b.size);
 
-        // --- Smart Auto Logic ---
-        if (modelPath === "auto") {
-            const userMsg = input;
-            const isComplex = userMsg.length > 50 || /explain|code|program|analyze|create|write|why|how|react|rust|function|class|debug|error/i.test(userMsg);
-
-            const sorted = [...localModels].sort((a, b) => a.size - b.size);
-            if (sorted.length > 0) {
-                if (isComplex) {
-                    const largest = sorted[sorted.length - 1];
-                    finalModelPath = largest.path;
-                } else {
-                    const smallest = sorted[0];
-                    finalModelPath = smallest.path;
-                }
-
-                // We rely on backend or manual restart if model changed.
-                // BUT current architecture assumes server is running `modelPath`.
-                // If `modelPath` is "auto", we don't know what's running unless we check `status`.
-                // Status check is async.
-                // We will force a restart if we are in "auto" mode to ensure the correct model is loaded for this query.
-                // This adds latency but fulfills "Smart Auto" requirement of adapting to query.
-                // Optimization: Backend could handle "hot swap" or check if loaded model matches.
-                // We'll call startChatServer. Backend checks if already running same model (usually).
-
-                const tId = toast.loading(`Auto - switching to ${isComplex ? "Smart" : "Fast"} Model...`);
-                try {
-                    // Start with appropriate template (null lets
-                    if (finalModelPath) {
-                        await commands.startChatServer(finalModelPath, maxContext, null, null, false, false, false);
+                    let bestModel = localModels[0];
+                    if (sorted.length > 0) {
+                        bestModel = isComplex ? sorted[sorted.length - 1] : sorted[0];
                     }
-                    toast.dismiss(tId);
-                } catch (e) {
-                    toast.error("Failed to auto-switch model");
-                    return;
+
+                    if (bestModel) {
+                        toast.loading(`Auto-switching to ${bestModel.name}...`, { id: tId });
+                        // bestModel has .path
+                        await commands.startChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
+                    } else {
+                        throw new Error("No local models found.");
+                    }
+                } else {
+                    await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
                 }
-            } else {
-                toast.error("No local models found for Auto Mode.");
+                toast.success("Ready", { id: tId });
+            } catch (e) {
+                toast.error("Failed to start model", { id: tId, description: String(e) });
                 return;
             }
         }
 
+        // Reset seen content if starting a new chat
+        if (!currentConversationId) {
+            seenIds.current.clear();
+        }
+
         const imageIds = attachedImages.map(img => img.id);
+        const effectiveProjectId = currentConversationId ? (conversations.find(c => c.id === currentConversationId)?.project_id ?? null) : selectedProjectId;
 
-        const currentConv = conversations.find(c => c.id === currentConversationId);
-        // CRITICAL FIX: Only use the sidebar's selectedProjectId if we are starting a NEW chat.
-        // If we are in an existing chat, we MUST use that chat's own project_id (which might be null).
-        // This prevents "context leakage" from a project that is just expanded in the sidebar.
-        const effectiveProjectId = currentConversationId ? (currentConv?.project_id ?? null) : selectedProjectId;
-
-        sendMessage(input, imageIds, ingestedFiles, isWebSearchEnabled, effectiveProjectId);
+        const currentInput = input;
+        const currentImages = attachedImages;
+        const currentDocs = ingestedFiles;
 
         setInput("");
         setAttachedImages([]);
-        setIngestedFiles([]); // Clear ingested list on send
-    }
+        setIngestedFiles([]);
+
+        try {
+            await sendMessage(currentInput, imageIds, currentDocs, isWebSearchEnabled, effectiveProjectId);
+        } catch (e) {
+            console.error(e);
+            setInput(currentInput);
+            setAttachedImages(currentImages);
+            setIngestedFiles(currentDocs);
+        }
+    }, [input, isImageMode, handleGenerateImage, isCloudProvider, modelRunning, modelPath, attachedImages, ingestedFiles, isStreaming, currentConversationId, localModels, maxContext, currentModelTemplate, sendMessage, conversations, selectedProjectId, mentionQuery, modelsDir, seenIds, isWebSearchEnabled]);
 
     const removeImage = (id: string) => {
         setAttachedImages(prev => prev.filter(img => img.id !== id));
@@ -440,7 +543,7 @@ export function ChatLayout() {
     };
 
     // Dropzone
-    const onDrop = async (acceptedFiles: File[]) => {
+    const onDrop = useCallback(async (acceptedFiles: File[]) => {
         const totalFiles = attachedImages.length + ingestedFiles.length + acceptedFiles.length;
         if (totalFiles > 3) {
             toast.error("Maximum 3 files allowed per message.");
@@ -525,7 +628,7 @@ export function ChatLayout() {
                 }
             }
         }
-    };
+    }, [attachedImages.length, ingestedFiles.length, canSee, isRagCapable, currentEmbeddingModelPath, ingestFile, selectedProjectId]);
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
@@ -537,7 +640,7 @@ export function ChatLayout() {
         }
     });
 
-    const handleImageUpload = () => {
+    const handleImageUpload = useCallback(() => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = 'image/*';
@@ -547,9 +650,9 @@ export function ChatLayout() {
             if (files.length > 0) onDrop(files);
         };
         input.click();
-    };
+    }, [onDrop]);
 
-    const handleFileUpload = () => {
+    const handleFileUpload = useCallback(() => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.pdf,.txt,.md,.json,.js,.ts,.rs,.py';
@@ -559,9 +662,9 @@ export function ChatLayout() {
             if (files.length > 0) onDrop(files);
         };
         input.click();
-    };
+    }, [onDrop]);
 
-    const handleMicClick = async () => {
+    const handleMicClick = useCallback(async () => {
         if (!isRecording) {
             // Check Server State
             if (!sttRunning) {
@@ -610,133 +713,20 @@ export function ChatLayout() {
                 toast.error("Transcription Failed", { id: toastId, description: String(e) });
             }
         }
-    };
+    }, [isRecording, sttRunning, currentSttModelPath, startRecording, stopRecording]);
 
 
 
-    const handleGenerateImage = async () => {
-        if (!input.trim()) {
-            toast.error("Please enter a prompt for image generation.");
-            return;
-        }
 
-        // Check Server
-        if (!imageRunning) {
-            if (currentImageGenModelPath) {
-                const tId = toast.loading("Starting Image Engine...");
-                try {
-                    const res = await commands.startImageServer(currentImageGenModelPath);
-                    if (res.status !== "ok") throw new Error(res.error);
-                    await new Promise(r => setTimeout(r, 5000)); // Image servers take longer
-                    toast.success("Image Engine Ready", { id: tId });
-                } catch (e) {
-                    toast.error("Failed to start Image Engine", { id: tId, description: String(e) });
-                    return;
-                }
-            } else {
-                toast.error("No Image Gen Model Selected", { description: "Please select a model in settings." });
-                return;
-            }
-        }
 
+    const handleCancelGeneration = useCallback(async () => {
         try {
-            // Resolve Components
-            let vae = null;
-            let clip_l = null;
-            let clip_g = null;
-            let t5xxl = null;
-
-            // Check if current model has components defined in context
-            // We need to find the definition.
-            // currentImageGenModelPath is just path string.
-            // We can find the model definition from `models` using helper or just scan.
-            // Helper: We have `models` in context.
-            const modelDef = models.find(m => m.variants?.some(v => currentImageGenModelPath.endsWith(v.filename)));
-
-            if (modelDef && modelDef.components && modelsDir) {
-                // Join paths. We need path separator.
-                // Simplified: use / for now, MacOS handles it.
-                // Or use `await path.join` from tauri api if imported.
-                // Assuming standard / separator for Mac.
-
-                for (const comp of modelDef.components) {
-                    const compPath = `${modelsDir}/${comp.filename}`;
-                    if (comp.type === 'vae') vae = compPath;
-                    if (comp.type === 'clip_l') clip_l = compPath;
-                    if (comp.type === 'clip_g') clip_g = compPath;
-                    if (comp.type === 't5xxl') t5xxl = compPath;
-                }
-            }
-
-
-
-            const promptToUse = input.trim();
-            const styleToUse = activeStyleId;
-
-            setInput("");
-            setAttachedImages([]); // Clear any reference images
-            setIngestedFiles([]); // Clear any attached documents
-            setIsImageMode(false);
-            setActiveStyleId(null);
-            setSlashQuery(null);
-            setMentionQuery(null);
-
-            // Using the new chat-native flow
-            await sendImagePrompt(
-                promptToUse,
-                currentImageGenModelPath,
-                { vae, clip_l, clip_g, t5xxl, cfg_scale: cfgScale, steps: imageSteps, seed: -1, schedule: "discrete", sampling_method: "euler" },
-                styleToUse || undefined
-            );
-
-            // AUTO-RESTART REMOVED FOR STABILITY
-            // The concurrent Metal initialization caused black screens.
-            // We now rely on the user to click "Resume Chat" if needed,
-            // ensuring they have viewed the image first and the GPU is idle.
-
-            // Helpful Toast & Auto-Restart
-            setTimeout(async () => {
-                toast.success("Image Generated! Cooling down GPU (3s)...");
-
-                // Wait for GPU to release memory
-                await new Promise(r => setTimeout(r, 3000));
-
-                const chatModel = modelPath;
-                if (chatModel) {
-                    const tId = toast.loading("Resuming Chat Server...");
-                    try {
-                        let mmproj = null;
-                        const mDef = models.find(m => m.variants.some(v => chatModel.endsWith(v.filename)));
-                        if (mDef && mDef.mmproj && modelsDir) {
-                            mmproj = `${modelsDir}/${mDef.mmproj.filename}`;
-                        }
-                        // Increase context back to 8192 if needed, matching common usage
-                        await commands.startChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
-                        toast.success("Ready to chat", { id: tId });
-                    } catch (e) {
-                        console.error("Auto-resume failed:", e);
-                        toast.error("Failed to auto-resume chat server", { id: tId });
-                    }
-                }
-            }, 1000);
-
-            setAttachedImages([]);
-            setIngestedFiles([]);
-
-        } catch (e) {
-            console.error(e);
-            toast.error("Generation Failed", { description: String(e) });
-        }
-    };
-
-    const handleCancelGeneration = async () => {
-        try {
-            await commands.cancelGeneration();
+            await cancelGeneration();
             toast.info("Stopping generation...");
         } catch (e) {
             toast.error("Failed to cancel generation");
         }
-    };
+    }, [cancelGeneration]);
 
 
     const handleNewClawdbotSession = () => {
@@ -1019,40 +1009,69 @@ export function ChatLayout() {
                                     </motion.div>
                                 </AnimatePresence>
 
-                                {/* Scroll Container */}
-                                <div
-                                    ref={scrollContainerRef}
-                                    onScroll={handleScroll}
-                                    className="absolute inset-0 overflow-y-auto overflow-x-hidden flex flex-col scroll-smooth pt-16"
-                                >
-                                    <div className="flex-1 flex flex-col gap-2 p-4 md:p-6 w-full max-w-4xl mx-auto">
-                                        {messages.length === 0 ? (
-                                            <div className="flex-1 flex items-center justify-center text-muted-foreground flex-col gap-4 min-h-[50vh]">
-                                                <Bot className="w-12 h-12 opacity-20" />
-                                                <p>Ready to chat.</p>
-                                                <div className="flex gap-4 text-xs opacity-50">
-                                                    {canSee && <span className="flex items-center gap-1"><ImageIcon className="w-3 h-3" /> Images</span>}
-                                                    {isRagCapable && <span className="flex items-center gap-1"><Paperclip className="w-3 h-3" /> Documents</span>}
-                                                </div>
+                                {/* Virtuoso Scroll Container */}
+                                <div className="absolute inset-0 pt-16 flex flex-col">
+                                    {loadingHistory ? (
+                                        <div className="flex-1 flex items-center justify-center">
+                                            <Loader2 className="w-8 h-8 animate-spin text-primary/20" />
+                                        </div>
+                                    ) : messages.length === 0 ? (
+                                        <div className="flex-1 flex items-center justify-center text-muted-foreground flex-col gap-4 min-h-[50vh]">
+                                            <Bot className="w-12 h-12 opacity-20" />
+                                            <p>Ready to chat.</p>
+                                            <div className="flex gap-4 text-xs opacity-50">
+                                                {canSee && <span className="flex items-center gap-1"><ImageIcon className="w-3 h-3" /> Images</span>}
+                                                {isRagCapable && <span className="flex items-center gap-1"><Paperclip className="w-3 h-3" /> Documents</span>}
                                             </div>
-                                        ) : (
-                                            (() => {
-                                                const lastUserIndex = messages.map((m, i) => ({ role: m.role, index: i })).reverse().find(m => m.role === 'user')?.index ?? -1;
-                                                return messages.map((m, i) => (
-                                                    <MessageBubble
-                                                        key={i}
-                                                        message={{ ...m, web_search_results: m.web_search_results || undefined }}
-                                                        conversationId={currentConversationId}
-                                                        isLast={i === messages.length - 1}
-                                                        isLastUser={i === lastUserIndex}
-                                                        onResend={handleEditMessage}
-                                                    />
-                                                ));
-                                            })()
-                                        )}
-                                        <div className="h-20 md:h-24 shrink-0" />
-                                        <div ref={messagesEndRef} />
-                                    </div>
+                                        </div>
+                                    ) : (
+                                        <Virtuoso
+                                            ref={virtuosoRef}
+                                            data={virtuosoData}
+                                            style={{ height: '100%' }}
+                                            className="custom-scrollbar"
+                                            followOutput={"auto"}
+                                            startReached={loadMoreMessages}
+                                            atBottomStateChange={(atBottom) => {
+                                                setShowScrollButton(!atBottom);
+                                                isUserScrolling.current = !atBottom;
+                                            }}
+                                            itemContent={(index, m) => {
+                                                const lastUserIndex = virtuosoData.map((msg, i) => ({ role: msg.role, index: i })).reverse().find(msg => msg.role === 'user')?.index ?? -1;
+
+                                                // Use ID-based tracking for animation skipping.
+                                                // If we have seen this ID before, skip the entry animation.
+                                                // This is robust against content changes (streaming) and slight persistence diffs.
+                                                const msgKey = m.id || "msg-" + index;
+                                                const shouldSkip = seenIds.current.has(msgKey);
+                                                if (!shouldSkip) {
+                                                    seenIds.current.add(msgKey);
+                                                }
+
+                                                return (
+                                                    <div className="w-full max-w-4xl mx-auto px-4 md:px-6 py-2">
+                                                        <MessageBubble
+                                                            key={m.id || `msg-${index}`}
+                                                            message={{ ...m, web_search_results: m.web_search_results || undefined }}
+                                                            conversationId={currentConversationId}
+                                                            isLast={index === virtuosoData.length - 1}
+                                                            isLastUser={index === lastUserIndex}
+                                                            onResend={handleEditMessage}
+                                                            skipAnimation={shouldSkip}
+                                                        />
+                                                    </div>
+                                                );
+                                            }}
+                                            components={{
+                                                Header: () => hasMore ? (
+                                                    <div className="h-12 flex items-center justify-center">
+                                                        {isLoadingMore && <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />}
+                                                    </div>
+                                                ) : <div className="h-4" />,
+                                                Footer: () => <div className="h-24 md:h-32" />
+                                            }}
+                                        />
+                                    )}
                                 </div>
 
                                 {/* Floating Input Bar */}
@@ -1060,7 +1079,10 @@ export function ChatLayout() {
                                     {showScrollButton && (
                                         <div className="w-full max-w-4xl mx-auto relative pointer-events-auto">
                                             <button
-                                                onClick={() => { isUserScrolling.current = false; scrollToBottom(); }}
+                                                onClick={() => {
+                                                    isUserScrolling.current = false;
+                                                    virtuosoRef.current?.scrollToIndex({ index: virtuosoData.length - 1, align: 'end', behavior: 'smooth' });
+                                                }}
                                                 className="absolute -top-12 right-4 p-2 bg-primary text-primary-foreground rounded-full shadow-lg hover:bg-primary/90 transition-all z-20"
                                             >
                                                 <ArrowDown className="w-5 h-5" />
@@ -1103,397 +1125,56 @@ export function ChatLayout() {
                                                 </div>
                                             )}
 
-                                            <div className="relative flex items-end gap-2 bg-background/60 backdrop-blur-xl border border-input/50 p-2 rounded-2xl shadow-lg transition-all">
-                                                {(canSee || isRagCapable || isImageMode) && !isWebSearchEnabled && (
-                                                    <div className="relative group flex flex-col justify-end">
-                                                        <div className="absolute bottom-full left-0 mb-0 flex flex-col gap-1 p-1 bg-background/80 backdrop-blur-md border rounded-xl shadow-xl opacity-0 translate-y-2 invisible group-hover:visible group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 ease-out z-20 min-w-[120px]">
-                                                            {(canSee || isImageMode) && (
-                                                                <button onClick={handleImageUpload} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors">
-                                                                    <div className="p-1.5 bg-blue-500/10 rounded-md"><ImageIcon className="w-4 h-4 text-blue-500" /></div>
-                                                                    <span>Image</span>
-                                                                </button>
-                                                            )}
-                                                            {!isImageMode && (
-                                                                <button onClick={handleFileUpload} disabled={!isRagCapable} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors disabled:opacity-50">
-                                                                    <div className="p-1.5 bg-orange-500/10 rounded-md"><Paperclip className="w-4 h-4 text-orange-500" /></div>
-                                                                    <span>Document</span>
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                        <div className="p-2 text-muted-foreground hover:text-foreground hover:bg-background/50 rounded-lg transition-colors cursor-pointer">
-                                                            <Paperclip className="w-5 h-5" />
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                <div className="flex-1 relative flex flex-col">
-                                                    {activeStyleId && (
-                                                        <div className="absolute -top-10 left-0 flex items-center gap-1.5 bg-pink-500/10 border border-pink-500/30 text-pink-500 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider animate-in slide-in-from-bottom-2">
-                                                            <Sparkles className="w-3 h-3" />
-                                                            <span>Style: {findStyle(activeStyleId)?.label}</span>
-                                                            <button onClick={() => setActiveStyleId(null)} className="ml-1 hover:text-pink-600">
-                                                                <X className="w-3 h-3" />
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                    <textarea
-                                                        ref={textareaRef}
-                                                        value={input}
-                                                        onChange={(e) => {
-                                                            const newVal = e.target.value;
-                                                            // Style Command Detection
-                                                            if (newVal.startsWith("/style_")) {
-                                                                const match = newVal.match(/^\/style_([a-zA-Z0-9-]+)(\s+)?(.*)/);
-                                                                if (match) {
-                                                                    const styleId = match[1];
-                                                                    const remainder = match[3] || "";
-                                                                    const styleDef = findStyle(styleId);
-                                                                    if (styleDef) {
-                                                                        setIsImageMode(true);
-                                                                        setActiveStyleId(styleId);
-                                                                        setInput(remainder);
-                                                                        toast.success(`Style Locked: ${styleDef.label}`, {
-                                                                            icon: "🎨"
-                                                                        });
-                                                                        return;
-                                                                    }
-                                                                }
-                                                            }
-                                                            setInput(newVal);
-
-                                                            // Check for @ mention at cursor position
-                                                            const cursor = e.target.selectionStart;
-                                                            const textBeforeCursor = newVal.slice(0, cursor);
-                                                            const lastAt = textBeforeCursor.lastIndexOf('@');
-
-                                                            if (lastAt !== -1) {
-                                                                const query = textBeforeCursor.slice(lastAt + 1);
-                                                                // If query contains space, invalidate unless it is very short (e.g. "my file") but usually handles filenames
-                                                                if (!query.includes(' ') && query.length < 20) {
-                                                                    setMentionQuery(query);
-                                                                    setSelectedIndex(0);
-                                                                    return;
-                                                                }
-                                                            }
-                                                            setMentionQuery(null);
-
-                                                            // Slash Command Discovery
-                                                            if (newVal.startsWith("/")) {
-                                                                setSlashQuery(newVal);
-                                                                setSlashSelectedIndex(0);
-                                                            } else {
-                                                                setSlashQuery(null);
-                                                            }
-                                                        }}
-                                                        onKeyDown={(e) => {
-                                                            // Handle Mentions
-                                                            if (mentionQuery !== null && filteredDocs.length > 0) {
-                                                                if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIndex(prev => Math.max(0, prev - 1)); return; }
-                                                                if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(prev => Math.min(filteredDocs.length - 1, prev + 1)); return; }
-                                                                if (e.key === 'Enter' || e.key === 'Tab') {
-                                                                    e.preventDefault();
-                                                                    const doc = filteredDocs[selectedIndex];
-                                                                    setIngestedFiles(prev => [...prev, { id: doc.id, name: doc.name }]);
-                                                                    const cursor = textareaRef.current?.selectionStart || 0;
-                                                                    const textBefore = input.slice(0, cursor);
-                                                                    const lastAt = textBefore.lastIndexOf('@');
-                                                                    if (lastAt !== -1) {
-                                                                        const prefix = textBefore.slice(0, lastAt);
-                                                                        setInput(prefix + input.slice(cursor));
-                                                                    }
-                                                                    setMentionQuery(null);
-                                                                    return;
-                                                                }
-                                                                if (e.key === 'Escape') { setMentionQuery(null); return; }
-                                                            }
-
-                                                            // Handle Slash Commands
-                                                            if (slashQuery !== null && slashSuggestions.length > 0) {
-                                                                if (e.key === 'ArrowUp') { e.preventDefault(); setSlashSelectedIndex(prev => Math.max(0, prev - 1)); return; }
-                                                                if (e.key === 'ArrowDown') { e.preventDefault(); setSlashSelectedIndex(prev => Math.min(slashSuggestions.length - 1, prev + 1)); return; }
-                                                                if (e.key === 'Enter' || e.key === 'Tab') {
-                                                                    e.preventDefault();
-                                                                    handleSlashCommandExecute(slashSuggestions[slashSelectedIndex]);
-                                                                    return;
-                                                                }
-                                                                if (e.key === 'Escape') { setSlashQuery(null); return; }
-                                                            }
-
-                                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                                e.preventDefault();
-
-                                                                // Don't send if button is disabled (blocks Enter while warming up/restarting)
-                                                                const canSend = !isRestarting && ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0 || isStreaming) && (isCloudProvider || modelRunning || isImageMode || isStreaming));
-                                                                if (!canSend) return;
-
-                                                                if (isImageMode) {
-                                                                    setSlashQuery(null);
-                                                                    setMentionQuery(null);
-                                                                    handleGenerateImage();
-                                                                } else {
-                                                                    setSlashQuery(null);
-                                                                    setMentionQuery(null);
-                                                                    handleSend();
-                                                                }
-                                                            }
-                                                        }}
-                                                        placeholder={
-                                                            isRestarting ? "Warming up model..." : (
-                                                                userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local"
-                                                                    ? "Type a message..."
-                                                                    : (!modelRunning ? "Starting model..." : (isImageMode ? "Describe the image you want to generate..." : (canSee ? "Type a message..." : (isRagCapable ? "Type a message..." : "Select a Vision model or start Embedder..."))))
-                                                            )
-                                                        }
-                                                        className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px]"
-                                                        rows={1}
-                                                        style={{ height: 'auto', minHeight: '44px' }}
-                                                    />
-                                                </div>
-
-                                                {!autoMode && (
-                                                    <div className="flex items-center">
-                                                        {isImageMode && (
-                                                            <button
-                                                                onClick={() => setShowImageSettings(!showImageSettings)}
-                                                                className={cn(
-                                                                    "px-2 py-1 mr-2 text-[10px] font-black uppercase tracking-widest transition-all duration-300 rounded-md border",
-                                                                    showImageSettings ? "bg-pink-500/10 border-pink-500/30 text-pink-500" : "bg-muted/30 border-border/50 text-muted-foreground hover:text-foreground hover:border-border"
-                                                                )}
-                                                            >
-                                                                Settings
-                                                            </button>
-                                                        )}
-                                                        {!isImageMode && (
-                                                            <button onClick={() => setIsWebSearchEnabled(!isWebSearchEnabled)} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isWebSearchEnabled ? "bg-blue-500 text-white shadow-md shadow-blue-500/20" : "text-muted-foreground hover:bg-muted hover:text-foreground")}
-                                                                title={isWebSearchEnabled ? "Disable Web Search" : "Enable Web Search"}
-                                                            >
-                                                                <Globe className={cn("w-5 h-5", isWebSearchEnabled && "stroke-[2.5]")} />
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                )}
-
-                                                <button onClick={handleMicClick} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isRecording ? "bg-red-500 text-white animate-stop-pulse" : "text-muted-foreground hover:bg-muted hover:text-foreground")}
-                                                    title={isRecording ? "Stop Recording" : "Voice Input"}
-                                                >
-                                                    {isRecording ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-5 h-5" />}
-                                                </button>
-
-                                                {!autoMode && !isWebSearchEnabled && (
-                                                    <button onClick={() => { setIsImageMode(!isImageMode); }} disabled={isRecording} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isImageMode ? "bg-pink-500 text-white shadow-md shadow-pink-500/20" : (imageRunning ? "text-pink-500 hover:bg-pink-500/10" : "text-muted-foreground hover:bg-muted"))}
-                                                        title={isImageMode ? "Cancel Image Mode" : "Switch to Image Generator"}
-                                                    >
-                                                        <Palette className={cn("w-5 h-5", isImageMode && "fill-current")} />
-                                                    </button>
-                                                )}
-
-                                                <button
-                                                    onClick={() => {
-                                                        if (isStreaming) { handleCancelGeneration(); return; }
-                                                        setSlashQuery(null);
-                                                        setMentionQuery(null);
-                                                        if (isImageMode) {
-                                                            handleGenerateImage();
-                                                        } else {
-                                                            handleSend();
-                                                        }
-                                                    }}
-                                                    disabled={isRestarting || (!input.trim() && attachedImages.length === 0 && ingestedFiles.length === 0 && !isStreaming) || (!isCloudProvider && !modelRunning && !isImageMode && !isStreaming)}
-                                                    className={cn(
-                                                        "p-2 rounded-xl transition-colors disabled:opacity-50",
-                                                        isStreaming ? "bg-destructive text-destructive-foreground hover:bg-destructive/90 animate-stop-pulse shadow-md shadow-red-500/20" :
-                                                            ((input.trim() || attachedImages.length > 0 || ingestedFiles.length > 0) ?
-                                                                (isImageMode ? "bg-pink-500 hover:bg-pink-600 text-white" :
-                                                                    ((isCloudProvider || modelRunning) ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground"))
-                                                                : "text-muted-foreground hover:bg-muted")
-                                                    )}
-                                                >
-                                                    {isStreaming ? <Square className="w-5 h-5 fill-current" /> : (isImageMode ? <Palette className="w-5 h-5" /> : <Send className="w-5 h-5" />)}
-                                                </button>
-
-                                                {!modelRunning && !isImageMode && userCfg?.selected_chat_provider === "local" && (
-                                                    <button
-                                                        onClick={async () => {
-                                                            const model = modelPath || localModels[0]?.path;
-                                                            if (model) {
-                                                                toast.loading("Starting Chat Server...");
-                                                                try {
-                                                                    await commands.startChatServer(model, maxContext, currentModelTemplate, null, false, false, false);
-                                                                    toast.dismiss();
-                                                                    toast.success("Server Started");
-                                                                } catch (e) { toast.error("Start failed"); }
-                                                            }
-                                                        }}
-                                                        className="p-2 rounded-xl transition-all duration-300 mr-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                                                        title="Start Server Manually"
-                                                    >
-                                                        <Server className="w-5 h-5" />
-                                                    </button>
-                                                )}
-
-                                                {/* Image Generation Settings Popover */}
-                                                <AnimatePresence>
-                                                    {showImageSettings && isImageMode && (
-                                                        <motion.div
-                                                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                                                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                                                            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                                                            className="absolute bottom-full left-0 right-0 mb-2 p-4 bg-background/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl z-50 flex flex-col gap-4 origin-bottom"
-                                                        >
-                                                            <div className="flex items-center justify-between border-b border-border/50 pb-2">
-                                                                <span className="text-xs font-black uppercase tracking-widest text-muted-foreground flex items-center gap-2">
-                                                                    <Palette className="w-3.5 h-3.5" /> Engine Parameters
-                                                                </span>
-                                                                <button onClick={() => setShowImageSettings(false)} className="text-muted-foreground hover:text-foreground transition-colors">
-                                                                    <X className="w-4 h-4" />
-                                                                </button>
-                                                            </div>
-
-                                                            <div className="grid grid-cols-2 gap-6">
-                                                                <div className="flex flex-col gap-3">
-                                                                    <div className="flex justify-between text-[10px] items-center">
-                                                                        <span className="font-bold text-muted-foreground uppercase opacity-70">Guidance Scale</span>
-                                                                        <span className="bg-pink-500/10 text-pink-500 px-1.5 py-0.5 rounded font-mono font-bold">{cfgScale.toFixed(1)}</span>
-                                                                    </div>
-                                                                    <input
-                                                                        type="range"
-                                                                        min="1" max="20" step="0.5"
-                                                                        value={cfgScale}
-                                                                        onChange={(e) => setCfgScale(parseFloat(e.target.value))}
-                                                                        className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-pink-500"
-                                                                    />
-                                                                    <p className="text-[9px] text-muted-foreground leading-tight italic">Higher values follow prompt more closely but can cause artifacts.</p>
-                                                                </div>
-
-                                                                <div className="flex flex-col gap-3">
-                                                                    <div className="flex justify-between text-[10px] items-center">
-                                                                        <span className="font-bold text-muted-foreground uppercase opacity-70">Inference Steps</span>
-                                                                        <span className="bg-primary/10 text-primary px-1.5 py-0.5 rounded font-mono font-bold">{imageSteps}</span>
-                                                                    </div>
-                                                                    <input
-                                                                        type="range"
-                                                                        min="1" max="50" step="1"
-                                                                        value={imageSteps}
-                                                                        onChange={(e) => setImageSteps(parseInt(e.target.value))}
-                                                                        className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-                                                                    />
-                                                                    <p className="text-[9px] text-muted-foreground leading-tight italic">More steps = better quality but takes longer to generate.</p>
-                                                                </div>
-                                                            </div>
-                                                        </motion.div>
-                                                    )}
-                                                </AnimatePresence>
-
-                                                {/* Mentions Popover */}
-                                                {mentionQuery !== null && filteredDocs.length > 0 && (
-                                                    <div className="absolute bottom-full left-0 mb-1 w-80 bg-popover/95 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl overflow-hidden origin-bottom animate-in fade-in slide-in-from-bottom-2 zoom-in-95 duration-150 ease-out z-50">
-                                                        <div className="px-3 py-1.5 bg-muted/50 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border/50 flex items-center gap-2">
-                                                            <Layers className="w-3 h-3" /> Suggested Documents
-                                                        </div>
-                                                        <div className="max-h-56 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
-                                                            {filteredDocs.map((doc, i) => (
-                                                                <button
-                                                                    key={doc.id}
-                                                                    className={cn(
-                                                                        "w-full text-left px-3 py-2.5 text-sm rounded-xl flex items-center gap-3 transition-all duration-200",
-                                                                        i === selectedIndex
-                                                                            ? "bg-primary/10 text-primary font-medium translate-x-1"
-                                                                            : "hover:bg-muted/50 text-foreground"
-                                                                    )}
-                                                                    onClick={() => {
-                                                                        // Add to ingested/attached list
-                                                                        setIngestedFiles(prev => [...prev, { id: doc.id, name: doc.name }]);
-
-                                                                        // Remove the @query from input
-                                                                        // input has "Hello @foo"
-                                                                        // We want "Hello "
-                                                                        const cursor = document.querySelector('textarea')?.selectionStart || 0;
-                                                                        const textBefore = input.slice(0, cursor);
-                                                                        const textAfter = input.slice(cursor);
-
-                                                                        const lastAt = textBefore.lastIndexOf('@');
-                                                                        if (lastAt !== -1) {
-                                                                            const prefix = textBefore.slice(0, lastAt);
-                                                                            setInput(prefix + textAfter);
-                                                                        }
-
-                                                                        setMentionQuery(null);
-                                                                    }}
-                                                                >
-                                                                    <div className={cn(
-                                                                        "p-1.5 rounded-lg",
-                                                                        i === selectedIndex ? "bg-primary/20" : "bg-muted"
-                                                                    )}>
-                                                                        <Paperclip className={cn("w-3.5 h-3.5", i === selectedIndex ? "text-primary" : "text-muted-foreground")} />
-                                                                    </div>
-                                                                    <span className="truncate">{doc.name}</span>
-                                                                </button>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Slash Commands Popover */}
-                                                <AnimatePresence>
-                                                    {slashQuery !== null && (
-                                                        <motion.div
-                                                            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                                                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                                                            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                                                            className="absolute bottom-full left-0 mb-2 w-72 bg-popover/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl overflow-hidden z-50 origin-bottom"
-                                                        >
-                                                            <div className="px-3 py-2 bg-muted/30 text-[10px] font-black text-muted-foreground uppercase tracking-tighter border-b border-border/50 flex items-center justify-between">
-                                                                <div className="flex items-center gap-1.5">
-                                                                    <Terminal className="w-3 h-3" />
-                                                                    <span>Commands</span>
-                                                                </div>
-                                                                <kbd className="px-1.5 py-0.5 rounded bg-muted/50 border border-border/50">TAB</kbd>
-                                                            </div>
-                                                            <div
-                                                                ref={slashCommandContainerRef}
-                                                                className="max-h-64 overflow-y-auto p-1.5 custom-scrollbar"
-                                                            >
-                                                                {(() => {
-                                                                    if (slashSuggestions.length === 0) return <div className="p-3 text-xs text-muted-foreground text-center italic">No matches found</div>;
-
-                                                                    return slashSuggestions.map((s, i) => (
-                                                                        <button
-                                                                            key={s.id}
-                                                                            className={cn(
-                                                                                "w-full text-left px-3 py-2.5 text-sm rounded-xl flex items-center justify-between group transition-all duration-200 outline-none",
-                                                                                i === slashSelectedIndex
-                                                                                    ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20 translate-x-1"
-                                                                                    : "hover:bg-muted text-foreground"
-                                                                            )}
-                                                                            onClick={() => handleSlashCommandExecute(s)}
-                                                                        >
-                                                                            <div className="flex items-center gap-3">
-                                                                                <div className={cn(
-                                                                                    "w-6 h-6 rounded-lg flex items-center justify-center transition-colors",
-                                                                                    i === slashSelectedIndex ? "bg-primary/20 text-primary" : "bg-muted"
-                                                                                )}>
-                                                                                    {s.type === 'command' ? <Terminal className="w-3.5 h-3.5" /> : <Palette className="w-3.5 h-3.5" />}
-                                                                                </div>
-                                                                                <div className="flex flex-col">
-                                                                                    <span className="font-semibold tracking-tight leading-none mb-0.5">{s.label}</span>
-                                                                                    <span className={cn(
-                                                                                        "text-[10px]",
-                                                                                        i === slashSelectedIndex ? "text-primary/70" : "text-muted-foreground"
-                                                                                    )}>
-                                                                                        {s.desc}
-                                                                                    </span>
-                                                                                </div>
-                                                                            </div>
-                                                                            {i === slashSelectedIndex && (
-                                                                                <ChevronRight className="w-4 h-4 text-primary" />
-                                                                            )}
-                                                                        </button>
-                                                                    ));
-                                                                })()}
-                                                            </div>
-                                                        </motion.div>
-                                                    )}
-                                                </AnimatePresence>
-                                            </div>
+                                            <ChatInput
+                                                input={input}
+                                                setInput={setInput}
+                                                textareaRef={textareaRef}
+                                                isStreaming={isStreaming}
+                                                isRestarting={isRestarting}
+                                                modelRunning={modelRunning}
+                                                isImageMode={isImageMode}
+                                                isWebSearchEnabled={isWebSearchEnabled}
+                                                isRecording={isRecording}
+                                                canSee={canSee === true}
+                                                isRagCapable={isRagCapable}
+                                                isCloudProvider={!!isCloudProvider}
+                                                autoMode={!!autoMode}
+                                                attachedImages={attachedImages}
+                                                ingestedFiles={ingestedFiles}
+                                                handleSend={handleSend}
+                                                handleGenerateImage={handleGenerateImage}
+                                                handleCancelGeneration={handleCancelGeneration}
+                                                handleImageUpload={handleImageUpload}
+                                                handleFileUpload={handleFileUpload}
+                                                handleMicClick={handleMicClick}
+                                                setIngestedFiles={setIngestedFiles}
+                                                setIsImageMode={setIsImageMode}
+                                                setIsWebSearchEnabled={setIsWebSearchEnabled}
+                                                setShowImageSettings={setShowImageSettings}
+                                                showImageSettings={showImageSettings}
+                                                imageRunning={imageRunning}
+                                                startServer={async () => {
+                                                    await commands.startChatServer(modelPath || localModels[0]?.path, maxContext, currentModelTemplate, null, false, false, false);
+                                                }}
+                                                slashQuery={slashQuery}
+                                                setSlashQuery={setSlashQuery}
+                                                mentionQuery={mentionQuery}
+                                                setMentionQuery={setMentionQuery}
+                                                cfgScale={cfgScale}
+                                                setCfgScale={setCfgScale}
+                                                imageSteps={imageSteps}
+                                                setImageSteps={setImageSteps}
+                                                filteredDocs={filteredDocs}
+                                                slashSuggestions={slashSuggestions}
+                                                selectedIndex={selectedIndex}
+                                                setSelectedIndex={setSelectedIndex}
+                                                slashSelectedIndex={slashSelectedIndex}
+                                                setSlashSelectedIndex={setSlashSelectedIndex}
+                                                handleSlashCommandExecute={handleSlashCommandExecute}
+                                                activeStyleId={activeStyleId}
+                                                setActiveStyleId={setActiveStyleId}
+                                                findStyle={findStyle}
+                                            />
                                         </div>
                                     </div>
                                 </div>

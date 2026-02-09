@@ -15,6 +15,8 @@ interface ChatJob {
     searchMessage?: string;
     usage?: TokenUsage | null;
     replacedHistory?: Message[] | null;
+    // Real DB ID of the saved assistant message, for in-place ID reconciliation
+    savedMessageId?: string;
 }
 
 interface ChatContextType {
@@ -146,8 +148,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         const current = activeJobsRef.current[id];
                         if (current && current.fullMessage) {
                             commands.saveMessage(id, "assistant", current.fullMessage, null, null, current.searchResults)
-                                .then(() => {
-                                    setTimeout(() => removeJob(id), 2000);
+                                .then((res) => {
+                                    // Store the real message ID so useChat can update in-place
+                                    if (res.status === 'ok') {
+                                        updateJob(id, { savedMessageId: res.data });
+                                    }
+                                    // Give useChat a moment to read savedMessageId, then cleanup
+                                    setTimeout(() => removeJob(id), 500);
                                 });
                         } else {
                             removeJob(id);

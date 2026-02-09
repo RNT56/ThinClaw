@@ -10,22 +10,30 @@ import { unwrap } from "../lib/utils";
 
 export type ExtendedMessage = Message & {
     id?: string;
+    // Persistent DB ID for actions (edit/copy) while `id` remains stable stream ID
+    realId?: string;
     web_search_results?: import("../lib/bindings").WebSearchResult[] | null;
     searchStatus?: 'idle' | 'searching' | 'scraping' | 'analyzing' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
     searchMessage?: string;
     is_summary?: boolean | null;
     original_messages?: Message[] | null;
     isStreaming?: boolean;
+    created_at?: number;
 };
 
 export function useChat() {
     const [dbMessages, setDbMessages] = useState<ExtendedMessage[]>([]);
+    const dbMessagesRef = useRef<ExtendedMessage[]>([]);
+    useEffect(() => { dbMessagesRef.current = dbMessages; }, [dbMessages]);
+
     const [conversations, setConversations] = useState<Conversation[]>([]);
     const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
     const [modelRunning, setModelRunning] = useState(false);
     const [sttRunning, setSttRunning] = useState(false);
     const [imageRunning, setImageRunning] = useState(false);
     const [loadingHistory, setLoadingHistory] = useState(false);
+    const [hasMore, setHasMore] = useState(true);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [autoMode, setAutoMode] = useState(false);
     const { config } = useConfig();
 
@@ -34,52 +42,60 @@ export function useChat() {
 
     const activeJob = currentConversationId ? activeJobs[currentConversationId] : null;
 
-    // Merge DB history with live streaming job
+    // Derived full list of messages to display
     const messages = useMemo(() => {
-        if (!activeJob) return dbMessages;
+        // Start with the messages we have in our local state (dbMessages)
+        // These might be Optimistic (Temp ID) or Persisted (Real ID)
+        const list = [...dbMessages];
 
-        let merged: ExtendedMessage[] = [];
-
-        // If we have a summarized history replacement, use that as the base context
-        if (activeJob.replacedHistory) {
-            // Replaced history provides the summarized context
-            const history = [...activeJob.replacedHistory];
-            // The current turn (User message + Assistant placeholder) should still come from DB
-            const currentTurn = dbMessages.slice(-2);
-            merged = [...history, ...currentTurn];
-        } else {
-            merged = [...dbMessages];
+        // If we are currently streaming, the last message in dbMessages is likely our "Assistant Placeholder"
+        // We want to override its content with the live streaming content
+        if (activeJob?.isStreaming && activeJob.fullMessage) {
+            const lastIdx = list.length - 1;
+            if (lastIdx >= 0) {
+                const last = list[lastIdx];
+                // Only update if it looks like the assistant message we are streaming
+                if (last.role === 'assistant') {
+                    list[lastIdx] = {
+                        ...last,
+                        content: activeJob.fullMessage,
+                        web_search_results: activeJob.searchResults,
+                        isStreaming: true,
+                        // If it's a thinking model, we might want to expose that state too
+                        searchStatus: activeJob.searchStatus
+                    };
+                }
+            } else {
+                // Fallback if dbMessages was empty for some reason (shouldn't happen with optimistic updates)
+                list.push({
+                    id: 'streaming-temp',
+                    role: 'assistant',
+                    content: activeJob.fullMessage,
+                    web_search_results: activeJob.searchResults,
+                    isStreaming: true,
+                    created_at: Date.now(),
+                    images: null,
+                    attached_docs: null,
+                    is_summary: false,
+                    original_messages: null
+                });
+            }
         }
-
-        // Apply live streaming updates to the last message (Assistant container)
-        const lastIndex = merged.length - 1;
-        if (lastIndex >= 0 && merged[lastIndex].role === "assistant") {
-            merged[lastIndex] = {
-                ...merged[lastIndex],
-                content: activeJob.fullMessage,
-                web_search_results: activeJob.searchResults,
-                searchStatus: activeJob.searchStatus,
-                searchMessage: activeJob.searchMessage,
-                is_summary: false,
-                original_messages: null,
-                isStreaming: activeJob.isStreaming
-            };
-        } else if (lastIndex >= 0 && merged[lastIndex].role === "user") {
-            // Fallback: If Assistant message hasn't appeared in DB yet but job is active, push a live one
-            merged.push({
-                role: "assistant",
-                content: activeJob.fullMessage,
-                images: null,
-                attached_docs: null,
-                web_search_results: activeJob.searchResults,
-                is_summary: false,
-                original_messages: null,
-                isStreaming: activeJob.isStreaming
-            });
-        }
-
-        return merged;
+        return list;
     }, [dbMessages, activeJob]);
+
+    const isStreaming = activeJob?.isStreaming || false;
+    const isThinking = activeJob?.isThinking || false;
+
+    // Track pending optimistic messages (Legacy Ref for compatibility if needed, but currently unused logic removed)
+    const pendingOptimisticMessages = useRef<ExtendedMessage[]>([]);
+
+    // Refs for stable callbacks
+    const messagesRef = useRef(messages);
+    messagesRef.current = messages;
+
+    const conversationsRef = useRef(conversations);
+    conversationsRef.current = conversations;
 
     const [lastTokenUsage, setLastTokenUsage] = useState<import("../lib/bindings").TokenUsage | null>(null);
 
@@ -89,11 +105,7 @@ export function useChat() {
         }
     }, [activeJob?.usage]);
 
-    const isStreaming = activeJob?.isStreaming || false;
-    const isThinking = activeJob?.isThinking || false;
     const tokenUsage = activeJob?.usage || lastTokenUsage;
-
-
 
 
     // Load conversations list on mount
@@ -127,15 +139,37 @@ export function useChat() {
         }
     }, [activeJob?.isStreaming, activeJob?.fullMessage, activeJob?.searchResults]);
 
-    // Reload from DB when streaming finishes to ensure we have the persisted version with proper IDs
+    // In-place ID reconciliation: When streaming finishes and backend saves, update the temp message with real ID
+    // This avoids the full loadConversation call which causes visible re-renders
     const prevActiveJobRef = useRef<any>(null);
     useEffect(() => {
+        // Detect job removal
         if (prevActiveJobRef.current && !activeJob && currentConversationId === prevActiveJobRef.current.conversationId) {
-            // Job just finished and was removed from context
-            if (currentConversationId) {
-                loadConversation(currentConversationId);
-                fetchConversations(); // Update titles/order
+            const savedId = prevActiveJobRef.current.savedMessageId;
+            const finalContent = prevActiveJobRef.current.fullMessage;
+            const searchResults = prevActiveJobRef.current.searchResults;
+
+            // Update the last assistant message in-place with the real DB ID
+            if (savedId || finalContent) {
+                setDbMessages(prev => {
+                    const lastIdx = prev.length - 1;
+                    if (lastIdx >= 0 && prev[lastIdx].role === 'assistant') {
+                        const updated = [...prev];
+                        updated[lastIdx] = {
+                            ...updated[lastIdx],
+                            realId: savedId || updated[lastIdx].realId,
+                            content: finalContent || updated[lastIdx].content,
+                            web_search_results: searchResults || updated[lastIdx].web_search_results,
+                            isStreaming: false
+                        };
+                        return updated;
+                    }
+                    return prev;
+                });
             }
+
+            // Only update conversations list (for titles/order), not messages
+            fetchConversations();
         }
         prevActiveJobRef.current = activeJob;
     }, [activeJob, currentConversationId, fetchConversations]);
@@ -211,21 +245,56 @@ export function useChat() {
         };
     }, [fetchConversations, currentModelPath, startServer, isRestarting]);
 
-    const loadConversation = async (id: string) => {
-        setLoadingHistory(true);
+    const loadConversation = useCallback(async (id: string, silent = false) => {
+        if (!silent) setLoadingHistory(true);
+        setHasMore(true);
         try {
-            const result = await commands.getMessages(id);
+            // Prevent truncating history during background refreshes by using Ref current value
+            const currentCount = dbMessagesRef.current.length;
+            const limit = silent ? Math.max(50, currentCount) : 50;
+
+            const result = await commands.getMessages(id, limit, null);
             const msgs = unwrap(result);
-            setDbMessages(msgs.map(m => ({
-                id: m.id,
-                role: m.role,
-                content: m.content,
-                images: m.images || null,
-                attached_docs: m.attached_docs || null,
-                web_search_results: m.web_search_results || null,
-                is_summary: false,
-                original_messages: null
-            })));
+
+            setHasMore(msgs.length === limit);
+
+            setDbMessages(msgs.map((m) => {
+                // We only care about reconciling TEMP IDs.
+                // Search in current DB ref for a message with a Temp ID that matches this new DB message.
+                // We search from the end because we are likely matching the latest messages.
+                const existingTemp = [...dbMessagesRef.current].reverse().find(curr => {
+                    if (!curr.id?.startsWith('temp-')) return false;
+
+                    // 1. If we already mapped it previously (realId matches)
+                    if (curr.realId === m.id) return true;
+
+                    // 2. Exact Content Match (User messages usually)
+                    if (curr.role === m.role && curr.content === m.content) return true;
+
+                    // 3. Last Assistant Message Match:
+                    // If this is one of the last few messages from DB, and matches role
+                    // increased time buffer to 5 minutes to account for long generations
+                    if (curr.role === m.role && m.role === 'assistant') {
+                        const timeDiff = Math.abs((curr.created_at || 0) - (m.created_at || 0));
+                        return timeDiff < 300000;
+                    }
+                    return false;
+                });
+
+                return {
+                    id: existingTemp ? existingTemp.id : m.id,
+                    realId: m.id,
+                    role: m.role,
+                    // Prefer DB content, but fallback to existing content if DB is empty (anti-flash)
+                    content: m.content || (existingTemp?.content || ""),
+                    images: m.images || null,
+                    attached_docs: m.attached_docs || null,
+                    web_search_results: m.web_search_results || null,
+                    is_summary: false,
+                    original_messages: null,
+                    created_at: m.created_at || existingTemp?.created_at || Date.now()
+                };
+            }));
             setCurrentConversationId(id);
 
             // Calculate tokens for loaded conversation
@@ -239,15 +308,50 @@ export function useChat() {
         } finally {
             setLoadingHistory(false);
         }
-    };
+    }, []);
 
-    const cancelGeneration = async () => {
+    const loadMoreMessages = useCallback(async () => {
+        if (!currentConversationId || !hasMore || isLoadingMore) return;
+
+        setIsLoadingMore(true);
+        try {
+            const limit = 50;
+            const before = dbMessages.length > 0 ? (dbMessages[0].created_at ?? null) : null;
+
+            const result = await commands.getMessages(currentConversationId, limit, before);
+            const msgs = unwrap(result);
+
+            setHasMore(msgs.length === limit);
+
+            if (msgs.length > 0) {
+                const newMsgs = msgs.map(m => ({
+                    id: m.id,
+                    role: m.role,
+                    content: m.content,
+                    images: m.images || null,
+                    attached_docs: m.attached_docs || null,
+                    web_search_results: m.web_search_results || null,
+                    is_summary: false,
+                    original_messages: null,
+                    created_at: m.created_at
+                }));
+                // We prepend since it's going back in time
+                setDbMessages(prev => [...newMsgs, ...prev]);
+            }
+        } catch (e) {
+            console.error("Failed to load more messages:", e);
+        } finally {
+            setIsLoadingMore(false);
+        }
+    }, [currentConversationId, hasMore, isLoadingMore, dbMessages]);
+
+    const cancelGeneration = useCallback(async () => {
         if (currentConversationId) {
             await contextCancel(currentConversationId);
         }
-    };
+    }, [currentConversationId, contextCancel]);
 
-    const deleteConversation = async (id: string) => {
+    const deleteConversation = useCallback(async (id: string) => {
         try {
             unwrap(await commands.deleteConversation(id));
             setConversations(prev => prev.filter(c => c.id !== id));
@@ -258,28 +362,39 @@ export function useChat() {
         } catch (e) {
             console.error("Failed to delete conversation:", e);
         }
-    };
+    }, [currentConversationId]);
 
-    const sendMessage = async (content: string, images: string[] = [], attachedDocs: { id: string, name: string }[] = [], webSearchEnabled: boolean = false, projectId: string | null = null) => {
+    const sendMessage = useCallback(async (content: string, images: string[] = [], attachedDocs: { id: string, name: string }[] = [], webSearchEnabled: boolean = false, projectId: string | null = null) => {
         if ((!content.trim() && images.length === 0) || isStreaming) return;
 
         // Optimistic update
+        const tempId = `temp-${Date.now()}`;
         const tempUserMsg: ExtendedMessage = {
+            id: tempId,
             role: "user",
             content,
             images: images.length > 0 ? images : null,
             attached_docs: attachedDocs.length > 0 ? attachedDocs : null,
             is_summary: false,
-            original_messages: null
+            original_messages: null,
+            created_at: Date.now()
         };
-        setDbMessages(prev => [...prev, tempUserMsg, {
+        const tempAssistantId = `temp-assistant-${Date.now()}`;
+        const tempAssistantMsg: ExtendedMessage = {
+            id: tempAssistantId,
             role: "assistant",
             content: "",
             images: null,
             attached_docs: null,
             is_summary: false,
-            original_messages: null
-        }]);
+            original_messages: null,
+            created_at: Date.now() + 1
+        };
+
+        // Add to pending queue so we can map IDs later
+        pendingOptimisticMessages.current.push(tempUserMsg, tempAssistantMsg);
+
+        setDbMessages(prev => [...prev, tempUserMsg, tempAssistantMsg]);
 
         try {
             const convId = await startGeneration({
@@ -289,7 +404,7 @@ export function useChat() {
                 webSearchEnabled,
                 projectId,
                 conversationId: currentConversationId,
-                history: messages, // Current view history
+                history: messagesRef.current, // Use Ref to get current messages without dep
                 autoMode,
                 currentEmbeddingModelPath
             });
@@ -297,21 +412,26 @@ export function useChat() {
             if (!currentConversationId) {
                 setCurrentConversationId(convId);
                 fetchConversations();
+                // New conversation has no history to load
+                setHasMore(false);
             }
         } catch (e) {
             console.error("SendMessage Error:", e);
         }
-    };
+    }, [isStreaming, currentConversationId, startGeneration, autoMode, currentEmbeddingModelPath, fetchConversations]);
 
-    const regenerate = async () => {
+    const regenerate = useCallback(async () => {
         if (isStreaming || !currentConversationId) return;
+        const tempId = `temp-reg-${Date.now()}`;
         setDbMessages(prev => [...prev, {
+            id: tempId,
             role: "assistant",
             content: "",
             images: null,
             attached_docs: null,
             is_summary: false,
-            original_messages: null
+            original_messages: null,
+            created_at: Date.now()
         }]);
 
         try {
@@ -325,14 +445,14 @@ export function useChat() {
                 webSearchEnabled: false,
                 projectId,
                 conversationId: currentConversationId,
-                history: dbMessages, // dbMessages has the truncated history
+                history: dbMessagesRef.current, // Use Ref to avoid dependency on dbMessages
                 autoMode,
                 currentEmbeddingModelPath
             });
         } catch (e) {
             console.error("Regenerate error:", e);
         }
-    };
+    }, [isStreaming, currentConversationId, conversations, startGeneration, autoMode, currentEmbeddingModelPath]);
 
     const clearMessages = () => {
         setDbMessages([]);
@@ -340,7 +460,7 @@ export function useChat() {
         setLastTokenUsage(null);
     };
 
-    const createNewConversation = async (title: string, projectId: string | null = null) => {
+    const createNewConversation = useCallback(async (title: string, projectId: string | null = null) => {
         try {
             const result = await commands.createConversation(title, projectId);
             const newConv = unwrap(result);
@@ -353,9 +473,9 @@ export function useChat() {
             console.error("Create Conversation Error:", e);
             throw e;
         }
-    };
+    }, []);
 
-    const ingestFile = async (path: string, projectId: string | null = null): Promise<string> => {
+    const ingestFile = useCallback(async (path: string, projectId: string | null = null): Promise<string> => {
         // ... Logic for ensuring conversation exists before ingestion ...
         // Reusing createNewConversation pattern
         let convId = currentConversationId;
@@ -366,18 +486,18 @@ export function useChat() {
         if (!convId) return "";
         const res = await commands.ingestDocument(path, convId, projectId);
         return unwrap(res);
-    };
+    }, [currentConversationId, createNewConversation]);
 
-    const moveConversation = async (id: string, projectId: string | null) => {
+    const moveConversation = useCallback(async (id: string, projectId: string | null) => {
         try {
             await commands.updateConversationProject(id, projectId);
             setConversations(prev => prev.map(c => c.id === id ? { ...c, project_id: projectId } : c));
         } catch (e) {
             console.error("Failed to move conversation:", e);
         }
-    };
+    }, []);
 
-    const sendImagePrompt = async (
+    const sendImagePrompt = useCallback(async (
         prompt: string,
         modelPath: string,
         components: any,
@@ -507,15 +627,15 @@ export function useChat() {
             toast.error("Generation Failed", { description: String(e) });
             throw e;
         }
-    };
+    }, [currentConversationId, createNewConversation, config, modelRunning, loadConversation, fetchConversations]);
 
-    const updateConversationsOrder = async (orders: [string, number][]) => {
+    const updateConversationsOrder = useCallback(async (orders: [string, number][]) => {
         try {
             await commands.updateConversationsOrder(orders);
         } catch (error) {
             console.error('Failed to update conversation order', error);
         }
-    };
+    }, []);
 
     return {
         messages,
@@ -530,8 +650,11 @@ export function useChat() {
         conversations,
         currentConversationId,
         loadConversation,
+        loadMoreMessages,
         deleteConversation,
         loadingHistory,
+        hasMore,
+        isLoadingMore,
         ingestFile,
         createNewConversation,
         moveConversation,
