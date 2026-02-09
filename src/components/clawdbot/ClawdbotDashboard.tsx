@@ -37,7 +37,7 @@ function StatCard({ title, value, icon: Icon, status = 'info', description, clas
     };
 
     return (
-        <div className={cn("p-4 rounded-xl border bg-card/50 backdrop-blur-sm shadow-sm", className)}>
+        <div className={cn("p-4 rounded-xl border border-white/10 bg-card/50 backdrop-blur-sm shadow-sm", className)}>
             <div className="flex items-start justify-between mb-2">
                 <div className={cn("p-2 rounded-lg", statusColors[status])}>
                     <Icon className="w-5 h-5" />

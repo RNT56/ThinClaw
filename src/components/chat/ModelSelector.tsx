@@ -60,10 +60,15 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         if ((m as any).category !== "Cloud") return false;
 
         const id = m.id.toLowerCase();
-        const family = m.family.toLowerCase();
+        const provider = id.startsWith("openrouter-") ? "openrouter" :
+            id.startsWith("groq-") ? "groq" :
+                id.startsWith("anthropic-") ? "anthropic" :
+                    id.startsWith("openai-") ? "openai" :
+                        id.startsWith("google-") || id.startsWith("gemini-") ? "gemini" :
+                            m.family.toLowerCase();
 
         // Check if disabled in config
-        if (config?.disabled_providers?.includes(family)) return false;
+        if (config?.disabled_providers?.includes(provider)) return false;
 
         // Determine provider by ID prefix first (robust for aggregators)
         if (id.startsWith("openrouter-")) return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
@@ -73,6 +78,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         if (id.startsWith("google-") || id.startsWith("gemini-")) return !!(status?.has_gemini_key || status?.hasGeminiKey);
 
         // Fallback to family-based check
+        const family = m.family.toLowerCase();
         if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
         if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
         if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
@@ -221,7 +227,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                         model.id?.startsWith("groq-") ? "groq" :
                                             model.id?.startsWith("anthropic-") ? "anthropic" :
                                                 model.id?.startsWith("openai-") ? "openai" :
-                                                    model.id?.startsWith("google-") ? "gemini" :
+                                                    model.id?.startsWith("google-") || model.id?.startsWith("gemini-") ? "gemini" :
                                                         model.family?.toLowerCase();
 
                                     const isActive = model.type === 'local'

@@ -1,12 +1,13 @@
 
 import { useState, useEffect } from 'react';
-import { commands, UserConfig } from '../../lib/bindings';
+import { commands } from '../../lib/bindings';
 import { Bot, Zap, ShieldCheck, ShieldAlert, CheckCircle, Info, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
+import { useConfig } from '../../hooks/use-config';
 
 export function ChatProviderTab() {
-    const [config, setConfig] = useState<UserConfig | null>(null);
+    const { config, updateConfig } = useConfig();
     const [status, setStatus] = useState<any>(null);
     const [loading, setLoading] = useState(true);
 
@@ -17,11 +18,7 @@ export function ChatProviderTab() {
     const loadAll = async () => {
         setLoading(true);
         try {
-            const [cfg, s] = await Promise.all([
-                commands.getUserConfig(),
-                commands.getClawdbotStatus()
-            ]);
-            setConfig(cfg);
+            const s = await commands.getClawdbotStatus();
             if (s.status === 'ok') setStatus(s.data);
         } catch (e) {
             console.error(e);
@@ -35,8 +32,7 @@ export function ChatProviderTab() {
         if (!config) return;
         try {
             const newConfig = { ...config, selected_chat_provider: providerId };
-            await commands.updateUserConfig(newConfig);
-            setConfig(newConfig);
+            await updateConfig(newConfig);
             toast.success(`${providerId === null ? 'Local' : providerId.charAt(0).toUpperCase() + providerId.slice(1)} selected for Chat & Auto Mode`);
         } catch (e) {
             toast.error("Failed to update provider");

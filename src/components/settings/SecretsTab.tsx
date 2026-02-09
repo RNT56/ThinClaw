@@ -4,6 +4,7 @@ import { commands } from '../../lib/bindings';
 import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Bot, Search, Loader2, Trash2, Plus, Key, X, Radio, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
+import { useConfig } from '../../hooks/use-config';
 
 interface SecretCardProps {
     title: string;
@@ -326,7 +327,7 @@ function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, descrip
 
 export function SecretsTab() {
     const [status, setStatus] = useState<any>(null);
-    const [config, setConfig] = useState<any>(null);
+    const { config, updateConfig } = useConfig();
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -335,12 +336,8 @@ export function SecretsTab() {
 
     const loadData = async () => {
         try {
-            const [sRes, cRes] = await Promise.all([
-                commands.getClawdbotStatus(),
-                commands.getUserConfig()
-            ]);
+            const sRes = await commands.getClawdbotStatus();
             if (sRes.status === 'ok') setStatus(sRes.data);
-            setConfig(cRes);
         } catch (e) {
             console.error(e);
         } finally {
@@ -359,8 +356,7 @@ export function SecretsTab() {
             if (!disabled.includes(provider)) disabled.push(provider);
         }
         const newConfig = { ...config, disabled_providers: disabled };
-        await commands.updateUserConfig(newConfig);
-        setConfig(newConfig);
+        await updateConfig(newConfig);
         toast.success(`${provider.charAt(0).toUpperCase() + provider.slice(1)} models ${visible ? 'enabled' : 'disabled'}`);
     };
 

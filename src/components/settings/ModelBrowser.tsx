@@ -6,6 +6,7 @@ import { useModelContext } from "../model-context";
 import { useEffect, useMemo, useState } from "react";
 import { commands } from "../../lib/bindings";
 import { toast } from "sonner";
+import { useConfig } from "../../hooks/use-config";
 
 export function ModelBrowser() {
     const {
@@ -44,17 +45,13 @@ export function ModelBrowser() {
     const [activeCategory, setActiveCategory] = useState("All");
     const [selectedModelVariants, setSelectedModelVariants] = useState<{ model: any, isOpen: boolean } | null>(null);
     const [status, setStatus] = useState<any>(null);
-    const [config, setConfig] = useState<any>(null);
+    const { config, updateConfig } = useConfig();
 
     useEffect(() => {
         const load = async () => {
             try {
-                const [s, cfg] = await Promise.all([
-                    commands.getClawdbotStatus(),
-                    commands.getUserConfig()
-                ]);
+                const s = await commands.getClawdbotStatus();
                 if (s.status === 'ok') setStatus(s.data);
-                setConfig(cfg);
             } catch (e) {
                 console.error(e);
             }
@@ -79,9 +76,14 @@ export function ModelBrowser() {
         if (!status || !config) return false;
 
         const id = model.id.toLowerCase();
+        const provider = id.startsWith("anthropic") ? "anthropic" :
+            id.startsWith("openai") ? "openai" :
+                id.startsWith("google") || id.startsWith("gemini") ? "gemini" :
+                    id.startsWith("groq") ? "groq" :
+                        id.startsWith("openrouter") ? "openrouter" : "";
 
         // Check if disabled in config
-        if (config.disabled_providers?.some((p: string) => id.startsWith(p.toLowerCase()))) return false;
+        if (config.disabled_providers?.includes(provider)) return false;
 
         if (id.startsWith("anthropic")) return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
         if (id.startsWith("openai")) return !!(status?.has_openai_key || status?.hasOpenaiKey);
@@ -426,7 +428,15 @@ export function ModelBrowser() {
                                             {isImageGen && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Image Gen</span>}
                                             {model.isCurated && model.isLocal && <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500/5 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-md border border-emerald-500/10">Installed</span>}
                                             {!model.isCurated && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted/50 text-muted-foreground/50 px-2 py-0.5 rounded-md border border-border/10">Local</span>}
-                                            {category === "Cloud" && <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500/10 text-indigo-500 border border-indigo-500/20 px-2 py-0.5 rounded-md">Cloud Brain</span>}
+                                            {category === "Cloud" && (
+                                                <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500/10 text-indigo-500 border border-indigo-500/20 px-2 py-0.5 rounded-md">
+                                                    {model.id.toLowerCase().startsWith("anthropic") ? "Anthropic" :
+                                                        model.id.toLowerCase().startsWith("openai") ? "OpenAI" :
+                                                            (model.id.toLowerCase().startsWith("google") || model.id.toLowerCase().startsWith("gemini")) ? "Google" :
+                                                                model.id.toLowerCase().startsWith("groq") ? "Groq" :
+                                                                    model.id.toLowerCase().startsWith("openrouter") ? "OpenRouter" : "Cloud"}
+                                                </span>
+                                            )}
                                         </div>
                                     </h3>
                                     <p className="text-sm text-muted-foreground line-clamp-2" title={model.description}>{model.description}</p>
@@ -567,8 +577,7 @@ export function ModelBrowser() {
                                                             if (config?.selected_chat_provider !== "local") {
                                                                 try {
                                                                     const newConfig = { ...config, selected_chat_provider: "local" };
-                                                                    await commands.updateUserConfig(newConfig);
-                                                                    setConfig(newConfig);
+                                                                    await updateConfig(newConfig);
                                                                 } catch (e) {
                                                                     console.error(e);
                                                                 }
@@ -667,7 +676,13 @@ export function ModelBrowser() {
                                     <button
                                         onClick={async () => {
                                             try {
-                                                const brain = model.family.toLowerCase();
+                                                const id = model.id.toLowerCase();
+                                                const brain = id.startsWith("openrouter-") ? "openrouter" :
+                                                    id.startsWith("groq-") ? "groq" :
+                                                        id.startsWith("anthropic-") ? "anthropic" :
+                                                            id.startsWith("openai-") ? "openai" :
+                                                                id.startsWith("google-") || id.startsWith("gemini-") ? "gemini" :
+                                                                    model.family.toLowerCase();
                                                 const modelId = model.id.split('-').slice(1).join('-');
                                                 const cfg = await commands.getUserConfig();
                                                 const newConfig = {
@@ -676,16 +691,14 @@ export function ModelBrowser() {
                                                     selected_cloud_brain: brain,
                                                     selected_cloud_model: modelId
                                                 };
-                                                await commands.updateUserConfig(newConfig);
+                                                await updateConfig(newConfig);
                                                 if ((commands as any).saveSelectedCloudModel) {
                                                     await (commands as any).saveSelectedCloudModel(modelId);
                                                 }
-                                                toast.success(`${model.name} selected as active Cloud Brain`);
-
-                                                // Update local state to reflect change immediately
+                                                const providerName = brain === "gemini" ? "Google" : brain.charAt(0).toUpperCase() + brain.slice(1);
+                                                toast.success(`${model.name} selected as active ${providerName} Brain`);
                                                 const s = await commands.getClawdbotStatus();
                                                 if (s.status === 'ok') setStatus(s.data);
-                                                setConfig(newConfig);
                                             } catch (e) {
                                                 toast.error("Failed to select cloud model");
                                             }
@@ -722,15 +735,13 @@ export function ModelBrowser() {
                                                     if ((model as any).category === 'Cloud') {
                                                         // For cloud models, deactivation means switching back to Local Neural Link
                                                         const newConfig = { ...config, selected_chat_provider: null, selected_cloud_model: null };
-                                                        await commands.updateUserConfig(newConfig);
+                                                        await updateConfig(newConfig);
                                                         if ((commands as any).saveSelectedCloudModel) {
                                                             await (commands as any).saveSelectedCloudModel(null);
                                                         }
                                                         toast.success("Switched to Local Neural Link");
-                                                        // Refresh local status
                                                         const s = await commands.getClawdbotStatus();
                                                         if (s.status === 'ok') setStatus(s.data);
-                                                        setConfig(newConfig);
                                                     } else {
                                                         setModelPath("");
                                                     }
@@ -849,7 +860,13 @@ export function ModelBrowser() {
                                                                     category === "Embedding" ? "bg-cyan-500/10 text-cyan-500 border-cyan-500/20" :
                                                                         "bg-primary/10 text-primary border-primary/20"
                                                     )}>
-                                                        {category === "Cloud" ? "Cloud Provider" : category}
+                                                        {category === "Cloud" ? (
+                                                            selectedModelVariants.model.id.toLowerCase().startsWith("anthropic") ? "Anthropic" :
+                                                                selectedModelVariants.model.id.toLowerCase().startsWith("openai") ? "OpenAI" :
+                                                                    (selectedModelVariants.model.id.toLowerCase().startsWith("google") || selectedModelVariants.model.id.toLowerCase().startsWith("gemini")) ? "Google" :
+                                                                        selectedModelVariants.model.id.toLowerCase().startsWith("groq") ? "Groq" :
+                                                                            selectedModelVariants.model.id.toLowerCase().startsWith("openrouter") ? "OpenRouter" : "Cloud"
+                                                        ) : category}
                                                     </span>
                                                     {selectedModelVariants.model.tags?.map((tag: string) => (
                                                         <span key={tag} className="text-[10px] bg-muted text-muted-foreground px-2 py-0.5 rounded-full border border-border/50">
