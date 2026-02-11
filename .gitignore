@@ -1,6 +1,5 @@
 # Documentation
 # documentation/
-
 # Node & Dependencies
 node_modules/
 dist/
@@ -14,6 +13,7 @@ lerna-debug.log*
 
 # Rust / Tauri
 src-tauri/target/
+src-tauri/scrappy-mcp-tools/target/
 src-tauri/gen/
 src-tauri/bin/
 src-tauri/resources/chromium/

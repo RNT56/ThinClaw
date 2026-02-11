@@ -23,7 +23,7 @@ For a deep dive into environment configuration, see the specialized **[macOS (Ap
 ```bash
 # 1. Install project dependencies
 npm install
-npm run setup:openclaw
+npm run setup:moltbot
 
 # 2. Automated sidecar initialization (Node, Chromium, AI)
 npm run setup:all
@@ -130,7 +130,7 @@ OpenClaw is highly configurable through a combination of system files and worksp
 
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`~/Library/Application Support/scrappy cursor/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, and API keys for Cloud Providers (Anthropic, OpenAI, Gemini, Groq, OpenRouter).
+- **`identity.json`**: (`~/Library/Application Support/com.schack.scrappy/Clawdbot/state/identity.json`) - Your persistent device ID, auth token, and API keys for Cloud Providers.
 - **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
 - **`auth-profiles.json`**: Secure storage for API keys that the agent is permitted to use, including Brave Search and Custom Secrets.
 
@@ -150,7 +150,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 ### 4. Management & Visibility
 - **Settings Tab**: Manage API keys, model selection, gateway connection modes, and customize your **Spotlight Global Shortcut**.
 - **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `src-tauri/src/personas.rs`.
-- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
+- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `Clawdbot/agents/main/sessions/`.
 
 ### 5. Cloud Inference Providers
 Scrappy 2026 features native integration with the world's most powerful inference engines:
@@ -166,7 +166,7 @@ Scrappy 2026 features native integration with the world's most powerful inferenc
 ## Project Structure
 
 ### Backend (`src-tauri/`)
--   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
+-   `src/clawdbot/`: OpenClaw gateway logic and session orchestration.
 -   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
 -   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium).
 -   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral) used for model formatting.
@@ -213,7 +213,7 @@ Tools are implemented in the **OpenClaw** engine:
 Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
 1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check the `src-tauri/src/openclaw/commands.rs` and `rig_lib/agent.rs` for backend extension points.
+2.  Check the `src-tauri/src/clawdbot/commands.rs` and `rig_lib/agent.rs` for backend extension points.
 
 ---
 

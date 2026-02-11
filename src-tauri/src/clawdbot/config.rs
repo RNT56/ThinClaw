@@ -6,7 +6,7 @@
 //! - mDNS discovery disabled
 //! - Connectors disabled by default
 
-pub const OPENCLAW_VERSION: &str = "2026.2.2-beta";
+pub const OPENCLAW_VERSION: &str = "2026.2.9";
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -658,13 +658,15 @@ impl ClawdbotConfig {
                             "anthropic/{}",
                             self.selected_cloud_model
                                 .as_deref()
-                                .unwrap_or("claude-3-5-sonnet-latest")
+                                .unwrap_or("claude-4-5-sonnet-latest")
                         );
                     }
                     "openai" if self.openai_granted => {
                         agent_model = format!(
                             "openai/{}",
-                            self.selected_cloud_model.as_deref().unwrap_or("gpt-4o")
+                            self.selected_cloud_model
+                                .as_deref()
+                                .unwrap_or("gpt-5.2-nano")
                         );
                     }
                     "openrouter" if self.openrouter_granted => {
@@ -672,7 +674,7 @@ impl ClawdbotConfig {
                             "openrouter/{}",
                             self.selected_cloud_model
                                 .as_deref()
-                                .unwrap_or("anthropic/claude-3.5-sonnet")
+                                .unwrap_or("anthropic/claude-4.5-sonnet")
                         );
                     }
                     "gemini" if self.gemini_granted => {
@@ -680,7 +682,7 @@ impl ClawdbotConfig {
                             "gemini/{}",
                             self.selected_cloud_model
                                 .as_deref()
-                                .unwrap_or("gemini-2.0-flash")
+                                .unwrap_or("gemini-3.0-flash")
                         );
                     }
                     "groq" if self.groq_granted => {
@@ -709,15 +711,15 @@ impl ClawdbotConfig {
                     }
                 }
             } else if self.anthropic_granted {
-                agent_model = "anthropic/claude-3-5-sonnet-latest".to_string();
+                agent_model = "anthropic/claude-4.5-sonnet".to_string();
             } else if self.openai_granted {
-                agent_model = "openai/gpt-4o".to_string();
+                agent_model = "openai/gpt-5.2-nano".to_string();
             } else if self.gemini_granted {
-                agent_model = "gemini/gemini-2.0-flash".to_string();
+                agent_model = "gemini/gemini-3.0-flash".to_string();
             } else if self.groq_granted {
                 agent_model = "groq/llama-3.3-70b-versatile".to_string();
             } else if self.openrouter_granted {
-                agent_model = "openrouter/anthropic/claude-3.5-sonnet".to_string();
+                agent_model = "openrouter/anthropic/claude-4.5-sonnet".to_string();
             } else {
                 agent_model = "local/model".to_string();
             }
@@ -737,9 +739,9 @@ impl ClawdbotConfig {
                 serde_json::json!({
                     "api": "anthropic",
                     "models": [
-                        { "id": "claude-3-5-sonnet-latest", "name": "Claude 3.5 Sonnet" },
-                        { "id": "claude-3-5-haiku-latest", "name": "Claude 3.5 Haiku" },
-                        { "id": "claude-3-opus-latest", "name": "Claude 3 Opus" }
+                        { "id": "claude-4.5-sonnet", "name": "Claude 4.5 Sonnet" },
+                        { "id": "claude-4.5-haiku", "name": "Claude 4.5 Haiku" },
+                        { "id": "claude-4.6-opus", "name": "Claude 4.6 Opus" }
                     ]
                 }),
             );
@@ -758,9 +760,9 @@ impl ClawdbotConfig {
                 serde_json::json!({
                     "api": "openai",
                     "models": [
-                        { "id": "gpt-4o", "name": "GPT-4o" },
-                        { "id": "gpt-4o-mini", "name": "GPT-4o Mini" },
-                        { "id": "o1", "name": "o1 (Reasoning)" }
+                        { "id": "gpt-5.2-nano", "name": "GPT-5.2 Nano" },
+                        { "id": "gpt-5.2-mini", "name": "GPT-5.2 Mini" },
+                        { "id": "gpt-5.2", "name": "GPT-5.2" }
                     ]
                 }),
             );
@@ -780,8 +782,8 @@ impl ClawdbotConfig {
                     "api": "openai",
                     "baseUrl": "https://openrouter.ai/api/v1",
                     "models": [
-                        { "id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet (via OR)" },
-                        { "id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (via OR)" },
+                        { "id": "anthropic/claude-4.5-sonnet", "name": "Claude 4.5 Sonnet (via OR)" },
+                        { "id": "google/gemini-3.0-flash", "name": "Gemini 3.0 Flash (via OR)" },
                         { "id": "deepseek/deepseek-r1", "name": "DeepSeek R1 (via OR)" },
                         { "id": "moonshotai/kimi-k2.5", "name": "Kimi K2.5 (via OR)" },
                         { "id": "moonshotai/kimi-k2.5:nitro", "name": "Kimi K2.5 (Nitro) (via OR)" }
@@ -803,9 +805,9 @@ impl ClawdbotConfig {
                 serde_json::json!({
                     "api": "gemini",
                     "models": [
-                        { "id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash" },
-                        { "id": "gemini-2.0-flash-thinking-exp", "name": "Gemini 2.0 Thinking" },
-                        { "id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro" }
+                        { "id": "gemini-3.0-flash", "name": "Gemini 3.0 Flash" },
+                        { "id": "gemini-3.0-thinking-exp", "name": "Gemini 3.0 Thinking" },
+                        { "id": "gemini-3.0-pro", "name": "Gemini 3.0 Pro" }
                     ]
                 }),
             );
