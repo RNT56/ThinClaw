@@ -52,10 +52,16 @@ export function ImagineGeneration({
     progress,
     lastGeneratedImage
 }: ImagineGenerationProps) {
+    const { currentImageGenModelPath, models } = useModelContext();
+
+    // Find active model and variant for constraints
+    const activeModel = models.find(m => m.category === 'Diffusion' && m.variants.some(v => currentImageGenModelPath.includes(v.filename)));
+    const activeVariant: ModelVariant | undefined = activeModel?.variants.find(v => currentImageGenModelPath.includes(v.filename));
+
     const [prompt, setPrompt] = useState('');
     const [showSettings, setShowSettings] = useState(false);
     const [showStylePicker, setShowStylePicker] = useState(false);
-    const [provider, setProvider] = useState<'local' | 'nano-banana' | 'nano-banana-pro'>('nano-banana');
+    const [provider, setProvider] = useState<'local' | 'nano-banana' | 'nano-banana-pro'>(activeModel ? 'local' : 'nano-banana');
     const [aspectRatio, setAspectRatio] = useState('1:1');
     const [resolution, setResolution] = useState('512');
     const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
@@ -64,16 +70,11 @@ export function ImagineGeneration({
     const [recentImages, setRecentImages] = useState<GeneratedImage[]>([]);
     const [previewImage, setPreviewImage] = useState<string | null>(null);
     const [isExpanded, setIsExpanded] = useState(false);
-    const { currentImageGenModelPath, models } = useModelContext();
 
     const settingsRef = useRef<HTMLDivElement>(null);
     const stylePickerRef = useRef<HTMLDivElement>(null);
     const settingsButtonRef = useRef<HTMLButtonElement>(null);
     const styleButtonRef = useRef<HTMLButtonElement>(null);
-
-    // Find active model and variant for constraints
-    const activeModel = models.find(m => m.category === 'Diffusion' && m.variants.some(v => currentImageGenModelPath.includes(v.filename)));
-    const activeVariant: ModelVariant | undefined = activeModel?.variants.find(v => currentImageGenModelPath.includes(v.filename));
 
     const minSteps = activeVariant?.min_steps ?? 1;
     const maxSteps = activeVariant?.max_steps ?? 50;
