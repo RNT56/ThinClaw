@@ -1233,7 +1233,21 @@ export type TAURI_CHANNEL<TSend> = null
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; disabled_providers?: string[] }
+export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; disabled_providers?: string[]; 
+/**
+ * MCP server base URL (e.g. "https://api.scrappy.dev")
+ * Falls back to SCRAPPY_MCP_URL env var if not set in config.
+ */
+mcp_base_url?: string | null; 
+/**
+ * MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
+ */
+mcp_auth_token?: string | null; 
+/**
+ * Whether to use the Rhai sandbox (code-execution mode) instead of
+ * legacy JSON <tool_code> parsing. Requires mcp_base_url to be set.
+ */
+mcp_sandbox_enabled?: boolean }
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/

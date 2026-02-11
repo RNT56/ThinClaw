@@ -3,6 +3,9 @@ pub mod chromium_resolver;
 pub mod llama_provider;
 pub mod orchestrator;
 pub mod router;
+pub mod sandbox_factory;
+pub mod tool_discovery;
+pub mod tool_router;
 pub mod tools;
 pub mod unified_provider;
 

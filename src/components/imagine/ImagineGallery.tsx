@@ -16,6 +16,7 @@ import {
     type GeneratedImage
 } from '../../lib/imagine';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { downloadImageToDisk } from '../../lib/fs-utils';
 
 interface ImagineGalleryProps {
     onImageSelect?: (image: GeneratedImage) => void;
@@ -29,7 +30,7 @@ export function ImagineGallery({
     const [images, setImages] = useState<GeneratedImage[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
-    const [gridSize, setGridSize] = useState<'small' | 'large'>('large');
+    const [gridSize, setGridSize] = useState<'small' | 'large'>('small');
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
     const [selectedImages, setSelectedImages] = useState<Set<string>>(new Set());
     const [previewImage, setPreviewImage] = useState<GeneratedImage | null>(null);
@@ -107,12 +108,18 @@ export function ImagineGallery({
     // Download image
     const handleDownload = async (image: GeneratedImage) => {
         try {
-            const link = document.createElement('a');
-            link.href = convertFileSrc(image.filePath);
-            link.download = `${image.prompt.slice(0, 50)}.png`;
-            link.click();
+            const assetUrl = convertFileSrc(image.filePath);
+            const filename = `${image.prompt.slice(0, 50).replace(/[^a-z0-9]/gi, '_')}_${image.id.slice(0, 6)}.png`;
+
+            await downloadImageToDisk(assetUrl, filename);
+
+            // Show toast only for single downloads (bulk has its own toast)
+            if (selectedImages.size === 0) {
+                toast.success(`Saved to Downloads`);
+            }
         } catch (err) {
             console.error('Failed to download image:', err);
+            throw err; // Re-throw for bulk error handling
         }
     };
 
@@ -190,36 +197,6 @@ export function ImagineGallery({
                             <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
                         </button>
 
-                        {/* Batch Actions */}
-                        <AnimatePresence>
-                            {selectedImages.size > 0 && (
-                                <motion.div
-                                    initial={{ opacity: 0, x: 20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    exit={{ opacity: 0, x: 20 }}
-                                    className="flex items-center gap-2"
-                                >
-                                    <span className="text-sm text-muted-foreground">
-                                        {selectedImages.size} selected
-                                    </span>
-                                    <button
-                                        onClick={() => {
-                                            selectedImages.forEach(id => handleDelete(id));
-                                            setSelectedImages(new Set());
-                                        }}
-                                        className="p-2 rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
-                                    >
-                                        <Trash2 className="w-4 h-4" />
-                                    </button>
-                                    <button
-                                        onClick={() => setSelectedImages(new Set())}
-                                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
-                                    >
-                                        <X className="w-4 h-4" />
-                                    </button>
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
                     </div>
                 </div>
 
@@ -317,7 +294,15 @@ export function ImagineGallery({
                                         "ring-2 ring-transparent transition-all duration-200",
                                         selectedImages.has(image.id) && "ring-primary"
                                     )}
-                                    onClick={() => setPreviewImage(image)}
+                                    onClick={(e) => {
+                                        // If in bulk mode (at least one selected), click toggles selection.
+                                        // Otherwise, open preview.
+                                        if (selectedImages.size > 0) {
+                                            toggleSelect(image.id, e);
+                                        } else {
+                                            setPreviewImage(image);
+                                        }
+                                    }}
                                 >
                                     {/* Image */}
                                     <div className={cn(
@@ -344,7 +329,7 @@ export function ImagineGallery({
                                         onClick={(e) => toggleSelect(image.id, e)}
                                         className={cn(
                                             "absolute top-2 left-2 w-6 h-6 rounded-md border-2 transition-all duration-200",
-                                            "flex items-center justify-center",
+                                            "flex items-center justify-center z-20",
                                             selectedImages.has(image.id)
                                                 ? "bg-primary border-primary text-primary-foreground"
                                                 : "bg-black/40 border-white/50 opacity-0 group-hover:opacity-100"
@@ -490,6 +475,116 @@ export function ImagineGallery({
                                 </div>
                             </div>
                         </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Floating Bulk Action Bar */}
+            <AnimatePresence>
+                {selectedImages.size > 0 && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 50, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 50, scale: 0.95 }}
+                        className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 bg-card/80 backdrop-blur-xl border border-primary/20 shadow-2xl rounded-2xl px-2 py-2 flex items-center gap-2 max-w-[90vw] overflow-hidden ring-1 ring-black/5"
+                    >
+                        {/* Counter Badge */}
+                        <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 rounded-xl mr-2">
+                            <span className="text-xs font-bold text-primary uppercase tracking-wider">
+                                {selectedImages.size} Selected
+                            </span>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="w-px h-6 bg-border/50 mx-1" />
+
+                        {/* Clear Selection */}
+                        <button
+                            onClick={() => setSelectedImages(new Set())}
+                            className="flex flex-col items-center justify-center w-12 h-12 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all gap-0.5 group"
+                            title="Clear Selection"
+                        >
+                            <X className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                            <span className="text-[9px] font-medium opacity-70">Clear</span>
+                        </button>
+
+                        {/* Copy Prompts */}
+                        <button
+                            onClick={async () => {
+                                const selected = images.filter(img => selectedImages.has(img.id));
+                                const prompts = selected.map(img => img.prompt).join('\n\n');
+                                try {
+                                    await navigator.clipboard.writeText(prompts);
+                                    toast.success(`Copied ${selected.length} prompts to clipboard`);
+                                    setSelectedImages(new Set());
+                                } catch (e) {
+                                    toast.error("Failed to copy prompts");
+                                }
+                            }}
+                            className="flex flex-col items-center justify-center w-12 h-12 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all gap-0.5 group"
+                            title="Copy Prompts"
+                        >
+                            <Copy className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                            <span className="text-[9px] font-medium opacity-70">Copy</span>
+                        </button>
+
+                        {/* Download Selected */}
+                        <button
+                            onClick={async () => {
+                                const selected = images.filter(img => selectedImages.has(img.id));
+                                let successCount = 0;
+
+                                toast.promise((async () => {
+                                    for (const img of selected) {
+                                        try {
+                                            await handleDownload(img);
+                                            successCount++;
+                                            // Small delay to prevent system overload
+                                            await new Promise(r => setTimeout(r, 200));
+                                        } catch (e) {
+                                            console.error(`Failed to download ${img.id}`, e);
+                                        }
+                                    }
+                                    // Return summary for the success message
+                                    if (successCount === 0) throw new Error("No images downloaded");
+                                    return `Saved ${successCount} images`;
+                                })(), {
+                                    loading: `Downloading ${selected.length} images...`,
+                                    success: (data) => {
+                                        setSelectedImages(new Set());
+                                        return data;
+                                    },
+                                    error: "Failed to complete downloads"
+                                });
+                            }}
+                            className="flex flex-col items-center justify-center w-12 h-12 rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all gap-0.5 group"
+                            title="Download Selected"
+                        >
+                            <Download className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                            <span className="text-[9px] font-medium opacity-70">Save</span>
+                        </button>
+
+                        {/* Delete Selected */}
+                        <button
+                            onClick={async () => {
+                                if (confirm(`Are you sure you want to delete ${selectedImages.size} images?`)) {
+                                    const selectedIds = Array.from(selectedImages);
+                                    toast.promise(Promise.all(selectedIds.map(id => handleDelete(id))), {
+                                        loading: "Deleting images...",
+                                        success: () => {
+                                            setSelectedImages(new Set());
+                                            return "Images deleted";
+                                        },
+                                        error: "Failed to delete images"
+                                    });
+                                }
+                            }}
+                            className="flex flex-col items-center justify-center w-12 h-12 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all gap-0.5 group"
+                            title="Delete Selected"
+                        >
+                            <Trash2 className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                            <span className="text-[9px] font-medium opacity-70">Delete</span>
+                        </button>
                     </motion.div>
                 )}
             </AnimatePresence>

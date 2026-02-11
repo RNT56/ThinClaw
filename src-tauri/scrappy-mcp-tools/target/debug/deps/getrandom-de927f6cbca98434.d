@@ -1,0 +1,11 @@
+/Users/mt/Programming/Schtack/scrappy-cursor/src-tauri/scrappy-mcp-tools/target/debug/deps/libgetrandom-de927f6cbca98434.rmeta: /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/lib.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/error.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/util.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/../README.md /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/getentropy.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/../utils/get_errno.rs
+
+/Users/mt/Programming/Schtack/scrappy-cursor/src-tauri/scrappy-mcp-tools/target/debug/deps/getrandom-de927f6cbca98434.d: /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/lib.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/error.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/util.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/../README.md /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/getentropy.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/../utils/get_errno.rs
+
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/lib.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/error.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/util.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/../README.md:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/getentropy.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/getrandom-0.4.1/src/backends/../utils/get_errno.rs:

@@ -13,7 +13,8 @@ import {
     CheckCircle2,
     XCircle,
     Database,
-    Binary
+    Binary,
+    AlertTriangle
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as clawdbot from '../../lib/clawdbot';
@@ -113,6 +114,20 @@ export function ClawdbotDashboard() {
                 >
                     <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                 </button>
+            </div>
+
+            {/* Alpha Warning Banner */}
+            <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/10 backdrop-blur-sm flex items-start gap-4">
+                <div className="p-2 rounded-lg bg-amber-500/20">
+                    <AlertTriangle className="w-5 h-5 text-amber-500" />
+                </div>
+                <div>
+                    <h3 className="text-sm font-semibold text-amber-500">Experimental Feature</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                        The OpenClaw implementation in this application is currently in an <strong>alpha state</strong>.
+                        Features may be unstable or incomplete. Please use with caution and report any issues you encounter.
+                    </p>
+                </div>
             </div>
 
             {/* Top Level Stats */}

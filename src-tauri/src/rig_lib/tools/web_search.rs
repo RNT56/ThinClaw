@@ -8,6 +8,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+use std::sync::atomic::Ordering;
 
 use tauri::Manager;
 
@@ -80,6 +81,19 @@ impl Tool for DDGSearchTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let cancellation_token = if let Some(app) = &self.app {
+            app.try_state::<crate::sidecar::SidecarManager>()
+                .map(|s| s.cancellation_token.clone())
+        } else {
+            None
+        };
+
+        if let Some(token) = &cancellation_token {
+            if token.load(Ordering::Relaxed) {
+                return Err(SearchError::System("Cancelled by user".into()));
+            }
+        }
+
         let url = format!(
             "https://duckduckgo.com/html/?q={}",
             urlencoding::encode(&args.query)
@@ -170,6 +184,12 @@ impl Tool for DDGSearchTool {
             }));
         }
 
+        if let Some(token) = &cancellation_token {
+            if token.load(Ordering::Relaxed) {
+                return Err(SearchError::System("Cancelled by user".into()));
+            }
+        }
+
         let initial_count = initial_results.len();
         if let Some(app) = &self.app {
             use tauri::Emitter;
@@ -219,9 +239,11 @@ impl Tool for DDGSearchTool {
         let initial_results_clone = initial_results.clone();
         let app_handle = self.app.clone();
         let conversation_id_top = self.conversation_id.clone();
+        let token_for_spawn = cancellation_token.clone();
 
         let mut scraping_result = tokio::task::spawn_blocking(move || {
             let conversation_id_clone = conversation_id_top;
+            let token_for_inner = token_for_spawn;
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -249,7 +271,14 @@ impl Tool for DDGSearchTool {
                         let scraper = &scraper;
                         let browser = &browser;
                         let conversation_id = conversation_id_clone.clone();
+                        let token_ref = token_for_inner.clone();
                         async move {
+                            if let Some(token) = token_ref {
+                                if token.load(Ordering::Relaxed) {
+                                    return result;
+                                }
+                            }
+
                             // Emit "visiting"
                             if let Ok(guard) = scraper.app.lock() {
                                 if let Some(app) = guard.as_ref() {
@@ -314,6 +343,11 @@ impl Tool for DDGSearchTool {
 
         // Post-Processing: Map-Reduce Summarization
         if let Some(summarizer) = &self.summarizer {
+            if let Some(token) = &cancellation_token {
+                if token.load(Ordering::Relaxed) {
+                    return Err(SearchError::System("Cancelled by user".into()));
+                }
+            }
             for result in scraping_result.iter_mut() {
                 let content_len = result.snippet.len();
                 let original_content = result.snippet.clone();
@@ -345,15 +379,26 @@ impl Tool for DDGSearchTool {
                     let summaries_conv_id = self.conversation_id.clone();
                     let query_clone = args.query.clone();
                     let app_top = self.app.clone();
+                    let app_top_for_closure = app_top.clone();
+                    let summaries_conv_id_for_closure = summaries_conv_id.clone();
+                    let token_for_stream = cancellation_token.clone();
+                    
                     let summaries: Vec<(f32, String)> = stream::iter(chunks)
                         .enumerate()
                         .map(move |(i, chunk)| {
                             let summarizer = summarizer.clone();
                             let query = query_clone.clone();
-                            let app = app_top.clone();
-                            let conversation_id_inner = summaries_conv_id.clone();
+                            let app = app_top_for_closure.clone();
+                            let conversation_id_inner = summaries_conv_id_for_closure.clone();
+                            let token_ref = token_for_stream.clone();
 
                             async move {
+                                if let Some(token) = token_ref {
+                                    if token.load(Ordering::Relaxed) {
+                                        return None;
+                                    }
+                                }
+
                                 if let Some(app) = &app {
                                     use tauri::Emitter;
                                     #[derive(Serialize, Clone, specta::Type)]
@@ -453,6 +498,24 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
 
                     // Recursive Reduce if still too big
                     if combined_summary.len() > chars_per_slot as usize {
+                        if let Some(app) = &app_top {
+                             use tauri::Emitter;
+                             #[derive(Serialize, Clone, specta::Type)]
+                             struct WebSearchStatus {
+                                 id: Option<String>,
+                                 step: String,
+                                 message: String,
+                             }
+                             let _ = app.emit(
+                                 "web_search_status",
+                                 WebSearchStatus {
+                                     id: summaries_conv_id.clone(),
+                                     step: "summarizing".into(),
+                                     message: "Summarizing findings...".into(),
+                                 },
+                             );
+                        }
+
                         let prompt = format!(
                             "Compress the following summaries into a single coherent text relevant to '{}'. Max length {} chars.\n\n{}", 
                             args.query, chars_per_slot, combined_summary
@@ -529,7 +592,7 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Emit done status
+        // Emit generating status (instead of done)
         if let Some(app) = &self.app {
             use tauri::Emitter;
             #[derive(Serialize, Clone, specta::Type)]
@@ -542,8 +605,8 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                 "web_search_status",
                 WebSearchStatus {
                     id: self.conversation_id.clone(),
-                    step: "done".into(),
-                    message: "Found and analyzed results. Generating answer...".into(),
+                    step: "generating".into(),
+                    message: "Formulating response...".into(),
                 },
             );
             // Emit final results with summaries for UI and Persistence

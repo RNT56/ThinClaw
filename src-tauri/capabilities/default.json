@@ -30,12 +30,29 @@
     "core:window:default",
     "fs:default",
     {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        {
+          "path": "$DOWNLOAD/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        {
+          "path": "$DOWNLOAD/**"
+        }
+      ]
+    },
+    {
       "identifier": "fs:scope",
       "allow": [
         "$APP_DATA/**",
         "$RESOURCE/**",
         "$HOME/Library/Application Support/com.schack.scrappy/**",
-        "/Users/mt/Library/Application Support/com.schack.scrappy/**"
+        "/Users/mt/Library/Application Support/com.schack.scrappy/**",
+        "$DOWNLOAD/**"
       ]
     }
   ]

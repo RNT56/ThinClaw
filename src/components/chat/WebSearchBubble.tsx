@@ -1,7 +1,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Globe, Search, ExternalLink } from 'lucide-react';
+import { Globe, Search, ExternalLink, Sparkles } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { listen } from '@tauri-apps/api/event';
 
@@ -11,7 +11,7 @@ export type WebSource = {
     snippet: string;
 }
 
-export type WebStatusState = 'idle' | 'searching' | 'scraping' | 'analyzing' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
+export type WebStatusState = 'idle' | 'searching' | 'scraping' | 'analyzing' | 'summarizing' | 'generating' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
 
 type ScrapingProgress = {
     url: string;
@@ -219,7 +219,7 @@ export function WebSearchBubble({ status, message, sources, conversationId }: We
     // If idle and no sources, don't render anything
     if (status === 'idle' && (!sources || sources.length === 0)) return null;
 
-    const isSearching = status === 'searching' || status === 'scraping' || status === 'analyzing' || status === 'rag_searching' || status === 'rag_reading';
+    const isSearching = status === 'searching' || status === 'scraping' || status === 'analyzing' || status === 'summarizing' || status === 'generating' || status === 'rag_searching' || status === 'rag_reading';
     const isDone = status === 'done' || (status === 'idle' && sources && sources.length > 0);
     const isError = status === 'error';
     const isRag = status === 'rag_searching' || status === 'rag_reading';
@@ -237,6 +237,8 @@ export function WebSearchBubble({ status, message, sources, conversationId }: We
         } else if (scrapingProgress.status === 'scraped') {
             displayMessage = `Reading ${scrapingProgress.title || 'content'}...`;
         }
+    } else if (status === 'generating') {
+        displayMessage = "Formulating response...";
     }
 
     return (
@@ -257,6 +259,8 @@ export function WebSearchBubble({ status, message, sources, conversationId }: We
                             <div className="relative flex items-center justify-center w-6 h-6 rounded-full bg-primary/10 text-primary">
                                 {status === 'searching' && <Globe className="w-4 h-4 animate-pulse" />}
                                 {(status === 'scraping' || status === 'analyzing') && <Search className="w-4 h-4 animate-bounce" />}
+                                {status === 'summarizing' && <div className="w-4 h-4 bg-primary/20 rounded animate-pulse" />}
+                                {status === 'generating' && <Sparkles className="w-4 h-4 animate-pulse" />}
                                 {status === 'rag_searching' && <Search className="w-4 h-4 animate-pulse" />}
                                 {status === 'rag_reading' && <div className="w-4 h-4 rounded-sm border-2 border-primary animate-pulse flex items-center justify-center text-[10px] font-bold">F</div>}
 
@@ -269,7 +273,9 @@ export function WebSearchBubble({ status, message, sources, conversationId }: We
                                     <span className="text-xs font-semibold text-primary uppercase tracking-wider">
                                         {status === 'scraping' ? 'Reading Content' :
                                             status === 'analyzing' ? 'Analyzing Data' :
-                                                isRag ? 'Browsing Documents' : 'Browsing the Web'}
+                                                status === 'summarizing' ? 'Summarizing Findings' :
+                                                    status === 'generating' ? 'Generating Answer' :
+                                                        isRag ? 'Browsing Documents' : 'Browsing the Web'}
                                     </span>
                                     {sources && sources.length > 0 && (
                                         <span className="text-[10px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded-full animate-in fade-in zoom-in duration-300">

@@ -87,6 +87,21 @@ pub struct UserConfig {
 
     #[serde(default)]
     pub disabled_providers: Vec<String>,
+
+    // --- MCP Integration ---
+    /// MCP server base URL (e.g. "https://api.scrappy.dev")
+    /// Falls back to SCRAPPY_MCP_URL env var if not set in config.
+    #[serde(default = "default_mcp_base_url")]
+    pub mcp_base_url: Option<String>,
+
+    /// MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
+    #[serde(default = "default_mcp_auth_token")]
+    pub mcp_auth_token: Option<String>,
+
+    /// Whether to use the Rhai sandbox (code-execution mode) instead of
+    /// legacy JSON <tool_code> parsing. Requires mcp_base_url to be set.
+    #[serde(default = "default_false")]
+    pub mcp_sandbox_enabled: bool,
 }
 
 impl Default for UserConfig {
@@ -114,6 +129,9 @@ impl Default for UserConfig {
             quantize_kv: false,
             spotlight_shortcut: default_spotlight_shortcut(),
             disabled_providers: vec![],
+            mcp_base_url: default_mcp_base_url(),
+            mcp_auth_token: default_mcp_auth_token(),
+            mcp_sandbox_enabled: false,
         }
     }
 }
@@ -168,6 +186,18 @@ fn default_true() -> bool {
 
 fn default_spotlight_shortcut() -> String {
     "Command+Shift+K".to_string()
+}
+
+fn default_mcp_base_url() -> Option<String> {
+    std::env::var("SCRAPPY_MCP_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+fn default_mcp_auth_token() -> Option<String> {
+    std::env::var("SCRAPPY_MCP_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub struct ConfigManager {

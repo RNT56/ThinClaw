@@ -9,6 +9,7 @@
 pub mod commands;
 mod config;
 mod frames;
+pub mod ipc;
 mod normalizer;
 mod ws_client;
 

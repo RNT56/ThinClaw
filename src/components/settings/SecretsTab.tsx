@@ -19,10 +19,11 @@ interface SecretCardProps {
     onVisibilityToggle?: (visible: boolean) => Promise<void>;
     onFetch: () => Promise<string | null>;
     onDelete: () => Promise<void>;
+    getKeyUrl?: string;
 }
 
 function SecretCard({
-    title, description, icon, placeholder, hasKey, granted, isVisible, onVisibilityToggle, onSave, onToggle, onFetch, onDelete
+    title, description, icon, placeholder, hasKey, granted, isVisible, onVisibilityToggle, onSave, onToggle, onFetch, onDelete, getKeyUrl
 }: SecretCardProps) {
     const [key, setKey] = useState('');
     const [showKey, setShowKey] = useState(false);
@@ -89,7 +90,20 @@ function SecretCard({
                         {icon}
                     </div>
                     <div>
-                        <h3 className="font-semibold text-lg">{title}</h3>
+                        <div className="flex items-center gap-2">
+                            <h3 className="font-semibold text-lg">{title}</h3>
+                            {getKeyUrl && (
+                                <button
+                                    type="button"
+                                    onClick={() => commands.openUrl(getKeyUrl)}
+                                    className="text-[10px] font-medium text-primary hover:underline flex items-center gap-0.5 bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10 hover:bg-primary/10 transition-colors cursor-pointer"
+                                    title="Open API Key Page"
+                                >
+                                    Get Key
+                                    <Search className="w-2.5 h-2.5" />
+                                </button>
+                            )}
+                        </div>
                         <p className="text-sm text-muted-foreground">{description}</p>
                     </div>
                 </div>
@@ -617,6 +631,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('anthropic', g)}
                             onFetch={handleAnthropicFetch}
                             onDelete={handleAnthropicDelete}
+                            getKeyUrl="https://console.anthropic.com/settings/keys"
                         />
 
                         <SecretCard
@@ -632,6 +647,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('openai', g)}
                             onFetch={handleOpenAIFetch}
                             onDelete={handleOpenAIDelete}
+                            getKeyUrl="https://platform.openai.com/api-keys"
                         />
 
                         <SecretCard
@@ -647,6 +663,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('openrouter', g)}
                             onFetch={handleOpenRouterFetch}
                             onDelete={handleOpenRouterDelete}
+                            getKeyUrl="https://openrouter.ai/keys"
                         />
 
                         <SecretCard
@@ -662,6 +679,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('gemini', g)}
                             onFetch={handleGeminiFetch}
                             onDelete={handleGeminiDelete}
+                            getKeyUrl="https://aistudio.google.com/app/apikey"
                         />
 
                         <SecretCard
@@ -677,6 +695,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('groq', g)}
                             onFetch={handleGroqFetch}
                             onDelete={handleGroqDelete}
+                            getKeyUrl="https://console.groq.com/keys"
                         />
                     </div>
                 </div>
@@ -700,6 +719,7 @@ export function SecretsTab() {
                             onToggle={(g) => handleToggle('brave', g)}
                             onFetch={handleBraveFetch}
                             onDelete={handleBraveDelete}
+                            getKeyUrl="https://brave.com/search/api/"
                         />
 
                         <SecretCard
@@ -731,6 +751,7 @@ export function SecretsTab() {
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error("Failed to delete HF token");
                             }}
+                            getKeyUrl="https://huggingface.co/settings/tokens"
                         />
                     </div>
                 </div>

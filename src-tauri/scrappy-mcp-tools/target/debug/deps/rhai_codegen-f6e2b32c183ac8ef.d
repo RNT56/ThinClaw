@@ -1,0 +1,11 @@
+/Users/mt/Programming/Schtack/scrappy-cursor/src-tauri/scrappy-mcp-tools/target/debug/deps/librhai_codegen-f6e2b32c183ac8ef.dylib: /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/lib.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/attrs.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/custom_type.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/function.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/module.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/register.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/rhai_module.rs
+
+/Users/mt/Programming/Schtack/scrappy-cursor/src-tauri/scrappy-mcp-tools/target/debug/deps/rhai_codegen-f6e2b32c183ac8ef.d: /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/lib.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/attrs.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/custom_type.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/function.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/module.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/register.rs /Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/rhai_module.rs
+
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/lib.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/attrs.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/custom_type.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/function.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/module.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/register.rs:
+/Users/mt/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rhai_codegen-3.1.0/src/rhai_module.rs:

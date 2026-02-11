@@ -56,7 +56,7 @@ urlencoding = "2"
 eventsource-stream = "0.2.3"
 chromiumoxide = { version = "0.8.0", features = ["tokio-runtime"] }
 zip = "0.6"
-tauri-plugin-fs = "2.4.5"
+tauri-plugin-fs = "2"
 
 tokio-stream = "0.1.18"
 sha2 = "0.10"
@@ -66,5 +66,9 @@ futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
 pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
 regex = "1.12.3"
+scrappy-mcp-tools = { path = "scrappy-mcp-tools" }
+rhai = { version = "1", features = ["sync", "serde"] }
+async-trait = "0.1"
+clawscan = "1.0.0"
 
 

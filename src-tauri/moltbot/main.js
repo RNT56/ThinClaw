@@ -5,62 +5,72 @@ const fs = require('fs');
 const os = require('os');
 
 async function main() {
-    console.log(`[moltbot-wrapper] Starting wrapper...`);
-    console.log(`[moltbot-wrapper] Current directory: ${process.cwd()}`);
-    console.log(`[moltbot-wrapper] Script directory: ${__dirname}`);
-    console.log(`[moltbot-wrapper] OS Homedir: ${os.homedir()}`);
+    console.log(`[openclaw-wrapper] Starting wrapper...`);
+    console.log(`[openclaw-wrapper] Current directory: ${process.cwd()}`);
+    console.log(`[openclaw-wrapper] Script directory: ${__dirname}`);
+    console.log(`[openclaw-wrapper] OS Homedir: ${os.homedir()}`);
 
     // Forward arguments
     const args = process.argv.slice(2);
 
-    // Attempt to locate moltbot
-    // We expect to be in a directory that has node_modules/moltbot
+    // Attempt to locate openclaw
+    // We expect to be in a directory that has node_modules/openclaw
     // Or node_modules is in a parent directory
 
-    let moltbotDir = '';
+    let openclawDir = '';
     const possibleDirs = [
-        path.join(__dirname, 'node_modules', 'moltbot'),
-        path.join(__dirname, '..', 'node_modules', 'moltbot'),
-        path.resolve(__dirname, 'node_modules', 'moltbot')
+        path.join(__dirname, 'node_modules', 'openclaw'),
+        path.join(__dirname, '..', 'node_modules', 'openclaw'),
+        path.resolve(__dirname, 'node_modules', 'openclaw')
     ];
 
     for (const dir of possibleDirs) {
         if (fs.existsSync(dir)) {
-            moltbotDir = dir;
+            openclawDir = dir;
             break;
         }
     }
 
-    if (!moltbotDir) {
+    if (!openclawDir) {
         // Fallback to require.resolve
         try {
-            const pkgPath = require.resolve('moltbot/package.json');
-            moltbotDir = path.dirname(pkgPath);
+            const pkgPath = require.resolve('openclaw/package.json');
+            openclawDir = path.dirname(pkgPath);
         } catch (e) {
-            console.error('[moltbot-wrapper] Could not find moltbot via file search or require.resolve');
-            process.exit(1);
+            console.error('[openclaw-wrapper] Could not find openclaw via file search or require.resolve');
+            // Try moltbot as legacy fallback?
+            try {
+                const pkgPath = require.resolve('moltbot/package.json');
+                openclawDir = path.dirname(pkgPath);
+                console.log('[openclaw-wrapper] Falling back to moltbot package');
+            } catch (e2) {
+                process.exit(1);
+            }
         }
     }
 
-    console.log(`[moltbot-wrapper] Found moltbot directory: ${moltbotDir}`);
+    console.log(`[openclaw-wrapper] Found openclaw directory: ${openclawDir}`);
 
     // Try to peek at identity
     try {
-        const identityLoader = require(path.join(moltbotDir, 'dist', 'infra', 'device-identity.js'));
+        // Path might differ in openclaw vs moltbot
+        const identityLoader = require(path.join(openclawDir, 'dist', 'infra', 'device-identity.js'));
         if (identityLoader && identityLoader.loadOrCreateDeviceIdentity) {
             const identity = identityLoader.loadOrCreateDeviceIdentity();
-            console.log(`[moltbot-wrapper] Moltbot Device ID: ${identity.deviceId}`);
+            console.log(`[openclaw-wrapper] Device ID: ${identity.deviceId}`);
         }
     } catch (e) {
-        console.log(`[moltbot-wrapper] Could not peek at identity: ${e.message}`);
+        console.log(`[openclaw-wrapper] Could not peek at identity: ${e.message}`);
     }
 
-    const pkg = JSON.parse(fs.readFileSync(path.join(moltbotDir, 'package.json'), 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(path.join(openclawDir, 'package.json'), 'utf8'));
 
     let binRelPath = '';
     if (pkg.bin) {
         if (typeof pkg.bin === 'string') {
             binRelPath = pkg.bin;
+        } else if (pkg.bin.openclaw) {
+            binRelPath = pkg.bin.openclaw;
         } else if (pkg.bin.moltbot) {
             binRelPath = pkg.bin.moltbot;
         }
@@ -68,9 +78,9 @@ async function main() {
 
     if (!binRelPath) {
         // Fallback to common names
-        const fallbacks = ['moltbot.mjs', 'moltbot.js', 'dist/index.js'];
+        const fallbacks = ['openclaw.mjs', 'openclaw.js', 'bin/openclaw.mjs', 'dist/index.js'];
         for (const f of fallbacks) {
-            if (fs.existsSync(path.join(moltbotDir, f))) {
+            if (fs.existsSync(path.join(openclawDir, f))) {
                 binRelPath = f;
                 break;
             }
@@ -78,12 +88,12 @@ async function main() {
     }
 
     if (!binRelPath) {
-        console.error('[moltbot-wrapper] Could not determine binary path for moltbot');
+        console.error('[openclaw-wrapper] Could not determine binary path for openclaw');
         process.exit(1);
     }
 
-    const binPath = path.join(moltbotDir, binRelPath);
-    console.log(`[moltbot-wrapper] Starting moltbot from: ${binPath}`);
+    const binPath = path.join(openclawDir, binRelPath);
+    console.log(`[openclaw-wrapper] Starting openclaw from: ${binPath}`);
 
     // We use process.execPath (the bundled node) to run the .mjs or .js file
     const child = spawn(process.execPath, [binPath, ...args], {
@@ -94,12 +104,12 @@ async function main() {
     });
 
     child.on('exit', (code) => {
-        console.log(`[moltbot-wrapper] moltbot exited with code ${code}`);
+        console.log(`[openclaw-wrapper] openclaw exited with code ${code}`);
         process.exit(code || 0);
     });
 
     child.on('error', (err) => {
-        console.error('[moltbot-wrapper] Failed to spawn moltbot:', err);
+        console.error('[openclaw-wrapper] Failed to spawn openclaw:', err);
         process.exit(1);
     });
 }

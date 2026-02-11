@@ -133,7 +133,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     if (event.payload.id === id) {
                         updateJob(id, {
                             searchResults: event.payload.results || event.payload,
-                            searchStatus: 'done'
+                            // Don't force 'done' here. Let web_search_status event handle the state transitions.
+                            // This prevents the UI from flashing "Source Cards" when initial results arrive before scraping starts.
                         });
                     }
                 });
@@ -166,6 +167,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     if (chunk.content) {
                         fullText += chunk.content;
                         updates.fullMessage = fullText;
+
+                        // Force search status to done if we have content and it's not already done.
+                        // This prevents "Searching..." or "Analyzing..." pills from persisting during response generation.
+                        const currentJob = activeJobsRef.current[id];
+                        if (currentJob && currentJob.searchStatus && currentJob.searchStatus !== 'done' && currentJob.searchStatus !== 'error') {
+                            updates.searchStatus = 'done';
+                            // Clear message to prevent "Analyzing..." text from hanging around
+                            updates.searchMessage = "";
+                        }
                     }
                     if (chunk.usage) {
                         updates.usage = chunk.usage;

@@ -239,4 +239,10 @@ pre code.hljs {
     0% { background-position: 24px 0; }
     100% { background-position: 0 0; }
   }
+
+  /* Utility for fading content at the top */
+  .mask-fade-top {
+      mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 120px);
+  }
 }

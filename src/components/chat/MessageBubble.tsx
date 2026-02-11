@@ -414,12 +414,18 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     let statusMessage = "";
 
     if (!isUser) {
-        if (message.web_search_results && message.web_search_results.length > 0) {
+        // Prioritize explicit active status from the job to show progress pills (Browsing, Reading, etc.)
+        // even if we already have some initial results.
+        if (message.searchStatus && ['searching', 'scraping', 'analyzing', 'summarizing', 'generating', 'rag_searching', 'rag_reading'].includes(message.searchStatus)) {
+            searchStatus = message.searchStatus;
+            statusMessage = message.searchMessage || "";
+            webSources = message.web_search_results || [];
+        } else if (message.web_search_results && message.web_search_results.length > 0) {
             webSources = message.web_search_results;
             searchStatus = 'done';
             statusMessage = "";
         } else if (message.searchStatus) {
-            // Live status from activeJob mapping
+            // Live status from activeJob mapping (e.g. idle, error, or done)
             searchStatus = message.searchStatus;
             statusMessage = message.searchMessage || "";
             webSources = [];

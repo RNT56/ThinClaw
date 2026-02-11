@@ -62,6 +62,9 @@ pub struct ClawdbotWsClient {
     private_key_pem: Option<String>,
     public_key_pem: Option<String>,
 
+    /// MCP request handler
+    mcp_handler: std::sync::Arc<super::ipc::McpRequestHandler>,
+
     /// Channel to send UI events
     ui_tx: mpsc::Sender<UiEvent>,
 
@@ -342,6 +345,7 @@ impl ClawdbotWsClient {
         private_key_pem: Option<String>,
         public_key_pem: Option<String>,
         ui_tx: mpsc::Sender<UiEvent>,
+        mcp_handler: std::sync::Arc<super::ipc::McpRequestHandler>,
     ) -> (Self, ClawdbotWsHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
@@ -353,6 +357,7 @@ impl ClawdbotWsClient {
             public_key_pem,
             ui_tx,
             cmd_rx,
+            mcp_handler,
             pending: HashMap::new(),
             running: true,
         };
@@ -571,7 +576,7 @@ impl ClawdbotWsClient {
     /// Handle an incoming frame
     async fn handle_incoming_frame<W>(
         &mut self,
-        _write: &mut W,
+        write: &mut W,
         frame: WsFrame,
     ) -> Result<(), ClientError>
     where
@@ -606,9 +611,46 @@ impl ClawdbotWsClient {
                     info!("[ws_client] Event was not normalized (dropped): {}", event);
                 }
             }
-            WsFrame::Req { .. } => {
-                // Gateway shouldn't send requests to operator client
-                warn!("Unexpected Req frame from gateway");
+            WsFrame::Req { id, method, params } => {
+                info!("[ws_client] Received Req frame: {} (id={})", method, id);
+
+                // Delegate to McpRequestHandler
+                let result = if method.starts_with("mcp.") {
+                    self.mcp_handler
+                        .handle_request(method, params.clone())
+                        .await
+                        .map_err(|e| e)
+                } else {
+                    warn!("Unexpected method from Gateway: {}", method);
+                    Err(format!("Method {} not supported", method))
+                };
+
+                // Send response
+                let (ok, payload, error) = match result {
+                    Ok(val) => (true, val, None),
+                    Err(e) => (
+                        false,
+                        serde_json::json!({}),
+                        Some(frames::WsError {
+                            code: "RPC_ERROR".into(),
+                            message: e,
+                            details: Value::Null,
+                        }),
+                    ),
+                };
+
+                let res = WsFrame::Res {
+                    id: id.clone(),
+                    ok,
+                    payload,
+                    error,
+                };
+
+                let msg = serde_json::to_string(&res)?;
+                write
+                    .send(Message::Text(msg.into()))
+                    .await
+                    .map_err(|_| ClientError::Protocol("Failed to send response".into()))?;
             }
         }
 

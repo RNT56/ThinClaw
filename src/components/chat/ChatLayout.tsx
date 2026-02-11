@@ -93,7 +93,6 @@ export function ChatLayout() {
     const [showScrollButton, setShowScrollButton] = useState(false);
     const isUserScrolling = useRef(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const slashCommandContainerRef = useRef<HTMLDivElement>(null);
     // Use ID tracking to prevent re-animation of messages we've already rendered
     // This is crucial for avoiding flashes when:
     // 1. Streaming updates content (ID stays same)
@@ -271,16 +270,6 @@ export function ChatLayout() {
     const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
     const [selectedIndex, setSelectedIndex] = useState(0);
 
-    // Sync scroll for slash commands
-    useEffect(() => {
-        if (slashQuery !== null && slashCommandContainerRef.current) {
-            const container = slashCommandContainerRef.current;
-            const activeItem = container.children[slashSelectedIndex] as HTMLElement;
-            if (activeItem) {
-                activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-            }
-        }
-    }, [slashSelectedIndex, slashQuery]);
 
     useEffect(() => {
         if (selectedProjectId) {
@@ -1095,14 +1084,14 @@ export function ChatLayout() {
                                         exit={{ opacity: 0, y: -20 }}
                                         className="absolute top-0 left-0 right-0 z-20 flex justify-center p-4 pointer-events-none"
                                     >
-                                        <div className="pointer-events-auto flex items-center gap-3">
+                                        <div className="pointer-events-auto flex items-center gap-3 relative z-10">
                                             <div className="shadow-sm">
                                                 <ModelSelector onManageClick={() => setActiveTab('models')} isAutoMode={autoMode} toggleAutoMode={setAutoMode} />
                                             </div>
 
                                             {/* Token Usage Indicator */}
                                             {tokenUsage && (
-                                                <div className="flex items-center gap-2 bg-background/50 backdrop-blur px-2 py-1.5 rounded-full border border-border/50 shadow-sm animate-in fade-in transition-all">
+                                                <div className="flex items-center gap-2 bg-background/60 backdrop-blur-xl px-2 py-1.5 rounded-full border border-input/50 shadow-sm animate-in fade-in transition-all">
                                                     <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
                                                         <div
                                                             className={cn("h-full transition-all duration-500 rounded-full",
@@ -1122,7 +1111,7 @@ export function ChatLayout() {
                                 </AnimatePresence>
 
                                 {/* Virtuoso Scroll Container */}
-                                <div className="absolute inset-0 pt-16 flex flex-col">
+                                <div className="absolute inset-0 mask-fade-top flex flex-col">
                                     {loadingHistory ? (
                                         <div className="flex-1 flex items-center justify-center">
                                             <Loader2 className="w-8 h-8 animate-spin text-primary/20" />
@@ -1176,10 +1165,10 @@ export function ChatLayout() {
                                             }}
                                             components={{
                                                 Header: () => hasMore ? (
-                                                    <div className="h-12 flex items-center justify-center">
+                                                    <div className="h-24 flex items-center justify-center">
                                                         {isLoadingMore && <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />}
                                                     </div>
-                                                ) : <div className="h-4" />,
+                                                ) : <div className="h-24" />,
                                                 Footer: () => <div className="h-24 md:h-32" />
                                             }}
                                         />

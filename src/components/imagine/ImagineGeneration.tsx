@@ -12,6 +12,8 @@ import { imagineListImages, GeneratedImage } from '../../lib/imagine';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useModelContext } from '../model-context';
 import { ModelVariant } from '../../lib/model-library';
+import { downloadImageToDisk } from '../../lib/fs-utils';
+import * as clawdbot from '../../lib/clawdbot';
 
 interface ImagineGenerationProps {
     onGenerate?: (prompt: string, options: GenerationOptions) => Promise<void>;
@@ -95,19 +97,8 @@ export function ImagineGeneration({
     const handleDownload = async () => {
         if (!displayImage) return;
         try {
-            // Fetch the image to get a blob (works for asset:// URLs too)
-            const response = await fetch(displayImage);
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `generated-${Date.now()}.png`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
-
+            const filename = `generated-${Date.now()}.png`;
+            await downloadImageToDisk(displayImage, filename);
             toast.success("Image downloaded");
         } catch (err) {
             console.error('Failed to download:', err);
@@ -205,8 +196,35 @@ export function ImagineGeneration({
 
     const selectedStyle = selectedStyleId ? findStyle(selectedStyleId) : null;
 
+    const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
+
+    // Fetch clawdbot status to check for keys
+    useEffect(() => {
+        const checkStatus = async () => {
+            try {
+                const status = await clawdbot.getClawdbotStatus();
+                setHasGeminiKey(status.has_gemini_key);
+            } catch (e) {
+                console.error("Failed to check status:", e);
+            }
+        };
+        checkStatus();
+    }, []);
+
     const handleGenerate = useCallback(async () => {
         if (!prompt.trim() || isGenerating) return;
+
+        // Check for Gemini Key if using Cloud Models
+        if ((provider === 'nano-banana' || provider === 'nano-banana-pro') && !hasGeminiKey) {
+            toast.error("Google Gemini API Key Required", {
+                description: "Cloud generation requires a Gemini API key.",
+                action: {
+                    label: "Add Key",
+                    onClick: () => window.dispatchEvent(new CustomEvent('open-settings', { detail: 'secrets' }))
+                }
+            });
+            return;
+        }
 
         // Clear the prompt and images after sending
         const currentPrompt = prompt;
@@ -225,7 +243,7 @@ export function ImagineGeneration({
 
         // Refresh recent images after generation
         await loadRecentImages();
-    }, [prompt, provider, aspectRatio, resolution, selectedStyleId, sourceImages, steps, isGenerating, onGenerate]);
+    }, [prompt, provider, aspectRatio, resolution, selectedStyleId, sourceImages, steps, isGenerating, onGenerate, hasGeminiKey]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {

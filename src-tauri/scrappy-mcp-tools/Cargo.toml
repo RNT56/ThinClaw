@@ -1,0 +1,33 @@
+[package]
+name = "scrappy-mcp-tools"
+version = "0.1.0"
+edition = "2021"
+description = "MCP tool bindings, sandboxed code execution, and progressive discovery for Scrappy"
+
+[dependencies]
+# MCP Client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Scripting Engine
+rhai = { version = "1", features = ["sync", "serde"] }
+
+# Async
+futures = "0.3"
+async-trait = "0.1"
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+thiserror = "1"
+
+# Time
+chrono = "0.4"
+toml = "0.8"
+clawscan = "1.0.0"
+
+[dev-dependencies]
+tempfile = "3.25.0"

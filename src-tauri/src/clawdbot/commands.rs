@@ -1315,6 +1315,8 @@ pub async fn start_gateway_core(
     // Step 3: Connect WS client to the gateway (local or remote)
     let (event_tx, mut event_rx) = mpsc::channel(64);
 
+    let mcp_handler = std::sync::Arc::new(super::ipc::McpRequestHandler::new(state.app.clone()));
+
     let (client, handle) = ClawdbotWsClient::new(
         gateway_url.clone(),
         gateway_token,
@@ -1322,6 +1324,7 @@ pub async fn start_gateway_core(
         cfg.private_key.clone(),
         cfg.public_key.clone(),
         event_tx,
+        mcp_handler,
     );
 
     *state.ws_handle.write().await = Some(handle);

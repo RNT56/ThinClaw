@@ -388,9 +388,24 @@ pub async fn chat_stream(
         }
     }
 
-    // Use the Orchestrator
-    let orchestrator =
-        crate::rig_lib::orchestrator::Orchestrator::new(std::sync::Arc::new(manager));
+    // Use the Orchestrator — sandbox mode is activated when MCP config is present
+    let mcp_config = crate::rig_lib::orchestrator::McpOrchestratorConfig {
+        mcp_base_url: user_config.mcp_base_url.clone(),
+        mcp_auth_token: user_config.mcp_auth_token.clone(),
+        sandbox_enabled: user_config.mcp_sandbox_enabled && user_config.mcp_base_url.is_some(),
+    };
+    if mcp_config.sandbox_enabled {
+        info!(
+            "[chat_stream] Sandbox mode ENABLED — MCP server: {}",
+            mcp_config.mcp_base_url.as_deref().unwrap_or("(none)")
+        );
+    } else {
+        info!("[chat_stream] Legacy tool mode (sandbox disabled)");
+    }
+    let orchestrator = crate::rig_lib::orchestrator::Orchestrator::new_with_mcp(
+        std::sync::Arc::new(manager),
+        mcp_config,
+    );
 
     let permissions = crate::rig_lib::orchestrator::ToolPermissions {
         allow_web_search: payload.auto_mode || payload.web_search_enabled,

@@ -82,6 +82,29 @@ export const ChatInput = memo(function ChatInput({
 }: ChatInputProps) {
 
     const slashCommandContainerRef = useRef<HTMLDivElement>(null);
+    const mentionsContainerRef = useRef<HTMLDivElement>(null);
+
+    // Auto-scroll slash command suggestions
+    useEffect(() => {
+        if (slashQuery !== null && slashCommandContainerRef.current) {
+            const container = slashCommandContainerRef.current;
+            const activeItem = container.children[slashSelectedIndex] as HTMLElement;
+            if (activeItem) {
+                activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+        }
+    }, [slashSelectedIndex, slashQuery]);
+
+    // Auto-scroll mention suggestions
+    useEffect(() => {
+        if (mentionQuery !== null && mentionsContainerRef.current) {
+            const container = mentionsContainerRef.current;
+            const activeItem = container.children[selectedIndex] as HTMLElement;
+            if (activeItem) {
+                activeItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+        }
+    }, [selectedIndex, mentionQuery]);
 
     // Initial focus
     useEffect(() => {
@@ -376,7 +399,10 @@ export const ChatInput = memo(function ChatInput({
                     <div className="px-3 py-1.5 bg-muted/50 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border/50 flex items-center gap-2">
                         <Layers className="w-3 h-3" /> Suggested Documents
                     </div>
-                    <div className="max-h-56 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
+                    <div
+                        ref={mentionsContainerRef}
+                        className="max-h-56 overflow-y-auto p-1 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent"
+                    >
                         {filteredDocs.map((doc, i) => (
                             <button
                                 key={doc.id}

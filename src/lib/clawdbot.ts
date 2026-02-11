@@ -34,6 +34,10 @@ export interface ClawdbotStatus {
     openai_granted: boolean;
     has_openrouter_key: boolean;
     openrouter_granted: boolean;
+    has_gemini_key: boolean;
+    gemini_granted: boolean;
+    has_groq_key: boolean;
+    groq_granted: boolean;
     node_host_enabled: boolean;
     local_inference_enabled: boolean;
     selected_cloud_brain: string | null;
