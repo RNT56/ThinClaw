@@ -57,7 +57,7 @@ pub async fn chat_stream(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
-    clawdbot: State<'_, crate::clawdbot::commands::ClawdbotManager>,
+    openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
@@ -85,10 +85,10 @@ pub async fn chat_stream(
     {
         Some("anthropic") => {
             info!("[chat_stream] Routing to Anthropic");
-            let claw_cfg = clawdbot
+            let claw_cfg = openclaw
                 .get_config()
                 .await
-                .ok_or("Clawdbot config not found")?;
+                .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .anthropic_api_key
                 .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
@@ -105,10 +105,10 @@ pub async fn chat_stream(
         }
         Some("openai") => {
             info!("[chat_stream] Routing to OpenAI");
-            let claw_cfg = clawdbot
+            let claw_cfg = openclaw
                 .get_config()
                 .await
-                .ok_or("Clawdbot config not found")?;
+                .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .openai_api_key
                 .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
@@ -125,10 +125,10 @@ pub async fn chat_stream(
         }
         Some("openrouter") => {
             info!("[chat_stream] Routing to OpenRouter");
-            let claw_cfg = clawdbot
+            let claw_cfg = openclaw
                 .get_config()
                 .await
-                .ok_or("Clawdbot config not found")?;
+                .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .openrouter_api_key
                 .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
@@ -145,10 +145,10 @@ pub async fn chat_stream(
         }
         Some("gemini") => {
             info!("[chat_stream] Routing to Gemini");
-            let claw_cfg = clawdbot
+            let claw_cfg = openclaw
                 .get_config()
                 .await
-                .ok_or("Clawdbot config not found")?;
+                .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .gemini_api_key
                 .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
@@ -165,10 +165,10 @@ pub async fn chat_stream(
         }
         Some("groq") => {
             info!("[chat_stream] Routing to Groq");
-            let claw_cfg = clawdbot
+            let claw_cfg = openclaw
                 .get_config()
                 .await
-                .ok_or("Clawdbot config not found")?;
+                .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .groq_api_key
                 .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
@@ -586,7 +586,7 @@ pub async fn chat_completion(
     _app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
-    clawdbot: State<'_, crate::clawdbot::commands::ClawdbotManager>,
+    openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     payload: ChatPayload,
 ) -> Result<String, String> {
     info!("[chat_completion] Starting chat_completion...");
@@ -597,10 +597,10 @@ pub async fn chat_completion(
     let (kind, base_url, model_name, _port, token, _context_size) =
         match user_config.selected_chat_provider.as_deref() {
             Some("anthropic") => {
-                let claw_cfg = clawdbot
+                let claw_cfg = openclaw
                     .get_config()
                     .await
-                    .ok_or("Clawdbot config not found")?;
+                    .ok_or("OpenClaw config not found")?;
                 let key = claw_cfg
                     .anthropic_api_key
                     .ok_or("Anthropic API key required")?;
@@ -616,10 +616,10 @@ pub async fn chat_completion(
                 )
             }
             Some("openai") => {
-                let claw_cfg = clawdbot
+                let claw_cfg = openclaw
                     .get_config()
                     .await
-                    .ok_or("Clawdbot config not found")?;
+                    .ok_or("OpenClaw config not found")?;
                 let key = claw_cfg.openai_api_key.ok_or("OpenAI API key required")?;
                 (
                     crate::rig_lib::unified_provider::ProviderKind::OpenAI,
@@ -633,10 +633,10 @@ pub async fn chat_completion(
                 )
             }
             Some("gemini") => {
-                let claw_cfg = clawdbot
+                let claw_cfg = openclaw
                     .get_config()
                     .await
-                    .ok_or("Clawdbot config not found")?;
+                    .ok_or("OpenClaw config not found")?;
                 let key = claw_cfg.gemini_api_key.ok_or("Gemini API key required")?;
                 (
                     crate::rig_lib::unified_provider::ProviderKind::Gemini,

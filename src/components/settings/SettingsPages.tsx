@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import * as clawdbot from "../../lib/clawdbot";
+import * as openclaw from "../../lib/openclaw";
 import { ModelBrowser } from './ModelBrowser';
 import { PersonaTab } from './PersonaTab';
 import { PersonalizationTab } from './PersonalizationTab';
@@ -167,9 +167,9 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'server' && <ServerSettings />}
                         {activePage === 'troubleshooting' && <TroubleshootingSettings />}
                         {activePage === 'appearance' && <AppearanceSettings />}
-                        {activePage === 'clawdbot-slack' && <SlackTab />}
-                        {activePage === 'clawdbot-telegram' && <TelegramTab />}
-                        {activePage === 'clawdbot-gateway' && <GatewayTab />}
+                        {activePage === 'openclaw-slack' && <SlackTab />}
+                        {activePage === 'openclaw-telegram' && <TelegramTab />}
+                        {activePage === 'openclaw-gateway' && <GatewayTab />}
                         {activePage === 'secrets' && <SecretsTab />}
                         {activePage === 'inference' && <ChatProviderTab />}
                     </div>
@@ -216,17 +216,17 @@ function PageHeader({ page }: { page: SettingsPage }) {
             description: "Customize the look and feel of your workspace.",
             icon: Settings
         },
-        'clawdbot-slack': {
+        'openclaw-slack': {
             title: "Slack Integration",
-            description: "Connect Clawdbot to your Slack workspace.",
+            description: "Connect OpenClaw to your Slack workspace.",
             icon: Settings
         },
-        'clawdbot-telegram': {
+        'openclaw-telegram': {
             title: "Telegram Integration",
-            description: "Connect Clawdbot to Telegram.",
+            description: "Connect OpenClaw to Telegram.",
             icon: Settings
         },
-        'clawdbot-gateway': {
+        'openclaw-gateway': {
             title: "OpenClaw Gateway",
             description: "Manage autonomy, connectivity and agent runtime.",
             icon: Radio
@@ -396,9 +396,9 @@ function ServerSettings() {
             await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
             await checkStatus();
 
-            // Attempt dynamic config update for Clawdbot
+            // Attempt dynamic config update for OpenClaw
             try {
-                const gatewayStatus = await commands.getClawdbotStatus();
+                const gatewayStatus = await commands.openclawGetStatus();
                 if (gatewayStatus.status === "ok" && gatewayStatus.data.gateway_running) {
                     toast.loading("Syncing Agent Configuration...", { id: toastId });
 
@@ -408,7 +408,6 @@ function ServerSettings() {
                     const localPort = chatConfig ? chatConfig.port : 53755;
                     const usedContext = chatConfig ? chatConfig.context_size : maxContext;
 
-                    console.log(`[DynamicPatch] Updating Moltbot with port=${localPort} ctx=${usedContext}`);
 
                     const configPatch = {
                         models: {
@@ -429,7 +428,7 @@ function ServerSettings() {
                         }
                     };
 
-                    await clawdbot.patchClawdbotConfig({
+                    await openclaw.patchOpenClawConfig({
                         raw: JSON.stringify(configPatch)
                     });
 
@@ -439,14 +438,14 @@ function ServerSettings() {
             } catch (err) {
                 console.warn("Dynamic config update failed, falling back to restart:", err);
 
-                // Fallback: Restart Clawdbot Gateway if running
+                // Fallback: Restart OpenClaw Gateway if running
                 try {
-                    const gatewayStatus = await commands.getClawdbotStatus();
+                    const gatewayStatus = await commands.openclawGetStatus();
                     if (gatewayStatus.status === "ok" && gatewayStatus.data.gateway_running) {
                         toast.loading("Restarting Agent Gateway...", { id: toastId });
-                        await commands.stopClawdbotGateway();
+                        await commands.openclawStopGateway();
                         await new Promise(r => setTimeout(r, 1000));
-                        await commands.startClawdbotGateway();
+                        await commands.openclawStartGateway();
                     }
                 } catch (ignore) {
                     console.warn("Failed to restart gateway:", ignore);
@@ -828,13 +827,13 @@ function TroubleshootingSettings() {
     const [status, setStatus] = useState<SidecarStatus | null>(null);
     const [pathValid, setPathValid] = useState<boolean | null>(null);
 
-    const [clawStatus, setClawStatus] = useState<clawdbot.ClawdbotStatus | null>(null);
+    const [clawStatus, setClawStatus] = useState<openclaw.OpenClawStatus | null>(null);
 
     const checkStatus = async () => {
         try {
             const s = await commands.getSidecarStatus();
             setStatus(s);
-            const cs = await clawdbot.getClawdbotStatus();
+            const cs = await openclaw.getOpenClawStatus();
             setClawStatus(cs);
         } catch (e) {
             console.error(e);
@@ -843,8 +842,8 @@ function TroubleshootingSettings() {
 
     const toggleDevMode = async (enabled: boolean) => {
         try {
-            await clawdbot.setDevModeWizard(enabled);
-            const cs = await clawdbot.getClawdbotStatus();
+            await openclaw.setDevModeWizard(enabled);
+            const cs = await openclaw.getOpenClawStatus();
             setClawStatus(cs);
             toast.success(enabled ? "Dev mode onboarding enabled" : "Dev mode onboarding disabled");
         } catch (e) {

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scrappy::clawdbot::ipc::McpRequestHandler;
+    use scrappy::openclaw::ipc::McpRequestHandler;
     use serde_json::json;
     use std::collections::HashMap;
     use tauri::{test::mock_builder, AppHandle, Manager};

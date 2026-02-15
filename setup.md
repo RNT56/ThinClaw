@@ -36,10 +36,10 @@ cd scrappy
 ```
 
 ### 2. Install Dependencies
-Install the React frontend, Tauri backend, and the OpenClaw/Moltbot engine dependencies:
+Install the React frontend, Tauri backend, and the OpenClaw/OpenClawEngine engine dependencies:
 ```bash
 npm install
-npm run setup:moltbot
+npm run setup:openclaw-engine
 ```
 
 ### 3. Setup Sidecar Binaries (One-Click)

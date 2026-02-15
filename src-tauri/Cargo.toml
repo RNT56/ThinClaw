@@ -71,4 +71,22 @@ rhai = { version = "1", features = ["sync", "serde"] }
 async-trait = "0.1"
 clawscan = "1.0.0"
 
+# ---------------------------------------------------------------------------
+# Build Profiles — keep target/ size under control
+# ---------------------------------------------------------------------------
 
+[profile.dev]
+# "line-tables-only" keeps file:line info for backtraces but strips the huge
+# type/variable debug info that accounts for ~60% of target/ size.
+debug = "line-tables-only"
+# On macOS, split debug info into small .o files instead of one giant dSYM
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.release]
+# Thin LTO across all crates — better codegen without massive compile times
+lto = "thin"
+# Single codegen unit → better optimisation, smaller binary
+codegen-units = 1
+# Strip debug symbols from the final binary
+strip = "symbols"

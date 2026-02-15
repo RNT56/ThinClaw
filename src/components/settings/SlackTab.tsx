@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { MessageSquare, Key, CheckCircle, Copy, Info, AlertTriangle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as clawdbot from '../../lib/clawdbot';
+import * as openclaw from '../../lib/openclaw';
 
 interface SlackTabProps {
     className?: string;
@@ -12,8 +12,8 @@ interface SlackTabProps {
 // Slack App Manifest for easy setup
 const SLACK_MANIFEST = {
     "display_information": {
-        "name": "Scrappy Inference (Clawdbot)",
-        "description": "Local-first Clawdbot mode inside Scrappy Inference",
+        "name": "Scrappy Inference (OpenClaw)",
+        "description": "Local-first OpenClaw mode inside Scrappy Inference",
         "background_color": "#111111"
     },
     "features": {
@@ -29,7 +29,7 @@ const SLACK_MANIFEST = {
         "slash_commands": [
             {
                 "command": "/clawd",
-                "description": "Send a message to Scrappy Clawdbot",
+                "description": "Send a message to Scrappy OpenClaw",
                 "should_escape": false
             }
         ]
@@ -70,7 +70,7 @@ export function SlackTab({ className }: SlackTabProps) {
 
     // Load initial state from backend
     useEffect(() => {
-        clawdbot.getClawdbotStatus().then(status => {
+        openclaw.getOpenClawStatus().then(status => {
             setEnabled(status.slack_enabled);
         }).catch(console.error);
     }, []);
@@ -84,7 +84,7 @@ export function SlackTab({ className }: SlackTabProps) {
         setIsLoading(true);
 
         try {
-            await clawdbot.saveSlackConfig({
+            await openclaw.saveSlackConfig({
                 enabled,
                 bot_token: botToken || null,
                 app_token: appToken || null,
@@ -115,7 +115,7 @@ export function SlackTab({ className }: SlackTabProps) {
                 </div>
                 <div>
                     <h2 className="text-lg font-semibold">Slack Integration</h2>
-                    <p className="text-sm text-muted-foreground">Connect Clawdbot to your Slack workspace</p>
+                    <p className="text-sm text-muted-foreground">Connect OpenClaw to your Slack workspace</p>
                 </div>
             </div>
 
@@ -123,7 +123,7 @@ export function SlackTab({ className }: SlackTabProps) {
             <div className="flex items-center justify-between p-4 rounded-lg bg-card border border-border">
                 <div>
                     <p className="font-medium">Enable Slack</p>
-                    <p className="text-sm text-muted-foreground">Allow Clawdbot to respond in Slack DMs</p>
+                    <p className="text-sm text-muted-foreground">Allow OpenClaw to respond in Slack DMs</p>
                 </div>
                 <button
                     onClick={() => setEnabled(!enabled)}

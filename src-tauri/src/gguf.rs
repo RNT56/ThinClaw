@@ -17,6 +17,10 @@ pub struct GGUFMetadata {
     #[specta(type = f64)]
     pub head_count_kv: u64,
     pub file_type: u32,
+    /// Raw chat template string from tokenizer.chat_template (Jinja2)
+    pub chat_template: Option<String>,
+    /// Detected model family based on architecture + template heuristics
+    pub model_family: Option<String>,
 }
 
 pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
@@ -42,7 +46,6 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
     let mut tensor_count_bytes = [0u8; 8];
     file.read_exact(&mut tensor_count_bytes)
         .map_err(|e| e.to_string())?;
-    // let _tensor_count = u64::from_le_bytes(tensor_count_bytes);
 
     // Metadata KV Count
     let mut kv_count_bytes = [0u8; 8];
@@ -53,19 +56,23 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
     let mut metadata = GGUFMetadata::default();
 
     for _ in 0..kv_count {
-        // Read Key
         let key = read_gguf_string(&mut file)?;
 
-        // Read Value Type
         let mut type_bytes = [0u8; 4];
         file.read_exact(&mut type_bytes)
             .map_err(|e| e.to_string())?;
         let val_type = u32::from_le_bytes(type_bytes);
 
-        // Process based on key
         match key.as_str() {
             "general.architecture" => {
                 metadata.architecture = read_value_string(&mut file, val_type)?;
+            }
+            "tokenizer.chat_template" => {
+                if val_type == 8 {
+                    metadata.chat_template = Some(read_gguf_string(&mut file)?);
+                } else {
+                    skip_value(&mut file, val_type)?;
+                }
             }
             _ if key.ends_with(".context_length") => {
                 metadata.context_length = read_value_u64(&mut file, val_type)?;
@@ -86,28 +93,120 @@ pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
                 metadata.file_type = read_value_u32(&mut file, val_type)?;
             }
             _ => {
-                // Skip value
                 skip_value(&mut file, val_type)?;
             }
         }
     }
 
-    // Heuristic: if head_count_kv is 0 (missing), it usually means it equals head_count (no GQA)
     if metadata.head_count_kv == 0 {
         metadata.head_count_kv = metadata.head_count;
     }
 
+    metadata.model_family = Some(detect_model_family(
+        &metadata.architecture,
+        metadata.chat_template.as_deref(),
+    ));
+
     Ok(metadata)
+}
+
+/// Detect the model family from GGUF architecture string and/or chat template content.
+/// Returns a normalized family string used for stop token selection.
+pub fn detect_model_family(architecture: &str, chat_template: Option<&str>) -> String {
+    let arch_lower = architecture.to_lowercase();
+
+    // 1. Architecture-based detection (most reliable)
+    if arch_lower.contains("llama") {
+        return "llama3".into();
+    }
+    if arch_lower.contains("mistral") || arch_lower.contains("mixtral") {
+        return "mistral".into();
+    }
+    if arch_lower.contains("deepseek") {
+        return "deepseek".into();
+    }
+    if arch_lower.contains("chatglm") || arch_lower.contains("glm") {
+        return "glm".into();
+    }
+    if arch_lower.contains("gemma") {
+        return "gemma".into();
+    }
+    if arch_lower.contains("qwen") {
+        return "qwen".into();
+    }
+    if arch_lower.contains("phi") {
+        return "chatml".into();
+    }
+    if arch_lower.contains("starcoder") || arch_lower.contains("codellama") {
+        return "llama3".into();
+    }
+
+    // 2. Template-based fallback detection
+    if let Some(tpl) = chat_template {
+        if tpl.contains("<|eot_id|>") || tpl.contains("<|start_header_id|>") {
+            return "llama3".into();
+        }
+        if tpl.contains("[INST]") || tpl.contains("[/INST]") {
+            return "mistral".into();
+        }
+        if tpl.contains("<start_of_turn>") || tpl.contains("<end_of_turn>") {
+            return "gemma".into();
+        }
+        if tpl.contains("<|im_start|>") || tpl.contains("<|im_end|>") {
+            return "qwen".into();
+        }
+        if tpl.contains("[gMASK]") || tpl.contains("sop") {
+            return "glm".into();
+        }
+    }
+
+    // 3. Unknown — default to ChatML which is the most common format
+    "chatml".into()
+}
+
+/// Return the appropriate stop tokens for a given model family.
+/// These are used both in llama-server --stop args and openclaw model config.
+pub fn stop_tokens_for_family(family: &str) -> Vec<String> {
+    match family {
+        "llama3" => vec![
+            "<|eot_id|>".into(),
+            "<|end_of_text|>".into(),
+            "<|start_header_id|>user".into(),
+            "<|start_header_id|>system".into(),
+        ],
+        "mistral" => vec!["[/INST]".into(), "</s>".into(), "[INST]".into()],
+        "deepseek" => vec![
+            "<|end_of_sentence|>".into(),
+            "<|User|>".into(),
+            "<|begin_of_sentence|>".into(),
+        ],
+        "glm" => vec!["[gMASK]".into(), "<sop>".into(), "<eop>".into()],
+        "gemma" => vec![
+            "<end_of_turn>".into(),
+            "<start_of_turn>user".into(),
+            "<start_of_turn>system".into(),
+        ],
+        "qwen" | "chatml" => vec![
+            "<|im_end|>".into(),
+            "<|im_start|>user".into(),
+            "<|im_start|>system".into(),
+            "<|endoftext|>".into(),
+        ],
+        _ => vec![
+            "Human:".into(),
+            "User:".into(),
+            "### Human".into(),
+            "### User".into(),
+        ],
+    }
 }
 
 fn read_gguf_string(file: &mut File) -> Result<String, String> {
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
     let len = u64::from_le_bytes(len_bytes) as usize;
-
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf).map_err(|e| e.to_string())?;
-
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
@@ -121,13 +220,11 @@ fn read_value_string(file: &mut File, val_type: u32) -> Result<String, String> {
 fn read_value_u64(file: &mut File, val_type: u32) -> Result<u64, String> {
     match val_type {
         4 => {
-            // UINT32
             let mut b = [0u8; 4];
             file.read_exact(&mut b).map_err(|e| e.to_string())?;
             Ok(u32::from_le_bytes(b) as u64)
         }
         10 => {
-            // UINT64
             let mut b = [0u8; 8];
             file.read_exact(&mut b).map_err(|e| e.to_string())?;
             Ok(u64::from_le_bytes(b))
@@ -148,8 +245,7 @@ fn read_value_u32(file: &mut File, val_type: u32) -> Result<u32, String> {
 fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
     match val_type {
         0..=7 | 11 => {
-            // Fixed size types (1, 2, 4, 8 bytes)
-            let sizes = [1, 1, 2, 2, 4, 4, 4, 1]; // UINT8, INT8, UINT16, INT16, UINT32, INT32, FLOAT32, BOOL
+            let sizes = [1, 1, 2, 2, 4, 4, 4, 1];
             let size = if val_type < 8 {
                 sizes[val_type as usize]
             } else {
@@ -159,7 +255,6 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         8 => {
-            // String
             let mut len_bytes = [0u8; 8];
             file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
             let len = u64::from_le_bytes(len_bytes);
@@ -167,22 +262,18 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         9 => {
-            // Array
             let mut arr_type_bytes = [0u8; 4];
             file.read_exact(&mut arr_type_bytes)
                 .map_err(|e| e.to_string())?;
             let arr_type = u32::from_le_bytes(arr_type_bytes);
-
             let mut len_bytes = [0u8; 8];
             file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
             let len = u64::from_le_bytes(len_bytes);
-
             for _ in 0..len {
                 skip_value(file, arr_type)?;
             }
         }
         10 | 12 | 13 => {
-            // UINT64, INT64, FLOAT64 (8 bytes)
             file.seek(SeekFrom::Current(8)).map_err(|e| e.to_string())?;
         }
         _ => return Err(format!("Unknown GGUF type: {}", val_type)),

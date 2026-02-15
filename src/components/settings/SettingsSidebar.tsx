@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'clawdbot-slack' | 'clawdbot-telegram' | 'clawdbot-gateway' | 'secrets';
+export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -42,11 +42,11 @@ const NAV_ITEMS = [
         ]
     },
     {
-        section: "Clawdbot",
+        section: "OpenClaw",
         items: [
-            { id: 'clawdbot-slack', label: 'Slack', icon: MessageSquare },
-            { id: 'clawdbot-telegram', label: 'Telegram', icon: Send },
-            { id: 'clawdbot-gateway', label: 'Gateway', icon: Radio },
+            { id: 'openclaw-slack', label: 'Slack', icon: MessageSquare },
+            { id: 'openclaw-telegram', label: 'Telegram', icon: Send },
+            { id: 'openclaw-gateway', label: 'Gateway', icon: Radio },
         ]
     },
     {

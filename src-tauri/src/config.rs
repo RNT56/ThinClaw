@@ -283,16 +283,16 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 #[specta::specta]
 pub fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let config = crate::clawdbot::ClawdbotConfig::new(app_data_dir);
+    let config = crate::openclaw::OpenClawConfig::new(app_data_dir);
 
     if let Some(token) = config.huggingface_token {
         if !token.trim().is_empty() {
-            println!("[config] get_hf_token: success (from clawdbot config)");
+            println!("[config] get_hf_token: success (from openclaw config)");
             return Ok(Some(token));
         }
     }
 
-    println!("[config] get_hf_token: NoEntry (clawdbot config)");
+    println!("[config] get_hf_token: NoEntry (openclaw config)");
     Ok(None)
 }
 

@@ -50,7 +50,7 @@ export function ModelBrowser() {
     useEffect(() => {
         const load = async () => {
             try {
-                const s = await commands.getClawdbotStatus();
+                const s = await commands.openclawGetStatus();
                 if (s.status === 'ok') setStatus(s.data);
             } catch (e) {
                 console.error(e);
@@ -692,12 +692,12 @@ export function ModelBrowser() {
                                                     selected_cloud_model: modelId
                                                 };
                                                 await updateConfig(newConfig);
-                                                if ((commands as any).saveSelectedCloudModel) {
-                                                    await (commands as any).saveSelectedCloudModel(modelId);
+                                                if (commands.openclawSaveSelectedCloudModel) {
+                                                    await commands.openclawSaveSelectedCloudModel(modelId);
                                                 }
                                                 const providerName = brain === "gemini" ? "Google" : brain.charAt(0).toUpperCase() + brain.slice(1);
                                                 toast.success(`${model.name} selected as active ${providerName} Brain`);
-                                                const s = await commands.getClawdbotStatus();
+                                                const s = await commands.openclawGetStatus();
                                                 if (s.status === 'ok') setStatus(s.data);
                                             } catch (e) {
                                                 toast.error("Failed to select cloud model");
@@ -736,11 +736,11 @@ export function ModelBrowser() {
                                                         // For cloud models, deactivation means switching back to Local Neural Link
                                                         const newConfig = { ...config, selected_chat_provider: null, selected_cloud_model: null };
                                                         await updateConfig(newConfig);
-                                                        if ((commands as any).saveSelectedCloudModel) {
-                                                            await (commands as any).saveSelectedCloudModel(null);
+                                                        if (commands.openclawSaveSelectedCloudModel) {
+                                                            await commands.openclawSaveSelectedCloudModel(null);
                                                         }
                                                         toast.success("Switched to Local Neural Link");
-                                                        const s = await commands.getClawdbotStatus();
+                                                        const s = await commands.openclawGetStatus();
                                                         if (s.status === 'ok') setStatus(s.data);
                                                     } else {
                                                         setModelPath("");

@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Send, Key, CheckCircle, Info, AlertTriangle, Users } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as clawdbot from '../../lib/clawdbot';
+import * as openclaw from '../../lib/openclaw';
 
 interface TelegramTabProps {
     className?: string;
@@ -19,7 +19,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
 
     // Load initial state from backend
     useEffect(() => {
-        clawdbot.getClawdbotStatus().then(status => {
+        openclaw.getOpenClawStatus().then(status => {
             setEnabled(status.telegram_enabled);
         }).catch(console.error);
     }, []);
@@ -28,7 +28,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
         setIsLoading(true);
 
         try {
-            await clawdbot.saveTelegramConfig({
+            await openclaw.saveTelegramConfig({
                 enabled,
                 bot_token: botToken || null,
                 dm_policy: dmPolicy,
@@ -60,7 +60,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
                 </div>
                 <div>
                     <h2 className="text-lg font-semibold">Telegram Integration</h2>
-                    <p className="text-sm text-muted-foreground">Connect Clawdbot to Telegram</p>
+                    <p className="text-sm text-muted-foreground">Connect OpenClaw to Telegram</p>
                 </div>
             </div>
 
@@ -68,7 +68,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
             <div className="flex items-center justify-between p-4 rounded-lg bg-card border border-border">
                 <div>
                     <p className="font-medium">Enable Telegram</p>
-                    <p className="text-sm text-muted-foreground">Allow Clawdbot to respond via Telegram</p>
+                    <p className="text-sm text-muted-foreground">Allow OpenClaw to respond via Telegram</p>
                 </div>
                 <button
                     onClick={() => setEnabled(!enabled)}

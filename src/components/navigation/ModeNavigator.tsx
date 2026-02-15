@@ -1,9 +1,9 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { Settings } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { ChatModeIcon, ClawdbotModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
+import { ChatModeIcon, OpenClawModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
 
-export type AppMode = 'chat' | 'clawdbot' | 'imagine' | 'settings';
+export type AppMode = 'chat' | 'openclaw' | 'imagine' | 'settings';
 
 interface ModeNavigatorProps {
     activeMode: AppMode;
@@ -14,7 +14,7 @@ interface ModeNavigatorProps {
 
 const MODES = [
     { id: 'chat' as const, label: 'Chat', Icon: ChatModeIcon },
-    { id: 'clawdbot' as const, label: 'Clawdbot', Icon: ClawdbotModeIcon },
+    { id: 'openclaw' as const, label: 'OpenClaw', Icon: OpenClawModeIcon },
     { id: 'imagine' as const, label: 'Imagine', Icon: ImagineModeIcon },
 ];
 
@@ -40,7 +40,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                 <AnimatePresence mode="popLayout">
                     {modesToShow.map((mode) => {
                         const isActive = activeMode === mode.id;
-                        const showGatewayPulse = mode.id === 'clawdbot' && gatewayRunning;
+                        const showGatewayPulse = mode.id === 'openclaw' && gatewayRunning;
 
                         return (
                             <motion.button
@@ -66,7 +66,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                                     className="shrink-0"
                                 />
 
-                                {/* Gateway running indicator for Clawdbot */}
+                                {/* Gateway running indicator for OpenClaw */}
                                 {showGatewayPulse && (
                                     <motion.div
                                         className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-background"

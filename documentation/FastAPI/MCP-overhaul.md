@@ -1274,11 +1274,11 @@ impl Default for SandboxPermissions {
 ### Phase F: Openclaw Integration — DONE ✅
 
 - [x] **Build IPC Bridge (Rust side)**
-    *   Create `McpRequestHandler` in `scrappy-mcp-tools`/`clawdbot`
-    *   Wire up to `ClawdbotWsClient` for `mcp.*` messages
+    *   Create `McpRequestHandler` in `scrappy-mcp-tools`/`openclaw`
+    *   Wire up to `OpenClawWsClient` for `mcp.*` messages
     *   Implement `list_tools` and `call_tool` handlers (mocked/transient sandbox)
 - [x] **Build IPC Bridge (Node side)**
-    *   Update `moltbot` wrapper to launch `openclaw`
+    *   Update `openclaw-engine` wrapper to launch `openclaw`
     *   Ensure `openclaw` can send/receive WebSocket IPC messages
     *   Verify `openclaw` agent can invoke Rust tools
 - [x] **Refactor Sandbox Factory**
@@ -1297,7 +1297,7 @@ impl Default for SandboxPermissions {
 ### Phase G: Tool Discovery & Unified Registry — DONE ✅
 
 - [x] **Unified Registry**: Build discovery logic that searches Host Tools, Skills, and Remote MCP tools (`tool_discovery.rs`).
-- [x] **Expose `mcp.search_tools` via IPC**: Enable OpenClaw to perform dynamic discovery of the entire tool ecosystem (`clawdbot/ipc.rs`).
+- [x] **Expose `mcp.search_tools` via IPC**: Enable OpenClaw to perform dynamic discovery of the entire tool ecosystem (`openclaw/ipc.rs`).
 - [x] **Tool Router**: Implement a dispatcher for consistent execution across all domains (`tool_router.rs`).
 - [x] **Auto-summarization**: Add middleware to truncate/summarize large tool outputs for standard LLMs (`summarize_result`).
 - [x] **Progressive Discovery**: Updated Orchestrator system prompt to encourage `search_tools` first strategy.
@@ -1342,8 +1342,8 @@ The migration involves replacing the `openclaw` Node.js process with a Rust bina
 
 #### Step 5: Cutover
 1.  Add `ironclaw` to Tauri `sidecar` configuration.
-2.  Update `moltbot` (or `src-tauri/src/sidecar.rs`) to launch `ironclaw` instead of the Node wrapper.
-3.  Remove `src-tauri/moltbot` directory.
+2.  Update `openclaw-engine` (or `src-tauri/src/sidecar.rs`) to launch `ironclaw` instead of the Node wrapper.
+3.  Remove `src-tauri/openclaw-engine` directory.
 
 ### 11.2 Checklist for IronClaw Readiness
 
@@ -1392,18 +1392,18 @@ tauri = { version = "2", optional = true }
 > This appendix documents the IPC bridge between the Rust core and the Node.js sidecar (`openclaw`).
 
 ### B.1 Protocol
-Communication happens over the existing WebSocket connection used by `ClawdbotWsClient`. Two new RPC methods are intercepted on the Rust side:
+Communication happens over the existing WebSocket connection used by `OpenClawWsClient`. Two new RPC methods are intercepted on the Rust side:
 
 - `mcp.list_tools`: Returns a list of available tools (schema matches MCP spec).
 - `mcp.call_tool`: Executes a tool (currently transient) and returns the result.
   - Arguments: `{ name: string, args: object }`
 
 ### B.2 Rust Implementation
-- `McpRequestHandler` (`src-tauri/src/clawdbot/ipc.rs`): Handles the RPC logic. It currently mocks `web_search` and `read_file` to prove connectivity but is wired to accept `tauri::AppHandle` for future integration with the real application state.
-- `ClawdbotWsClient` (`src-tauri/src/clawdbot/ws_client.rs`): Identifies `mcp.*` methods and delegates them to the handler instead of the default Moltbot gateway logic.
+- `McpRequestHandler` (`src-tauri/src/openclaw/ipc.rs`): Handles the RPC logic. It currently mocks `web_search` and `read_file` to prove connectivity but is wired to accept `tauri::AppHandle` for future integration with the real application state.
+- `OpenClawWsClient` (`src-tauri/src/openclaw/ws_client.rs`): Identifies `mcp.*` methods and delegates them to the handler instead of the default OpenClawEngine gateway logic.
 
 ### B.3 Node.js Wrapper
-- The `moltbot` directory in `src-tauri` now contains a `main.js` that has been updated to launch the `openclaw` binary. It handles path resolution and environment setup to ensure the sidecar starts correctly.
+- The `openclaw-engine` directory in `src-tauri` now contains a `main.js` that has been updated to launch the `openclaw` binary. It handles path resolution and environment setup to ensure the sidecar starts correctly.
 
 ---
 

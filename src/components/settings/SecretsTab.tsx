@@ -66,7 +66,6 @@ function SecretCard({
     };
 
     const handleDelete = async () => {
-        console.log(`[SecretCard] Deleting ${title}...`);
         setLoading(true);
         try {
             await onDelete();
@@ -237,6 +236,213 @@ function SecretCard({
     );
 }
 
+function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
+    status: any;
+    loadStatus: () => Promise<void>;
+    handleToggle: (secret: string, granted: boolean) => Promise<void>;
+}) {
+    const [accessKeyId, setAccessKeyId] = useState('');
+    const [secretAccessKey, setSecretAccessKey] = useState('');
+    const [region, setRegion] = useState('us-east-1');
+    const [loading, setLoading] = useState(false);
+    const [showKeys, setShowKeys] = useState(false);
+    const [fetching, setFetching] = useState(false);
+    const [showConfirm, setShowConfirm] = useState(false);
+
+    const hasKey = !!(status?.has_bedrock_key ?? (status as any)?.hasBedrockKey);
+    const granted = !!(status?.bedrock_granted ?? (status as any)?.bedrockGranted);
+
+    const handleFetch = async () => {
+        setFetching(true);
+        try {
+            const res = await commands.openclawGetBedrockCredentials();
+            if (res.status === 'ok' && res.data) {
+                const [ak, sk, r] = res.data;
+                if (ak) setAccessKeyId(ak);
+                if (sk) setSecretAccessKey(sk);
+                if (r) setRegion(r);
+            }
+            setShowKeys(true);
+        } catch {
+            toast.error('Failed to fetch Bedrock credentials');
+        } finally {
+            setFetching(false);
+        }
+    };
+
+    const handleSave = async () => {
+        setLoading(true);
+        try {
+            const res = await commands.openclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
+            if (res.status === 'ok') {
+                await loadStatus();
+                toast.success('Bedrock credentials saved');
+            } else {
+                toast.error('Failed to save Bedrock credentials');
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDelete = async () => {
+        setLoading(true);
+        try {
+            const res = await commands.openclawSaveBedrockCredentials('', '', '');
+            if (res.status === 'ok') {
+                setAccessKeyId('');
+                setSecretAccessKey('');
+                setRegion('us-east-1');
+                setShowConfirm(false);
+                await loadStatus();
+                toast.success('Bedrock credentials deleted');
+            } else {
+                toast.error('Failed to delete Bedrock credentials');
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="space-y-4 p-5 bg-card/50 rounded-2xl border border-border/50">
+            <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                    <div className={cn(
+                        "w-10 h-10 rounded-xl flex items-center justify-center transition-all",
+                        hasKey ? "bg-amber-500/20" : "bg-muted"
+                    )}>
+                        <Bot className="w-5 h-5 text-amber-500" />
+                    </div>
+                    <div>
+                        <div className="font-semibold text-foreground flex items-center gap-2">
+                            Amazon Bedrock
+                            {hasKey && (
+                                <span className={cn(
+                                    "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider",
+                                    granted ? "bg-emerald-500/20 text-emerald-500" : "bg-amber-500/20 text-amber-500"
+                                )}>
+                                    {granted ? 'Active' : 'Paused'}
+                                </span>
+                            )}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                            Access Claude, Llama, Nova and other models via AWS Bedrock.
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                    {!showKeys && hasKey && (
+                        <button onClick={handleFetch} disabled={fetching} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors cursor-pointer" title="Show Credentials">
+                            {fetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                    )}
+                    {showKeys && (
+                        <button onClick={() => { setShowKeys(false); setAccessKeyId(''); setSecretAccessKey(''); }} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors cursor-pointer" title="Hide">
+                            <EyeOff className="w-4 h-4" />
+                        </button>
+                    )}
+                    {hasKey && !showConfirm && (
+                        <button onClick={() => setShowConfirm(true)} disabled={loading} className="p-1.5 text-muted-foreground hover:text-rose-600 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer" title="Delete">
+                            <Trash2 className="w-4 h-4" />
+                        </button>
+                    )}
+                    {showConfirm && (
+                        <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
+                            <button onClick={() => setShowConfirm(false)} disabled={loading} className="px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer">Cancel</button>
+                            <button onClick={handleDelete} disabled={loading} className="px-2.5 py-1 bg-rose-700 text-white rounded-md text-xs font-bold uppercase tracking-wider hover:bg-rose-800 transition-colors shadow-sm flex items-center gap-1.5 cursor-pointer">
+                                {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+                                Confirm Delete
+                            </button>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            <div className="space-y-3 max-w-2xl">
+                <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">AWS Access Key ID</label>
+                    <input
+                        type={showKeys ? "text" : "password"}
+                        value={accessKeyId}
+                        onChange={(e) => setAccessKeyId(e.target.value)}
+                        placeholder={hasKey ? "••••••••••••••••" : "AKIA..."}
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                    />
+                </div>
+                <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">AWS Secret Access Key</label>
+                    <input
+                        type="password"
+                        value={secretAccessKey}
+                        onChange={(e) => setSecretAccessKey(e.target.value)}
+                        placeholder={hasKey ? "••••••••••••••••" : "wJal..."}
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                    />
+                </div>
+                <div>
+                    <label className="text-xs font-medium text-muted-foreground mb-1 block">AWS Region</label>
+                    <input
+                        type="text"
+                        value={region}
+                        onChange={(e) => setRegion(e.target.value)}
+                        placeholder="us-east-1"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
+                    />
+                </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+                <button
+                    onClick={handleSave}
+                    disabled={loading || (!accessKeyId && !secretAccessKey)}
+                    className={cn(
+                        "px-6 h-10 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider flex items-center gap-2 hover:bg-primary/90 transition-all shrink-0 shadow-sm hover:translate-y-[-1px]",
+                        (loading || (!accessKeyId && !secretAccessKey)) && "opacity-50 cursor-not-allowed transform-none"
+                    )}
+                >
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {hasKey ? "Update" : "Save"}
+                </button>
+                <a
+                    href="https://console.aws.amazon.com/iam/home#/security_credentials"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline"
+                >
+                    Get AWS Credentials →
+                </a>
+            </div>
+
+            {hasKey && (
+                <div className="pt-3 border-t border-border/50">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-sm font-medium">Access for OpenClaw Agents</div>
+                            <div className="text-xs text-muted-foreground">Allow OpenClaw to use Bedrock for inference</div>
+                        </div>
+                        <button
+                            onClick={() => handleToggle('amazon-bedrock', !granted)}
+                            className={cn(
+                                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+                                granted ? "bg-emerald-500" : "bg-slate-200 dark:bg-muted"
+                            )}
+                        >
+                            <span
+                                className={cn(
+                                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform ring-0",
+                                    granted ? "translate-x-6" : "translate-x-1"
+                                )}
+                            />
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function AddSecretForm({ onAdd }: { onAdd: (name: string, value: string, description: string | null) => Promise<void> }) {
     const [name, setName] = useState('');
     const [value, setValue] = useState('');
@@ -350,7 +556,7 @@ export function SecretsTab() {
 
     const loadData = async () => {
         try {
-            const sRes = await commands.getClawdbotStatus();
+            const sRes = await commands.openclawGetStatus();
             if (sRes.status === 'ok') setStatus(sRes.data);
         } catch (e) {
             console.error(e);
@@ -380,8 +586,7 @@ export function SecretsTab() {
 
     const handleAnthropicSave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving Anthropic key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveAnthropicKey(value);
+        const res = await commands.openclawSaveAnthropicKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('anthropic', true);
             await loadStatus();
@@ -392,8 +597,7 @@ export function SecretsTab() {
 
     const handleBraveSave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving Brave key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveBraveKey(value);
+        const res = await commands.openclawSaveBraveKey(value);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -403,8 +607,7 @@ export function SecretsTab() {
 
     const handleOpenAISave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving OpenAI key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveOpenaiKey(value);
+        const res = await commands.openclawSaveOpenaiKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('openai', true);
             await loadStatus();
@@ -415,8 +618,7 @@ export function SecretsTab() {
 
     const handleOpenRouterSave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving OpenRouter key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveOpenrouterKey(value);
+        const res = await commands.openclawSaveOpenrouterKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('openrouter', true);
             await loadStatus();
@@ -427,8 +629,7 @@ export function SecretsTab() {
 
     const handleGeminiSave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving Gemini key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveGeminiKey(value);
+        const res = await commands.openclawSaveGeminiKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('gemini', true);
             await loadStatus();
@@ -439,8 +640,7 @@ export function SecretsTab() {
 
     const handleGroqSave = async (key: string) => {
         const value = key.trim() || null;
-        console.log(`[SecretsTab] Saving Groq key:`, value ? "REDACTED" : "null");
-        const res = await commands.saveGroqKey(value);
+        const res = await commands.openclawSaveGroqKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('groq', true);
             await loadStatus();
@@ -451,7 +651,7 @@ export function SecretsTab() {
 
     const handleToggle = async (secret: string, granted: boolean) => {
         try {
-            const res = await commands.clawdbotToggleSecretAccess(secret, granted);
+            const res = await commands.openclawToggleSecretAccess(secret, granted);
             if (res.status === 'ok') {
                 await loadStatus();
                 toast.success(`Access ${granted ? 'granted' : 'revoked'}`);
@@ -464,39 +664,37 @@ export function SecretsTab() {
     };
 
     const handleAnthropicFetch = async (): Promise<string | null> => {
-        const res = await commands.getAnthropicKey();
+        const res = await commands.openclawGetAnthropicKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleBraveFetch = async (): Promise<string | null> => {
-        const res = await commands.getBraveKey();
+        const res = await commands.openclawGetBraveKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleOpenAIFetch = async (): Promise<string | null> => {
-        const res = await commands.getOpenaiKey();
+        const res = await commands.openclawGetOpenaiKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleOpenRouterFetch = async (): Promise<string | null> => {
-        const res = await commands.getOpenrouterKey();
+        const res = await commands.openclawGetOpenrouterKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleGeminiFetch = async (): Promise<string | null> => {
-        const res = await commands.getGeminiKey();
+        const res = await commands.openclawGetGeminiKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleGroqFetch = async (): Promise<string | null> => {
-        const res = await commands.getGroqKey();
+        const res = await commands.openclawGetGroqKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleAnthropicDelete = async () => {
-        console.log(`[SecretsTab] Deleting Anthropic key...`);
-        const res = await commands.saveAnthropicKey(null);
-        console.log(`[SecretsTab] Anthropic save result:`, res);
+        const res = await commands.openclawSaveAnthropicKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -505,9 +703,7 @@ export function SecretsTab() {
     };
 
     const handleBraveDelete = async () => {
-        console.log(`[SecretsTab] Deleting Brave key...`);
-        const res = await commands.saveBraveKey(null);
-        console.log(`[SecretsTab] Brave save result:`, res);
+        const res = await commands.openclawSaveBraveKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -516,8 +712,7 @@ export function SecretsTab() {
     };
 
     const handleOpenAIDelete = async () => {
-        console.log(`[SecretsTab] Deleting OpenAI key...`);
-        const res = await commands.saveOpenaiKey(null);
+        const res = await commands.openclawSaveOpenaiKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -526,8 +721,7 @@ export function SecretsTab() {
     };
 
     const handleOpenRouterDelete = async () => {
-        console.log(`[SecretsTab] Deleting OpenRouter key...`);
-        const res = await commands.saveOpenrouterKey(null);
+        const res = await commands.openclawSaveOpenrouterKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -536,8 +730,7 @@ export function SecretsTab() {
     };
 
     const handleGeminiDelete = async () => {
-        console.log(`[SecretsTab] Deleting Gemini key...`);
-        const res = await commands.saveGeminiKey(null);
+        const res = await commands.openclawSaveGeminiKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -546,8 +739,7 @@ export function SecretsTab() {
     };
 
     const handleGroqDelete = async () => {
-        console.log(`[SecretsTab] Deleting Groq key...`);
-        const res = await commands.saveGroqKey(null);
+        const res = await commands.openclawSaveGroqKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -556,7 +748,7 @@ export function SecretsTab() {
     };
 
     const handleAddCustomSecret = async (name: string, value: string, description: string | null) => {
-        const res = await commands.addCustomSecret(name, value, description);
+        const res = await commands.openclawAddCustomSecret(name, value, description);
         if (res.status === 'ok') {
             await loadStatus();
             toast.success(`${name} secret added`);
@@ -567,7 +759,7 @@ export function SecretsTab() {
     };
 
     const handleRemoveCustomSecret = async (id: string) => {
-        const res = await commands.removeCustomSecret(id);
+        const res = await commands.openclawRemoveCustomSecret(id);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -576,7 +768,7 @@ export function SecretsTab() {
     };
 
     const handleToggleCustomSecret = async (id: string, granted: boolean) => {
-        const res = await commands.clawdbotToggleCustomSecret(id, granted);
+        const res = await commands.openclawToggleCustomSecret(id, granted);
         if (res.status === 'ok') {
             await loadStatus();
             toast.success(`Access ${granted ? 'granted' : 'revoked'}`);
@@ -700,6 +892,252 @@ export function SecretsTab() {
                     </div>
                 </div>
 
+                {/* Additional Cloud Providers Section */}
+                <div className="space-y-6">
+                    <div className="flex items-center gap-2 border-b border-border/50 pb-4">
+                        <Bot className="w-5 h-5 text-muted-foreground" />
+                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Additional Cloud Providers</h3>
+                    </div>
+
+                    <div className="grid gap-6">
+                        <SecretCard
+                            title="xAI API Key"
+                            description="Access Grok models for reasoning and code generation."
+                            icon={<Bot className="w-5 h-5 text-blue-400" />}
+                            placeholder="xai-..."
+                            hasKey={!!(status?.has_xai_key ?? (status as any)?.hasXaiKey)}
+                            granted={!!(status?.xai_granted ?? (status as any)?.xaiGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('xai', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('xAI key saved'); }
+                                else toast.error('Failed to save xAI key');
+                            }}
+                            onToggle={(g) => handleToggle('xai', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('xai');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('xai', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete xAI key');
+                            }}
+                            getKeyUrl="https://console.x.ai/"
+                        />
+
+                        <SecretCard
+                            title="Mistral AI API Key"
+                            description="Access Mistral Large, Medium, and other Mistral models."
+                            icon={<Bot className="w-5 h-5 text-amber-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_mistral_key ?? (status as any)?.hasMistralKey)}
+                            granted={!!(status?.mistral_granted ?? (status as any)?.mistralGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('mistral', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Mistral key saved'); }
+                                else toast.error('Failed to save Mistral key');
+                            }}
+                            onToggle={(g) => handleToggle('mistral', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('mistral');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('mistral', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Mistral key');
+                            }}
+                            getKeyUrl="https://console.mistral.ai/api-keys/"
+                        />
+
+                        <SecretCard
+                            title="Venice AI API Key"
+                            description="Privacy-focused AI inference with uncensored models."
+                            icon={<Bot className="w-5 h-5 text-teal-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_venice_key ?? (status as any)?.hasVeniceKey)}
+                            granted={!!(status?.venice_granted ?? (status as any)?.veniceGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('venice', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Venice key saved'); }
+                                else toast.error('Failed to save Venice key');
+                            }}
+                            onToggle={(g) => handleToggle('venice', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('venice');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('venice', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Venice key');
+                            }}
+                            getKeyUrl="https://venice.ai/settings/api"
+                        />
+
+                        <SecretCard
+                            title="Together AI API Key"
+                            description="Access open-source models with fast serverless inference."
+                            icon={<Bot className="w-5 h-5 text-violet-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_together_key ?? (status as any)?.hasTogetherKey)}
+                            granted={!!(status?.together_granted ?? (status as any)?.togetherGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('together', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Together key saved'); }
+                                else toast.error('Failed to save Together key');
+                            }}
+                            onToggle={(g) => handleToggle('together', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('together');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('together', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Together key');
+                            }}
+                            getKeyUrl="https://api.together.xyz/settings/api-keys"
+                        />
+
+                        <SecretCard
+                            title="Moonshot API Key"
+                            description="Kimi-powered long-context models with strong multilingual support."
+                            icon={<Bot className="w-5 h-5 text-slate-400" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_moonshot_key ?? (status as any)?.hasMoonshotKey)}
+                            granted={!!(status?.moonshot_granted ?? (status as any)?.moonshotGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('moonshot', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Moonshot key saved'); }
+                                else toast.error('Failed to save Moonshot key');
+                            }}
+                            onToggle={(g) => handleToggle('moonshot', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('moonshot');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('moonshot', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Moonshot key');
+                            }}
+                            getKeyUrl="https://platform.moonshot.cn/"
+                        />
+
+                        <SecretCard
+                            title="MiniMax API Key"
+                            description="Access MiniMax models for text and multimodal generation."
+                            icon={<Bot className="w-5 h-5 text-rose-400" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_minimax_key ?? (status as any)?.hasMinimaxKey)}
+                            granted={!!(status?.minimax_granted ?? (status as any)?.minimaxGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('minimax', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('MiniMax key saved'); }
+                                else toast.error('Failed to save MiniMax key');
+                            }}
+                            onToggle={(g) => handleToggle('minimax', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('minimax');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('minimax', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete MiniMax key');
+                            }}
+                        />
+
+                        <SecretCard
+                            title="NVIDIA NIM API Key"
+                            description="Enterprise-grade inference for NVIDIA-optimized models."
+                            icon={<Bot className="w-5 h-5 text-green-500" />}
+                            placeholder="nvapi-..."
+                            hasKey={!!(status?.has_nvidia_key ?? (status as any)?.hasNvidiaKey)}
+                            granted={!!(status?.nvidia_granted ?? (status as any)?.nvidiaGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('nvidia', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('NVIDIA key saved'); }
+                                else toast.error('Failed to save NVIDIA key');
+                            }}
+                            onToggle={(g) => handleToggle('nvidia', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('nvidia');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('nvidia', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete NVIDIA key');
+                            }}
+                            getKeyUrl="https://build.nvidia.com/"
+                        />
+
+                        <SecretCard
+                            title="Baidu Qianfan API Key"
+                            description="Access ERNIE and other Baidu AI models."
+                            icon={<Bot className="w-5 h-5 text-sky-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_qianfan_key ?? (status as any)?.hasQianfanKey)}
+                            granted={!!(status?.qianfan_granted ?? (status as any)?.qianfanGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('qianfan', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Qianfan key saved'); }
+                                else toast.error('Failed to save Qianfan key');
+                            }}
+                            onToggle={(g) => handleToggle('qianfan', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('qianfan');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('qianfan', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Qianfan key');
+                            }}
+                        />
+
+                        <SecretCard
+                            title="Xiaomi MiLM API Key"
+                            description="Access Xiaomi's MiLM language models."
+                            icon={<Bot className="w-5 h-5 text-orange-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_xiaomi_key ?? (status as any)?.hasXiaomiKey)}
+                            granted={!!(status?.xiaomi_granted ?? (status as any)?.xiaomiGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('xiaomi', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Xiaomi key saved'); }
+                                else toast.error('Failed to save Xiaomi key');
+                            }}
+                            onToggle={(g) => handleToggle('xiaomi', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('xiaomi');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('xiaomi', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Xiaomi key');
+                            }}
+                        />
+                    </div>
+                </div>
+
+                {/* Amazon Bedrock Section (uses AWS credentials, not a single API key) */}
+                <div className="space-y-6">
+                    <div className="flex items-center gap-2 border-b border-border/50 pb-4">
+                        <Bot className="w-5 h-5 text-muted-foreground" />
+                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Amazon Bedrock (AWS)</h3>
+                    </div>
+
+                    <BedrockCredentialsCard
+                        status={status}
+                        loadStatus={loadStatus}
+                        handleToggle={handleToggle}
+                    />
+                </div>
+
                 {/* System & Data Tools Section */}
                 <div className="space-y-6">
                     <div className="flex items-center gap-2 border-b border-border/10 pb-4">
@@ -731,8 +1169,7 @@ export function SecretsTab() {
                             granted={!!(status?.huggingface_granted ?? status?.huggingfaceGranted)}
                             onSave={async (key) => {
                                 const value = key.trim() || "";
-                                console.log(`[SecretsTab] Saving HF token:`, value ? "REDACTED" : "empty (delete)");
-                                const res = await commands.setHfToken(value);
+                                const res = await commands.openclawSetHfToken(value);
                                 if (res.status === 'ok') {
                                     await loadStatus();
                                     toast.success("Hugging Face token saved");
@@ -747,7 +1184,7 @@ export function SecretsTab() {
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.setHfToken("");
+                                const res = await commands.openclawSetHfToken("");
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error("Failed to delete HF token");
                             }}

@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
-import { revealPath } from '../../lib/clawdbot';
+import { revealPath } from '../../lib/openclaw';
 import { ThinkingDots } from './ThinkingDots';
 
 function extractText(node: any): string {
@@ -104,7 +104,6 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
             setIsReadyToView(true);
             // Auto-load if it's already "revealed" (like historical messages)
             if (userRequestedView && !src && !isLoading && !error) {
-                console.log("[ImageAttachment] Auto-triggering load for ID:", id);
                 loadContent();
             }
         }
@@ -113,11 +112,9 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
     const loadContent = async () => {
         if (id === "pending_generation") return;
         setIsLoading(true);
-        console.log("[ImageAttachment] Loading content for ID:", id);
         try {
             const res = await commands.getImagePath(id);
             if (res.status === "ok") {
-                console.log("[ImageAttachment] Found path:", res.data);
                 const assetUrl = convertFileSrc(res.data);
                 setSrc(assetUrl);
             } else {

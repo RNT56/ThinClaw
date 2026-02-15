@@ -101,5 +101,5 @@ Sources:
 	•	OpenClaw Documentation – Workspace and Memory Management ￼ ￼ ￼
 	•	OpenClaw Documentation – Gateway & WebSocket API ￼ ￼ ￼
 	•	OpenClaw Documentation – Tools and Sandbox ￼ ￼ ￼
-	•	“Everyone talks about Clawdbot (OpenClaw), but here’s how it works” – VibeCodeCamp blog by jumpspace ￼ ￼ ￼
-	•	Reddit r/aiagents – Architecture notes on Clawdbot/OpenClaw ￼ ￼ (lane-based queue, JSONL memory, exec allowlist)
+	•	“Everyone talks about OpenClaw (OpenClaw), but here’s how it works” – VibeCodeCamp blog by jumpspace ￼ ￼ ￼
+	•	Reddit r/aiagents – Architecture notes on OpenClaw/OpenClaw ￼ ￼ (lane-based queue, JSONL memory, exec allowlist)

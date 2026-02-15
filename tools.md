@@ -88,7 +88,7 @@ let agent = builder
 
 ## 📡 2. OpenClaw Node.js Agent (OpenClaw Engine)
 
-The OpenClaw engine (formerly Moltbot) is a Node.js-based runtime designed for autonomous tasks and interactive tool usage (HITL).
+The OpenClaw engine (formerly OpenClawEngine) is a Node.js-based runtime designed for autonomous tasks and interactive tool usage (HITL).
 
 ### 📋 Built-in Capabilities
 
@@ -99,7 +99,7 @@ The OpenClaw engine (formerly Moltbot) is a Node.js-based runtime designed for a
 
 ### 🛠️ How to Create & Register an OpenClaw Skill
 
-Tools in OpenClaw are called **Skills**. They are located in the `moltbot` workspace directory.
+Tools in OpenClaw are called **Skills**. They are located in the `openclaw-engine` workspace directory.
 
 #### 1. Create a Skill Definition (`skill.json`)
 Each skill requires a JSON definition that follows the **Agent Control Protocol (ACP)** specification.
@@ -130,7 +130,7 @@ export async function execute({ city }) {
 ```
 
 #### 3. Deployment
-*   Skills are automatically discovered if placed in the `Clawdbot/skills/` directory within your App Data folder.
+*   Skills are automatically discovered if placed in the `OpenClaw/skills/` directory within your App Data folder.
 *   You can toggle them on/off in the **Settings > OpenClaw** tab in the Scrappy UI.
 
 ---

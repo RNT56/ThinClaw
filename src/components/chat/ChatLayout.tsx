@@ -23,23 +23,25 @@ import { useAutoStart } from "../../hooks/use-auto-start";
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
 import { useProjects } from '../../hooks/use-projects';
 import { useConfig } from '../../hooks/use-config';
-import { ClawdbotSidebar } from '../clawdbot/ClawdbotSidebar';
-import { ClawdbotChatView } from '../clawdbot/ClawdbotChatView';
-import { ClawdbotDashboard } from '../clawdbot/ClawdbotDashboard';
-import { ClawdbotChannels } from '../clawdbot/ClawdbotChannels';
-import { ClawdbotPresence } from '../clawdbot/ClawdbotPresence';
-import { ClawdbotAutomations } from '../clawdbot/ClawdbotAutomations';
-import { ClawdbotSkills } from '../clawdbot/ClawdbotSkills';
-import { ClawdbotSystemControl } from '../clawdbot/ClawdbotSystemControl';
-import { ClawdbotBrain } from '../clawdbot/ClawdbotBrain';
-import { ClawdbotMemory } from '../clawdbot/ClawdbotMemory';
-import { ClawdbotPage } from '../clawdbot/ClawdbotSidebar';
-import * as clawdbotApi from '../../lib/clawdbot';
+import { OpenClawSidebar } from '../openclaw/OpenClawSidebar';
+import { OpenClawChatView } from '../openclaw/OpenClawChatView';
+import { OpenClawDashboard } from '../openclaw/OpenClawDashboard';
+import { OpenClawChannels } from '../openclaw/OpenClawChannels';
+import { OpenClawPresence } from '../openclaw/OpenClawPresence';
+import { OpenClawAutomations } from '../openclaw/OpenClawAutomations';
+import { OpenClawSkills } from '../openclaw/OpenClawSkills';
+import { OpenClawSystemControl } from '../openclaw/OpenClawSystemControl';
+import { OpenClawBrain } from '../openclaw/OpenClawBrain';
+import { OpenClawMemory } from '../openclaw/OpenClawMemory';
+import { FleetCommandCenter } from '../openclaw/fleet/FleetCommandCenter';
+import { OpenClawPage } from '../openclaw/OpenClawSidebar';
+import * as openclawApi from '../../lib/openclaw';
 import { ModeNavigator, AppMode } from '../navigation/ModeNavigator';
 import { ImagineSidebar, ImagineGeneration, ImagineGallery, ImagineTab } from '../imagine';
 import { imagineGenerate } from '../../lib/imagine';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { CanvasWindow } from '../openclaw/canvas/CanvasWindow';
 
 
 export function ChatLayout() {
@@ -114,10 +116,10 @@ export function ChatLayout() {
     const [showImageSettings, setShowImageSettings] = useState(false);
 
     // Mode Management - The activeTab still contains settings pages for backwards compatibility
-    // but we use appMode for the high-level navigation between Chat/Clawdbot/Imagine/Settings
-    const [activeTab, setActiveTab] = useState<SettingsPage | 'chat' | 'clawdbot' | 'imagine'>('chat');
-    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'clawdbot' && activeTab !== 'imagine';
-    const isClawdbotMode = activeTab === 'clawdbot';
+    // but we use appMode for the high-level navigation between Chat/OpenClaw/Imagine/Settings
+    const [activeTab, setActiveTab] = useState<SettingsPage | 'chat' | 'openclaw' | 'imagine'>('chat');
+    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'openclaw' && activeTab !== 'imagine';
+    const isOpenClawMode = activeTab === 'openclaw';
     const isImagineMode = activeTab === 'imagine';
 
     // Compute AppMode from activeTab
@@ -129,21 +131,21 @@ export function ChatLayout() {
     const [generationProgress, setGenerationProgress] = useState<string | null>(null);
     const [lastGeneratedImage, setLastGeneratedImage] = useState<string | null>(null);
 
-    // Clawdbot mode state
-    const [selectedClawdbotSession, setSelectedClawdbotSession] = useState<string | null>(null);
-    const [clawdbotGatewayRunning, setClawdbotGatewayRunning] = useState(false);
-    const [activeClawdbotPage, setActiveClawdbotPage] = useState<ClawdbotPage>('dashboard');
+    // OpenClaw mode state
+    const [selectedOpenClawSession, setSelectedOpenClawSession] = useState<string | null>(null);
+    const [openclawGatewayRunning, setOpenClawGatewayRunning] = useState(false);
+    const [activeOpenClawPage, setActiveOpenClawPage] = useState<OpenClawPage>('dashboard');
 
     const isCloudProvider = useMemo(() => userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local", [userCfg?.selected_chat_provider]);
 
-    // Poll clawdbot gateway status
+    // Poll openclaw gateway status
     useEffect(() => {
         const checkStatus = async () => {
             try {
-                const status = await clawdbotApi.getClawdbotStatus();
-                setClawdbotGatewayRunning(status.gateway_running);
+                const status = await openclawApi.getOpenClawStatus();
+                setOpenClawGatewayRunning(status.gateway_running);
             } catch (e) {
-                setClawdbotGatewayRunning(false);
+                setOpenClawGatewayRunning(false);
             }
         };
         checkStatus();
@@ -592,7 +594,6 @@ export function ChatLayout() {
         }
 
         for (const file of acceptedFiles) {
-            console.log("Processing drop:", file.name, file.type);
 
             // Check file type
             if (file.type.startsWith('image/')) {
@@ -727,9 +728,7 @@ export function ChatLayout() {
                 }
             }
             try {
-                console.log("Requesting microphone access...");
                 await startRecording();
-                console.log("Microphone access granted.");
             } catch (e) {
                 console.error("Microphone access error:", e);
                 toast.error("Microphone Access Failed", { description: String(e) });
@@ -770,11 +769,11 @@ export function ChatLayout() {
     }, [cancelGeneration]);
 
 
-    const handleNewClawdbotSession = () => {
+    const handleNewOpenClawSession = () => {
         // Use 'agent:main:chat-' prefix to ensure it's properly associated with the main agent
         // and stored in the correct sessions directory for persistence.
         const newKey = `agent:main:chat-${crypto.randomUUID()}`;
-        setSelectedClawdbotSession(newKey);
+        setSelectedOpenClawSession(newKey);
     };
 
     return (
@@ -860,25 +859,25 @@ export function ChatLayout() {
                                 />
                             </div>
                         </motion.div>
-                    ) : isClawdbotMode ? (
+                    ) : isOpenClawMode ? (
                         <motion.div
-                            key="clawdbot-sidebar"
+                            key="openclaw-sidebar"
                             initial={{ opacity: 0, x: 10 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: 10 }}
                             transition={{ duration: 0.2 }}
                             className="flex flex-col flex-1 h-full"
                         >
-                            <ClawdbotSidebar
+                            <OpenClawSidebar
                                 sidebarOpen={sidebarOpen}
                                 onBack={() => setActiveTab('chat')}
-                                onSelectSession={setSelectedClawdbotSession}
-                                onNewSession={handleNewClawdbotSession}
-                                selectedSessionKey={selectedClawdbotSession}
-                                gatewayRunning={clawdbotGatewayRunning}
+                                onSelectSession={setSelectedOpenClawSession}
+                                onNewSession={handleNewOpenClawSession}
+                                selectedSessionKey={selectedOpenClawSession}
+                                gatewayRunning={openclawGatewayRunning}
                                 onNavigateToSettings={(page) => setActiveTab(page)}
-                                activePage={activeClawdbotPage}
-                                onSelectPage={setActiveClawdbotPage}
+                                activePage={activeOpenClawPage}
+                                onSelectPage={setActiveOpenClawPage}
                             />
                         </motion.div>
                     ) : isImagineMode ? (
@@ -926,44 +925,50 @@ export function ChatLayout() {
                         }
                     }}
                     sidebarOpen={sidebarOpen}
-                    gatewayRunning={clawdbotGatewayRunning}
+                    gatewayRunning={openclawGatewayRunning}
                 />
             </div>
 
-            {/* Main Area Content (Chat, Clawdbot, or Settings) */}
+            {/* Main Area Content (Chat, OpenClaw, or Settings) */}
             <div className="flex-1 flex flex-col relative h-full overflow-hidden">
                 <AnimatePresence mode="wait">
-                    {isClawdbotMode ? (
+                    {isOpenClawMode ? (
                         <motion.div
-                            key="clawdbot-area"
+                            key="openclaw-area"
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             className="flex-1 flex flex-col h-full overflow-hidden"
                         >
                             <div className="flex-1 flex flex-col h-full overflow-hidden">
-                                {activeClawdbotPage === 'chat' ? (
-                                    <ClawdbotChatView
-                                        sessionKey={selectedClawdbotSession}
-                                        gatewayRunning={clawdbotGatewayRunning}
+                                {activeOpenClawPage === 'chat' ? (
+                                    <OpenClawChatView
+                                        sessionKey={selectedOpenClawSession}
+                                        gatewayRunning={openclawGatewayRunning}
                                         onNavigateToSettings={(page) => setActiveTab(page as any)}
+                                        onViewSession={(key) => {
+                                            setSelectedOpenClawSession(key);
+                                            setActiveOpenClawPage('chat');
+                                        }}
                                     />
-                                ) : activeClawdbotPage === 'dashboard' ? (
-                                    <ClawdbotDashboard />
-                                ) : activeClawdbotPage === 'channels' ? (
-                                    <ClawdbotChannels />
-                                ) : activeClawdbotPage === 'presence' ? (
-                                    <ClawdbotPresence />
-                                ) : activeClawdbotPage === 'automations' ? (
-                                    <ClawdbotAutomations />
-                                ) : activeClawdbotPage === 'skills' ? (
-                                    <ClawdbotSkills />
-                                ) : activeClawdbotPage === 'system-control' ? (
-                                    <ClawdbotSystemControl />
-                                ) : activeClawdbotPage === 'brain' ? (
-                                    <ClawdbotBrain />
-                                ) : activeClawdbotPage === 'memory' ? (
-                                    <ClawdbotMemory />
+                                ) : activeOpenClawPage === 'dashboard' ? (
+                                    <OpenClawDashboard />
+                                ) : activeOpenClawPage === 'fleet' ? (
+                                    <FleetCommandCenter />
+                                ) : activeOpenClawPage === 'channels' ? (
+                                    <OpenClawChannels />
+                                ) : activeOpenClawPage === 'presence' ? (
+                                    <OpenClawPresence />
+                                ) : activeOpenClawPage === 'automations' ? (
+                                    <OpenClawAutomations />
+                                ) : activeOpenClawPage === 'skills' ? (
+                                    <OpenClawSkills />
+                                ) : activeOpenClawPage === 'system-control' ? (
+                                    <OpenClawSystemControl />
+                                ) : activeOpenClawPage === 'brain' ? (
+                                    <OpenClawBrain />
+                                ) : activeOpenClawPage === 'memory' ? (
+                                    <OpenClawMemory />
                                 ) : (
                                     <div className="flex-1 flex items-center justify-center text-muted-foreground">
                                         Select a page from the sidebar.
@@ -985,7 +990,6 @@ export function ChatLayout() {
                                     progress={generationProgress}
                                     lastGeneratedImage={lastGeneratedImage}
                                     onGenerate={async (prompt, options) => {
-                                        console.log('ChatLayout: Starting generation...');
                                         setImagineGenerating(true);
                                         setGenerationProgress({
                                             stage: 'Initializing',
@@ -1049,7 +1053,6 @@ export function ChatLayout() {
                             ) : (
                                 <ImagineGallery
                                     onImageSelect={(image) => {
-                                        console.log('Selected image:', image);
                                         setLastGeneratedImage(convertFileSrc(image.filePath));
                                         setActiveImagineTab('generate');
                                     }}
@@ -1294,6 +1297,8 @@ export function ChatLayout() {
                     )}
                 </AnimatePresence>
             </div >
+            {/* Canvas Window (Global) */}
+            <CanvasWindow />
         </div >
     );
 }

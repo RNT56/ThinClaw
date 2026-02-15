@@ -62,6 +62,8 @@ pub struct SidecarManager {
     pub is_chat_stop_intentional: Arc<Mutex<bool>>,
     pub cancellation_token: Arc<AtomicBool>,
     pub generation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Model family detected from GGUF metadata during sidecar startup
+    pub detected_model_family: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for SidecarManager {
@@ -83,6 +85,7 @@ impl SidecarManager {
             is_chat_stop_intentional: Arc::new(Mutex::new(false)),
             cancellation_token: Arc::new(AtomicBool::new(false)),
             generation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            detected_model_family: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -104,14 +107,41 @@ impl SidecarManager {
         let mlock = options.mlock;
         let quantize_kv = options.quantize_kv;
 
-        // Resolve Template
+        // Resolve Template + detect model family from GGUF metadata
+        let gguf_meta = crate::gguf::read_gguf_metadata(&model_path).ok();
+        let detected_family = gguf_meta
+            .as_ref()
+            .and_then(|m| m.model_family.clone())
+            .unwrap_or_else(|| "chatml".to_string());
+
+        println!("[sidecar] Detected model family: {}", detected_family);
+        *self.detected_model_family.lock().unwrap() = Some(detected_family.clone());
+        if let Some(ref meta) = gguf_meta {
+            if let Some(ref tpl) = meta.chat_template {
+                println!("[sidecar] GGUF chat_template present ({} chars)", tpl.len());
+            }
+        }
+
         let template_opt = match template_name.as_deref() {
             Some("llama3") => Some(crate::templates::LLAMA3_TEMPLATE),
             Some("mistral") => Some(crate::templates::MISTRAL_TEMPLATE),
             Some("gemma") => Some(crate::templates::GEMMA_TEMPLATE),
             Some("qwen") => Some(crate::templates::QWEN_TEMPLATE),
+            Some("chatml") => Some(crate::templates::CHATML_TEMPLATE),
             Some("auto") => None, // Let llama-server detect from GGUF
-            _ => Some(crate::templates::CHATML_TEMPLATE), // Default to ChatML
+            None => {
+                // Auto-detect from GGUF family
+                match detected_family.as_str() {
+                    "llama3" => Some(crate::templates::LLAMA3_TEMPLATE),
+                    "mistral" => Some(crate::templates::MISTRAL_TEMPLATE),
+                    "gemma" => Some(crate::templates::GEMMA_TEMPLATE),
+                    "qwen" => Some(crate::templates::QWEN_TEMPLATE),
+                    "deepseek" => None, // Let llama-server handle deepseek natively
+                    "glm" => None,      // Let llama-server handle GLM natively
+                    _ => Some(crate::templates::CHATML_TEMPLATE),
+                }
+            }
+            _ => Some(crate::templates::CHATML_TEMPLATE), // Unknown name -> ChatML
         };
 
         // Get ProcessTracker
@@ -211,6 +241,10 @@ impl SidecarManager {
             args.push("--chat-template".to_string());
             args.push(t.to_string());
         }
+
+        // NOTE: Stop tokens are NOT injected as CLI args (llama-server doesn't support --stop).
+        // They are enforced at the API request level via OpenClaw model config (Layer 2 in config.rs).
+        println!("[sidecar] Stop tokens for family '{}' will be enforced at API request level", detected_family);
 
         // Handles MMProj (Vision)
         // Priority: Explicit Override > .mmproj file > Smart Discovery

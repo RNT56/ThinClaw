@@ -13,7 +13,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useModelContext } from '../model-context';
 import { ModelVariant } from '../../lib/model-library';
 import { downloadImageToDisk } from '../../lib/fs-utils';
-import * as clawdbot from '../../lib/clawdbot';
+import * as openclaw from '../../lib/openclaw';
 
 interface ImagineGenerationProps {
     onGenerate?: (prompt: string, options: GenerationOptions) => Promise<void>;
@@ -148,7 +148,6 @@ export function ImagineGeneration({
 
     // Debug log for isGenerating prop
     useEffect(() => {
-        console.log('ImagineGeneration: isGenerating changed to:', isGenerating);
     }, [isGenerating]);
 
     // Load recent images on mount
@@ -199,11 +198,11 @@ export function ImagineGeneration({
 
     const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
 
-    // Fetch clawdbot status to check for keys
+    // Fetch openclaw status to check for keys
     useEffect(() => {
         const checkStatus = async () => {
             try {
-                const status = await clawdbot.getClawdbotStatus();
+                const status = await openclaw.getOpenClawStatus();
                 setHasGeminiKey(status.has_gemini_key);
             } catch (e) {
                 console.error("Failed to check status:", e);

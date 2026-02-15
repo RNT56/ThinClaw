@@ -37,7 +37,7 @@ impl RigManager {
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut base_preamble = format!(
-            "You are Scrappy, a friendly AI assistant.
+            "You are OpenClaw, a friendly AI assistant.
 Current Date: {}
 ",
             date

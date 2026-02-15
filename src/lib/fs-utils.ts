@@ -28,7 +28,6 @@ export async function downloadImageToDisk(url: string, filename: string): Promis
             baseDir: BaseDirectory.Download
         });
 
-        console.log(`Successfully saved ${uniqueFilename} to Downloads`);
         return uniqueFilename;
     } catch (error) {
         console.error('Tauri FS Write Error:', error);

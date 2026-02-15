@@ -69,12 +69,12 @@ async fn generate_with_gemini(
     params: &ImagineParams,
     is_pro: bool,
 ) -> Result<ImageResponse, String> {
-    // Get Gemini API key from clawdbot config
-    let clawdbot_mgr = app.state::<crate::clawdbot::ClawdbotManager>();
-    let config = clawdbot_mgr
+    // Get Gemini API key from openclaw config
+    let openclaw_mgr = app.state::<crate::openclaw::OpenClawManager>();
+    let config = openclaw_mgr
         .get_config()
         .await
-        .ok_or("Failed to get Clawdbot config")?;
+        .ok_or("Failed to get OpenClaw config")?;
 
     let api_key = config
         .gemini_api_key

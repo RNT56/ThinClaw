@@ -4,14 +4,14 @@ import {
     CheckCircle, ChevronRight, Monitor, Globe, Cpu, Code, HardDrive, Info, Palette, Moon, Sun
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import * as clawdbot from '../../lib/clawdbot';
+import * as openclaw from '../../lib/openclaw';
 import { useTheme } from '../theme-provider';
 import { APP_THEMES } from '../../lib/app-themes';
 import { toast } from 'sonner';
 // Use ModelDefinition from lib to avoid interface conflicts if re-exported differently in model-context
 import { MODEL_LIBRARY } from '../../lib/model-library';
 import { useModelContext } from '../model-context';
-import { openPath } from '../../lib/clawdbot';
+import { openPath } from '../../lib/openclaw';
 import { commands } from '../../lib/bindings';
 
 interface OnboardingWizardProps {
@@ -83,7 +83,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     const checkPermissions = async () => {
         try {
-            const perms = await clawdbot.getPermissionStatus();
+            const perms = await openclaw.getPermissionStatus();
             setPermissions(perms);
         } catch (e) {
             console.error("Failed to check permissions", e);
@@ -176,7 +176,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         try {
             // Save HF Token first if provided
             if (hfToken && hfToken.trim().length > 0) {
-                await commands.setHfToken(hfToken.trim());
+                await openclaw.setHfToken(hfToken.trim());
             }
 
             // Trigger downloads if any
@@ -203,7 +203,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             }
 
             // Save setup completed status
-            await clawdbot.setSetupCompleted(true);
+            await openclaw.setSetupCompleted(true);
             toast.success("Setup complete!");
             onComplete();
         } catch (e) {
@@ -732,7 +732,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </span>
                                         ) : (
                                             <button
-                                                onClick={() => clawdbot.requestPermission('accessibility')}
+                                                onClick={() => openclaw.requestPermission('accessibility')}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"
                                             >
                                                 Grant Access
@@ -756,7 +756,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </span>
                                         ) : (
                                             <button
-                                                onClick={() => clawdbot.requestPermission('screen_recording')}
+                                                onClick={() => openclaw.requestPermission('screen_recording')}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"
                                             >
                                                 Grant Access

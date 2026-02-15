@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, MousePointerClick } from 'lucide-react';
+import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, MousePointerClick, Globe, Cpu, Settings } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as clawdbot from '../../lib/clawdbot';
+import * as openclaw from '../../lib/openclaw';
 import { useModelContext } from '../model-context';
-// Removed unused import
+import { RemoteDeployWizard } from '../openclaw/RemoteDeployWizard';
+import CloudBrainConfigModal from '../openclaw/CloudBrainConfigModal';
 
 interface GatewayTabProps {
     className?: string;
@@ -44,8 +45,12 @@ interface StatusInfo {
     hasOpenrouterKey: boolean;
     openrouterGranted: boolean;
     customSecrets: any[];
+    geminiGranted: boolean;
+    groqGranted: boolean;
     selectedCloudBrain: string | null;
     autoStartGateway: boolean;
+    profiles: openclaw.AgentProfile[];
+    enabled_cloud_providers: string[]; // Added this field
 }
 
 export function GatewayTab({ className }: GatewayTabProps) {
@@ -75,11 +80,19 @@ export function GatewayTab({ className }: GatewayTabProps) {
         hasOpenrouterKey: false,
         openrouterGranted: false,
         customSecrets: [],
+        geminiGranted: false,
+        groqGranted: false,
         selectedCloudBrain: null,
-        autoStartGateway: false
+        autoStartGateway: false,
+        profiles: [],
+        enabled_cloud_providers: [] // Initialized
     });
 
+    const [rawStatus, setRawStatus] = useState<openclaw.OpenClawStatus | null>(null);
+
     const [showBrainSelector, setShowBrainSelector] = useState(false);
+    const [isCloudConfigOpen, setIsCloudConfigOpen] = useState(false); // Added this state
+    const [showDeployWizard, setShowDeployWizard] = useState(false);
 
     const [permissions, setPermissions] = useState<PermissionStatus>({
         accessibility: false,
@@ -101,7 +114,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
     // Poll gateway status
     const fetchStatus = useCallback(async () => {
         try {
-            const s = await clawdbot.getClawdbotStatus();
+            const s = await openclaw.getOpenClawStatus();
             setStatus({
                 gateway: s.gateway_running ? 'running' : 'stopped',
                 wsConnected: s.ws_connected,
@@ -128,19 +141,26 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 hasOpenrouterKey: s.has_openrouter_key,
                 openrouterGranted: s.openrouter_granted,
                 customSecrets: (s as any).custom_secrets || [],
+                geminiGranted: s.gemini_granted,
+                groqGranted: s.groq_granted,
                 selectedCloudBrain: s.selected_cloud_brain,
-                autoStartGateway: s.auto_start_gateway || false
+                autoStartGateway: s.auto_start_gateway || false,
+                profiles: s.profiles || [],
+                enabled_cloud_providers: s.enabled_cloud_providers || [] // Updated this field
             });
+            setRawStatus(s);
 
-            const perms = await clawdbot.getPermissionStatus();
+            const perms = await openclaw.getPermissionStatus();
             setPermissions(perms);
 
             if (s.remote_url) setRemoteUrlInput(s.remote_url);
             if (s.remote_token) setRemoteTokenInput(s.remote_token);
         } catch (e) {
-            console.error('Failed to fetch clawdbot status:', e);
+            console.error('Failed to fetch openclaw status:', e);
         }
     }, []);
+
+
 
     useEffect(() => {
         fetchStatus();
@@ -153,9 +173,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
         setStatus(s => ({ ...s, gateway: 'starting' }));
 
         try {
-            await clawdbot.startClawdbotGateway();
+            await openclaw.startOpenClawGateway();
             await fetchStatus();
-            toast.success('Clawdbot Gateway started');
+            toast.success('OpenClaw Gateway started');
         } catch (e) {
             console.error('Failed to start gateway:', e);
             setStatus(s => ({ ...s, gateway: 'error' }));
@@ -167,7 +187,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const handleStart = async () => {
         // Mandatory Inference Provider Check
-        const cloudGranted = status.anthropicGranted || status.openaiGranted || status.openrouterGranted;
+        const cloudGranted = status.anthropicGranted || status.openaiGranted || status.openrouterGranted || status.geminiGranted || status.groqGranted || (status.customSecrets && status.customSecrets.some(s => s.granted)); // Also check custom secrets if any relate to LLMs
         if (!status.localInferenceEnabled && !cloudGranted) {
             toast.error("Cognitive engine required", {
                 description: "Please enable Local Neural Link or authorize a Cloud Brain before starting the gateway."
@@ -186,9 +206,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
         setIsLoading(true);
 
         try {
-            await clawdbot.stopClawdbotGateway();
+            await openclaw.stopOpenClawGateway();
             await fetchStatus();
-            toast.info('Clawdbot Gateway stopped');
+            toast.info('OpenClaw Gateway stopped');
         } catch (e) {
             console.error('Failed to stop gateway:', e);
             toast.error('Failed to stop gateway', { description: String(e) });
@@ -205,7 +225,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const handleSaveGateway = async (mode: string, url: string | null, token: string | null) => {
         try {
-            await clawdbot.saveGatewaySettings(mode, url, token);
+            await openclaw.saveGatewaySettings(mode, url, token);
             await fetchStatus();
             toast.success('Gateway settings updated');
         } catch (e) {
@@ -213,14 +233,14 @@ export function GatewayTab({ className }: GatewayTabProps) {
         }
     };
 
-    const copyToClipboard = (text: string, label: string) => {
+    const copyToClipboard = (text: string, label: string = "Text") => {
         navigator.clipboard.writeText(text);
         toast.success(`${label} copied to clipboard`);
     };
 
     const copyDiagnostics = async () => {
         try {
-            const diag = await clawdbot.getClawdbotDiagnostics();
+            const diag = await openclaw.getOpenClawDiagnostics();
             navigator.clipboard.writeText(JSON.stringify(diag, null, 2));
             toast.success('Diagnostics copied to clipboard');
         } catch (e) {
@@ -266,7 +286,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 <div className="relative z-10 flex flex-col justify-between h-full space-y-4">
                     <div className="space-y-1">
                         <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-[0.2em]">Connection Pulse</span>
-                        <h4 className="text-xl font-bold tracking-tight">Moltbot Sync</h4>
+                        <h4 className="text-xl font-bold tracking-tight">OpenClawEngine Sync</h4>
                     </div>
                     <div className="flex items-center justify-between">
                         <div className="flex flex-col">
@@ -289,30 +309,99 @@ export function GatewayTab({ className }: GatewayTabProps) {
     );
 
     const ModeCard = () => (
-        <div className="flex p-1.5 rounded-2xl bg-muted/30 border border-border/50 shadow-inner group transition-all hover:bg-muted/50">
+        <div className="space-y-4">
+            <div className="grid grid-cols-1 gap-3">
+                {/* Always show Local Core */}
+                <button
+                    onClick={() => handleSaveGateway('local', null, null)}
+                    className={cn(
+                        "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
+                        status.gatewayMode === 'local'
+                            ? "bg-primary/5 border-primary shadow-sm ring-1 ring-primary/20"
+                            : "bg-card border-border/50 hover:bg-muted/50 hover:border-primary/30"
+                    )}
+                >
+                    <div className="flex items-center gap-4">
+                        <div className="p-2.5 rounded-lg bg-primary/10 text-primary">
+                            <Monitor className="w-5 h-5" />
+                        </div>
+                        <div>
+                            <div className="font-bold text-sm">Local Core</div>
+                            <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide">
+                                Internal Host • 127.0.0.1
+                            </div>
+                            {/* macOS Warning */}
+                            {navigator.platform.toUpperCase().includes('MAC') && (
+                                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-rose-500 font-bold bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span>High Risk: Unrestricted Root Access</span>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    {status.gatewayMode === 'local' && (
+                        <div className="flex items-center gap-2 text-emerald-500 text-xs font-bold bg-emerald-500/10 px-2 py-1 rounded-md">
+                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            ACTIVE
+                        </div>
+                    )}
+                </button>
+
+                {/* Remote Profiles */}
+                {status.profiles.map((profile) => (
+                    <div
+                        key={profile.id}
+                        className={cn(
+                            "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
+                            status.gatewayMode === 'remote' && status.remoteUrl === profile.url
+                                ? "bg-indigo-500/5 border-indigo-500 shadow-sm ring-1 ring-indigo-500/20"
+                                : "bg-card border-border/50 hover:bg-muted/50 hover:border-indigo-500/30"
+                        )}
+                    >
+                        <button
+                            onClick={() => handleSaveGateway('remote', profile.url, profile.token)}
+                            className="flex items-center gap-4 flex-1 text-left"
+                        >
+                            <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-500">
+                                <Server className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <div className="font-bold text-sm">{profile.name}</div>
+                                <div className="text-[10px] text-muted-foreground font-medium uppercase tracking-wide font-mono">
+                                    {profile.url.replace('ws://', '').replace('wss://', '')}
+                                </div>
+                            </div>
+                        </button>
+
+                        <div className="flex items-center gap-2">
+                            {status.gatewayMode === 'remote' && status.remoteUrl === profile.url ? (
+                                <div className="flex items-center gap-2 text-indigo-500 text-xs font-bold bg-indigo-500/10 px-2 py-1 rounded-md">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                                    CONNECTED
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        openclaw.removeAgentProfile(profile.id).then(fetchStatus);
+                                    }}
+                                    className="p-2 text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-colors"
+                                    title="Remove Profile"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                ))}
+            </div>
+
             <button
-                onClick={() => handleSaveGateway('local', null, null)}
-                className={cn(
-                    "flex-1 flex flex-col items-center py-4 rounded-xl text-sm font-bold transition-all gap-1",
-                    status.gatewayMode === 'local'
-                        ? "bg-card shadow-xl text-primary border border-primary/20 scale-[1.02]"
-                        : "text-muted-foreground hover:text-foreground opacity-60 hover:opacity-100"
-                )}
+                onClick={() => setShowDeployWizard(true)}
+                className="w-full py-3 rounded-xl border border-dashed border-border hover:border-primary/50 text-muted-foreground hover:text-primary hover:bg-primary/5 transition-all flex items-center justify-center gap-2 text-sm font-bold uppercase tracking-wide"
             >
-                <Monitor className="w-5 h-5" />
-                <span>Local Sidecar</span>
-            </button>
-            <button
-                onClick={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
-                className={cn(
-                    "flex-1 flex flex-col items-center py-4 rounded-xl text-sm font-bold transition-all gap-1",
-                    status.gatewayMode === 'remote'
-                        ? "bg-card shadow-xl text-primary border border-primary/20 scale-[1.02]"
-                        : "text-muted-foreground hover:text-foreground opacity-60 hover:opacity-100"
-                )}
-            >
-                <Server className="w-5 h-5" />
-                <span>Remote Bridge</span>
+                <Server className="w-4 h-4" />
+                Add New Agent
             </button>
         </div>
     );
@@ -402,12 +491,21 @@ export function GatewayTab({ className }: GatewayTabProps) {
             <div className="space-y-8">
                 {status.gatewayMode === 'remote' && (
                     <div className="p-8 rounded-3xl bg-card border border-border/50 shadow-xl space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
-                        <div className="flex items-center gap-3 border-b border-border/50 pb-4">
-                            <Server className="w-6 h-6 text-indigo-500" />
-                            <div>
-                                <h4 className="font-bold text-lg">Remote Bridge Connection</h4>
-                                <p className="text-xs text-muted-foreground">Linking your desktop client to an external Moltbot instance.</p>
+                        <div className="flex items-center justify-between border-b border-border/50 pb-4">
+                            <div className="flex items-center gap-3">
+                                <Server className="w-6 h-6 text-indigo-500" />
+                                <div>
+                                    <h4 className="font-bold text-lg">Remote Bridge Connection</h4>
+                                    <p className="text-xs text-muted-foreground">Linking your desktop client to an external OpenClawEngine instance.</p>
+                                </div>
                             </div>
+                            <button
+                                onClick={() => setShowDeployWizard(true)}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 text-xs font-bold border border-indigo-500/20 transition-all flex items-center gap-2"
+                            >
+                                <Server className="w-3.5 h-3.5" />
+                                DEPLOY NEW SERVER
+                            </button>
                         </div>
                         <div className="grid grid-cols-1 gap-6">
                             <div className="space-y-2">
@@ -463,171 +561,116 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </p>
                     </div>
 
-                    {/* Granted Brains Section */}
+                    {/* Intelligence Channels Redesign */}
                     <div className="space-y-4">
-                        <div className="flex items-center justify-between">
-                            <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Authorized Intelligence Channels</label>
-                            {!status.localInferenceEnabled && !status.anthropicGranted && !status.openaiGranted && !status.openrouterGranted && (
-                                <span className="text-[10px] font-bold text-rose-500 animate-pulse">ACTION REQUIRED: NO BRAIN CONFIGURED</span>
-                            )}
-                        </div>
+                        <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Primary Intelligence Source</label>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {/* Local Brain Status */}
-                            <div className={cn(
-                                "p-4 rounded-2xl border transition-all flex items-center justify-between group",
-                                status.localInferenceEnabled
-                                    ? "bg-emerald-500/5 border-emerald-500/20"
-                                    : "bg-muted/10 border-transparent opacity-50"
-                            )}>
-                                <div className="flex items-center gap-3">
-                                    <div className={cn("p-2 rounded-xl", status.localInferenceEnabled ? "bg-emerald-500/10" : "bg-muted")}>
-                                        <Zap className={cn("w-4 h-4", status.localInferenceEnabled ? "text-emerald-500" : "text-muted-foreground")} />
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {/* Local Core Card */}
+                            <button
+                                onClick={async () => {
+                                    if (!status.localInferenceEnabled) {
+                                        await openclaw.toggleOpenClawLocalInference(true);
+                                        await fetchStatus();
+                                        toast.success('Switched to Local Core');
+                                    }
+                                }}
+                                className={cn(
+                                    "relative p-5 rounded-2xl border-2 text-left transition-all duration-300 overflow-hidden group",
+                                    status.localInferenceEnabled
+                                        ? "bg-emerald-500/10 border-emerald-500/50 shadow-lg shadow-emerald-500/20"
+                                        : "bg-card border-border hover:border-emerald-500/30 hover:bg-emerald-500/5"
+                                )}
+                            >
+                                <div className="flex items-start justify-between mb-4">
+                                    <div className={cn(
+                                        "p-3 rounded-xl transition-colors",
+                                        status.localInferenceEnabled ? "bg-emerald-500 text-white" : "bg-muted text-muted-foreground group-hover:text-emerald-500"
+                                    )}>
+                                        <Cpu className="w-6 h-6" />
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-bold">Local Host</p>
-                                        <p className="text-[10px] text-muted-foreground">{status.localInferenceEnabled ? "Primary Path" : "Disabled"}</p>
-                                    </div>
+                                    {status.localInferenceEnabled && (
+                                        <div className="px-2 py-1 rounded-full bg-emerald-500 text-white text-[10px] font-bold uppercase tracking-wider">
+                                            Active
+                                        </div>
+                                    )}
                                 </div>
-                                {status.localInferenceEnabled && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                            </div>
-
-                            {/* Anthropic Status */}
-                            {status.anthropicGranted && (
-                                <button
-                                    onClick={async () => {
-                                        if (status.localInferenceEnabled) return;
-                                        await clawdbot.selectClawdbotBrain('anthropic');
-                                        await fetchStatus();
-                                        toast.success('Anthropic Claude selected as primary brain');
-                                    }}
-                                    className={cn(
-                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
-                                        status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled
-                                            ? "bg-indigo-500/10 border-indigo-500/40 shadow-sm"
-                                            : "bg-indigo-500/5 border-indigo-500/10 hover:border-indigo-500/30"
-                                    )}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 rounded-xl bg-indigo-500/10">
-                                            <Shield className="w-4 h-4 text-indigo-500" />
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold">Anthropic Claude</p>
-                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
-                                        </div>
-                                    </div>
-                                    {(status.selectedCloudBrain === 'anthropic' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                                </button>
-                            )}
-
-                            {/* OpenAI Status */}
-                            {status.openaiGranted && (
-                                <button
-                                    onClick={async () => {
-                                        if (status.localInferenceEnabled) return;
-                                        await clawdbot.selectClawdbotBrain('openai');
-                                        await fetchStatus();
-                                        toast.success('OpenAI GPT selected as primary brain');
-                                    }}
-                                    className={cn(
-                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
-                                        status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled
-                                            ? "bg-blue-500/10 border-blue-500/40 shadow-sm"
-                                            : "bg-blue-500/5 border-blue-500/10 hover:border-blue-500/30"
-                                    )}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 rounded-xl bg-blue-500/10">
-                                            <Play className="w-4 h-4 text-blue-500" />
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold">OpenAI GPT</p>
-                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
-                                        </div>
-                                    </div>
-                                    {(status.selectedCloudBrain === 'openai' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                                </button>
-                            )}
-
-                            {/* OpenRouter Status */}
-                            {status.openrouterGranted && (
-                                <button
-                                    onClick={async () => {
-                                        if (status.localInferenceEnabled) return;
-                                        await clawdbot.selectClawdbotBrain('openrouter');
-                                        await fetchStatus();
-                                        toast.success('OpenRouter selected as primary brain');
-                                    }}
-                                    className={cn(
-                                        "p-4 rounded-2xl border transition-all flex items-center justify-between text-left",
-                                        status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled
-                                            ? "bg-purple-500/10 border-purple-500/40 shadow-sm"
-                                            : "bg-purple-500/5 border-purple-500/10 hover:border-purple-500/30"
-                                    )}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 rounded-xl bg-purple-500/10">
-                                            <RefreshCw className="w-4 h-4 text-purple-500" />
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold">OpenRouter</p>
-                                            <p className="text-[10px] text-muted-foreground">{status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled ? "Current Brain" : "Authorized Channel"}</p>
-                                        </div>
-                                    </div>
-                                    {(status.selectedCloudBrain === 'openrouter' && !status.localInferenceEnabled) && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                                </button>
-                            )}
-                        </div>
-
-                        {/* Critical Warning if nothing is set up */}
-                        {!status.localInferenceEnabled && !status.anthropicGranted && !status.openaiGranted && !status.openrouterGranted && (
-                            <div className="p-6 border-2 border-dashed border-rose-500/20 rounded-2xl bg-rose-500/5 text-center space-y-3">
-                                <p className="text-sm font-medium text-rose-600 dark:text-rose-400">
-                                    No cognitive engine is configured for the agent.
+                                <h3 className="text-lg font-bold mb-1">Local Core</h3>
+                                <p className="text-xs text-muted-foreground mb-4">
+                                    Privacy-first inference running directly on this device. Zero data egress.
                                 </p>
-                                <div className="flex gap-2 justify-center">
+                                <div className="flex items-center gap-2 text-[10px] font-medium text-emerald-600/80">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                    {status.localInferenceEnabled ? "Neural Engine Online" : "Ready to Activate"}
+                                </div>
+                            </button>
+
+                            {/* Cloud Intelligence Card */}
+                            <div className={cn(
+                                "relative p-5 rounded-2xl border-2 text-left transition-all duration-300 overflow-hidden group flex flex-col",
+                                !status.localInferenceEnabled
+                                    ? "bg-indigo-500/10 border-indigo-500/50 shadow-lg shadow-indigo-500/20"
+                                    : "bg-card border-border hover:border-indigo-500/30 hover:bg-indigo-500/5"
+                            )}>
+                                <button
+                                    className="absolute inset-0 z-0"
+                                    onClick={async () => {
+                                        if (status.localInferenceEnabled) {
+                                            await openclaw.toggleOpenClawLocalInference(false);
+                                            await fetchStatus();
+                                            toast.success('Switched to Cloud Intelligence');
+                                        }
+                                    }}
+                                />
+
+                                <div className="relative z-10 flex items-start justify-between mb-4">
+                                    <div className={cn(
+                                        "p-3 rounded-xl transition-colors",
+                                        !status.localInferenceEnabled ? "bg-indigo-500 text-white" : "bg-muted text-muted-foreground group-hover:text-indigo-500"
+                                    )}>
+                                        <Globe className="w-6 h-6" />
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {!status.localInferenceEnabled && (
+                                            <div className="px-2 py-1 rounded-full bg-indigo-500 text-white text-[10px] font-bold uppercase tracking-wider">
+                                                Active
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <h3 className="text-lg font-bold mb-1">Cloud Intelligence</h3>
+                                <p className="text-xs text-muted-foreground mb-4">
+                                    High-performance models from top providers. Best for complex reasoning.
+                                </p>
+
+                                <div className="mt-auto relative z-10 pt-2 border-t border-indigo-500/10 flex items-center justify-between">
+                                    <div className="flex flex-col">
+                                        <span className="text-[10px] font-bold uppercase text-muted-foreground">Enabled Providers</span>
+                                        <div className="flex items-center gap-1 mt-1 h-5">
+                                            {status.enabled_cloud_providers?.length > 0 ? (
+                                                <span className="text-xs font-medium truncate max-w-[120px]">
+                                                    {status.enabled_cloud_providers.join(', ')}
+                                                </span>
+                                            ) : (
+                                                <span className="text-xs text-muted-foreground italic">None configured</span>
+                                            )}
+                                        </div>
+                                    </div>
+
                                     <button
-                                        onClick={async () => {
-                                            try {
-                                                const newState = !status.localInferenceEnabled;
-                                                await clawdbot.toggleClawdbotLocalInference(newState);
-                                                await fetchStatus();
-
-                                                if (!newState) {
-                                                    // Local link deactivated, check if we need to prompt for cloud brain
-                                                    const cloudGrantedCount = [status.anthropicGranted, status.openaiGranted, status.openrouterGranted].filter(Boolean).length;
-                                                    if (cloudGrantedCount > 1 || (cloudGrantedCount === 0 && !status.selectedCloudBrain)) {
-                                                        setShowBrainSelector(true);
-                                                    } else if (cloudGrantedCount === 1 && !status.selectedCloudBrain) {
-                                                        // If only one cloud brain is granted and none is selected, select it automatically
-                                                        if (status.anthropicGranted) await clawdbot.selectClawdbotBrain('anthropic');
-                                                        else if (status.openaiGranted) await clawdbot.selectClawdbotBrain('openai');
-                                                        else if (status.openrouterGranted) await clawdbot.selectClawdbotBrain('openrouter');
-                                                        await fetchStatus();
-                                                    }
-                                                }
-
-                                                toast.success(newState ? 'Local Neural Link active' : 'Local link deactivated');
-                                            } catch (e) { toast.error('Link toggle failed'); }
-                                        }}
-                                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition-all flex items-center gap-2"
-                                    >
-                                        <Zap className="w-3.5 h-3.5" /> ENABLE LOCAL LINK
-                                    </button>
-                                    <a
-                                        href="#secrets"
-                                        className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold hover:opacity-90 transition-all flex items-center gap-2 shadow-lg shadow-primary/20"
                                         onClick={(e) => {
-                                            e.preventDefault();
-                                            window.dispatchEvent(new CustomEvent('open-settings', { detail: 'secrets' }));
+                                            e.stopPropagation();
+                                            setIsCloudConfigOpen(true);
                                         }}
+                                        className="px-3 py-1.5 rounded-lg bg-background/50 hover:bg-background border border-border text-xs font-bold flex items-center gap-2 transition-colors"
                                     >
-                                        <Shield className="w-3.5 h-3.5" /> AUTHORIZE CLOUD BRAIN
-                                    </a>
+                                        <Settings className="w-3 h-3" />
+                                        Configure
+                                    </button>
                                 </div>
                             </div>
-                        )}
+                        </div>
                     </div>
                 </div>
 
@@ -645,15 +688,15 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 if (status.stateDir) {
                                     try {
                                         const baseDir = status.stateDir.replace(/\/state$/, '');
-                                        await clawdbot.revealPath(`${baseDir}/workspace`);
+                                        await openclaw.revealPath(`${baseDir}/workspace`);
                                     } catch (e) { toast.error('Directory access denied'); }
                                 }
                             }}
                             className="px-5 py-2 rounded-xl bg-primary/10 hover:bg-primary/20 text-xs font-bold transition-all text-primary border border-primary/20"
                         >
                             Reveal Workspace
-                        </button>
-                    </div>
+                        </button >
+                    </div >
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                         {[
@@ -667,8 +710,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 onClick={async () => {
                                     try {
                                         const content = file.memory
-                                            ? await clawdbot.getClawdbotMemory()
-                                            : await clawdbot.getClawdbotFile(file.id);
+                                            ? await openclaw.getOpenClawMemory()
+                                            : await openclaw.getOpenClawFile(file.id);
                                         setViewingFile({ title: file.id, content });
                                     } catch (e) { toast.error(`Failed to read ${file.id}`); }
                                 }}
@@ -680,20 +723,22 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         ))}
                     </div>
 
-                    {viewingFile && (
-                        <div className="animate-in fade-in slide-in-from-top-4 duration-500 space-y-3">
-                            <div className="flex items-center justify-between px-2">
-                                <span className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">{viewingFile.title}</span>
-                                <button onClick={() => setViewingFile(null)} className="text-xs font-bold text-muted-foreground hover:text-foreground">Close Editor</button>
+                    {
+                        viewingFile && (
+                            <div className="animate-in fade-in slide-in-from-top-4 duration-500 space-y-3">
+                                <div className="flex items-center justify-between px-2">
+                                    <span className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">{viewingFile.title}</span>
+                                    <button onClick={() => setViewingFile(null)} className="text-xs font-bold text-muted-foreground hover:text-foreground">Close Editor</button>
+                                </div>
+                                <textarea
+                                    readOnly
+                                    value={viewingFile.content}
+                                    className="w-full h-80 bg-black/20 dark:bg-black/40 border border-border/50 rounded-2xl p-5 text-xs font-mono text-foreground/80 resize-none shadow-inner outline-none scrollbar-hide"
+                                />
                             </div>
-                            <textarea
-                                readOnly
-                                value={viewingFile.content}
-                                className="w-full h-80 bg-black/20 dark:bg-black/40 border border-border/50 rounded-2xl p-5 text-xs font-mono text-foreground/80 resize-none shadow-inner outline-none scrollbar-hide"
-                            />
-                        </div>
-                    )}
-                </div>
+                        )
+                    }
+                </div >
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* OS Automation Card */}
@@ -708,7 +753,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     try {
-                                        await clawdbot.toggleClawdbotNodeHost(!status.nodeHostEnabled);
+                                        await openclaw.toggleOpenClawNodeHost(!status.nodeHostEnabled);
                                         await fetchStatus();
                                         toast.success('automation state toggled');
                                     } catch (e) { toast.error('toggle failed'); }
@@ -741,7 +786,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     try {
-                                        await clawdbot.toggleClawdbotLocalInference(!status.localInferenceEnabled);
+                                        await openclaw.toggleOpenClawLocalInference(!status.localInferenceEnabled);
                                         await fetchStatus();
                                         toast.success('Inference link state toggled');
                                     } catch (e) { toast.error('Link toggle failed'); }
@@ -774,7 +819,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     try {
-                                        await clawdbot.toggleClawdbotAutoStart(!status.autoStartGateway);
+                                        await openclaw.toggleOpenClawAutoStart(!status.autoStartGateway);
                                         await fetchStatus();
                                         toast.success(`Auto-start ${!status.autoStartGateway ? 'enabled' : 'disabled'}`);
                                     } catch (e) { toast.error('Toggle failed'); }
@@ -838,14 +883,19 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             </p>
                             <button
                                 onClick={async () => {
-                                    if (!confirm("ABSOLUTE PERMANENT RESET: Wiping your agent's soul and memory. Proceed?")) return;
+                                    // Removed confirm dialog to prevent browser blocking; this action is deliberate enough
                                     try {
                                         setIsLoading(true);
-                                        await clawdbot.clearClawdbotMemory('all');
+                                        // Force stop gateway first to ensure clean state
+                                        await openclaw.stopOpenClawGateway();
+                                        await openclaw.clearOpenClawMemory('all');
                                         setStatus(s => ({ ...s, gateway: 'stopped', wsConnected: false }));
                                         toast.success("Agent factory reset initiated.");
                                         setViewingFile(null);
-                                    } catch (e) { toast.error("Reset failed"); }
+                                    } catch (e) {
+                                        console.error(e);
+                                        toast.error("Reset failed", { description: String(e) });
+                                    }
                                     finally { setIsLoading(false); }
                                 }}
                                 disabled={isLoading}
@@ -885,7 +935,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                 </div>
                                             ) : (
                                                 <button
-                                                    onClick={() => clawdbot.requestPermission(perm.id as any)}
+                                                    onClick={() => openclaw.requestPermission(perm.id as any)}
                                                     className="px-3 py-1 rounded-lg bg-primary text-primary-foreground text-[10px] font-bold hover:opacity-90 transition-all"
                                                 >
                                                     AUTHORIZE
@@ -951,7 +1001,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </button>
                     </div>
                 </div>
-            </div>
+            </div >
 
             {/* Context Warning Dialog */}
             {
@@ -998,75 +1048,94 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             </div>
                         </motion.div>
                     </div>
-                )}
+                )
+            }
 
             {/* Brain Selector Modal */}
-            {showBrainSelector && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
-                    <motion.div
-                        initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-w-md w-full space-y-6"
-                    >
-                        <div className="space-y-2 text-center">
-                            <div className="mx-auto p-4 bg-primary/10 rounded-full w-fit">
-                                <Zap className="w-8 h-8 text-primary" />
-                            </div>
-                            <h3 className="text-xl font-bold tracking-tight">Select Cloud Brain</h3>
-                            <p className="text-sm text-muted-foreground leading-relaxed">
-                                Local inference is disabled. Choose which cloud provider to use for the agent's logic.
-                            </p>
-                        </div>
-
-                        <div className="space-y-3">
-                            {[
-                                { id: 'anthropic', label: 'Anthropic Claude', granted: status.anthropicGranted, color: 'indigo' },
-                                { id: 'openai', label: 'OpenAI GPT-4o', granted: status.openaiGranted, color: 'blue' },
-                                { id: 'openrouter', label: 'OpenRouter', granted: status.openrouterGranted, color: 'purple' }
-                            ].map(brain => (
-                                <button
-                                    key={brain.id}
-                                    disabled={!brain.granted}
-                                    onClick={async () => {
-                                        try {
-                                            await clawdbot.selectClawdbotBrain(brain.id);
-                                            await fetchStatus();
-                                            setShowBrainSelector(false);
-                                            toast.success(`${brain.label} selected as primary brain`);
-                                        } catch (e) { toast.error('Selection failed'); }
-                                    }}
-                                    className={cn(
-                                        "w-full p-4 rounded-2xl border transition-all flex items-center justify-between group",
-                                        brain.granted
-                                            ? `hover:bg-${brain.color}-500/5 hover:border-${brain.color}-500/30`
-                                            : "opacity-40 cursor-not-allowed",
-                                        status.selectedCloudBrain === brain.id ? `bg-${brain.color}-500/10 border-${brain.color}-500/40` : "bg-muted/10 border-transparent"
-                                    )}
-                                >
-                                    <div className="flex items-center gap-3">
-                                        <div className={cn("p-2 rounded-xl bg-card", brain.granted && `text-${brain.color}-500`)}>
-                                            <Shield className="w-4 h-4" />
-                                        </div>
-                                        <span className="text-sm font-bold">{brain.label}</span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        {!brain.granted && <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">NOT GRANTED</span>}
-                                        {status.selectedCloudBrain === brain.id && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-
-                        <button
-                            onClick={() => setShowBrainSelector(false)}
-                            className="w-full py-3 text-xs font-bold text-muted-foreground hover:text-foreground transition-all"
+            {
+                showBrainSelector && (
+                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-w-md w-full space-y-6"
                         >
-                            Cancel
-                        </button>
-                    </motion.div>
-                </div>
-            )}
-        </motion.div>
+                            <div className="space-y-2 text-center">
+                                <div className="mx-auto p-4 bg-primary/10 rounded-full w-fit">
+                                    <Zap className="w-8 h-8 text-primary" />
+                                </div>
+                                <h3 className="text-xl font-bold tracking-tight">Select Cloud Brain</h3>
+                                <p className="text-sm text-muted-foreground leading-relaxed">
+                                    Local inference is disabled. Choose which cloud provider to use for the agent's logic.
+                                </p>
+                            </div>
+
+                            <div className="space-y-3">
+                                {[
+                                    { id: 'anthropic', label: 'Anthropic Claude', granted: status.anthropicGranted, color: 'indigo' },
+                                    { id: 'openai', label: 'OpenAI GPT-4o', granted: status.openaiGranted, color: 'blue' },
+                                    { id: 'openrouter', label: 'OpenRouter', granted: status.openrouterGranted, color: 'purple' }
+                                ].map(brain => (
+                                    <button
+                                        key={brain.id}
+                                        disabled={!brain.granted}
+                                        onClick={async () => {
+                                            try {
+                                                await openclaw.selectOpenClawBrain(brain.id);
+                                                await fetchStatus();
+                                                setShowBrainSelector(false);
+                                                toast.success(`${brain.label} selected as primary brain`);
+                                            } catch (e) { toast.error('Selection failed'); }
+                                        }}
+                                        className={cn(
+                                            "w-full p-4 rounded-2xl border transition-all flex items-center justify-between group",
+                                            brain.granted
+                                                ? `hover:bg-${brain.color}-500/5 hover:border-${brain.color}-500/30`
+                                                : "opacity-40 cursor-not-allowed",
+                                            status.selectedCloudBrain === brain.id ? `bg-${brain.color}-500/10 border-${brain.color}-500/40` : "bg-muted/10 border-transparent"
+                                        )}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className={cn("p-2 rounded-xl bg-card", brain.granted && `text-${brain.color}-500`)}>
+                                                <Shield className="w-4 h-4" />
+                                            </div>
+                                            <span className="text-sm font-bold">{brain.label}</span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {!brain.granted && <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">NOT GRANTED</span>}
+                                            {status.selectedCloudBrain === brain.id && <CheckCircle className="w-4 h-4 text-emerald-500" />}
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+
+                            <button
+                                onClick={() => setShowBrainSelector(false)}
+                                className="w-full py-3 text-xs font-bold text-muted-foreground hover:text-foreground transition-all"
+                            >
+                                Cancel
+                            </button>
+                        </motion.div>
+                    </div>
+                )
+            }
+            {/* Modals */}
+            <CloudBrainConfigModal
+                isOpen={isCloudConfigOpen}
+                onClose={() => setIsCloudConfigOpen(false)}
+                status={rawStatus}
+                onUpdate={fetchStatus}
+            />
+
+            <RemoteDeployWizard
+                isOpen={showDeployWizard}
+                onClose={() => setShowDeployWizard(false)}
+                onCheckStatus={() => {
+                    setShowDeployWizard(false);
+                    fetchStatus();
+                }}
+            />
+        </motion.div >
     );
 }
 

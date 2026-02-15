@@ -72,7 +72,7 @@
       "bin/*.dylib",
       "bin/*.metal",
       "resources/chromium",
-      "moltbot/**/*"
+      "openclaw-engine/**/*"
     ],
     "macOS": {
       "entitlements": "Entitlements.plist"

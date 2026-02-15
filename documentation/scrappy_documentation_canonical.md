@@ -281,7 +281,7 @@ Profile =
 
 ---
 
-## 12. Agent Engine (Clawdbot / Moltbot)
+## 12. Agent Engine (OpenClaw / OpenClawEngine)
 
 ### Process Model
 The agent runtime is split into two specialized Node sidecars managed by Rust:
@@ -291,10 +291,10 @@ The agent runtime is split into two specialized Node sidecars managed by Rust:
 ### Secrets Firewall (Privacy & Security)
 Scrappy implements a strict granular permissions model for external agents:
 - **Keys in Escrow**: API keys for Anthropic, OpenAI, etc., are stored in Scrappy's secure identity store.
-- **Explicit Grant**: Agents **cannot** see these keys by default. The user must explicitly toggle the "Grant Access" flag per secret in the Settings panel to expose it to the Moltbot environment.
+- **Explicit Grant**: Agents **cannot** see these keys by default. The user must explicitly toggle the "Grant Access" flag per secret in the Settings panel to expose it to the OpenClawEngine environment.
 
 ### Workspace Isolation
-- Each agent operates in a dedicated workspace directory (`Clawdbot/workspace`).
+- Each agent operates in a dedicated workspace directory (`OpenClaw/workspace`).
 - Transcripts and artifacts created by agents are isolated from the main chat history to prevent context pollution.
 
 ---

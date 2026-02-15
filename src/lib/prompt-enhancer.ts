@@ -55,7 +55,6 @@ export async function enhanceImagePrompt(
         const enhanced = cleanEnhancedPrompt(res);
 
         if (enhanced.length > 0) {
-            console.log("[PromptEnhancer] Cleaned:", enhanced);
             return enhanced;
         }
         return prompt;

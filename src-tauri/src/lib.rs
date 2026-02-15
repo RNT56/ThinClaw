@@ -59,7 +59,6 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 }
 
 pub mod chat;
-pub mod clawdbot;
 pub mod config;
 pub mod gguf;
 mod history;
@@ -67,6 +66,7 @@ pub mod image_gen;
 pub mod images;
 pub mod imagine;
 pub mod model_manager;
+pub mod openclaw;
 pub mod permissions;
 pub mod personas;
 pub mod process_tracker;
@@ -163,68 +163,88 @@ pub fn run() {
         projects::delete_document,
         rig_lib::rig_check_web_search,
         rig_lib::agent_chat,
-        // Clawdbot commands
-        clawdbot::commands::get_clawdbot_status,
-        clawdbot::commands::save_anthropic_key,
-        clawdbot::commands::get_anthropic_key,
-        clawdbot::commands::save_brave_key,
-        clawdbot::commands::get_brave_key,
-        clawdbot::commands::save_openai_key,
-        clawdbot::commands::get_openai_key,
-        clawdbot::commands::save_openrouter_key,
-        clawdbot::commands::get_openrouter_key,
-        clawdbot::commands::save_gemini_key,
-        clawdbot::commands::get_gemini_key,
-        clawdbot::commands::save_groq_key,
-        clawdbot::commands::get_groq_key,
-        clawdbot::commands::save_selected_cloud_model,
-        clawdbot::commands::clawdbot_toggle_secret_access,
-        clawdbot::commands::save_slack_config,
-        clawdbot::commands::save_telegram_config,
-        clawdbot::commands::save_gateway_settings,
-        clawdbot::commands::start_clawdbot_gateway,
-        clawdbot::commands::stop_clawdbot_gateway,
-        clawdbot::commands::get_clawdbot_sessions,
-        clawdbot::commands::get_clawdbot_history,
-        clawdbot::commands::delete_clawdbot_session,
-        clawdbot::commands::send_clawdbot_message,
-        clawdbot::commands::subscribe_clawdbot_session,
-        clawdbot::commands::abort_clawdbot_chat,
-        clawdbot::commands::resolve_clawdbot_approval,
-        clawdbot::commands::get_clawdbot_diagnostics,
-        clawdbot::commands::clear_clawdbot_memory,
-        clawdbot::commands::get_clawdbot_memory,
-        clawdbot::commands::get_clawdbot_file,
-        clawdbot::commands::write_clawdbot_file,
-        clawdbot::commands::save_clawdbot_memory,
-        clawdbot::commands::list_workspace_files,
-        clawdbot::commands::clawdbot_cron_list,
-        clawdbot::commands::clawdbot_cron_run,
-        clawdbot::commands::clawdbot_cron_history,
-        clawdbot::commands::clawdbot_skills_list,
-        clawdbot::commands::clawdbot_skills_status,
-        clawdbot::commands::clawdbot_skills_toggle,
-        clawdbot::commands::clawdbot_install_skill_repo,
-        clawdbot::commands::clawdbot_install_skill_deps,
-        clawdbot::commands::clawdbot_config_schema,
-        clawdbot::commands::clawdbot_config_get,
-        clawdbot::commands::clawdbot_config_set,
-        clawdbot::commands::clawdbot_config_patch,
-        clawdbot::commands::clawdbot_system_presence,
-        clawdbot::commands::clawdbot_logs_tail,
-        clawdbot::commands::clawdbot_update_run,
-        clawdbot::commands::clawdbot_web_login_whatsapp,
-        clawdbot::commands::clawdbot_web_login_telegram,
-        clawdbot::commands::add_custom_secret,
-        clawdbot::commands::remove_custom_secret,
-        clawdbot::commands::clawdbot_toggle_custom_secret,
-        clawdbot::commands::clawdbot_toggle_node_host,
-        clawdbot::commands::clawdbot_toggle_local_inference,
-        clawdbot::commands::clawdbot_toggle_expose_inference,
-        clawdbot::commands::clawdbot_set_setup_completed,
-        clawdbot::commands::clawdbot_toggle_auto_start,
-        clawdbot::commands::clawdbot_set_dev_mode_wizard,
-        clawdbot::commands::set_hf_token,
+        // OpenClaw commands
+        openclaw::commands::openclaw_get_status,
+        openclaw::commands::openclaw_save_anthropic_key,
+        openclaw::commands::openclaw_get_anthropic_key,
+        openclaw::commands::openclaw_save_brave_key,
+        openclaw::commands::openclaw_get_brave_key,
+        openclaw::commands::openclaw_save_openai_key,
+        openclaw::commands::openclaw_get_openai_key,
+        openclaw::commands::openclaw_save_openrouter_key,
+        openclaw::commands::openclaw_get_openrouter_key,
+        openclaw::commands::openclaw_save_gemini_key,
+        openclaw::commands::openclaw_get_gemini_key,
+        openclaw::commands::openclaw_save_groq_key,
+        openclaw::commands::openclaw_get_groq_key,
+        openclaw::commands::openclaw_save_selected_cloud_model,
+        openclaw::commands::select_openclaw_brain,
+        openclaw::commands::openclaw_save_cloud_config,
+        openclaw::commands::openclaw_toggle_secret_access,
+        openclaw::commands::openclaw_save_slack_config,
+        openclaw::commands::openclaw_save_telegram_config,
+        openclaw::commands::openclaw_save_gateway_settings,
+        openclaw::commands::openclaw_add_agent_profile,
+        openclaw::commands::openclaw_remove_agent_profile,
+        openclaw::extra_commands::openclaw_switch_to_profile,
+        openclaw::extra_commands::openclaw_test_connection,
+        openclaw::fleet::openclaw_get_fleet_status,
+        openclaw::fleet::openclaw_broadcast_command,
+        openclaw::commands::openclaw_start_gateway,
+        openclaw::commands::openclaw_stop_gateway,
+        openclaw::commands::openclaw_get_sessions,
+        openclaw::commands::openclaw_get_history,
+        openclaw::commands::openclaw_delete_session,
+        openclaw::commands::openclaw_reset_session,
+        openclaw::commands::openclaw_send_message,
+        openclaw::commands::openclaw_subscribe_session,
+        openclaw::commands::openclaw_abort_chat,
+        openclaw::commands::openclaw_resolve_approval,
+        openclaw::commands::openclaw_get_diagnostics,
+        openclaw::commands::openclaw_clear_memory,
+        openclaw::commands::openclaw_get_memory,
+        openclaw::commands::openclaw_get_file,
+        openclaw::commands::openclaw_write_file,
+        openclaw::commands::openclaw_save_memory,
+        openclaw::commands::openclaw_list_workspace_files,
+        openclaw::commands::openclaw_cron_list,
+        openclaw::commands::openclaw_cron_run,
+        openclaw::commands::openclaw_cron_history,
+        openclaw::commands::openclaw_skills_list,
+        openclaw::commands::openclaw_skills_status,
+        openclaw::commands::openclaw_skills_toggle,
+        openclaw::commands::openclaw_install_skill_repo,
+        openclaw::commands::openclaw_install_skill_deps,
+        openclaw::commands::openclaw_config_schema,
+        openclaw::commands::openclaw_config_get,
+        openclaw::commands::openclaw_config_set,
+        openclaw::commands::openclaw_config_patch,
+        openclaw::commands::openclaw_system_presence,
+        openclaw::commands::openclaw_logs_tail,
+        openclaw::commands::openclaw_update_run,
+        openclaw::commands::openclaw_web_login_whatsapp,
+        openclaw::commands::openclaw_web_login_telegram,
+        openclaw::commands::openclaw_add_custom_secret,
+        openclaw::commands::openclaw_remove_custom_secret,
+        openclaw::commands::openclaw_toggle_custom_secret,
+        openclaw::commands::openclaw_toggle_node_host,
+        openclaw::commands::openclaw_toggle_local_inference,
+        openclaw::commands::openclaw_toggle_expose_inference,
+        openclaw::commands::openclaw_set_setup_completed,
+        openclaw::commands::openclaw_toggle_auto_start,
+        openclaw::commands::openclaw_set_dev_mode_wizard,
+        openclaw::commands::openclaw_set_hf_token,
+        openclaw::commands::openclaw_save_implicit_provider_key,
+        openclaw::commands::openclaw_get_implicit_provider_key,
+        openclaw::commands::openclaw_save_bedrock_credentials,
+        openclaw::commands::openclaw_get_bedrock_credentials,
+        openclaw::commands::openclaw_sync_local_llm,
+        openclaw::deploy::openclaw_deploy_remote,
+        // Orchestration & Canvas
+        openclaw::commands::openclaw_spawn_session,
+        openclaw::commands::openclaw_agents_list,
+        openclaw::commands::openclaw_canvas_push,
+        openclaw::commands::openclaw_canvas_navigate,
         permissions::get_permission_status,
         permissions::request_permission,
         toggle_spotlight,
@@ -270,7 +290,7 @@ pub fn run() {
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));
-    app.manage(clawdbot::ClawdbotManager::new(app.handle().clone()));
+    app.manage(openclaw::OpenClawManager::new(app.handle().clone()));
 
     // Setup Logic
     {
@@ -304,7 +324,15 @@ pub fn run() {
             let reranker_wrapper = reranker::RerankerWrapper::new(app_data_dir.clone()).await;
             handle.manage(reranker_wrapper);
 
-            let db_path = app_data_dir.join("scrappy.db");
+            let db_path = app_data_dir.join("openclaw.db");
+            let legacy_db = app_data_dir.join("scrappy.db");
+
+            // Migration: rename legacy scrappy.db to openclaw.db
+            if !db_path.exists() && legacy_db.exists() {
+                println!("[main] Migrating legacy scrappy.db to openclaw.db...");
+                let _ = fs::rename(&legacy_db, &db_path);
+            }
+
             let db_url = format!("sqlite://{}?mode=rwc", db_path.to_str().unwrap());
 
             let pool = SqlitePoolOptions::new()
@@ -333,28 +361,28 @@ pub fn run() {
                 eprintln!("[main] Integrity Check Failed: {}", e);
             }
 
-            // Init Clawdbot Config (Critical for paths to work before gateway start)
-            let clawdbot_state = handle.state::<clawdbot::ClawdbotManager>();
-            if let Err(e) = clawdbot_state.init_config().await {
-                eprintln!("[main] Failed to init Clawdbot config: {}", e);
+            // Init OpenClaw Config (Critical for paths to work before gateway start)
+            let openclaw_state = handle.state::<openclaw::OpenClawManager>();
+            if let Err(e) = openclaw_state.init_config().await {
+                eprintln!("[main] Failed to init OpenClaw config: {}", e);
             } else {
                 // Check if we should auto-start the gateway
-                if let Some(cfg) = clawdbot_state.get_config().await {
+                if let Some(cfg) = openclaw_state.get_config().await {
                     if cfg.auto_start_gateway {
-                        println!("[main] Auto-starting Clawdbot gateway...");
+                        println!("[main] Auto-starting OpenClaw gateway...");
                         let handle_clone = handle.clone();
 
                         tauri::async_runtime::spawn(async move {
-                            let clawdbot_mgr = handle_clone.state::<clawdbot::ClawdbotManager>();
+                            let openclaw_mgr = handle_clone.state::<openclaw::OpenClawManager>();
                             let sidecar_mgr = handle_clone.state::<SidecarManager>();
 
                             if let Err(e) =
-                                clawdbot::commands::start_gateway_core(&clawdbot_mgr, &sidecar_mgr)
+                                openclaw::commands::start_gateway_core(&openclaw_mgr, &sidecar_mgr)
                                     .await
                             {
-                                eprintln!("[main] Failed to auto-start Clawdbot gateway: {}", e);
+                                eprintln!("[main] Failed to auto-start OpenClaw gateway: {}", e);
                             } else {
-                                println!("[main] Clawdbot gateway auto-started successfully.");
+                                println!("[main] OpenClaw gateway auto-started successfully.");
                             }
                         });
                     }
@@ -364,7 +392,7 @@ pub fn run() {
 
         // 2. Tray Icon
         let quit_i = MenuItem::with_id(&app, "quit", "Quit", true, None::<&str>);
-        let show_i = MenuItem::with_id(&app, "show", "Show Scrappy", true, None::<&str>);
+        let show_i = MenuItem::with_id(&app, "show", "Show OpenClaw", true, None::<&str>);
 
         if let (Ok(quit_i), Ok(show_i)) = (quit_i, show_i) {
             let menu = Menu::with_items(&app, &[&show_i, &quit_i]);
