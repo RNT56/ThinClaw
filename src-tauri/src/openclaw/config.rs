@@ -340,7 +340,7 @@ pub struct OpenClawEngineConfig {
 }
 
 impl OpenClawEngineConfig {
-    pub fn get_local_llm_config(&self) -> Option<(u16, String, u32)> {
+    pub fn get_local_llm_config(&self) -> Option<(u16, String, u32, String)> {
         let models = self.models.as_ref()?;
         let local = models.providers.get("local")?;
 
@@ -358,7 +358,8 @@ impl OpenClawEngineConfig {
         let models_list = local.get("models")?.as_array()?;
         let context_size = models_list.get(0)?.get("contextWindow")?.as_u64()? as u32;
 
-        Some((port, api_key, context_size))
+        // Model family is not stored in config JSON, default to chatml
+        Some((port, api_key, context_size, "chatml".into()))
     }
 }
 
@@ -977,7 +978,7 @@ impl OpenClawConfig {
         &self,
         slack: Option<SlackConfig>,
         telegram: Option<TelegramConfig>,
-        local_llm: Option<(u16, String, u32)>,
+        local_llm: Option<(u16, String, u32, String)>,
     ) -> OpenClawEngineConfig {
         // Determine primary model and provider content
 
@@ -1226,8 +1227,8 @@ impl OpenClawConfig {
         ];
 
         // Only the local provider needs explicit models.providers config
-        let (local_port, local_token, context_size) =
-            local_llm.unwrap_or((53755, "".into(), 16384));
+        let (local_port, local_token, context_size, _model_family) =
+            local_llm.unwrap_or((53755, "".into(), 16384, "chatml".into()));
         let mut providers = serde_json::Map::new();
 
         // Local Provider (llama.cpp) — needs explicit config for custom baseUrl/port
@@ -1399,7 +1400,7 @@ impl OpenClawConfig {
     pub fn write_config(
         &self,
         config: &OpenClawEngineConfig,
-        local_llm: Option<(u16, String, u32)>,
+        local_llm: Option<(u16, String, u32, String)>,
     ) -> std::io::Result<()> {
         self.ensure_dirs()?;
         let json = serde_json::to_string_pretty(config)
@@ -1655,7 +1656,7 @@ impl OpenClawConfig {
         }
 
         // Add Local LLM (llama.cpp) configuration
-        let (_, local_token, _) = local_llm.unwrap_or((0, "".to_string(), 0));
+        let (_, local_token, _, _) = local_llm.unwrap_or((0, "".to_string(), 0, "chatml".into()));
 
         let token_val = if local_token.is_empty() {
             "dummy-key".to_string()

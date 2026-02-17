@@ -1371,7 +1371,7 @@ export type AgentProfile = { id: string; name: string; url: string; token: strin
 export type AgentStatusSummary = { id: string; name: string; url: string; online: boolean; latency_ms: number | null; version: string | null; stats: JsonValue | null; current_task: string | null; progress: number | null; logs: string[] | null; parent_id: string | null; children_ids: string[] | null; active_session_id: string | null; active: boolean; capabilities: string[] | null; run_status: string | null; model: string | null }
 export type AttachedDoc = { id: string; name: string }
 export type ChatPayload = { model: string; messages: Message[]; temperature: number; top_p: number; web_search_enabled?: boolean; auto_mode?: boolean; project_id: string | null; conversation_id: string | null }
-export type ChatServerConfig = { port: number; token: string; context_size: number }
+export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
 export type CreateProjectRequest = { name: string; description: string | null }
 /**

@@ -190,9 +190,29 @@ impl Orchestrator {
             let threshold = 0.6; // 60% to trigger proactive summarization (hardcoded logic)
             let _summarize_ratio = 0.5; // Summarize oldest 50%
 
-            let token_count_res = rig_clone.provider.count_tokens(check_history.clone()).await;
-
             let mut should_summarize = false;
+
+            // Performance: Use fast heuristic estimate first (~4 chars per token).
+            // Only call the expensive tokenizer endpoint if the estimate is within
+            // 80% of the threshold (i.e. we might actually need to summarize).
+            let heuristic_tokens: u32 = check_history
+                .iter()
+                .map(|msg| {
+                    let content_len = msg["content"].as_str().map_or(0, |s| s.len());
+                    (content_len / 4) as u32 + 4 // +4 for role wrapper overhead
+                })
+                .sum();
+
+            let threshold_tokens = (max_context as f32 * threshold) as u32;
+            let needs_precise_count = heuristic_tokens > (threshold_tokens as f32 * 0.8) as u32;
+
+            let token_count_res = if needs_precise_count {
+                info!("[orchestrator] Heuristic estimate {} near threshold {}, performing precise count", heuristic_tokens, threshold_tokens);
+                rig_clone.provider.count_tokens(check_history.clone()).await
+            } else {
+                info!("[orchestrator] Heuristic token estimate: {} (threshold: {}), skipping precise count", heuristic_tokens, threshold_tokens);
+                Ok(heuristic_tokens)
+            };
 
             match token_count_res {
                 Ok(token_count) => {
@@ -206,7 +226,7 @@ impl Orchestrator {
                         })))
                         .await;
 
-                    if token_count > (max_context as f32 * threshold) as u32 {
+                    if token_count > threshold_tokens {
                         should_summarize = true;
                         info!("[orchestrator] Token count exceeds threshold.");
                     }

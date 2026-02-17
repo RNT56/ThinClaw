@@ -608,7 +608,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                         <ReactMarkdown
                                             key={idx}
                                             remarkPlugins={[remarkGfm]}
-                                            rehypePlugins={[rehypeHighlight]}
+                                            rehypePlugins={message.isStreaming ? [] : [rehypeHighlight]}
                                             components={{
                                                 a: ({ node, href, children, ...props }) => {
                                                     const isLocalPath = href && (href.startsWith('/') || href.startsWith('file://') || (typeof children === 'string' && (children.startsWith('/') || children.startsWith('./'))));

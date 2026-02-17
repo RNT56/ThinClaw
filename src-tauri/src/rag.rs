@@ -133,7 +133,7 @@ pub async fn extract_document_content(
         // Small wait for initial render
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-        if let Some((port, token, _)) = sidecar.get_chat_config() {
+        if let Some((port, token, _, _)) = sidecar.get_chat_config() {
             let client = reqwest::Client::new();
             let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 

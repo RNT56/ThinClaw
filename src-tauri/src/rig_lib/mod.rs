@@ -36,7 +36,8 @@ pub async fn agent_chat(
     state: tauri::State<'_, crate::sidecar::SidecarManager>,
     request: String,
 ) -> Result<String, String> {
-    let (port, _token, _) = state.get_chat_config().ok_or("Chat server not running")?;
+    let (port, _token, _, model_family) =
+        state.get_chat_config().ok_or("Chat server not running")?;
     let base_url = format!("http://127.0.0.1:{}/v1", port);
 
     // Check for summarizer
@@ -47,6 +48,7 @@ pub async fn agent_chat(
             &sum_url,
             "sk-no-key-required",
             "default",
+            Some(model_family.clone()),
         ))
     } else {
         None
@@ -66,6 +68,7 @@ pub async fn agent_chat(
         false,
         None,
         None,
+        Some(model_family),
     );
 
     manager.chat(&request).await

@@ -79,7 +79,7 @@ pub async fn chat_stream(
     let user_config = config.get_config();
 
     // Provider Routing Logic
-    let (kind, base_url, model_name, _port, token, context_size) = match user_config
+    let (kind, base_url, model_name, _port, token, context_size, model_family) = match user_config
         .selected_chat_provider
         .as_deref()
     {
@@ -101,6 +101,7 @@ pub async fn chat_stream(
                 0,
                 key,
                 200000,
+                None,
             )
         }
         Some("openai") => {
@@ -121,6 +122,7 @@ pub async fn chat_stream(
                 0,
                 key,
                 128000,
+                None,
             )
         }
         Some("openrouter") => {
@@ -141,6 +143,7 @@ pub async fn chat_stream(
                 0,
                 key,
                 128000,
+                None,
             )
         }
         Some("gemini") => {
@@ -161,6 +164,7 @@ pub async fn chat_stream(
                 0,
                 key,
                 128000,
+                None,
             )
         }
         Some("groq") => {
@@ -181,6 +185,7 @@ pub async fn chat_stream(
                 0,
                 key,
                 128000,
+                None,
             )
         }
         _ => {
@@ -193,6 +198,7 @@ pub async fn chat_stream(
                 cfg.0,
                 cfg.1,
                 cfg.2,
+                Some(cfg.3),
             )
         }
     };
@@ -363,6 +369,7 @@ pub async fn chat_stream(
             Some(gk_content)
         },
         payload.conversation_id.clone(),
+        model_family,
     );
 
     // Emit "Thinking" Status
@@ -450,15 +457,35 @@ pub async fn chat_stream(
                 }
             }
 
-            // Consume stream and emit chunks
+            // Consume stream and emit chunks — with batching to reduce IPC overhead.
+            // During fast local inference, llama.cpp can emit 30-100+ tokens/sec.
+            // Sending each as a separate IPC message floods the webview event loop
+            // and causes UI lag. Instead, we buffer text content and flush when:
+            //   (a) the buffer reaches 20 chars, OR
+            //   (b) 30ms have elapsed since the last flush, OR
+            //   (c) a non-content event (Usage, ContextUpdate) arrives.
+            let mut content_buffer = String::new();
+            let mut last_flush = std::time::Instant::now();
+            const FLUSH_CHAR_THRESHOLD: usize = 20;
+            const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
+
             while let Some(chunk_res) = stream.next().await {
                 // Check Cancellation
                 if state
                     .cancellation_token
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
+                    // Flush any buffered content before sending stop
+                    if !content_buffer.is_empty() {
+                        let _ = on_event.send(StreamChunk {
+                            content: std::mem::take(&mut content_buffer),
+                            done: false,
+                            usage: None,
+                            context_update: None,
+                        });
+                    }
                     let _ = on_event.send(StreamChunk {
-                        content: "\n[Stopped]".into(), // Visual indicator
+                        content: "\n[Stopped]".into(),
                         done: true,
                         usage: None,
                         context_update: None,
@@ -471,14 +498,31 @@ pub async fn chat_stream(
                         use crate::rig_lib::unified_provider::ProviderEvent;
                         match event {
                             ProviderEvent::Content(text) => {
-                                let _ = on_event.send(StreamChunk {
-                                    content: text,
-                                    done: false,
-                                    usage: None,
-                                    context_update: None,
-                                });
+                                content_buffer.push_str(&text);
+                                let elapsed = last_flush.elapsed();
+                                if content_buffer.len() >= FLUSH_CHAR_THRESHOLD
+                                    || elapsed >= FLUSH_INTERVAL
+                                {
+                                    let _ = on_event.send(StreamChunk {
+                                        content: std::mem::take(&mut content_buffer),
+                                        done: false,
+                                        usage: None,
+                                        context_update: None,
+                                    });
+                                    last_flush = std::time::Instant::now();
+                                }
                             }
                             ProviderEvent::Usage(u) => {
+                                // Flush any buffered text before sending metadata
+                                if !content_buffer.is_empty() {
+                                    let _ = on_event.send(StreamChunk {
+                                        content: std::mem::take(&mut content_buffer),
+                                        done: false,
+                                        usage: None,
+                                        context_update: None,
+                                    });
+                                    last_flush = std::time::Instant::now();
+                                }
                                 let _ = on_event.send(StreamChunk {
                                     content: "".into(),
                                     done: false,
@@ -487,6 +531,16 @@ pub async fn chat_stream(
                                 });
                             }
                             ProviderEvent::ContextUpdate(c) => {
+                                // Flush any buffered text before sending metadata
+                                if !content_buffer.is_empty() {
+                                    let _ = on_event.send(StreamChunk {
+                                        content: std::mem::take(&mut content_buffer),
+                                        done: false,
+                                        usage: None,
+                                        context_update: None,
+                                    });
+                                    last_flush = std::time::Instant::now();
+                                }
                                 let _ = on_event.send(StreamChunk {
                                     content: "".into(),
                                     done: false,
@@ -497,6 +551,15 @@ pub async fn chat_stream(
                         }
                     }
                     Err(e) => {
+                        // Flush buffer before error
+                        if !content_buffer.is_empty() {
+                            let _ = on_event.send(StreamChunk {
+                                content: std::mem::take(&mut content_buffer),
+                                done: false,
+                                usage: None,
+                                context_update: None,
+                            });
+                        }
                         eprintln!("Error in stream: {}", e);
                         let _ = on_event.send(StreamChunk {
                             content: format!("\n[Error: {}]", e),
@@ -506,6 +569,16 @@ pub async fn chat_stream(
                         });
                     }
                 }
+            }
+
+            // Flush any remaining buffered content before sending done
+            if !content_buffer.is_empty() {
+                let _ = on_event.send(StreamChunk {
+                    content: content_buffer,
+                    done: false,
+                    usage: None,
+                    context_update: None,
+                });
             }
 
             let _ = on_event.send(StreamChunk {
@@ -537,7 +610,8 @@ pub async fn count_tokens(
 ) -> Result<TokenUsage, String> {
     use tauri::Manager;
     // 1. Get Chat Config
-    let (port, token, _) = state.get_chat_config().ok_or("Chat server not running")?;
+    let (port, token, _, model_family) =
+        state.get_chat_config().ok_or("Chat server not running")?;
 
     // 2. Fetch Messages from DB Directly
     let pool = app.state::<sqlx::SqlitePool>();
@@ -566,7 +640,12 @@ pub async fn count_tokens(
     // 4. Initialize ephemeral Rig/Provider to count
     let base_url = format!("http://127.0.0.1:{}/v1", port);
     // Token is already a String based on SidecarManager signature
-    let provider = crate::rig_lib::llama_provider::LlamaProvider::new(&base_url, &token, "default");
+    let provider = crate::rig_lib::llama_provider::LlamaProvider::new(
+        &base_url,
+        &token,
+        "default",
+        &model_family,
+    );
 
     let count = provider
         .count_tokens(check_history)
@@ -594,7 +673,7 @@ pub async fn chat_completion(
     let user_config = config.get_config();
 
     // Re-use the provider routing logic from chat_stream
-    let (kind, base_url, model_name, _port, token, _context_size) =
+    let (kind, base_url, model_name, _port, token, _context_size, model_family) =
         match user_config.selected_chat_provider.as_deref() {
             Some("anthropic") => {
                 let claw_cfg = openclaw
@@ -613,6 +692,7 @@ pub async fn chat_completion(
                     0,
                     key,
                     200000,
+                    None,
                 )
             }
             Some("openai") => {
@@ -630,6 +710,7 @@ pub async fn chat_completion(
                     0,
                     key,
                     128000,
+                    None,
                 )
             }
             Some("gemini") => {
@@ -647,6 +728,7 @@ pub async fn chat_completion(
                     0,
                     key,
                     128000,
+                    None,
                 )
             }
             // ... (can add others if needed, but Local is the main standard)
@@ -661,6 +743,7 @@ pub async fn chat_completion(
                     cfg.0,
                     cfg.1,
                     cfg.2,
+                    Some(cfg.3),
                 )
             }
         };
@@ -670,6 +753,7 @@ pub async fn chat_completion(
         &base_url,
         &token,
         &model_name,
+        model_family,
     );
 
     // Construct the request

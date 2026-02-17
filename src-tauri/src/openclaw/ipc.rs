@@ -181,6 +181,7 @@ impl McpRequestHandler {
             true,
             None,
             None,
+            None,
         ));
 
         let config = sandbox_factory::McpOrchestratorConfig {
@@ -309,6 +310,7 @@ impl McpRequestHandler {
             8192,
             None,
             true,
+            None,
             None,
             None,
         ));

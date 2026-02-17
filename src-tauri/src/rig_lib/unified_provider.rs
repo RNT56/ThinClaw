@@ -23,15 +23,23 @@ pub struct UnifiedProvider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub model_family: Option<String>,
 }
 
 impl UnifiedProvider {
-    pub fn new(kind: ProviderKind, base_url: &str, api_key: &str, model: &str) -> Self {
+    pub fn new(
+        kind: ProviderKind,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        model_family: Option<String>,
+    ) -> Self {
         Self {
             kind,
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            model_family,
         }
     }
 
@@ -383,6 +391,7 @@ impl UnifiedProvider {
                     &self.base_url,
                     &self.api_key,
                     &self.model,
+                    self.model_family.as_deref().unwrap_or("chatml"),
                 );
                 lp.count_tokens(messages).await
             }
@@ -425,6 +434,7 @@ impl UnifiedProvider {
                     &self.base_url,
                     &self.api_key,
                     &self.model,
+                    self.model_family.as_deref().unwrap_or("chatml"),
                 );
                 lp.stream_raw_completion(messages, temperature).await
             }
@@ -737,6 +747,7 @@ impl UnifiedProvider {
                     &self.base_url,
                     &self.api_key,
                     &self.model,
+                    self.model_family.as_deref().unwrap_or("chatml"),
                 );
                 lp.stream_completion(prompt, history).await
             }

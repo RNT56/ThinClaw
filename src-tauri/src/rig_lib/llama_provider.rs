@@ -10,14 +10,16 @@ pub struct LlamaProvider {
     base_url: String,
     api_key: String,
     model: String,
+    model_family: String,
 }
 
 impl LlamaProvider {
-    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str, model: &str, model_family: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            model_family: model_family.to_string(),
         }
     }
 
@@ -27,6 +29,45 @@ impl LlamaProvider {
         // do not support temperature values other than 1.
         m.starts_with("o1-") || m.starts_with("o3-") || m == "o1" || m.contains("gpt-5")
     }
+}
+
+/// Sanitize system prompt content for local models.
+/// Some local models (especially abliterated/uncensored variants) produce very short
+/// or empty outputs when the system prompt contains:
+/// - HTML-like tags (e.g. `<think>`, `<tool_result>`) which clash with Gemma's `<start_of_turn>` markers
+/// - Complex negative instructions ("Do NOT do X") which overwhelm smaller models
+/// - Overly long/complex multi-part instructions
+///
+/// This function cleans up the system prompt while preserving its core meaning.
+fn sanitize_system_prompt_for_local(content: &str) -> String {
+    let mut result = content.to_string();
+
+    // 1. Strip angle-bracketed tags that could confuse the model's template parser.
+    //    Models like Gemma use <start_of_turn>/<end_of_turn> as special tokens,
+    //    so seeing other <...> patterns in content can cause premature EOS.
+    //    We preserve the text content but remove the angle brackets.
+    let tag_re = regex::Regex::new(r"<(/?\w[\w_-]*)>").unwrap();
+    result = tag_re.replace_all(&result, "`$1`").to_string();
+
+    // 2. Simplify negative instructions that cause small models to "shut down".
+    //    "Do NOT output X" gets interpreted by degraded models as "do not output".
+    //    Replace with positive framing that achieves the same goal.
+    result = result.replace(
+        "Do NOT output internal thoughts, `think` tags, or simulate tool usage.",
+        "Respond directly and concisely.",
+    );
+    result = result.replace(
+        "Do NOT output internal thoughts, <think> tags, or simulate tool usage.",
+        "Respond directly and concisely.",
+    );
+
+    // 3. Clean up double spaces and excessive punctuation from replacements
+    let multi_space_re = regex::Regex::new(r"  +").unwrap();
+    result = multi_space_re.replace_all(&result, " ").to_string();
+    let multi_period_re = regex::Regex::new(r"\.(\s*\.)+").unwrap();
+    result = multi_period_re.replace_all(&result, ".").to_string();
+
+    result.trim().to_string()
 }
 
 #[derive(Serialize)]
@@ -84,6 +125,7 @@ impl CompletionModel for LlamaProvider {
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
         // Construct messages
         let mut messages: Vec<serde_json::Value> = Vec::new();
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
 
         let mut push_msg = |role: &str, content: String| {
             // Try to parse content as JSON (multimodal)
@@ -166,17 +208,13 @@ impl CompletionModel for LlamaProvider {
             temperature: None,
             top_p: None,
             tools,
-            stop: Some(vec![
-                "<|im_start|>".to_string(),
-                "<|im_end|>".to_string(),
-                "<|endoftext|>".to_string(),
-                "<|user|>".to_string(),
-                "<|assistant|>".to_string(),
-                "user\n".to_string(),
-                "assistant\n".to_string(),
-                "&lt;|im_start|&gt;".to_string(),
-                "&lt;|im_end|&gt;".to_string(),
-            ]),
+            // Per-model-family stop tokens: prevents ChatML models (Ministral, Qwen)
+            // from hallucinating turns, while leaving Gemma and others to use native EOS.
+            stop: if is_local {
+                Some(crate::gguf::stop_tokens_for_family(&self.model_family))
+            } else {
+                None
+            },
         };
 
         let client = reqwest::Client::builder()
@@ -276,21 +314,32 @@ impl LlamaProvider {
         use futures::StreamExt;
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
 
         let mut push_msg = |role: &str, content: String| {
+            // For gemma family, sanitize system prompt content to avoid issues
+            // with abliterated models that produce empty/short outputs.
+            let effective_content = if is_local && role == "system" && self.model_family == "gemma"
+            {
+                sanitize_system_prompt_for_local(&content)
+            } else {
+                content
+            };
+
             // Try to parse content as JSON (multimodal)
-            let content_val =
-                if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                    json!(parsed)
-                } else {
-                    json!(content)
-                };
+            let content_val = if let Ok(parsed) =
+                serde_json::from_str::<Vec<serde_json::Value>>(&effective_content)
+            {
+                json!(parsed)
+            } else {
+                json!(effective_content)
+            };
 
             if role == "user" {
                 if let Some(last) = messages.last_mut() {
@@ -312,20 +361,10 @@ impl LlamaProvider {
         for msg in history {
             match msg.role.as_str() {
                 "system" => {
-                    // Use "system" role if not local
-                    let target_role = if self.base_url.contains("127.0.0.1")
-                        || self.base_url.contains("localhost")
-                    {
-                        "user"
-                    } else {
-                        "system"
-                    };
-
-                    if target_role == "user" {
-                        push_msg("user", format!("[SYSTEM INSTRUCTIONS]\n{}", msg.content));
-                    } else {
-                        push_msg("system", msg.content);
-                    }
+                    // Pass system messages through as-is.
+                    // Modern models (Gemma 3, Qwen, DeepSeek) support system role natively
+                    // via their GGUF templates. Remapping to user created broken double-user turns.
+                    push_msg("system", msg.content);
                 }
                 "tool" => {
                     // Turn 3: Fake Assistant acknowledgement
@@ -334,10 +373,13 @@ impl LlamaProvider {
                         "I have gathered the necessary information from the web.".to_string(),
                     );
                     // Turn 3.5: User Context Injection
+                    // Use backtick-delimited markers instead of angle-bracket tags.
+                    // Angle brackets like <function_results> confuse models that use
+                    // angle-bracket special tokens (e.g. Gemma's <start_of_turn>).
                     push_msg(
                         "user",
                         format!(
-                            "<function_results>\n{}\n</function_results>\n\n[INSTRUCTION]: Based entirely on the results above, please answer the user's question. Do not cite the 'system' or 'tool' directly, just give the answer.",
+                            "```function_results\n{}\n```\n\nBased entirely on the results above, please answer the user's question directly.",
                             msg.content
                         ),
                     );
@@ -349,9 +391,6 @@ impl LlamaProvider {
         }
         push_msg("user", prompt);
 
-        // For Cloud models (OpenAI/Anthropic compat), we should be careful with stop sequences
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
-
         let body = LlamaChatRequest {
             messages: messages.clone(),
             model: self.model.clone(),
@@ -359,18 +398,10 @@ impl LlamaProvider {
             temperature: None,
             top_p: None,
             tools: vec![],
+            // Per-model-family stop tokens: prevents ChatML models (Ministral, Qwen)
+            // from hallucinating turns, while leaving Gemma and others to use native EOS.
             stop: if is_local {
-                Some(vec![
-                    "<|im_start|>".to_string(),
-                    "<|im_end|>".to_string(),
-                    "<|endoftext|>".to_string(),
-                    "<|user|>".to_string(),
-                    "<|assistant|>".to_string(),
-                    "user\n".to_string(),
-                    "assistant\n".to_string(),
-                    "&lt;|im_start|&gt;".to_string(),
-                    "&lt;|im_end|&gt;".to_string(),
-                ])
+                Some(crate::gguf::stop_tokens_for_family(&self.model_family))
             } else {
                 None
             },
@@ -505,24 +536,27 @@ impl LlamaProvider {
         use futures::StreamExt;
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(45))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut final_messages = Vec::new();
+        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+
         for msg in messages {
             let mut m = msg.clone();
-            // Map "system" role if cloud
-            if !self.base_url.contains("127.0.0.1") && !self.base_url.contains("localhost") {
-                if m["role"] == "system" {
-                    m["role"] = json!("system");
-                }
-            } else {
-                if m["role"] == "system" {
-                    m["role"] = json!("user");
-                    if let Some(c) = m["content"].as_str() {
-                        m["content"] = json!(format!("[SYSTEM INSTRUCTIONS]\n{}", c));
+
+            // For gemma family, sanitize system prompt content to avoid issues
+            // with abliterated models that produce empty/short outputs.
+            if is_local && self.model_family == "gemma" {
+                if let Some(role) = m["role"].as_str() {
+                    if role == "system" {
+                        if let Some(content_str) = m["content"].as_str() {
+                            m["content"] = serde_json::Value::String(
+                                sanitize_system_prompt_for_local(content_str),
+                            );
+                        }
                     }
                 }
             }
@@ -539,8 +573,6 @@ impl LlamaProvider {
             final_messages.push(m);
         }
 
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
-
         let effective_temp = if self.is_reasoning_model() {
             None
         } else {
@@ -554,22 +586,19 @@ impl LlamaProvider {
             temperature: effective_temp,
             top_p: None,
             tools: vec![],
+            // Per-model-family stop tokens: prevents ChatML models (Ministral, Qwen)
+            // from hallucinating turns, while leaving Gemma and others to use native EOS.
             stop: if is_local {
-                Some(vec![
-                    "<|im_start|>".to_string(),
-                    "<|im_end|>".to_string(),
-                    "<|endoftext|>".to_string(),
-                    "<|user|>".to_string(),
-                    "<|assistant|>".to_string(),
-                    "<|end_of_text|>".to_string(),
-                    "<|eot_id|>".to_string(),
-                    "user\n".to_string(),
-                    "assistant\n".to_string(),
-                ])
+                Some(crate::gguf::stop_tokens_for_family(&self.model_family))
             } else {
                 None
             },
         };
+
+        // Debug: log the exact messages being sent
+        if let Ok(body_json) = serde_json::to_string_pretty(&body) {
+            info!("[llama_provider] REQUEST BODY:\n{}", body_json);
+        }
 
         info!(
             "[llama_provider] Sending request to model: {} at url: {}",

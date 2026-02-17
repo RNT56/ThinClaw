@@ -1689,7 +1689,7 @@ pub async fn openclaw_sync_local_llm(
 
     info!(
         "[openclaw] Syncing Local LLM config: {:?}",
-        local_llm.as_ref().map(|(p, _, _)| *p)
+        local_llm.as_ref().map(|(p, _, _, _)| *p)
     );
 
     // Regenerate config with new local_llm details
@@ -1747,7 +1747,7 @@ pub async fn start_gateway_core(
             if local_llm.is_some() {
                 info!(
                     "[openclaw] Local LLM config detected: {:?}",
-                    local_llm.as_ref().map(|(p, _, _)| *p)
+                    local_llm.as_ref().map(|(p, _, _, _)| *p)
                 );
                 break;
             }

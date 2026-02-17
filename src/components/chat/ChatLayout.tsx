@@ -138,8 +138,12 @@ export function ChatLayout() {
 
     const isCloudProvider = useMemo(() => userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== "local", [userCfg?.selected_chat_provider]);
 
-    // Poll openclaw gateway status
+    // Poll openclaw gateway status (only when in OpenClaw mode)
     useEffect(() => {
+        if (!isOpenClawMode) {
+            setOpenClawGatewayRunning(false);
+            return;
+        }
         const checkStatus = async () => {
             try {
                 const status = await openclawApi.getOpenClawStatus();
@@ -151,7 +155,7 @@ export function ChatLayout() {
         checkStatus();
         const interval = setInterval(checkStatus, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [isOpenClawMode]);
 
     // Listen for image generation progress
     useEffect(() => {
@@ -227,6 +231,14 @@ export function ChatLayout() {
 
     // Use memoized merged data for Virtuoso
     const virtuosoData = messages;
+
+    // Precompute lastUserIndex once (avoids O(n) scan per visible row in Virtuoso)
+    const lastUserIndex = useMemo(() => {
+        for (let i = virtuosoData.length - 1; i >= 0; i--) {
+            if (virtuosoData[i].role === 'user') return i;
+        }
+        return -1;
+    }, [virtuosoData]);
 
     // Keyboard shortcuts for Settings
     useEffect(() => {
@@ -1141,11 +1153,7 @@ export function ChatLayout() {
                                                 isUserScrolling.current = !atBottom;
                                             }}
                                             itemContent={(index, m) => {
-                                                const lastUserIndex = virtuosoData.map((msg, i) => ({ role: msg.role, index: i })).reverse().find(msg => msg.role === 'user')?.index ?? -1;
-
-                                                // Use ID-based tracking for animation skipping.
-                                                // If we have seen this ID before, skip the entry animation.
-                                                // This is robust against content changes (streaming) and slight persistence diffs.
+                                                // Use precomputed lastUserIndex (O(1) instead of O(n) per row)
                                                 const msgKey = m.id || "msg-" + index;
                                                 const shouldSkip = seenIds.current.has(msgKey);
                                                 if (!shouldSkip) {

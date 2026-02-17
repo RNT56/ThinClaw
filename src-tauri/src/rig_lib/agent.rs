@@ -29,11 +29,12 @@ impl RigManager {
         enable_web_search: bool,
         user_context: Option<String>,
         conversation_id: Option<String>,
+        model_family: Option<String>,
     ) -> Self {
         let api_key = token.unwrap_or_else(|| "sk-no-key-required".to_string());
 
         // Initialize custom provider
-        let provider = UnifiedProvider::new(kind, &base_url, &api_key, &model_name);
+        let provider = UnifiedProvider::new(kind, &base_url, &api_key, &model_name, model_family);
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut base_preamble = format!(

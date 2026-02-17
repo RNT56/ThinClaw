@@ -12,6 +12,7 @@ pub struct SidecarProcess {
     pub port: u16,
     pub token: String,
     pub context_size: u32,
+    pub model_family: String,
 }
 
 pub struct ChatServerOptions {
@@ -125,7 +126,7 @@ impl SidecarManager {
         let template_opt = match template_name.as_deref() {
             Some("llama3") => Some(crate::templates::LLAMA3_TEMPLATE),
             Some("mistral") => Some(crate::templates::MISTRAL_TEMPLATE),
-            Some("gemma") => Some(crate::templates::GEMMA_TEMPLATE),
+            Some("gemma") => None, // Let llama-server use native GGUF template
             Some("qwen") => Some(crate::templates::QWEN_TEMPLATE),
             Some("chatml") => Some(crate::templates::CHATML_TEMPLATE),
             Some("auto") => None, // Let llama-server detect from GGUF
@@ -134,7 +135,7 @@ impl SidecarManager {
                 match detected_family.as_str() {
                     "llama3" => Some(crate::templates::LLAMA3_TEMPLATE),
                     "mistral" => Some(crate::templates::MISTRAL_TEMPLATE),
-                    "gemma" => Some(crate::templates::GEMMA_TEMPLATE),
+                    "gemma" => None,     // Let llama-server handle Gemma natively (uses 'model' role)
                     "qwen" => Some(crate::templates::QWEN_TEMPLATE),
                     "deepseek" => None, // Let llama-server handle deepseek natively
                     "glm" => None,      // Let llama-server handle GLM natively
@@ -224,6 +225,11 @@ impl SidecarManager {
             "--cache-prompt".to_string(),
             "--slot-save-path".to_string(),
             cache_path_str,
+            // Performance: Flash Attention (Metal/CUDA) for faster inference
+            "--flash-attn".to_string(),
+            "on".to_string(),
+            // Performance: Continuous batching for better prompt processing throughput
+            "--cont-batching".to_string(),
         ];
 
         if mlock {
@@ -395,6 +401,7 @@ impl SidecarManager {
             port,
             token: token.clone(),
             context_size,
+            model_family: detected_family.clone(),
         });
 
         // Reset intentional stop flag for the new process lifecycle
@@ -482,6 +489,7 @@ impl SidecarManager {
             port,
             token: token.clone(),
             context_size: 4096, // Fixed for embedding
+            model_family: "none".into(),
         });
 
         Ok((port, token))
@@ -555,6 +563,7 @@ impl SidecarManager {
             port,
             token: token.clone(),
             context_size,
+            model_family: "none".into(),
         });
 
         Ok((port, token))
@@ -639,6 +648,7 @@ impl SidecarManager {
             port,
             token: token.clone(),
             context_size: 0,
+            model_family: "none".into(),
         });
 
         // Also update model path for legacy check
@@ -701,9 +711,9 @@ impl SidecarManager {
         *self.is_chat_stop_intentional.lock().unwrap() = val;
     }
 
-    pub fn get_chat_config(&self) -> Option<(u16, String, u32)> {
+    pub fn get_chat_config(&self) -> Option<(u16, String, u32, String)> {
         let guard = self.chat_process.lock().unwrap();
-        guard.as_ref().map(|p| (p.port, p.token.clone(), p.context_size))
+        guard.as_ref().map(|p| (p.port, p.token.clone(), p.context_size, p.model_family.clone()))
     }
 
     pub fn get_embedding_config(&self) -> Option<(u16, String)> {
@@ -1025,15 +1035,17 @@ pub struct ChatServerConfig {
     pub port: u16,
     pub token: String,
     pub context_size: u32,
+    pub model_family: String,
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn get_chat_server_config(state: State<'_, SidecarManager>) -> Option<ChatServerConfig> {
-    state.get_chat_config().map(|(port, token, context_size)| ChatServerConfig {
+    state.get_chat_config().map(|(port, token, context_size, model_family)| ChatServerConfig {
         port,
         token,
         context_size,
+        model_family,
     })
 }
 
