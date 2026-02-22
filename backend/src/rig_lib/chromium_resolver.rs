@@ -40,12 +40,12 @@ pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, 
         }
     }
 
-    // 2. Fallback for Tests / Dev (cwd is usually src-tauri or project root)
-    // In tests, CWD is src-tauri.
+    // 2. Fallback for Tests / Dev (cwd is usually backend/ or project root)
+    // In tests, CWD is backend/.
     // In dev run, CWD might be project root.
 
-    // Check relative to src-tauri/resources
-    let dev_paths = vec!["src-tauri/resources/chromium", "resources/chromium"];
+    // Check relative to backend/resources
+    let dev_paths = vec!["backend/resources/chromium", "resources/chromium"];
 
     for base in dev_paths {
         let path = std::path::Path::new(base).join(exec_path);
@@ -58,7 +58,7 @@ pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, 
     }
 
     Err(
-        "Could not find Chromium binary. Please run 'src-tauri/scripts/setup_chromium.sh'."
+        "Could not find Chromium binary. Please run 'backend/scripts/setup_chromium.sh'."
             .to_string(),
     )
 }

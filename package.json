@@ -5,18 +5,18 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
+    "dev": "cd frontend && vite",
+    "build": "cd frontend && tsc && vite build",
+    "preview": "cd frontend && vite preview",
     "tauri": "tauri",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage",
-    "setup:node": "node src-tauri/scripts/download_node.js",
-    "setup:chromium": "bash src-tauri/scripts/setup_chromium.sh",
-    "setup:ai": "node src-tauri/scripts/download_ai_binaries.js",
-    "setup:openclaw-engine": "cd src-tauri/openclaw-engine && npm install",
+    "test": "cd frontend && vitest run",
+    "test:watch": "cd frontend && vitest",
+    "test:ui": "cd frontend && vitest --ui",
+    "test:coverage": "cd frontend && vitest run --coverage",
+    "setup:node": "node backend/scripts/download_node.js",
+    "setup:chromium": "bash backend/scripts/setup_chromium.sh",
+    "setup:ai": "node backend/scripts/download_ai_binaries.js",
+    "setup:openclaw-engine": "cd backend/openclaw-engine && npm install",
     "setup:all": "npm run setup:node && npm run setup:chromium && npm run setup:ai && npm run setup:openclaw-engine"
   },
   "dependencies": {
@@ -71,5 +71,6 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^3.2.4"
-  }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

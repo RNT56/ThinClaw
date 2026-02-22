@@ -436,7 +436,7 @@ async fn run_inference(
 
     // Fallback for Dev Mode
     if let Ok(cwd) = std::env::current_dir() {
-        let dev_bin = cwd.join("src-tauri").join("bin");
+        let dev_bin = cwd.join("backend").join("bin");
         if dev_bin.exists() {
             bin_path = Some(dev_bin);
         }

@@ -18,7 +18,7 @@ pub async fn openclaw_deploy_remote(
     // Hack for Dev: use relative path from CWD or resource dir.
 
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-    // In dev: src-tauri/openclaw-engine/deploy-remote.sh
+    // In dev: backend/openclaw-engine/deploy-remote.sh
     // In prod: resources/openclaw-engine/deploy-remote.sh (if configured in tauri.conf.json resources)
 
     let mut script_path = resource_dir
@@ -29,7 +29,7 @@ pub async fn openclaw_deploy_remote(
     if !script_path.exists() {
         if let Ok(cwd) = std::env::current_dir() {
             let dev_path = cwd
-                .join("src-tauri")
+                .join("backend")
                 .join("openclaw-engine")
                 .join("deploy-remote.sh");
             if dev_path.exists() {

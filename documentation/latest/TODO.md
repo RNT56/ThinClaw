@@ -110,7 +110,7 @@
 
 ## 🔵 Repository Structure — Planned Refactor
 
-- [ ] **Reorganise project into `backend/` + `frontend/` top-level folders**  
+- [x] **Reorganise project into `backend/` + `frontend/` top-level folders** *(done 2026-02-22)*  
   The current mixed layout (Rust sources in `src-tauri/`, React sources in `src/` at root) makes the repository hard to navigate.  
   Goal: move everything into two clearly-named siblings.
 

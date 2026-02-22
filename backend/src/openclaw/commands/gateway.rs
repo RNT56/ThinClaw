@@ -7,8 +7,7 @@ use tracing::{info, warn};
 use super::super::ws_client::OpenClawWsClient;
 use super::types::*;
 use super::OpenClawManager;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Get OpenClaw status
 #[tauri::command]

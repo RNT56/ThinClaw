@@ -47,20 +47,20 @@ echo "Target asset: llama-${TAG_NAME}-${ASSET_SUFFIX}.zip"
 ASSET_NAME="llama-${TAG_NAME}-${ASSET_SUFFIX}.zip"
 DOWNLOAD_URL="https://github.com/ggerganov/llama.cpp/releases/download/${TAG_NAME}/${ASSET_NAME}"
 
-mkdir -p src-tauri/bin
+mkdir -p backend/bin
 
 echo "Downloading $DOWNLOAD_URL ..."
-curl -L -o "src-tauri/bin/$ASSET_NAME" "$DOWNLOAD_URL"
+curl -L -o "backend/bin/$ASSET_NAME" "$DOWNLOAD_URL"
 
 echo "Extracting..."
-mkdir -p "src-tauri/bin/temp"
-unzip -o "src-tauri/bin/$ASSET_NAME" -d "src-tauri/bin/temp"
+mkdir -p "backend/bin/temp"
+unzip -o "backend/bin/$ASSET_NAME" -d "backend/bin/temp"
 
 # Find the binary
 if [[ "$OS" == *"MINGW"* ]] || [[ "$OS" == *"CYGWIN"* ]] || [[ "$OS" == *"MSYS"* ]]; then
-    FOUND_BIN=$(find src-tauri/bin/temp -name "llama-server.exe" -type f | head -n 1)
+    FOUND_BIN=$(find backend/bin/temp -name "llama-server.exe" -type f | head -n 1)
 else
-    FOUND_BIN=$(find src-tauri/bin/temp -name "llama-server" -type f | head -n 1)
+    FOUND_BIN=$(find backend/bin/temp -name "llama-server" -type f | head -n 1)
 fi
 
 if [ -z "$FOUND_BIN" ]; then
@@ -68,34 +68,34 @@ if [ -z "$FOUND_BIN" ]; then
     exit 1
 fi
 
-echo "Moving $FOUND_BIN to src-tauri/bin/$TARGET_NAME"
-mv "$FOUND_BIN" "src-tauri/bin/$TARGET_NAME"
+echo "Moving $FOUND_BIN to backend/bin/$TARGET_NAME"
+mv "$FOUND_BIN" "backend/bin/$TARGET_NAME"
 
 # Checks for associated libraries (dylibs)
 if [ "$OS" = "Darwin" ]; then
-    FOUND_LIB=$(find src-tauri/bin/temp -name "libllama.dylib" -type f | head -n 1)
+    FOUND_LIB=$(find backend/bin/temp -name "libllama.dylib" -type f | head -n 1)
     if [ ! -z "$FOUND_LIB" ]; then
-        echo "Found libllama.dylib, moving to src-tauri/bin/"
-        cp "$FOUND_LIB" "src-tauri/bin/libllama.dylib"
+        echo "Found libllama.dylib, moving to backend/bin/"
+        cp "$FOUND_LIB" "backend/bin/libllama.dylib"
         
         # Try to fix rpath using install_name_tool
         if command -v install_name_tool &> /dev/null; then
             echo "Fixing rpath for libllama.dylib..."
-            install_name_tool -add_rpath "@executable_path" "src-tauri/bin/$TARGET_NAME" || true
-            install_name_tool -change "@rpath/libllama.dylib" "@executable_path/libllama.dylib" "src-tauri/bin/$TARGET_NAME" || true
+            install_name_tool -add_rpath "@executable_path" "backend/bin/$TARGET_NAME" || true
+            install_name_tool -change "@rpath/libllama.dylib" "@executable_path/libllama.dylib" "backend/bin/$TARGET_NAME" || true
         fi
     fi
     # Also look for ggml libraries if split
-    find src-tauri/bin/temp -name "libggml*.dylib" -type f -exec cp {} "src-tauri/bin/" \;
+    find backend/bin/temp -name "libggml*.dylib" -type f -exec cp {} "backend/bin/" \;
 fi
 
 if [[ "$OS" != *"MINGW"* ]] && [[ "$OS" != *"CYGWIN"* ]] && [[ "$OS" != *"MSYS"* ]]; then
-    chmod +x "src-tauri/bin/$TARGET_NAME"
+    chmod +x "backend/bin/$TARGET_NAME"
 fi
 
 # Cleanup
-rm "src-tauri/bin/$ASSET_NAME"
-rm -rf "src-tauri/bin/temp"
-rm -rf "src-tauri/bin/__MACOSX"
+rm "backend/bin/$ASSET_NAME"
+rm -rf "backend/bin/temp"
+rm -rf "backend/bin/__MACOSX"
 
-echo "Done! Binary setup at src-tauri/bin/$TARGET_NAME"
+echo "Done! Binary setup at backend/bin/$TARGET_NAME"

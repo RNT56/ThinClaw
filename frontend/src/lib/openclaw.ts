@@ -2,7 +2,7 @@
  * OpenClaw API - wrappers for Tauri commands
  * 
  * These wrappers call the openclaw Tauri commands. The types match
- * the Rust structs in src-tauri/src/openclaw/commands.rs
+ * the Rust structs in backend/src/openclaw/commands.rs
  */
 
 import { invoke } from '@tauri-apps/api/core';

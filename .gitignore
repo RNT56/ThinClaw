@@ -12,11 +12,11 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Rust / Tauri
-src-tauri/target/
-src-tauri/scrappy-mcp-tools/target/
-src-tauri/gen/
-src-tauri/bin/
-src-tauri/resources/chromium/
+backend/target/
+backend/scrappy-mcp-tools/target/
+backend/gen/
+backend/bin/
+backend/resources/chromium/
 
 # Generated Binaries & Heavy Assets
 binaries/

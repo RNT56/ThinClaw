@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 CHROMIUM_REVISION="1313161"
-TARGET_DIR="src-tauri/resources/chromium"
+TARGET_DIR="backend/resources/chromium"
 mkdir -p "$TARGET_DIR"
 
 # Detect Architecture

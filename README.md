@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src-tauri/icons/128x128@2x.png" width="160" alt="Scrappy Logo">
+  <img src="backend/icons/128x128@2x.png" width="160" alt="Scrappy Logo">
 </p>
 
 # Scrappy: The Open-Source AI Command Center
@@ -83,7 +83,7 @@ graph TD
         Stream[OpenClaw Stream Hook]
     end
     
-    subgraph Backend [Rust Core src-tauri]
+    subgraph Backend [Rust Core backend/]
         Tauri[Tauri v2 Main]
         Manager[Sidecar Manager]
         Gateway[Gateway Controller]
@@ -116,7 +116,7 @@ The heart of Scrappy's autonomous agency. Based on the **Pi agent runtime**, it 
 -   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, and `skill` extensions.
 -   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking".
 
-### 2. The Native Rust Agent (`src-tauri/src/rig_lib`)
+### 2. The Native Rust Agent (`backend/src/rig_lib`)
 A specialized agent engine built using **Rig**. It focuses on performance and reliability for core features:
 -   **RAG Integration**: Direct access to the `usearch` vector store for context injection.
 -   **Deep Search**: Utilizes `DDGSearchTool` and `ScrapePageTool` for gathering real-time information.
@@ -149,7 +149,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 
 ### 4. Management & Visibility
 - **Settings Tab**: Manage API keys, model selection, gateway connection modes, and customize your **Spotlight Global Shortcut**.
-- **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `src-tauri/src/personas.rs`.
+- **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `backend/src/personas.rs`.
 - **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
 
 ### 5. Cloud Inference Providers
@@ -165,7 +165,7 @@ Scrappy 2026 features native integration with the world's most powerful inferenc
 
 ## Project Structure
 
-### Backend (`src-tauri/`)
+### Backend (`backend/`)
 -   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
 -   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
 -   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium).
@@ -182,7 +182,7 @@ Scrappy 2026 features native integration with the world's most powerful inferenc
 ## Developer Guide: Extending Scrappy
 
 ### Adding a New Prompt Template
-Templates are defined in `src-tauri/src/templates.rs`. To add one:
+Templates are defined in `backend/src/templates.rs`. To add one:
 1.  Define a new `pub const` with your Jinja-like template.
 2.  Add it to the renderer logic in the model manager.
 
@@ -193,8 +193,8 @@ Tools are implemented in the **OpenClaw** engine:
 3.  The UI will automatically handle rendering based on the ACP metadata.
 
 ### Adding a Native Rust Tool (Rig)
-1.  Implement the `Tool` trait in `src-tauri/src/rig_lib/tools/`.
-2.  Register the tool in `RigManager::new` within `src-tauri/src/rig_lib/agent.rs`.
+1.  Implement the `Tool` trait in `backend/src/rig_lib/tools/`.
+2.  Register the tool in `RigManager::new` within `backend/src/rig_lib/agent.rs`.
 3.  Ensure the tool emits progress events to the UI if long-running.
 
 ---
@@ -213,7 +213,7 @@ Tools are implemented in the **OpenClaw** engine:
 Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
 1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check the `src-tauri/src/openclaw/commands.rs` and `rig_lib/agent.rs` for backend extension points.
+2.  Check the `backend/src/openclaw/commands.rs` and `rig_lib/agent.rs` for backend extension points.
 
 ---
 

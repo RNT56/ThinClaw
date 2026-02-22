@@ -36,7 +36,7 @@ This pipeline ensures that Scrappy doesn't just "talk about" the web, but actual
 ### 🛠️ How to Create & Register a Native Tool
 
 #### 1. Implement the `Tool` Trait
-Create a new file in `src-tauri/src/rig_lib/tools/your_tool.rs`:
+Create a new file in `backend/src/rig_lib/tools/your_tool.rs`:
 
 ```rust
 use rig::tool::Tool;
@@ -75,7 +75,7 @@ impl Tool for MyTool {
 ```
 
 #### 2. Register in the Agent
-Modify `src-tauri/src/rig_lib/agent.rs` inside `RigManager::new`:
+Modify `backend/src/rig_lib/agent.rs` inside `RigManager::new`:
 
 ```rust
 let agent = builder

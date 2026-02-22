@@ -14,7 +14,7 @@ We welcome contributions from the community! Whether you are fixing a bug, addin
 ## Development Workflow
 
 - **Type Safety**: We use TypeScript strictly. Run `npx tsc --noEmit` locally before submitting.
-- **Backend**: Rust code in `src-tauri` should follow standard idioms. Use `cargo check` to verify.
+- **Backend**: Rust code in `backend/` should follow standard idioms. Use `cargo check` to verify.
 - **Aesthetics**: Scrappy is designed to be premium and professional. Ensure new UI components follow the "Glassmorphism" and "Rich Dark Mode" aesthetic guidelines.
 
 ## Bug Reports

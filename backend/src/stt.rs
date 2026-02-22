@@ -93,7 +93,7 @@ pub async fn transcribe_audio(
         {
             let mut lib_path = bin_dir.to_string_lossy().to_string();
             if let Ok(cwd) = std::env::current_dir() {
-                let dev_bin = cwd.join("src-tauri/bin");
+                let dev_bin = cwd.join("backend/bin");
                 if dev_bin.exists() {
                     lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
                 }

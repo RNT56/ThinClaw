@@ -105,7 +105,7 @@ While Scrappy can run fully local AI, its advanced features benefit from the fol
 
 - **"App is Damaged" / Gatekeeper**: If binaries won't run due to security settings:
   ```bash
-  xattr -dr com.apple.quarantine src-tauri/bin/
+  xattr -dr com.apple.quarantine backend/bin/
   ```
 - **Dependencies Error**: If a binary fails to start, ensure you've run `npm run setup:all` to fetch the required `.dylib` files.
 - **Metal Performance**: If inference feels slow, verify that your model is fully loaded into GPU layers (configurable in Settings).

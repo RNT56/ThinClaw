@@ -5,11 +5,11 @@
 /// stdout when invoked with `--output_raw`.
 ///
 /// The binary is registered in `tauri.conf.json` as `"bin/tts"` and Tauri
-/// resolves it to `src-tauri/bin/tts-aarch64-apple-darwin` (or the
+/// resolves it to `backend/bin/tts-aarch64-apple-darwin` (or the
 /// appropriate target-triple suffix) at runtime.  To enable TTS, replace the
 /// placeholder file with the real Piper binary:
-///   cp /path/to/piper src-tauri/bin/tts-aarch64-apple-darwin
-///   chmod +x src-tauri/bin/tts-aarch64-apple-darwin
+///   cp /path/to/piper backend/bin/tts-aarch64-apple-darwin
+///   chmod +x backend/bin/tts-aarch64-apple-darwin
 ///
 /// Frontend workflow:
 ///   1. User clicks "Read Aloud" on an assistant bubble.
@@ -53,7 +53,7 @@ pub async fn tts_synthesize(
     let mut command = app
         .shell()
         .sidecar("bin/tts")
-        .map_err(|e| format!("TTS binary not found: {e}. Expected at src-tauri/bin/tts-aarch64-apple-darwin — replace with the Piper binary."))?;
+        .map_err(|e| format!("TTS binary not found: {e}. Expected at backend/bin/tts-aarch64-apple-darwin — replace with the Piper binary."))?;
 
     // Set DYLD_LIBRARY_PATH on macOS so the binary can find bundled shared libs
     #[cfg(target_os = "macos")]
@@ -63,7 +63,7 @@ pub async fn tts_synthesize(
             let mut lib_path = bin_dir.to_string_lossy().to_string();
 
             if let Ok(cwd) = std::env::current_dir() {
-                let dev_bin = cwd.join("src-tauri/bin");
+                let dev_bin = cwd.join("backend/bin");
                 if dev_bin.exists() {
                     lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
                 }

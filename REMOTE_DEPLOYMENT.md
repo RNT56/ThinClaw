@@ -25,7 +25,7 @@ It handles:
 From the project root:
 
 ```bash
-./src-tauri/openclaw-engine/deploy-remote.sh
+./backend/openclaw-engine/deploy-remote.sh
 ```
 
 Follow the prompts:
@@ -51,7 +51,7 @@ Once installed, your server will join your Tailscale network.
 ### 1. Transfer Files
 Copy `src-tauri/openclaw-engine` to your server:
 ```bash
-scp -r src-tauri/openclaw-engine user@your-server-ip:~/openclaw-agent
+scp -r backend/openclaw-engine user@your-server-ip:~/openclaw-agent
 ```
 
 ### 2. Start the Container
