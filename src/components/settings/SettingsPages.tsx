@@ -1,14 +1,18 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import * as openclaw from "../../lib/openclaw";
-import { ModelBrowser } from './ModelBrowser';
+import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { PersonaTab } from './PersonaTab';
 import { PersonalizationTab } from './PersonalizationTab';
 import { SlackTab } from './SlackTab';
 import { TelegramTab } from './TelegramTab';
-import { GatewayTab } from './GatewayTab';
-import { SecretsTab } from './SecretsTab';
 import { ChatProviderTab } from './ChatProviderTab';
 import { SettingsPage } from './SettingsSidebar';
+
+// Heavy tabs — code-split so they don't inflate the initial bundle chunk.
+// SecretsTab ~64KB, GatewayTab ~68KB, ModelBrowser ~63KB
+const ModelBrowser = lazy(() => import('./ModelBrowser').then(m => ({ default: m.ModelBrowser })));
+const GatewayTab = lazy(() => import('./GatewayTab').then(m => ({ default: m.GatewayTab })));
+const SecretsTab = lazy(() => import('./SecretsTab').then(m => ({ default: m.SecretsTab })));
 import {
     Cpu,
     Server,
@@ -30,7 +34,7 @@ import {
     FlaskConical
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
-import { useState, useEffect, useCallback } from 'react';
+
 import { commands, SidecarStatus, GGUFMetadata, Result } from '../../lib/bindings';
 import { toast } from 'sonner';
 import { cn, unwrap } from '../../lib/utils';
@@ -161,7 +165,7 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                     <PageHeader page={activePage} />
 
                     <div className="mt-8">
-                        {activePage === 'models' && <ModelBrowser />}
+                        {activePage === 'models' && <Suspense fallback={<TabSkeleton />}><ModelBrowser /></Suspense>}
                         {activePage === 'persona' && <PersonaTab />}
                         {activePage === 'personalization' && <PersonalizationTab />}
                         {activePage === 'server' && <ServerSettings />}
@@ -169,12 +173,23 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'appearance' && <AppearanceSettings />}
                         {activePage === 'openclaw-slack' && <SlackTab />}
                         {activePage === 'openclaw-telegram' && <TelegramTab />}
-                        {activePage === 'openclaw-gateway' && <GatewayTab />}
-                        {activePage === 'secrets' && <SecretsTab />}
+                        {activePage === 'openclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
+                        {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
                         {activePage === 'inference' && <ChatProviderTab />}
                     </div>
                 </motion.div>
             </AnimatePresence>
+        </div>
+    );
+}
+
+/** Minimal loading skeleton shown while a lazy tab chunk is being fetched. */
+function TabSkeleton() {
+    return (
+        <div className="space-y-4 animate-pulse pt-2">
+            {[1, 2, 3].map(i => (
+                <div key={i} className="h-20 rounded-xl bg-muted/40 border border-border/30" />
+            ))}
         </div>
     );
 }

@@ -345,7 +345,7 @@ pub async fn edit_message(
 pub async fn delete_all_history(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
-    vector_store: State<'_, crate::vector_store::VectorStore>,
+    vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
 ) -> Result<(), String> {
     println!("[history] delete_all_history: clearing database...");
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -391,8 +391,8 @@ pub async fn delete_all_history(
         .map_err(|e| format!("failed to commit transaction: {}", e))?;
     println!("[history] database transaction committed");
 
-    // 2. Reset Vector Store
-    vector_store.reset().map_err(|e| e.to_string())?;
+    // 2. Reset all Vector Store indices
+    vector_manager.reset_all().map_err(|e| e.to_string())?;
 
     // 3. Clear Files
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -409,6 +409,6 @@ pub async fn delete_all_history(
         fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
     }
 
-    println!("[history] All history deleted and vector store reset.");
+    println!("[history] All history deleted and vector stores reset.");
     Ok(())
 }

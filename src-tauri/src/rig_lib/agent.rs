@@ -45,17 +45,32 @@ Current Date: {}
         );
 
         if enable_web_search {
-            base_preamble.push_str("
-**GROUNDED RESEARCH MODE**: 
-1. **ALWAYS SEARCH FOR FACTS**: If the user's query requires any factual information, news, data, or current events, you MUST use `web_search`. Smaller models must rely on tools for all factual claims.
-2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`. Find out what the user really wants.
-3. **GREETINGS EXCEPTION**: If the user only says 'Hello', 'Hey', 'Hi' or similar without a request, DO NOT call tools. Reply naturally and ask what they would like to research.
+            base_preamble.push_str(
+                "
+**RESEARCH MODE**:
+You have access to `web_search` for looking up real-time information. Use it wisely.
+
+**REPLY DIRECTLY (NO tools) for**:
+- Greetings: Hello, Hey, Hi, How are you, etc.
+- Questions about yourself: Who are you, What can you do, etc.
+- Code / programming: Write, debug, explain code
+- Creative writing: Stories, poems, essays
+- General knowledge you are confident about: Math, science concepts, history, definitions
+- Opinions, advice, brainstorming
+- Follow-up conversation that does not need new data
+
+**USE `web_search` ONLY for**:
+- Today's news, current events, or anything that changes daily
+- Real-time data: stock prices, weather, sports scores, exchange rates
+- Specific entities you are genuinely unsure about (recent people, companies, products)
+- User explicitly asks to 'search', 'look up', or 'find' something
 
 Start your response with a clear thought:
-'Thought: User asked for current events. This requires Research. I will formalize a query and search.'
+'Thought: User said hello. This is a greeting. I will reply directly.'
 or
-'Thought: User said hello. This is just a greeting. I will reply directly.'
-");
+'Thought: User asked about today's stock market. This needs real-time data. I will search.'
+",
+            );
         } else {
             base_preamble.push_str("
 CORE RULES:

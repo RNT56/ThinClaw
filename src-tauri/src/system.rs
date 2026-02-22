@@ -33,7 +33,7 @@ pub struct SystemSpecs {
 #[command]
 #[specta::specta]
 pub fn get_system_specs() -> SystemSpecs {
-    let mut sys = get_sys().lock().unwrap();
+    let mut sys = get_sys().lock().unwrap_or_else(|e| e.into_inner());
 
     // Refresh CPU usage
     sys.refresh_cpu();

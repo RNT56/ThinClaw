@@ -21,6 +21,7 @@ use super::normalizer::{self, UiEvent};
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use pkcs8::DecodePrivateKey;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 /// Client errors
 #[derive(Debug, Error)]
@@ -79,6 +80,10 @@ pub struct OpenClawWsClient {
 
     /// Track connection attempts to reduce log noise during initial startup
     connection_attempts: u32,
+
+    /// Optional liveness flag from the gateway engine process.
+    /// When Some and loads false, the engine has exited — stop retrying.
+    gateway_alive: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Handle for sending commands to the WS client
@@ -348,6 +353,7 @@ impl OpenClawWsClient {
         public_key_pem: Option<String>,
         ui_tx: mpsc::Sender<UiEvent>,
         mcp_handler: std::sync::Arc<super::ipc::McpRequestHandler>,
+        gateway_alive: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> (Self, OpenClawWsHandle) {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
@@ -363,6 +369,7 @@ impl OpenClawWsClient {
             pending: HashMap::new(),
             running: true,
             connection_attempts: 0,
+            gateway_alive,
         };
 
         let handle = OpenClawWsHandle { cmd_tx };
@@ -376,6 +383,23 @@ impl OpenClawWsClient {
         let max_backoff = Duration::from_secs(10);
 
         while self.running {
+            // Check if the local gateway engine process is still alive.
+            // If it has exited, stop retrying — there's nothing to connect to.
+            if let Some(ref alive_flag) = self.gateway_alive {
+                if !alive_flag.load(AtomicOrdering::Relaxed) {
+                    info!(
+                        "[openclaw] Gateway engine process has stopped. WS client will not retry."
+                    );
+                    let _ = self
+                        .ui_tx
+                        .send(UiEvent::Disconnected {
+                            reason: "Gateway engine process has exited".to_string(),
+                        })
+                        .await;
+                    break;
+                }
+            }
+
             self.connection_attempts += 1;
 
             match self.run_once().await {
@@ -403,6 +427,15 @@ impl OpenClawWsClient {
                             reason: e.to_string(),
                         })
                         .await;
+
+                    // Before sleeping, re-check if engine is still alive
+                    if let Some(ref alive_flag) = self.gateway_alive {
+                        if !alive_flag.load(AtomicOrdering::Relaxed) {
+                            info!("[openclaw] Gateway engine exited during reconnect backoff. Stopping WS client.");
+                            break;
+                        }
+                    }
+
                     tokio::time::sleep(backoff).await;
                     backoff = std::cmp::min(max_backoff, backoff * 2);
                 }

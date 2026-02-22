@@ -1,0 +1,436 @@
+//! Configuration types and struct definitions for OpenClawEngine
+//!
+//! Contains all data structures used for configuration management,
+//! including identity, engine config, and connector configs.
+
+pub const OPENCLAW_VERSION: &str = "2026.2.14";
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+pub struct CustomSecret {
+    pub id: String,
+    pub name: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub token: Option<String>,
+    pub mode: String, // "local" | "remote"
+    #[serde(default)]
+    pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenClawIdentity {
+    pub device_id: String,
+    pub auth_token: String,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub anthropic_granted: bool,
+    #[serde(default)]
+    pub brave_search_api_key: Option<String>,
+    #[serde(default)]
+    pub brave_granted: bool,
+    #[serde(default)]
+    pub huggingface_token: Option<String>,
+    #[serde(default)]
+    pub huggingface_granted: bool,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    #[serde(default)]
+    pub openai_granted: bool,
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter_granted: bool,
+    #[serde(default)]
+    pub profiles: Vec<AgentProfile>,
+    #[serde(default)]
+    pub gateway_mode: String,
+    #[serde(default)]
+    pub remote_url: Option<String>,
+    #[serde(default)]
+    pub remote_token: Option<String>,
+    #[serde(default)]
+    pub custom_secrets: Vec<CustomSecret>,
+    #[serde(default)]
+    pub node_host_enabled: bool,
+    #[serde(default)]
+    pub local_inference_enabled: bool,
+    #[serde(default)]
+    pub expose_inference: bool,
+    #[serde(default)]
+    pub setup_completed: bool,
+    #[serde(default)]
+    pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub gemini_granted: bool,
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    #[serde(default)]
+    pub groq_granted: bool,
+    #[serde(default)]
+    pub selected_cloud_brain: Option<String>,
+    #[serde(default)]
+    pub selected_cloud_model: Option<String>,
+    #[serde(default)]
+    pub auto_start_gateway: bool,
+    #[serde(default)]
+    pub dev_mode_wizard: bool,
+    #[serde(default)]
+    pub custom_llm_url: Option<String>,
+    #[serde(default)]
+    pub custom_llm_key: Option<String>,
+    #[serde(default)]
+    pub custom_llm_model: Option<String>,
+    #[serde(default)]
+    pub custom_llm_enabled: bool,
+    #[serde(default)]
+    pub enabled_cloud_providers: Vec<String>,
+    /// Per-provider enabled model IDs. Only these models are written to the engine config.
+    /// Key = provider name ("anthropic", "openai", etc.), Value = list of allowed model IDs.
+    #[serde(default)]
+    pub enabled_cloud_models: HashMap<String, Vec<String>>,
+    // --- Implicit cloud provider keys ---
+    #[serde(default)]
+    pub xai_api_key: Option<String>,
+    #[serde(default)]
+    pub xai_granted: bool,
+    #[serde(default)]
+    pub venice_api_key: Option<String>,
+    #[serde(default)]
+    pub venice_granted: bool,
+    #[serde(default)]
+    pub together_api_key: Option<String>,
+    #[serde(default)]
+    pub together_granted: bool,
+    #[serde(default)]
+    pub moonshot_api_key: Option<String>,
+    #[serde(default)]
+    pub moonshot_granted: bool,
+    #[serde(default)]
+    pub minimax_api_key: Option<String>,
+    #[serde(default)]
+    pub minimax_granted: bool,
+    #[serde(default)]
+    pub nvidia_api_key: Option<String>,
+    #[serde(default)]
+    pub nvidia_granted: bool,
+    #[serde(default)]
+    pub qianfan_api_key: Option<String>,
+    #[serde(default)]
+    pub qianfan_granted: bool,
+    #[serde(default)]
+    pub mistral_api_key: Option<String>,
+    #[serde(default)]
+    pub mistral_granted: bool,
+    #[serde(default)]
+    pub xiaomi_api_key: Option<String>,
+    #[serde(default)]
+    pub xiaomi_granted: bool,
+    // --- Amazon Bedrock (uses AWS credentials, not a single API key) ---
+    #[serde(default)]
+    pub bedrock_access_key_id: Option<String>,
+    #[serde(default)]
+    pub bedrock_secret_access_key: Option<String>,
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+    #[serde(default)]
+    pub bedrock_granted: bool,
+}
+
+/// OpenClaw configuration manager
+#[derive(Clone)]
+pub struct OpenClawConfig {
+    /// Base directory for OpenClaw state
+    pub base_dir: PathBuf,
+    /// Persistent device ID for protocol handshake
+    pub device_id: String,
+    /// Generated auth token for gateway
+    pub auth_token: String,
+    /// Anthropic API key for agents
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_granted: bool,
+    pub brave_search_api_key: Option<String>,
+    pub brave_granted: bool,
+    pub huggingface_token: Option<String>,
+    pub huggingface_granted: bool,
+    pub openai_api_key: Option<String>,
+    pub openai_granted: bool,
+    pub openrouter_api_key: Option<String>,
+    pub openrouter_granted: bool,
+    pub gemini_api_key: Option<String>,
+    pub gemini_granted: bool,
+    pub groq_api_key: Option<String>,
+    pub groq_granted: bool,
+    /// Configured agent profiles (local + remotes)
+    pub profiles: Vec<AgentProfile>,
+    /// Gateway port
+    pub port: u16,
+    /// Gateway mode (local or remote)
+    pub gateway_mode: String,
+    /// Remote gateway URL
+    pub remote_url: Option<String>,
+    /// Remote gateway token
+    pub remote_token: Option<String>,
+    /// Ed25519 Private Key (PEM) for signing
+    pub private_key: Option<String>,
+    /// Ed25519 Public Key (PEM)
+    pub public_key: Option<String>,
+    /// Custom user-added secrets
+    pub custom_secrets: Vec<CustomSecret>,
+    /// Node host (OS automation) enabled
+    pub node_host_enabled: bool,
+    pub local_inference_enabled: bool,
+    /// Expose inference server to network (0.0.0.0)
+    pub expose_inference: bool,
+    /// Whether the user has completed the onboarding wizard
+    pub setup_completed: bool,
+    pub selected_cloud_brain: Option<String>,
+    pub selected_cloud_model: Option<String>,
+    pub auto_start_gateway: bool,
+    pub dev_mode_wizard: bool,
+    pub custom_llm_url: Option<String>,
+    pub custom_llm_key: Option<String>,
+    pub custom_llm_model: Option<String>,
+    pub custom_llm_enabled: bool,
+    pub enabled_cloud_providers: Vec<String>,
+    /// Per-provider enabled models — ONLY these models are written to engine config.
+    /// This is the hard allowlist preventing unexpected costs.
+    pub enabled_cloud_models: HashMap<String, Vec<String>>,
+    /// Transient: model family detected from GGUF (not persisted, set before generate_config)
+    pub local_model_family: Option<String>,
+    // --- Implicit cloud provider keys ---
+    pub xai_api_key: Option<String>,
+    pub xai_granted: bool,
+    pub venice_api_key: Option<String>,
+    pub venice_granted: bool,
+    pub together_api_key: Option<String>,
+    pub together_granted: bool,
+    pub moonshot_api_key: Option<String>,
+    pub moonshot_granted: bool,
+    pub minimax_api_key: Option<String>,
+    pub minimax_granted: bool,
+    pub nvidia_api_key: Option<String>,
+    pub nvidia_granted: bool,
+    pub qianfan_api_key: Option<String>,
+    pub qianfan_granted: bool,
+    pub mistral_api_key: Option<String>,
+    pub mistral_granted: bool,
+    pub xiaomi_api_key: Option<String>,
+    pub xiaomi_granted: bool,
+    // --- Amazon Bedrock ---
+    pub bedrock_access_key_id: Option<String>,
+    pub bedrock_secret_access_key: Option<String>,
+    pub bedrock_region: Option<String>,
+    pub bedrock_granted: bool,
+}
+
+/// Slack connector configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackConfig {
+    pub enabled: bool,
+    #[serde(rename = "botToken", skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    #[serde(rename = "appToken", skip_serializing_if = "Option::is_none")]
+    pub app_token: Option<String>,
+    #[serde(rename = "dmPolicy", default = "default_dm_policy")]
+    pub dm_policy: String,
+    /// Must be an object, not null
+    pub channels: serde_json::Value,
+}
+
+pub(crate) fn default_dm_policy() -> String {
+    "pairing".into()
+}
+
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: None,
+            app_token: None,
+            dm_policy: "pairing".into(),
+            channels: serde_json::json!({}),
+        }
+    }
+}
+
+/// Telegram connector configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    #[serde(rename = "botToken", skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    #[serde(rename = "dmPolicy")]
+    pub dm_policy: String,
+    #[serde(default)]
+    pub groups: TelegramGroupsConfig,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: None,
+            dm_policy: "pairing".into(),
+            groups: TelegramGroupsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TelegramGroupsConfig {
+    #[serde(rename = "*", default)]
+    pub wildcard: TelegramGroupConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramGroupConfig {
+    #[serde(rename = "requireMention")]
+    pub require_mention: bool,
+}
+
+impl Default for TelegramGroupConfig {
+    fn default() -> Self {
+        Self {
+            require_mention: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ToolsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenClawEngineConfig {
+    pub gateway: GatewayConfig,
+    pub discovery: DiscoveryConfig,
+    pub agents: AgentsConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<ModelsConfig>,
+    pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub meta: MetaConfig,
+}
+
+impl OpenClawEngineConfig {
+    pub fn get_local_llm_config(&self) -> Option<(u16, String, u32, String)> {
+        let models = self.models.as_ref()?;
+        let local = models.providers.get("local")?;
+
+        // Extract port from baseUrl (http://127.0.0.1:PORT)
+        let base_url = local.get("baseUrl")?.as_str()?;
+        let port = base_url.split(':').last()?.trim_matches('/').parse().ok()?;
+
+        let api_key = local
+            .get("apiKey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Context window from models[0]
+        let models_list = local.get("models")?.as_array()?;
+        let context_size = models_list.get(0)?.get("contextWindow")?.as_u64()? as u32;
+
+        // Model family is not stored in config JSON, default to chatml
+        Some((port, api_key, context_size, "chatml".into()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelsConfig {
+    #[serde(default)]
+    pub providers: serde_json::Map<String, serde_json::Value>,
+    /// Bedrock automatic model discovery (see docs.openclaw.ai/providers/bedrock)
+    #[serde(
+        default,
+        rename = "bedrockDiscovery",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bedrock_discovery: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MetaConfig {
+    #[serde(rename = "lastTouchedVersion")]
+    pub last_touched_version: String,
+    #[serde(rename = "lastTouchedAt")]
+    pub last_touched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    pub defaults: AgentDefaults,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDefaults {
+    pub workspace: String,
+    /// Primary model selection: `{ "primary": "provider/model", "fallbacks": [...] }`
+    /// See: https://docs.openclaw.ai/concepts/models#how-model-selection-works
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<serde_json::Value>,
+    /// Model allowlist: only models listed here can be used by the agent.
+    /// Format: `{ "provider/model-id": {} }`. Empty map = allow all.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    #[serde(default = "default_gateway_mode")]
+    pub mode: String,
+    pub bind: String,
+    pub port: u16,
+    pub auth: AuthConfig,
+}
+
+pub fn default_gateway_mode() -> String {
+    "local".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    pub mode: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    pub mdns: MdnsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MdnsConfig {
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelsConfig {
+    pub slack: SlackConfig,
+    pub telegram: TelegramConfig,
+}

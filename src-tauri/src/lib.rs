@@ -73,11 +73,13 @@ pub mod process_tracker;
 pub mod projects;
 pub mod rag;
 pub mod reranker;
+pub mod rig_cache;
 pub mod rig_lib;
 pub mod sidecar;
 pub mod stt;
 pub mod system;
 pub mod templates;
+pub mod tts;
 pub mod vector_store;
 pub mod web_search;
 
@@ -109,6 +111,7 @@ pub fn run() {
         sidecar::start_image_server,
         sidecar::start_tts_server,
         sidecar::cancel_generation,
+        tts::tts_synthesize,
         web_search::check_web_search,
         image_gen::generate_image,
         stt::transcribe_audio,
@@ -254,7 +257,7 @@ pub fn run() {
     #[cfg(debug_assertions)]
     specta_builder
         .export(
-            specta_typescript::Typescript::default().header("// @ts-nocheck\n"),
+            specta_typescript::Typescript::default(),
             "../src/lib/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
@@ -291,6 +294,7 @@ pub fn run() {
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));
     app.manage(openclaw::OpenClawManager::new(app.handle().clone()));
+    app.manage(rig_cache::RigManagerCache::new());
 
     // Setup Logic
     {
@@ -309,13 +313,12 @@ pub fn run() {
             tracker.cleanup_all();
             handle.manage(tracker);
 
-            // Vector Store Init
-            // We use the dimension in the filename to automatically "reset" if we switch defaults
+            // Vector Store Manager Init (per-scope index files)
             let dims = 384;
-            let vector_path = app_data_dir.join(format!("vector_index_{}.usearch", dims));
-            let vector_store = vector_store::VectorStore::new(vector_path, dims)
-                .expect("failed to init vector store");
-            handle.manage(vector_store);
+            let vectors_dir = app_data_dir.join("vectors");
+            let vector_manager = vector_store::VectorStoreManager::new(vectors_dir, dims)
+                .expect("failed to init vector store manager");
+            handle.manage(vector_manager);
 
             // Reranker Init (Downloads if needed)
             // Using RerankerWrapper to gracefully handle initialization failures.
@@ -351,13 +354,13 @@ pub fn run() {
             // 2. Integrity Check
             println!("[main] Running Integrity Check...");
             let pool_state = handle.state::<sqlx::SqlitePool>();
-            let vec_state = handle.state::<vector_store::VectorStore>();
+            let vec_manager = handle.state::<vector_store::VectorStoreManager>();
 
             // Need to use inner because perform_integrity_check takes &T
             // State<T> derefs to T? Yes, but check signature.
             // perform_integrity_check(pool: &SqlitePool, ...)
             // Perform integrity check
-            if let Err(e) = rag::perform_integrity_check(&pool_state, &vec_state).await {
+            if let Err(e) = rag::perform_integrity_check(&pool_state, &vec_manager).await {
                 eprintln!("[main] Integrity Check Failed: {}", e);
             }
 

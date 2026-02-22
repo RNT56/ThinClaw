@@ -1,26 +1,86 @@
 use scrappy_mcp_tools::events::{StatusReporter, ToolEvent};
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::Manager;
 use tracing::info;
 
-// A dummy reporter that drops events, since OpenClawEngine doesn't consume the XML stream yet.
-// In the future, we can forward these events to OpenClawEngine via IPC if needed.
-struct SilentReporter;
+// ---------------------------------------------------------------------------
+// TauriEventReporter — forwards ToolEvents to the frontend via Tauri events
+// ---------------------------------------------------------------------------
+
+/// The payload emitted on the `"tool_event"` Tauri channel.
+/// Frontend can listen with `listen("tool_event", handler)`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolEventPayload {
+    /// One of: "status", "tool_activity", "progress"
+    pub kind: String,
+    /// Human-readable message
+    pub message: String,
+    /// Tool name (for tool_activity events)
+    pub tool_name: Option<String>,
+    /// Progress percentage 0–100 (for progress events)
+    pub percentage: Option<f32>,
+    /// Tool dispatch status: "running", "complete", "failed"
+    pub status: Option<String>,
+}
+
+/// A reporter that bridges `ToolEvent`s to the Tauri event system so the
+/// frontend can display live tool-call progress when tools are invoked via
+/// the OpenClaw gateway / MCP IPC path.
+pub struct TauriEventReporter {
+    app: tauri::AppHandle,
+}
+
+impl TauriEventReporter {
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+
 #[async_trait::async_trait]
-impl StatusReporter for SilentReporter {
-    async fn report(&self, _event: ToolEvent) {
-        // Drop it
+impl StatusReporter for TauriEventReporter {
+    async fn report(&self, event: ToolEvent) {
+        use tauri::Emitter;
+
+        let payload = match &event {
+            ToolEvent::ToolActivity {
+                tool_name,
+                input_summary,
+                status,
+            } => ToolEventPayload {
+                kind: "tool_activity".into(),
+                message: format!("{}: {}", tool_name, input_summary),
+                tool_name: Some(tool_name.clone()),
+                percentage: None,
+                status: Some(status.clone()),
+            },
+            ToolEvent::Status { msg, .. } => ToolEventPayload {
+                kind: "status".into(),
+                message: msg.clone(),
+                tool_name: None,
+                percentage: None,
+                status: None,
+            },
+            ToolEvent::Progress {
+                percentage,
+                message,
+            } => ToolEventPayload {
+                kind: "progress".into(),
+                message: message.clone(),
+                tool_name: None,
+                percentage: Some(*percentage),
+                status: None,
+            },
+        };
+
+        let _ = self.app.emit("tool_event", &payload);
     }
 }
 
 /// Handles incoming RPC requests from OpenClawEngine (OpenClaw)
 pub struct McpRequestHandler {
     app: tauri::AppHandle,
-    // We need to construct a RigManager on demand or have one handy.
-    // Ideally, we'd grab the main RigManager from AppState if it was stored there.
-    // For now, we will construct a transient one using default config for each request
-    // or store a shared one. To save overhead, let's assume valid defaults.
 }
 
 impl McpRequestHandler {
@@ -45,9 +105,18 @@ impl McpRequestHandler {
 
     fn get_mcp_config(&self) -> crate::rig_lib::sandbox_factory::McpOrchestratorConfig {
         use crate::rig_lib::sandbox_factory::McpOrchestratorConfig;
+        use tauri::Manager;
+
+        // Load mcp_base_url / mcp_auth_token from the live ConfigManager so that
+        // values saved in Settings > Gateway tab are honoured here too.
+        let user_config = self
+            .app
+            .try_state::<crate::config::ConfigManager>()
+            .map(|cm| cm.get_config());
+
         McpOrchestratorConfig {
-            mcp_base_url: None, // TODO: Load from AppState/Config
-            mcp_auth_token: None,
+            mcp_base_url: user_config.as_ref().and_then(|c| c.mcp_base_url.clone()),
+            mcp_auth_token: user_config.as_ref().and_then(|c| c.mcp_auth_token.clone()),
             sandbox_enabled: true,
             user_skills_path: Some(
                 self.app
@@ -204,7 +273,7 @@ impl McpRequestHandler {
             ),
         };
 
-        let reporter = Arc::new(SilentReporter);
+        let reporter = Arc::new(TauriEventReporter::new(self.app.clone()));
         let sandbox = sandbox_factory::create_sandbox(rig.clone(), &config, reporter)
             .ok_or("Failed to create sandbox")?;
 
@@ -278,7 +347,7 @@ impl McpRequestHandler {
         use crate::rig_lib::unified_provider::ProviderKind;
         use crate::rig_lib::{sandbox_factory, RigManager};
         use scrappy_mcp_tools::skills::manager::SkillManager;
-        use std::sync::Arc; // Added this import
+        use std::sync::Arc;
 
         let tool_name = params
             .get("name")
@@ -315,10 +384,10 @@ impl McpRequestHandler {
             None,
         ));
 
-        // 3. Setup Sandbox
-        let sandbox =
-            sandbox_factory::create_sandbox(rig.clone(), &config, Arc::new(SilentReporter))
-                .ok_or("Failed to create sandbox")?;
+        // 3. Setup Sandbox — now with TauriEventReporter instead of SilentReporter
+        let reporter = Arc::new(TauriEventReporter::new(self.app.clone()));
+        let sandbox = sandbox_factory::create_sandbox(rig.clone(), &config, reporter)
+            .ok_or("Failed to create sandbox")?;
 
         // 4. Setup Managers
         let skill_manager = SkillManager::new(
@@ -345,6 +414,12 @@ impl McpRequestHandler {
         let result = router.call(tool_name, args).await?;
 
         // 6. Summarize/Truncate output (Auto-summarization Middleware)
-        Ok(summarize_result(result, 5000))
+        // Limit is configurable via UserConfig.mcp_tool_result_max_chars (default: 5000).
+        let max_chars = self
+            .app
+            .try_state::<crate::config::ConfigManager>()
+            .map(|cm| cm.get_config().mcp_tool_result_max_chars)
+            .unwrap_or(5000);
+        Ok(summarize_result(result, max_chars))
     }
 }

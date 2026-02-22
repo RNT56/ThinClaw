@@ -3,6 +3,9 @@ use scrappy_mcp_tools::McpClient;
 use serde_json::{json, Value};
 use tracing::info;
 
+/// Registry-based tool router. Host tools are auto-discovered from
+/// `tool_discovery::get_host_tools_definitions()` — adding a new host tool
+/// there automatically makes it routable here without any extra plumbing.
 pub struct ToolRouter<'a> {
     pub mcp_client: Option<&'a McpClient>,
     pub skill_manager: Option<&'a SkillManager>,
@@ -10,6 +13,15 @@ pub struct ToolRouter<'a> {
 }
 
 impl<'a> ToolRouter<'a> {
+    /// Returns the set of host-tool names that are currently registered.
+    /// Derived from the single source-of-truth in `tool_discovery`.
+    fn host_tool_names() -> Vec<String> {
+        crate::rig_lib::tool_discovery::get_host_tools_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
         info!("[router] calling tool '{}' with args: {}", name, args);
 
@@ -17,9 +29,6 @@ impl<'a> ToolRouter<'a> {
         if let Some(mgr) = self.skill_manager {
             if mgr.get_skill(name).is_ok() {
                 info!("[router] routing '{}' to Skills System", name);
-                // We need a script to run the skill via sandbox if available,
-                // or run it directly if we have a runner.
-                // For IPC, we'll use the sandbox.
                 if let Some(sb) = self.sandbox {
                     let args_json = serde_json::to_string(&args).unwrap_or_default();
                     let script = format!(
@@ -38,27 +47,32 @@ impl<'a> ToolRouter<'a> {
             }
         }
 
-        // 2. Check if it's a Host Tool
-        match name {
-            "web_search" | "rag_search" | "read_file" => {
-                info!("[router] routing '{}' to Host Tools", name);
-                if let Some(sb) = self.sandbox {
-                    let query = args
-                        .get("query")
-                        .or_else(|| args.get("path"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let script = format!("{}(\"{}\")", name, query.replace("\"", "\\\""));
-                    let res = sb
-                        .execute(&script)
-                        .map_err(|e| format!("Host tool execution failed: {:?}", e))?;
-                    return Ok(json!({
-                        "content": [{ "type": "text", "text": res.output }],
-                        "isError": false
-                    }));
-                }
+        // 2. Check if it's a Host Tool (registry-driven, no hardcoded names)
+        let known_host_tools = Self::host_tool_names();
+        if known_host_tools.iter().any(|t| t == name) {
+            info!("[router] routing '{}' to Host Tools (registry)", name);
+            if let Some(sb) = self.sandbox {
+                // Build argument string from the first meaningful arg value.
+                // Host tools registered in the sandbox accept a single positional
+                // string argument (query or path).
+                let arg_value = args
+                    .as_object()
+                    .and_then(|obj| {
+                        obj.values()
+                            .next()
+                            .and_then(|v| v.as_str().map(String::from))
+                    })
+                    .unwrap_or_default();
+
+                let script = format!("{}(\"{}\")", name, arg_value.replace("\"", "\\\""));
+                let res = sb
+                    .execute(&script)
+                    .map_err(|e| format!("Host tool execution failed: {:?}", e))?;
+                return Ok(json!({
+                    "content": [{ "type": "text", "text": res.output }],
+                    "isError": false
+                }));
             }
-            _ => {}
         }
 
         // 3. Remote MCP Tools
@@ -141,5 +155,165 @@ pub fn summarize_arbitrary_json(val: Value, max_string_len: usize, max_array_len
             Value::Object(new_map)
         }
         other => other,
+    }
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -------------------------------------------------------------------------
+    // host_tool_names (registry-driven)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn host_tool_names_contains_known_tools() {
+        let names = ToolRouter::host_tool_names();
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"rag_search".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // summarize_result
+    // -------------------------------------------------------------------------
+
+    fn make_tool_result(text: &str) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false
+        })
+    }
+
+    #[test]
+    fn summarize_result_leaves_short_text_unchanged() {
+        let result = make_tool_result("hello world");
+        let out = summarize_result(result, 100);
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn summarize_result_leaves_exactly_limit_length_unchanged() {
+        let text_at_limit = "a".repeat(50);
+        let result = make_tool_result(&text_at_limit);
+        let out = summarize_result(result, 50);
+        // len == limit, NOT >, so no truncation should happen
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text.len(), 50);
+        assert!(!text.contains("Truncated"));
+    }
+
+    #[test]
+    fn summarize_result_truncates_text_exceeding_limit() {
+        let long_text = "x".repeat(200);
+        let result = make_tool_result(&long_text);
+        let out = summarize_result(result, 50);
+        let text = out["content"][0]["text"].as_str().unwrap();
+
+        assert!(text.starts_with(&"x".repeat(50)));
+        assert!(text.contains("Truncated 150 chars"));
+    }
+
+    #[test]
+    fn summarize_result_truncation_message_is_accurate() {
+        let long_text = "z".repeat(7500);
+        let result = make_tool_result(&long_text);
+        let out = summarize_result(result, 5000);
+        let text = out["content"][0]["text"].as_str().unwrap();
+
+        assert!(
+            text.contains("Truncated 2500 chars"),
+            "expected 2500 chars in message, got: {text}"
+        );
+    }
+
+    #[test]
+    fn summarize_result_handles_multiple_content_items() {
+        let result = json!({
+            "content": [
+                { "type": "text", "text": "short" },
+                { "type": "text", "text": "x".repeat(200) }
+            ],
+            "isError": false
+        });
+        let out = summarize_result(result, 50);
+        let first = out["content"][0]["text"].as_str().unwrap();
+        let second = out["content"][1]["text"].as_str().unwrap();
+
+        assert_eq!(first, "short");
+        assert!(
+            second.contains("Truncated"),
+            "second item should be truncated"
+        );
+    }
+
+    #[test]
+    fn summarize_result_preserves_non_text_content_items() {
+        let result = json!({
+            "content": [{ "type": "image", "url": "https://example.com/img.png" }],
+            "isError": false
+        });
+        let out = summarize_result(result, 50);
+        assert_eq!(out["content"][0]["url"], "https://example.com/img.png");
+    }
+
+    #[test]
+    fn summarize_result_returns_value_when_content_key_missing() {
+        let result = json!({ "isError": true, "error": "not found" });
+        let out = summarize_result(result, 100);
+        assert_eq!(out["isError"], true);
+    }
+
+    // -------------------------------------------------------------------------
+    // summarize_arbitrary_json
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn summarize_arbitrary_json_leaves_short_string_unchanged() {
+        let val = json!("hello");
+        let out = summarize_arbitrary_json(val, 100, 10);
+        assert_eq!(out.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn summarize_arbitrary_json_truncates_long_string() {
+        let val = Value::String("a".repeat(200));
+        let out = summarize_arbitrary_json(val, 50, 10);
+        let s = out.as_str().unwrap();
+        assert!(s.starts_with(&"a".repeat(50)));
+        assert!(s.contains("Truncated 150 chars"));
+    }
+
+    #[test]
+    fn summarize_arbitrary_json_trims_long_array() {
+        let arr: Vec<Value> = (0..20).map(|i| json!(i)).collect();
+        let val = Value::Array(arr);
+        let out = summarize_arbitrary_json(val, 1000, 5);
+        let a = out.as_array().unwrap();
+
+        // 5 real items + 1 sentinel "… more items" message string
+        assert_eq!(a.len(), 6);
+        let last = a.last().unwrap().as_str().unwrap();
+        assert!(last.contains("15 more items truncated"), "got: {last}");
+    }
+
+    #[test]
+    fn summarize_arbitrary_json_recurses_into_object_values() {
+        let val = json!({ "key": "x".repeat(200) });
+        let out = summarize_arbitrary_json(val, 50, 10);
+        let s = out["key"].as_str().unwrap();
+        assert!(s.contains("Truncated"));
+    }
+
+    #[test]
+    fn summarize_arbitrary_json_passes_through_numbers_and_bools() {
+        assert_eq!(summarize_arbitrary_json(json!(42), 10, 5), json!(42));
+        assert_eq!(summarize_arbitrary_json(json!(true), 10, 5), json!(true));
+        assert_eq!(summarize_arbitrary_json(json!(null), 10, 5), json!(null));
     }
 }

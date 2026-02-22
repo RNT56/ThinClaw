@@ -263,7 +263,7 @@ pub async fn ingest_document(
     app: AppHandle,
     sidecar: State<'_, SidecarManager>,
     pool: State<'_, SqlitePool>,
-    vector_store: State<'_, crate::vector_store::VectorStore>,
+    vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_path: String,
     chat_id: Option<String>,
     project_id: Option<String>,
@@ -374,12 +374,21 @@ pub async fn ingest_document(
     let chunks_with_index: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
     let total_chunks = chunks_with_index.len();
 
-    println!("[rag] Starting ingestion of {} chunks", total_chunks);
+    // Determine the scope for vector storage
+    let scope = crate::vector_store::VectorStoreManager::scope_for(&project_id, &chat_id);
+    let scoped_store = vector_manager
+        .get(&scope)
+        .map_err(|e| format!("Failed to get vector store for scope {:?}: {}", scope, e))?;
+
+    println!(
+        "[rag] Starting ingestion of {} chunks into scope {:?}",
+        total_chunks, scope
+    );
 
     let stream = futures::stream::iter(chunks_with_index)
         .map(|(i, chunk_text)| {
             let pool = pool.clone();
-            let vector_store = vector_store.clone();
+            let scoped_store = scoped_store.clone();
             let client = client.clone();
             let url = url.clone();
             let token = token.clone();
@@ -436,7 +445,7 @@ pub async fn ingest_document(
                         .await
                         .map_err(|e| format!("Database insert failed: {}", e))?;
 
-                    if let Err(e) = vector_store.add(rowid as u64, &data.embedding) {
+                    if let Err(e) = scoped_store.add(rowid as u64, &data.embedding) {
                         return Err(format!("Vector store index failed: {}", e));
                     }
                 }
@@ -457,7 +466,7 @@ pub async fn ingest_document(
         }
     }
 
-    if let Err(e) = vector_store.save().await {
+    if let Err(e) = scoped_store.save() {
         let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
             .bind(&doc_id)
             .execute(pool.inner())
@@ -480,7 +489,7 @@ pub async fn retrieve_context(
     app: tauri::AppHandle,
     sidecar: State<'_, SidecarManager>,
     pool: State<'_, SqlitePool>,
-    vector_store: State<'_, crate::vector_store::VectorStore>,
+    vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     reranker: State<'_, crate::reranker::RerankerWrapper>,
     query: String,
     chat_id: Option<String>,
@@ -491,7 +500,7 @@ pub async fn retrieve_context(
         Some(app),
         sidecar.inner(),
         pool.inner().clone(),
-        vector_store.inner().clone(),
+        vector_manager.inner().clone(),
         reranker.inner(),
         query,
         chat_id,
@@ -505,7 +514,7 @@ pub async fn retrieve_context_internal(
     app: Option<tauri::AppHandle>,
     sidecar: &SidecarManager,
     pool: SqlitePool,
-    vector_store: crate::vector_store::VectorStore,
+    vector_manager: crate::vector_store::VectorStoreManager,
     reranker: &crate::reranker::RerankerWrapper,
     query: String,
     chat_id: Option<String>,
@@ -531,7 +540,6 @@ pub async fn retrieve_context_internal(
         );
     }
 
-    let initial_top_k = 150;
     let rrf_k = 60.0;
     let query_lower = query.to_lowercase();
 
@@ -546,6 +554,8 @@ pub async fn retrieve_context_internal(
                 .flatten();
         }
     }
+
+    let initial_top_k = 150;
 
     let is_overview = query_lower.contains("list file")
         || query_lower.contains("what file")
@@ -663,6 +673,14 @@ pub async fn retrieve_context_internal(
 
     let mut vector_results: Vec<i64> = Vec::new();
 
+    // Determine the vector search scopes
+    let scope = crate::vector_store::VectorStoreManager::scope_for(&project_id, &chat_id);
+    let mut search_scopes = vec![scope.clone()];
+    // Always include Global scope as well (so global docs are available everywhere)
+    if !matches!(scope, crate::vector_store::VectorScope::Global) {
+        search_scopes.push(crate::vector_store::VectorScope::Global);
+    }
+
     if let Some((port, token)) = sidecar.get_embedding_config() {
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
@@ -676,7 +694,9 @@ pub async fn retrieve_context_internal(
         {
             if let Ok(res_json) = response.json::<EmbeddingResponse>().await {
                 if let Some(data) = res_json.data.first() {
-                    if let Ok(keys) = vector_store.search(&data.embedding, initial_top_k) {
+                    if let Ok(keys) =
+                        vector_manager.search_scoped(&data.embedding, &search_scopes, initial_top_k)
+                    {
                         vector_results = keys.into_iter().map(|k| k as i64).collect();
                     }
                 }
@@ -705,6 +725,8 @@ pub async fn retrieve_context_internal(
         let score = 1.0 / (rrf_k + (rank as f32) + 1.0);
         *fused_scores.entry(*id).or_insert(0.0) += score;
     }
+
+    // No project-boost needed — scoped indices handle this natively now.
 
     let mut final_ranking: Vec<(i64, f32)> = fused_scores.into_iter().collect();
     final_ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -741,13 +763,13 @@ pub async fn retrieve_context_internal(
         placeholders
     );
 
+    // Vector results are already scope-filtered (scoped index + global index).
+    // We only need the doc_ids filter for explicitly attached documents.
     if let Some(docs) = &doc_ids {
         if !docs.is_empty() {
             let doc_placeholders = docs.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             final_sql.push_str(&format!(" AND d.id IN ({})", doc_placeholders));
         }
-    } else {
-        final_sql.push_str(" AND ((d.chat_id IS NULL AND d.project_id IS NULL) OR d.chat_id = ? OR d.project_id = ?)");
     }
 
     let mut query_obj = sqlx::query(&final_sql);
@@ -762,9 +784,6 @@ pub async fn retrieve_context_internal(
                 query_obj = query_obj.bind(doc_id);
             }
         }
-    } else {
-        query_obj = query_obj.bind(&chat_id);
-        query_obj = query_obj.bind(&project_id);
     }
 
     let content_rows = query_obj
@@ -871,18 +890,21 @@ pub async fn list_project_files(pool: &SqlitePool, project_id: &str) -> Vec<Stri
 
 pub async fn perform_integrity_check(
     pool: &SqlitePool,
-    vector_store: &crate::vector_store::VectorStore,
+    vector_manager: &crate::vector_store::VectorStoreManager,
 ) -> Result<String, String> {
     let chunk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks")
         .fetch_one(pool)
         .await
         .map_err(|e| format!("DB Count Error: {}", e))?;
 
-    let vector_count = vector_store
-        .count()
+    // With per-scope indices, total_count only reflects loaded indices.
+    // On a fresh start with no queries yet, no indices are loaded, so we
+    // skip the comparison and just report the DB count.
+    let vector_count = vector_manager
+        .total_count()
         .map_err(|e| format!("Vector Store Error: {}", e))? as i64;
 
-    if chunk_count != vector_count {
+    if vector_count > 0 && chunk_count != vector_count {
         return Ok(format!(
             "mismatch: db={}, vector={}",
             chunk_count, vector_count
@@ -896,7 +918,7 @@ pub async fn perform_integrity_check(
 #[specta::specta]
 pub async fn check_vector_index_integrity(
     pool: State<'_, SqlitePool>,
-    vector_store: State<'_, crate::vector_store::VectorStore>,
+    vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
 ) -> Result<String, String> {
-    perform_integrity_check(&pool, &vector_store).await
+    perform_integrity_check(&pool, &vector_manager).await
 }

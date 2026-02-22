@@ -898,7 +898,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                                                 if (msg.text.trim().startsWith('[Tool Call:')) return false;
                                                 if (msg.text.includes('Pre-compaction memory flush')) return false;
                                                 if (msg.text.includes('Store durable memories now')) return false;
-                                                if (msg.text.includes('NO_REPLY')) return false;
+                                                if (msg.text.includes('NO_REPL')) return false;
 
 
                                                 // Hide all system messages in Chat view

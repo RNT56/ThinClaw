@@ -1,5 +1,5 @@
 import ReactMarkdown from 'react-markdown';
-import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon } from 'lucide-react';
+import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon, Volume2 } from 'lucide-react';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
@@ -397,6 +397,38 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     const [isEditing, setIsEditing] = useState(false);
     const [editContent, setEditContent] = useState(message.content);
     const [showOriginals, setShowOriginals] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+
+    const handleReadAloud = async () => {
+        if (isSpeaking) return;
+        setIsSpeaking(true);
+        try {
+            const res = await commands.ttsSynthesize({ text: sanitizedContent, modelPath: null });
+            if (res.status === 'error') {
+                toast.error('TTS failed', { description: res.error });
+                return;
+            }
+            // Decode base64 PCM → Float32 audio and play via Web Audio API
+            const binary = atob(res.data);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const int16 = new Int16Array(bytes.buffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+            const ctx = new AudioContext({ sampleRate: 22050 });
+            const buffer = ctx.createBuffer(1, float32.length, 22050);
+            buffer.copyToChannel(float32, 0);
+            const source = ctx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(ctx.destination);
+            source.onended = () => { setIsSpeaking(false); ctx.close(); };
+            source.start();
+        } catch (e) {
+            toast.error('TTS error', { description: String(e) });
+            setIsSpeaking(false);
+        }
+    };
 
     // Update editContent if message changes (e.g. streaming update, though User messages rarely change)
     useEffect(() => {
@@ -660,8 +692,22 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                 }
 
                 {!isUser && (!message.images || message.images.length === 0) && (
-                    <div className="absolute -bottom-6 right-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <div className="absolute -bottom-6 right-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex gap-1">
                         <CopyButton content={sanitizedContent} className="border-border/50 shadow-sm" />
+                        <button
+                            id={`tts-btn-${message.id ?? 'msg'}`}
+                            onClick={handleReadAloud}
+                            disabled={isSpeaking}
+                            className={cn(
+                                "p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground border-border/50 shadow-sm",
+                                isSpeaking && "text-primary"
+                            )}
+                            title={isSpeaking ? 'Playing…' : 'Read Aloud'}
+                        >
+                            {isSpeaking
+                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                : <Volume2 className="w-3.5 h-3.5 text-muted-foreground" />}
+                        </button>
                     </div>
                 )}
 

@@ -42,8 +42,7 @@
         "scope": {
           "allow": [
             "$APP_DATA/images/**",
-            "$HOME/Library/Application Support/com.schack.scrappy/images/**",
-            "/Users/mt/Library/Application Support/com.schack.scrappy/images/**"
+            "$HOME/Library/Application Support/com.schack.scrappy/images/**"
           ]
         }
       }

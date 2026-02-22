@@ -51,9 +51,9 @@ impl Tool for RAGTool {
             .inner()
             .clone();
         let pool = self.app.state::<sqlx::SqlitePool>().inner().clone();
-        let vector_store = self
+        let vector_manager = self
             .app
-            .state::<crate::vector_store::VectorStore>()
+            .state::<crate::vector_store::VectorStoreManager>()
             .inner()
             .clone();
         let reranker = self
@@ -86,7 +86,7 @@ impl Tool for RAGTool {
                 Some(app_handle.clone()), // Pass app_handle to internal
                 &sidecar,
                 pool,
-                vector_store,
+                vector_manager,
                 &reranker,
                 query,
                 None, // chat_id

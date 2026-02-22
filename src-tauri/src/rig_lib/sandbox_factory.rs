@@ -132,7 +132,7 @@ where
                         use tauri::Manager;
                         let sidecar = app.state::<crate::sidecar::SidecarManager>();
                         let pool = app.state::<sqlx::SqlitePool>();
-                        let store = app.state::<crate::vector_store::VectorStore>();
+                        let store = app.state::<crate::vector_store::VectorStoreManager>();
                         let reranker = app.state::<crate::reranker::RerankerWrapper>();
                         match crate::rag::retrieve_context_internal(
                             Some(app.clone()),

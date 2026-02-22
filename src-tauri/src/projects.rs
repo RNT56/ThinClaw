@@ -83,7 +83,11 @@ pub async fn list_projects(pool: State<'_, SqlitePool>) -> Result<Vec<Project>, 
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_project(pool: State<'_, SqlitePool>, id: String) -> Result<(), String> {
+pub async fn delete_project(
+    pool: State<'_, SqlitePool>,
+    vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
+    id: String,
+) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     // 1. Delete messages associated with conversations in this project
@@ -126,6 +130,15 @@ pub async fn delete_project(pool: State<'_, SqlitePool>, id: String) -> Result<(
         .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 6. Delete the project's scoped vector index file
+    let scope = crate::vector_store::VectorScope::Project(id);
+    if let Err(e) = vector_manager.delete_scope(&scope) {
+        eprintln!(
+            "[projects] Failed to delete vector scope {:?}: {}",
+            scope, e
+        );
+    }
 
     Ok(())
 }

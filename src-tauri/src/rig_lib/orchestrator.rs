@@ -7,12 +7,16 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 // ---------------------------------------------------------------------------
-// Tool Permissions (unchanged)
+// Tool Permissions
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
 pub struct ToolPermissions {
     pub allow_web_search: bool,
+    /// When true, the user explicitly toggled the search icon — the LLM should
+    /// aggressively search for every query.  When false (auto mode), the LLM
+    /// should only search when genuinely needed.
+    pub force_web_search: bool,
     pub allow_file_search: bool,
     pub allow_image_gen: bool,
 }
@@ -22,7 +26,6 @@ pub struct ToolPermissions {
 // ---------------------------------------------------------------------------
 
 /// Configuration for the optional remote MCP server connection.
-/// When `None`, the orchestrator operates in legacy mode (no sandbox).
 #[derive(Clone, Debug, Default)]
 pub struct McpOrchestratorConfig {
     /// Base URL of the FastAPI MCP server (e.g. "https://api.scrappy.dev")
@@ -133,6 +136,37 @@ impl Orchestrator {
         crate::rig_lib::sandbox_factory::create_sandbox(self.rig.clone(), &factory_config, reporter)
     }
 
+    /// Build a sandbox unconditionally (ignoring the sandbox_enabled flag).
+    /// Used when tools are enabled but no remote MCP server is configured —
+    /// the sandbox still hosts local tools (web_search, rag_search, read_file).
+    fn build_sandbox_unconditional(
+        &self,
+        tx: &mpsc::Sender<Result<crate::rig_lib::unified_provider::ProviderEvent, String>>,
+    ) -> Option<Sandbox> {
+        let reporter = Arc::new(OrchestratorStatusReporter { tx: tx.clone() });
+        let factory_config = crate::rig_lib::sandbox_factory::McpOrchestratorConfig {
+            mcp_base_url: self.mcp_config.mcp_base_url.clone(),
+            mcp_auth_token: self.mcp_config.mcp_auth_token.clone(),
+            sandbox_enabled: true, // Force enabled
+            user_skills_path: self.rig.app_handle.as_ref().map(|app| {
+                use tauri::Manager;
+                app.path()
+                    .app_config_dir()
+                    .unwrap_or_default()
+                    .join("skills")
+            }),
+            builtin_skills_path: self.rig.app_handle.as_ref().map(|app| {
+                use tauri::Manager;
+                app.path()
+                    .resource_dir()
+                    .unwrap_or_default()
+                    .join("scrappy-mcp-tools/skills/built_in")
+            }),
+        };
+
+        crate::rig_lib::sandbox_factory::create_sandbox(self.rig.clone(), &factory_config, reporter)
+    }
+
     // -----------------------------------------------------------------------
     // Main entry point
     // -----------------------------------------------------------------------
@@ -167,8 +201,14 @@ impl Orchestrator {
         let current_docs = last_msg.attached_docs.clone();
         let conversation_id_clone = conversation_id.clone(); // Clone for spawn
 
-        // Build sandbox (if configured)
-        let sandbox = self.build_sandbox(&tx);
+        // Build sandbox — always attempt to build one when tools may be needed.
+        // If `mcp_config.sandbox_enabled` is true, `build_sandbox` succeeds.
+        // Otherwise, fall back to `build_sandbox_unconditional` so that local
+        // host tools (web_search, rag_search, read_file) remain available even
+        // without a remote MCP server configured.
+        let sandbox = self
+            .build_sandbox(&tx)
+            .or_else(|| self.build_sandbox_unconditional(&tx));
 
         tokio::spawn(async move {
             info!(
@@ -286,7 +326,7 @@ impl Orchestrator {
                         info!("[orchestrator] Summarization complete.");
                         // Create Summary Message
                         let summary_msg = Message {
-                            role: "system".into(), // Or "user" with special marker, but "system" is safer for context injection
+                            role: "system".into(),
                             content: format!("Previous conversation summary: {}", summary_text),
                             images: None,
                             attached_docs: None,
@@ -302,8 +342,6 @@ impl Orchestrator {
                             .await;
                     } else {
                         warn!("[orchestrator] Summarization failed (empty response). History truncated regardless to save context.");
-                        // Even if summary failed, we already drained the history, so we implicitly truncated it.
-                        // This is desired behavior if we are OOM.
                         let _ = tx
                             .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
                             .await;
@@ -315,9 +353,6 @@ impl Orchestrator {
 
             // 1. Context & Document Collection (Used for both Manual and Lead turns)
             let mut all_doc_ids = Vec::new();
-            let mut all_doc_names = Vec::new();
-
-            // ... (Rest of logic uses `final_history` instead of `history_clone`)
 
             // Collect docs from history
             for msg in &final_history {
@@ -325,7 +360,6 @@ impl Orchestrator {
                     for d in docs {
                         if !all_doc_ids.contains(&d.id) {
                             all_doc_ids.push(d.id.clone());
-                            all_doc_names.push(d.name.clone());
                         }
                     }
                 }
@@ -336,7 +370,6 @@ impl Orchestrator {
                 for d in docs {
                     if !all_doc_ids.contains(&d.id) {
                         all_doc_ids.push(d.id.clone());
-                        all_doc_names.push(d.name.clone());
                     }
                 }
             }
@@ -356,7 +389,7 @@ impl Orchestrator {
                         use tauri::Manager;
                         let sidecar = app.state::<crate::sidecar::SidecarManager>();
                         let pool = app.state::<sqlx::SqlitePool>();
-                        let store = app.state::<crate::vector_store::VectorStore>();
+                        let store = app.state::<crate::vector_store::VectorStoreManager>();
                         let reranker = app.state::<crate::reranker::RerankerWrapper>();
 
                         // 1. Text RAG
@@ -385,7 +418,6 @@ impl Orchestrator {
                         }
 
                         // 2. Visual Previews (for Multimodal models)
-                        // ... (Keeping existing visual logic)
                         for doc_id in all_doc_ids.iter().take(2) {
                             // Limit to 2 previews to save context
                             let hash_res: Result<String, _> =
@@ -479,40 +511,21 @@ impl Orchestrator {
             }
 
             // ===================================================================
-            // AUTO / TOOL MODE
+            // AUTO / TOOL MODE — Unified sandbox execution path
             // ===================================================================
 
-            // --- SANDBOX MODE (new) ---
-            // If sandbox is available, we use a different execution strategy:
-            // 1. Emit <rhai_code> blocks instead of <tool_code>
-            // 2. Execute them in the sandboxed Rhai engine
-            // 3. Feed results back to the LLM
-            if let Some(sandbox) = sandbox {
-                Self::run_sandbox_loop(
-                    &tx,
-                    &rig_clone,
-                    &sandbox,
-                    &perms,
-                    &final_history,
-                    &all_doc_ids,
-                    &current_docs,
-                    &project_id_clone,
-                    &conversation_id_clone,
-                    &persona_instructions,
-                    &query,
-                )
-                .await;
-                return;
-            }
+            // Always use the sandbox path. A sandbox is always available because
+            // `build_sandbox_unconditional` forces `sandbox_enabled = true`.
+            let sandbox = sandbox
+                .expect("[orchestrator] BUG: sandbox should always be Some when tools are enabled");
 
-            // --- LEGACY TOOL MODE (existing <tool_code> parsing) ---
-            Self::run_legacy_tool_loop(
+            Self::run_sandbox_loop(
                 &tx,
                 &rig_clone,
+                &sandbox,
                 &perms,
                 &final_history,
                 &all_doc_ids,
-                &all_doc_names,
                 &current_docs,
                 &project_id_clone,
                 &conversation_id_clone,
@@ -526,7 +539,7 @@ impl Orchestrator {
     }
 
     // -----------------------------------------------------------------------
-    // Sandbox execution loop (new MCP code-execution mode)
+    // Sandbox execution loop (unified tool execution via Rhai)
     // -----------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -564,6 +577,10 @@ impl Orchestrator {
             tools_desc.push_str("- rag_search(query): Search codebase/docs. Returns string.\n");
             tools_desc.push_str("- read_file(path): Read file content.\n");
         }
+        if perms.allow_image_gen {
+            tools_desc
+                .push_str("- generate_image(prompt): Generate an image from a text description.\n");
+        }
 
         // Dedicated Skills
         tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
@@ -571,16 +588,26 @@ impl Orchestrator {
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
+        let search_rules = if perms.force_web_search {
+            "CORE RULES:\n\
+             1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
+             2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`.\n\
+             3. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
+             4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them."
+        } else {
+            "CORE RULES:\n\
+             1. **REPLY DIRECTLY** for greetings, code, creative writing, general knowledge, opinions, or follow-up chat.\n\
+             2. **USE TOOLS ONLY** when the user needs real-time information (today's news, live prices, current events), or explicitly asks you to search/look something up.\n\
+             3. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
+             4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them.\n\
+             5. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
+        };
+
         let system_prompt = format!(
-            r#"{}
+            r#"{}. 
 Current Date: {}
 
-CORE RULES:
-1. ALWAYS use tools for factual queries.
-2. If the request is purely creative or conversational, answer directly.
-3. If uncertainty exists about any fact, specific entity, or current event, use `web_search`.
-4. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.
-5. If unsure which MCP tools exist, call `search_tools("")` first to discover them.
+{}
 
 TOOL USAGE (Code Execution Mode):
 To use tools, write a Rhai script inside <rhai_code> tags.
@@ -611,7 +638,7 @@ After receiving <tool_result>, use the data to synthesize a helpful answer for t
 If a script fails, the error message will appear in <tool_result>. Fix your script and try again.
 
 {}"#,
-            persona_instructions, date, tools_desc
+            persona_instructions, date, search_rules, tools_desc
         );
 
         conversation.push(json!({ "role": "system", "content": system_prompt }));
@@ -622,11 +649,16 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
         }
 
         // User query
-        let effective_query = if perms.allow_web_search {
+        let effective_query = if perms.force_web_search {
             format!(
-                "**INSTRUCTION**: Check if this request requires external research.\n\
-                 - If asking for facts, news, or specific data -> Call `web_search`.\n\
-                 - If greeting, chatting, or asking for code/logic -> Answer directly.\n\n\
+                "**SEARCH MODE ACTIVE**: Research this request using `web_search`. \
+                 Formalize the query and search.\n\nRequest: {}",
+                query
+            )
+        } else if perms.allow_web_search {
+            format!(
+                "Respond to this request. Only use tools if the request genuinely requires \
+                 real-time or external data you don't have. Otherwise reply directly.\n\n\
                  Request: {}",
                 query
             )
@@ -780,458 +812,5 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                 break;
             }
         } // End sandbox loop
-    }
-
-    // -----------------------------------------------------------------------
-    // Legacy tool loop (existing <tool_code> parsing — unchanged logic)
-    // -----------------------------------------------------------------------
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run_legacy_tool_loop(
-        tx: &mpsc::Sender<Result<crate::rig_lib::unified_provider::ProviderEvent, String>>,
-        rig: &Arc<RigManager>,
-        perms: &ToolPermissions,
-        final_history: &[crate::chat::Message],
-        all_doc_ids: &[String],
-        _all_doc_names: &[String],
-        _current_docs: &Option<Vec<crate::chat::AttachedDoc>>,
-        project_id: &Option<String>,
-        conversation_id: &Option<String>,
-        persona_instructions: &str,
-        query: &str,
-    ) {
-        use crate::rig_lib::unified_provider::ProviderEvent;
-
-        let max_turns = 5;
-        let mut current_turn = 0;
-        let mut conversation: Vec<serde_json::Value> = Vec::new();
-
-        // 1. Dynamic System Prompt
-        let mut tools_desc = String::from("AVAILABLE TOOLS:\n");
-        if perms.allow_web_search {
-            tools_desc.push_str("- web_search(query: str): Search internet for real-time info.\n");
-        }
-        if perms.allow_file_search {
-            tools_desc.push_str("- rag_search(query: str): Search project documents/codebase.\n");
-            tools_desc.push_str(
-                "- read_file(path: str, force_ocr: bool?): Read file content. Set force_ocr to true only if standard text extraction is failing or garbage.\n",
-            );
-        }
-        if perms.allow_image_gen {
-            tools_desc.push_str("- generate_image(prompt: str): Generate an image.\n");
-        }
-
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let mut grounding_rules = String::new();
-        if perms.allow_web_search {
-            grounding_rules.push_str("\n**RESEARCH RULES**:\n1. **Analyze Request**: Decide if the user needs external information or just conversation.\n2. **Search for Facts**: Use `web_search` for news, data, and specific entities.\n3. **Chat Directly**: For greetings, creative writing, or general questions, answer directly without tools.\n");
-        }
-        let system_prompt = format!(
-            r#"{}. 
-Current Date: {}
-
-CORE RULES:
-1. ALWAYS use tools for factual queries.
-2. If the request is purely creative or conversational, answer directly.
-3. If uncertainty exists about any fact, specific entity, or current event, use `web_search`.
-
-TOOL USAGE:
-To use a tool, output valid JSON inside <tool_code> tags.
-Example:
-<tool_code>
-{{
-  "name": "web_search",
-  "arguments": {{ "query": "..." }}
-}}
-</tool_code>
-
-{}"#,
-            persona_instructions, date, tools_desc
-        );
-
-        conversation.push(json!({
-            "role": "system",
-            "content": system_prompt
-        }));
-
-        // 2. History Conversion
-        for msg in final_history {
-            conversation.push(json!({
-                "role": msg.role,
-                "content": msg.content
-            }));
-        }
-
-        // 3. Current User Query and Context Collection (Resolving Paths for Tools)
-        let mut doc_info = Vec::new();
-        let mut visual_messages = Vec::new();
-        if !all_doc_ids.is_empty() {
-            if let Some(app) = &rig.app_handle {
-                use tauri::Manager;
-                let pool = app.state::<sqlx::SqlitePool>();
-                // Build dynamic IN query
-                let placeholders = all_doc_ids
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let query_str = format!(
-                    "SELECT id, path, hash FROM documents WHERE id IN ({})",
-                    placeholders
-                );
-                let mut db_query = sqlx::query_as::<_, (String, String, String)>(&query_str);
-                for id in all_doc_ids {
-                    db_query = db_query.bind(id);
-                }
-
-                match db_query.fetch_all(pool.inner()).await {
-                    Ok(docs) => {
-                        for (_id, path, hash) in docs {
-                            let name = std::path::Path::new(&path)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "unknown_file".to_string());
-                            doc_info.push(format!("{} (at {})", name, path));
-
-                            // 1. Check if the file itself is an image
-                            let path_lower = path.to_lowercase();
-                            let is_direct_image = path_lower.ends_with(".png")
-                                || path_lower.ends_with(".jpg")
-                                || path_lower.ends_with(".jpeg")
-                                || path_lower.ends_with(".webp");
-
-                            let mut image_injected = false;
-                            if is_direct_image {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    use base64::Engine;
-                                    let b64 =
-                                        base64::engine::general_purpose::STANDARD.encode(bytes);
-                                    let mime = if path_lower.ends_with(".png") {
-                                        "image/png"
-                                    } else {
-                                        "image/jpeg"
-                                    };
-                                    visual_messages.push(json!({
-                                          "role": "user",
-                                          "content": [
-                                              { "type": "text", "text": format!("Attached Image ({}):", path) },
-                                              { "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", mime, b64) } }
-                                          ]
-                                      }));
-                                    image_injected = true;
-                                }
-                            }
-
-                            if !image_injected {
-                                if let Ok(app_data_dir) = app.path().app_data_dir() {
-                                    let preview_path =
-                                        app_data_dir.join("previews").join(format!("{}.jpg", hash));
-                                    if preview_path.exists() {
-                                        if let Ok(bytes) = std::fs::read(preview_path) {
-                                            use base64::Engine;
-                                            let b64 = base64::engine::general_purpose::STANDARD
-                                                .encode(bytes);
-                                            visual_messages.push(json!({
-                                                 "role": "user",
-                                                 "content": [
-                                                     { "type": "text", "text": format!("Visual Preview of attached document ({}):", path) },
-                                                     { "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{}", b64) } }
-                                                 ]
-                                             }));
-                                        }
-                                    }
-                                }
-                            }
-
-                            // 3. Auto-Injection (simplified)
-                            if !path_lower.ends_with(".pdf") && !is_direct_image {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    if content.len() < 12000 {
-                                        doc_info.push(format!(
-                                            "\n[Direct Content of {}]:\n{}\n",
-                                            name, content
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("[orchestrator] Error resolving doc paths: {}", e),
-                }
-            }
-        }
-
-        let mut effective_query = query.to_string();
-
-        if let Some(pid) = project_id {
-            let mut context_str = format!("Project Context ID: {}\n", pid);
-            if perms.allow_file_search {
-                if let Some(app) = &rig.app_handle {
-                    use tauri::Manager;
-                    let pool = app.state::<sqlx::SqlitePool>();
-                    let files = crate::rag::list_project_files(pool.inner(), pid).await;
-                    if !files.is_empty() {
-                        let list = if files.len() > 50 {
-                            let subset = files[..50].join("\n- ");
-                            format!("- {}\n... ({} more files)", subset, files.len() - 50)
-                        } else {
-                            files.join("\n- ")
-                        };
-                        context_str
-                            .push_str(&format!("\n[AVAILABLE PROJECT FILES]:\n- {}\n", list));
-                    }
-                }
-            }
-            effective_query = format!("{}\nRequest: {}", context_str, query);
-        }
-
-        if !doc_info.is_empty() {
-            effective_query = format!(
-                "[CURRENT CHAT ATTACHMENTS]:\n{}\n\n{}",
-                doc_info.join("\n"),
-                effective_query
-            );
-        }
-
-        // Inject Visual Previews
-        for vmsg in visual_messages {
-            conversation.push(vmsg);
-        }
-
-        // Start turn with a strong grounding injection if searching is allowed
-        let final_query = if perms.allow_web_search {
-            format!(
-                "**INSTRUCTION**: Check if the user's request requires external knowledge.\n\
-                 - If it's a Greeting, Code execution, or General Chat -> Reply directly.\n\
-                 - If it's about News, Facts, or Specific Data -> Use `web_search`.\n\n\
-                 Request: {}",
-                effective_query
-            )
-        } else {
-            effective_query
-        };
-
-        conversation.push(json!({
-            "role": "user",
-            "content": final_query
-        }));
-
-        // 4. ReAct Loop
-        let mut _final_answer_streaming = false;
-        let _ = tx
-            .send(Ok(ProviderEvent::Content(
-                "\n<scrappy_status type=\"thinking\" />\n".into(),
-            )))
-            .await;
-
-        while current_turn < max_turns {
-            if rig.is_cancelled() {
-                let _ = tx
-                    .send(Ok(ProviderEvent::Content("\n[Stopped]".into())))
-                    .await;
-                break;
-            }
-            current_turn += 1;
-            let mut full_response = String::new();
-            let mut buffer = String::new();
-            let mut tool_detected = false;
-
-            use futures::StreamExt;
-            let mut stream = match rig
-                .provider
-                .stream_raw_completion(conversation.clone(), Some(0.1))
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(Err(format!("Provider Error: {}", e))).await;
-                    break;
-                }
-            };
-
-            while let Some(chunk_res) = stream.next().await {
-                if rig.is_cancelled() {
-                    let _ = tx
-                        .send(Ok(ProviderEvent::Content("\n[Stopped]".into())))
-                        .await;
-                    return;
-                }
-                match chunk_res {
-                    Ok(event) => match event {
-                        ProviderEvent::Content(token) => {
-                            full_response.push_str(&token);
-                            buffer.push_str(&token);
-
-                            if buffer.contains("<tool_code>") {
-                                tool_detected = true;
-                                if buffer.ends_with("<tool_code>") {
-                                    let _ = tx
-                                        .send(Ok(ProviderEvent::Content(
-                                            "\n<scrappy_status type=\"thinking\" />\n".into(),
-                                        )))
-                                        .await;
-                                }
-                            } else {
-                                if !tool_detected {
-                                    let _ = tx.send(Ok(ProviderEvent::Content(token))).await;
-                                    _final_answer_streaming = true;
-                                }
-                            }
-                        }
-                        ProviderEvent::Usage(u) => {
-                            let _ = tx.send(Ok(ProviderEvent::Usage(u))).await;
-                        }
-                        ProviderEvent::ContextUpdate(c) => {
-                            let _ = tx.send(Ok(ProviderEvent::ContextUpdate(c))).await;
-                        }
-                    },
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                    }
-                }
-            }
-
-            if !tool_detected {
-                break;
-            }
-
-            // Parse Tool
-            let mut tool_executed = false;
-            if let Some(start) = full_response.find("<tool_code>") {
-                if let Some(end) = full_response.find("</tool_code>") {
-                    let json_str = &full_response[start + 11..end].trim();
-                    let json_str = if json_str.starts_with("```json") {
-                        json_str
-                            .trim_start_matches("```json")
-                            .trim_end_matches("```")
-                            .trim()
-                    } else if json_str.starts_with("```") {
-                        json_str
-                            .trim_start_matches("```")
-                            .trim_end_matches("```")
-                            .trim()
-                    } else {
-                        json_str
-                    };
-
-                    let tool_call = match serde_json::from_str::<serde_json::Value>(json_str) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("Failed to parse tool JSON: {} in Turn {}", e, current_turn);
-                            if !_final_answer_streaming {
-                                let _ = tx
-                                    .send(Ok(ProviderEvent::Content(
-                                        "\n[Tool Parse Error - Proceeding with answer]\n".into(),
-                                    )))
-                                    .await;
-                            }
-                            break;
-                        }
-                    };
-
-                    conversation.push(json!({
-                        "role": "assistant",
-                        "content": full_response
-                    }));
-
-                    // Tool execution
-                    let name = tool_call["name"].as_str().unwrap_or("");
-                    let args = tool_call["arguments"].clone();
-                    let allowed_web = perms.allow_web_search;
-                    let allowed_file = perms.allow_file_search;
-                    let allowed_img = perms.allow_image_gen;
-                    let result = match name {
-                        "web_search" if allowed_web => {
-                            let q = args["query"].as_str().unwrap_or("");
-                            let _ = tx
-                                .send(Ok(ProviderEvent::Content(
-                                    format!(
-                                        "\n<scrappy_status type=\"web_search\" query=\"{}\" />\n",
-                                        q
-                                    )
-                                    .into(),
-                                )))
-                                .await;
-                            rig.explicit_search(q).await
-                        }
-                        "rag_search" if allowed_file => {
-                            let q = args["query"].as_str().unwrap_or("");
-                            let _ = tx
-                                .send(Ok(ProviderEvent::Content(
-                                    format!(
-                                        "\n<scrappy_status type=\"rag_search\" query=\"{}\" />\n",
-                                        q
-                                    )
-                                    .into(),
-                                )))
-                                .await;
-                            if let Some(app) = &rig.app_handle {
-                                use tauri::Manager;
-                                let context_res = crate::rag::retrieve_context_internal(
-                                    rig.app_handle.clone(),
-                                    app.state::<crate::sidecar::SidecarManager>().inner(),
-                                    app.state::<sqlx::SqlitePool>().inner().clone(),
-                                    app.state::<crate::vector_store::VectorStore>()
-                                        .inner()
-                                        .clone(),
-                                    app.state::<crate::reranker::RerankerWrapper>().inner(),
-                                    q.to_string(),
-                                    conversation_id.clone(),
-                                    if all_doc_ids.is_empty() {
-                                        None
-                                    } else {
-                                        Some(all_doc_ids.to_vec())
-                                    },
-                                    project_id.clone(),
-                                )
-                                .await;
-                                match context_res {
-                                    Ok(r) => r.join("\n\n"),
-                                    Err(e) => format!("Error: {}", e),
-                                }
-                            } else {
-                                "App state missing".into()
-                            }
-                        }
-                        "read_file" if allowed_file => {
-                            let path = args["path"].as_str().unwrap_or("");
-                            let _ = tx.send(Ok(ProviderEvent::Content(format!("\n<scrappy_status type=\"tool_call\" query=\"Reading {}\" />\n", path).into()))).await;
-                            if std::path::Path::new(path).exists() {
-                                if let Ok(c) = std::fs::read_to_string(path) {
-                                    if c.len() > 20000 {
-                                        format!("{}... (truncated)", &c[..20000])
-                                    } else {
-                                        c
-                                    }
-                                } else {
-                                    "Read failed".into()
-                                }
-                            } else {
-                                "File not found".into()
-                            }
-                        }
-                        "generate_image" if allowed_img => {
-                            let _ = tx
-                                .send(Ok(ProviderEvent::Content(
-                                    "\n<scrappy_status type=\"image_gen\" />\n".into(),
-                                )))
-                                .await;
-                            "Image Generation Triggered".to_string()
-                        }
-                        _ => "Unknown tool or permission denied".to_string(),
-                    };
-
-                    conversation.push(json!({
-                        "role": "user",
-                        "content": format!("<tool_result>\n{}\n</tool_result>", result)
-                    }));
-                    tool_executed = true;
-                }
-            }
-
-            if !tool_executed {
-                break;
-            }
-        } // End Loop
     }
 }

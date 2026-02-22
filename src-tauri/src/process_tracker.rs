@@ -103,7 +103,7 @@ impl ProcessTracker {
 
     pub fn cleanup_all(&self) {
         let procs = {
-            let mut guard = self.processes.lock().unwrap();
+            let mut guard = self.processes.lock().unwrap_or_else(|e| e.into_inner());
             let clones = guard.clone();
             guard.clear(); // We assume we are killing them all, so clear state
             clones
@@ -115,7 +115,7 @@ impl ProcessTracker {
 
     pub fn cleanup_by_service(&self, service_name: &str) {
         let procs_to_kill = {
-            let mut guard = self.processes.lock().unwrap();
+            let mut guard = self.processes.lock().unwrap_or_else(|e| e.into_inner());
             let (to_kill, keep): (Vec<_>, Vec<_>) = guard
                 .clone()
                 .into_iter()

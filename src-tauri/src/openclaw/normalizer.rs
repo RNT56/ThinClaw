@@ -27,6 +27,9 @@ static LLM_TOKEN_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"<\|end\|>").unwrap(),
         Regex::new(r"<\|endoftext\|>").unwrap(),
         Regex::new(r"<\|eot_id\|>").unwrap(),
+        // Llama header blocks: <|start_header_id|>role<|end_header_id|> as a single unit
+        Regex::new(r"<\|start_header_id\|>\w*<\|end_header_id\|>").unwrap(),
+        // Fallback: catch orphaned header tokens that appear without the other half
         Regex::new(r"<\|start_header_id\|>").unwrap(),
         Regex::new(r"<\|end_header_id\|>").unwrap(),
         // Thinking blocks: <think>...</think>
@@ -808,7 +811,15 @@ mod tests {
     fn test_strip_llama_tokens() {
         let input = "Hello<|eot_id|><|start_header_id|>assistant<|end_header_id|>World";
         let result = strip_llm_tokens(input);
-        assert_eq!(result, "HelloassistantWorld");
+        assert_eq!(result, "HelloWorld");
+    }
+
+    #[test]
+    fn test_strip_orphaned_header_tokens() {
+        // Orphaned tokens without the matching pair should still be stripped
+        let input = "Hello<|start_header_id|>World";
+        let result = strip_llm_tokens(input);
+        assert_eq!(result, "HelloWorld");
     }
 
     #[test]

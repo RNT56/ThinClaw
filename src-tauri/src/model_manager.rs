@@ -154,7 +154,7 @@ pub async fn download_model(
     // Setup cancellation
     let notify = Arc::new(tokio::sync::Notify::new());
     {
-        let mut downloads = state.downloads.lock().unwrap();
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if downloads.contains_key(&filename) {
             return Err("Download already in progress".to_string());
         }
@@ -193,7 +193,7 @@ pub async fn download_model(
             println!("[download_model] Error: {}", err_msg);
             // Remove lock before returning
             {
-                let mut downloads = state.downloads.lock().unwrap();
+                let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
             }
             return Err(err_msg);
@@ -207,7 +207,7 @@ pub async fn download_model(
             println!("[download_model] Error: {}", err_msg);
             // Remove lock
             {
-                let mut downloads = state.downloads.lock().unwrap();
+                let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
             }
             return Err(err_msg);
@@ -239,7 +239,7 @@ pub async fn download_model(
                 let _ = fs::remove_file(&dest_path);
 
                 // Remove from state
-                let mut downloads = state.downloads.lock().unwrap();
+                let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                 downloads.remove(&filename);
 
                 return Err("Download cancelled".to_string());
@@ -306,7 +306,7 @@ pub async fn download_model(
 
     // Remove from state
     {
-        let mut downloads = state.downloads.lock().unwrap();
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         downloads.remove(&filename);
     }
 
@@ -320,7 +320,7 @@ pub async fn cancel_download(
     state: State<'_, DownloadManager>,
     filename: String,
 ) -> Result<(), String> {
-    let downloads = state.downloads.lock().unwrap();
+    let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(notify) = downloads.get(&filename) {
         notify.notify_one();
         Ok(())
@@ -613,7 +613,7 @@ pub async fn download_standard_asset(
 
     // Lock and Register
     {
-        let mut downloads = state.downloads.lock().unwrap();
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if downloads.contains_key(&filename) {
              return Err("Download already in progress".to_string());
         }
@@ -629,7 +629,7 @@ pub async fn download_standard_asset(
     let res = match client.get(&url).send().await {
         Ok(r) => r.error_for_status().map_err(|e| e.to_string())?,
         Err(e) => {
-             let mut downloads = state.downloads.lock().unwrap();
+             let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
              downloads.remove(&filename);
              return Err(e.to_string());
         }
@@ -647,7 +647,7 @@ pub async fn download_standard_asset(
             _ = notify.notified() => {
                  drop(file);
                  let _ = fs::remove_file(&dest_path);
-                 let mut downloads = state.downloads.lock().unwrap();
+                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
                  downloads.remove(&filename);
                  return Err("Download cancelled".to_string());
             }
@@ -687,7 +687,7 @@ pub async fn download_standard_asset(
     }).ok();
     
     {
-        let mut downloads = state.downloads.lock().unwrap();
+        let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         downloads.remove(&filename);
     }
     

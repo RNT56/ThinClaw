@@ -26,7 +26,7 @@ pub async fn transcribe_audio(
 
     // CHECK FOR RUNNING SERVER FIRST
     let server_config = {
-        let guard = state.stt_process.lock().unwrap();
+        let guard = state.stt_process.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone()))
     };
 

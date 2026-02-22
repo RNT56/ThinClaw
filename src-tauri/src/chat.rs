@@ -51,6 +51,144 @@ pub struct StreamChunk {
     pub context_update: Option<Vec<Message>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub kind: crate::rig_lib::unified_provider::ProviderKind,
+    pub base_url: String,
+    pub model_name: String,
+    pub port: u16,
+    pub token: String,
+    pub context_size: u32,
+    pub model_family: Option<String>,
+}
+
+pub async fn resolve_provider(
+    user_config: &crate::config::UserConfig,
+    openclaw: &State<'_, crate::openclaw::commands::OpenClawManager>,
+    sidecar_manager: &State<'_, SidecarManager>,
+) -> Result<ProviderConfig, String> {
+    match user_config.selected_chat_provider.as_deref() {
+        Some("anthropic") => {
+            info!("[resolve_provider] Routing to Anthropic");
+            let claw_cfg = openclaw
+                .get_config()
+                .await
+                .ok_or("OpenClaw config not found")?;
+            let key = claw_cfg
+                .anthropic_api_key
+                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::Anthropic,
+                base_url: "https://api.anthropic.com/v1".to_string(),
+                model_name: claw_cfg
+                    .selected_cloud_model
+                    .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
+                port: 0,
+                token: key,
+                context_size: 200000,
+                model_family: None,
+            })
+        }
+        Some("openai") => {
+            info!("[resolve_provider] Routing to OpenAI");
+            let claw_cfg = openclaw
+                .get_config()
+                .await
+                .ok_or("OpenClaw config not found")?;
+            let key = claw_cfg
+                .openai_api_key
+                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
+                base_url: "https://api.openai.com/v1".to_string(),
+                model_name: claw_cfg
+                    .selected_cloud_model
+                    .unwrap_or_else(|| "gpt-4o".to_string()),
+                port: 0,
+                token: key,
+                context_size: 128000,
+                model_family: None,
+            })
+        }
+        Some("openrouter") => {
+            info!("[resolve_provider] Routing to OpenRouter");
+            let claw_cfg = openclaw
+                .get_config()
+                .await
+                .ok_or("OpenClaw config not found")?;
+            let key = claw_cfg
+                .openrouter_api_key
+                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                model_name: claw_cfg
+                    .selected_cloud_model
+                    .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string()),
+                port: 0,
+                token: key,
+                context_size: 128000,
+                model_family: None,
+            })
+        }
+        Some("gemini") => {
+            info!("[resolve_provider] Routing to Gemini");
+            let claw_cfg = openclaw
+                .get_config()
+                .await
+                .ok_or("OpenClaw config not found")?;
+            let key = claw_cfg
+                .gemini_api_key
+                .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::Gemini,
+                base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
+                model_name: claw_cfg
+                    .selected_cloud_model
+                    .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
+                port: 0,
+                token: key,
+                context_size: 128000,
+                model_family: None,
+            })
+        }
+        Some("groq") => {
+            info!("[resolve_provider] Routing to Groq");
+            let claw_cfg = openclaw
+                .get_config()
+                .await
+                .ok_or("OpenClaw config not found")?;
+            let key = claw_cfg
+                .groq_api_key
+                .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
+                base_url: "https://api.groq.com/openai/v1".to_string(),
+                model_name: claw_cfg
+                    .selected_cloud_model
+                    .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
+                port: 0,
+                token: key,
+                context_size: 128000,
+                model_family: None,
+            })
+        }
+        _ => {
+            info!("[resolve_provider] Routing to Local Provider");
+            let cfg = sidecar_manager.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
+            Ok(ProviderConfig {
+                kind: crate::rig_lib::unified_provider::ProviderKind::Local,
+                base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
+                model_name: "default".to_string(),
+                port: cfg.0,
+                token: cfg.1,
+                context_size: cfg.2,
+                model_family: Some(cfg.3),
+            })
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn chat_stream(
@@ -58,6 +196,7 @@ pub async fn chat_stream(
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
     openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
+    rig_cache: State<'_, crate::rig_cache::RigManagerCache>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), String> {
@@ -79,129 +218,14 @@ pub async fn chat_stream(
     let user_config = config.get_config();
 
     // Provider Routing Logic
-    let (kind, base_url, model_name, _port, token, context_size, model_family) = match user_config
-        .selected_chat_provider
-        .as_deref()
-    {
-        Some("anthropic") => {
-            info!("[chat_stream] Routing to Anthropic");
-            let claw_cfg = openclaw
-                .get_config()
-                .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .anthropic_api_key
-                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::Anthropic,
-                "https://api.anthropic.com/v1".to_string(),
-                claw_cfg
-                    .selected_cloud_model
-                    .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
-                0,
-                key,
-                200000,
-                None,
-            )
-        }
-        Some("openai") => {
-            info!("[chat_stream] Routing to OpenAI");
-            let claw_cfg = openclaw
-                .get_config()
-                .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .openai_api_key
-                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::OpenAI,
-                "https://api.openai.com/v1".to_string(),
-                claw_cfg
-                    .selected_cloud_model
-                    .unwrap_or_else(|| "gpt-4o".to_string()),
-                0,
-                key,
-                128000,
-                None,
-            )
-        }
-        Some("openrouter") => {
-            info!("[chat_stream] Routing to OpenRouter");
-            let claw_cfg = openclaw
-                .get_config()
-                .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .openrouter_api_key
-                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
-                "https://openrouter.ai/api/v1".to_string(),
-                claw_cfg
-                    .selected_cloud_model
-                    .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string()),
-                0,
-                key,
-                128000,
-                None,
-            )
-        }
-        Some("gemini") => {
-            info!("[chat_stream] Routing to Gemini");
-            let claw_cfg = openclaw
-                .get_config()
-                .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .gemini_api_key
-                .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::Gemini,
-                "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
-                claw_cfg
-                    .selected_cloud_model
-                    .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
-                0,
-                key,
-                128000,
-                None,
-            )
-        }
-        Some("groq") => {
-            info!("[chat_stream] Routing to Groq");
-            let claw_cfg = openclaw
-                .get_config()
-                .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .groq_api_key
-                .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::OpenAI,
-                "https://api.groq.com/openai/v1".to_string(),
-                claw_cfg
-                    .selected_cloud_model
-                    .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
-                0,
-                key,
-                128000,
-                None,
-            )
-        }
-        _ => {
-            info!("[chat_stream] Routing to Local Provider");
-            let cfg = state.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
-            (
-                crate::rig_lib::unified_provider::ProviderKind::Local,
-                format!("http://127.0.0.1:{}/v1", cfg.0),
-                "default".to_string(),
-                cfg.0,
-                cfg.1,
-                cfg.2,
-                Some(cfg.3),
-            )
-        }
-    };
+    let provider_cfg = resolve_provider(&user_config, &openclaw, &state).await?;
+    let kind = provider_cfg.kind;
+    let base_url = provider_cfg.base_url;
+    let model_name = provider_cfg.model_name;
+    let _port = provider_cfg.port;
+    let token = provider_cfg.token;
+    let context_size = provider_cfg.context_size;
+    let model_family = provider_cfg.model_family;
 
     // Collect enabled knowledge bits
     let gk_content = user_config
@@ -351,26 +375,58 @@ pub async fn chat_stream(
     let enable_tools = effective_auto_mode; // Or always true? Tools are gated by permissions anyway.
 
     info!(
-        "[chat_stream] Creating RigManager for model: {}",
+        "[chat_stream] Getting RigManager for model: {}",
         &model_name
     );
-    let manager = RigManager::new(
-        kind,
-        base_url,
-        model_name.clone(),
-        Some(app.clone()),
-        Some(token.clone()),
+
+    let gk_content_for_key = if gk_content.trim().is_empty() {
+        String::new()
+    } else {
+        gk_content.clone()
+    };
+
+    let cache_key = crate::rig_cache::RigManagerKey::from_parts(
+        &kind,
+        &base_url,
+        &model_name,
+        &token,
         context_size as usize,
-        None,
         enable_tools,
-        if gk_content.trim().is_empty() {
-            None
-        } else {
-            Some(gk_content)
-        },
-        payload.conversation_id.clone(),
-        model_family,
+        &gk_content_for_key,
+        model_family.as_deref(),
     );
+
+    // Clone all values needed inside the closure before moving them.
+    let app_clone = app.clone();
+    let kind_c = kind;
+    let base_url_c = base_url;
+    let model_name_c = model_name.clone();
+    let token_c = token.clone();
+    let gk_opt = if gk_content_for_key.is_empty() {
+        None
+    } else {
+        Some(gk_content_for_key)
+    };
+    let conv_id_c = payload.conversation_id.clone();
+    let mf_c = model_family;
+
+    let manager = rig_cache
+        .get_or_build(cache_key, move || {
+            RigManager::new(
+                kind_c,
+                base_url_c,
+                model_name_c,
+                Some(app_clone),
+                Some(token_c),
+                context_size as usize,
+                None,
+                enable_tools,
+                gk_opt,
+                conv_id_c,
+                mf_c,
+            )
+        })
+        .await;
 
     // Emit "Thinking" Status
     if let Some(id) = &payload.conversation_id {
@@ -407,7 +463,7 @@ pub async fn chat_stream(
             mcp_config.mcp_base_url.as_deref().unwrap_or("(none)")
         );
     } else {
-        info!("[chat_stream] Legacy tool mode (sandbox disabled)");
+        info!("[chat_stream] Sandbox mode (local-only, no remote MCP)");
     }
     let orchestrator = crate::rig_lib::orchestrator::Orchestrator::new_with_mcp(
         std::sync::Arc::new(manager),
@@ -416,6 +472,7 @@ pub async fn chat_stream(
 
     let permissions = crate::rig_lib::orchestrator::ToolPermissions {
         allow_web_search: payload.auto_mode || payload.web_search_enabled,
+        force_web_search: payload.web_search_enabled,
         allow_file_search: payload.auto_mode || has_context,
         allow_image_gen: payload.auto_mode,
     };
@@ -672,88 +729,15 @@ pub async fn chat_completion(
 
     let user_config = config.get_config();
 
-    // Re-use the provider routing logic from chat_stream
-    let (kind, base_url, model_name, _port, token, _context_size, model_family) =
-        match user_config.selected_chat_provider.as_deref() {
-            Some("anthropic") => {
-                let claw_cfg = openclaw
-                    .get_config()
-                    .await
-                    .ok_or("OpenClaw config not found")?;
-                let key = claw_cfg
-                    .anthropic_api_key
-                    .ok_or("Anthropic API key required")?;
-                (
-                    crate::rig_lib::unified_provider::ProviderKind::Anthropic,
-                    "https://api.anthropic.com/v1".to_string(),
-                    claw_cfg
-                        .selected_cloud_model
-                        .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
-                    0,
-                    key,
-                    200000,
-                    None,
-                )
-            }
-            Some("openai") => {
-                let claw_cfg = openclaw
-                    .get_config()
-                    .await
-                    .ok_or("OpenClaw config not found")?;
-                let key = claw_cfg.openai_api_key.ok_or("OpenAI API key required")?;
-                (
-                    crate::rig_lib::unified_provider::ProviderKind::OpenAI,
-                    "https://api.openai.com/v1".to_string(),
-                    claw_cfg
-                        .selected_cloud_model
-                        .unwrap_or_else(|| "gpt-4o".to_string()),
-                    0,
-                    key,
-                    128000,
-                    None,
-                )
-            }
-            Some("gemini") => {
-                let claw_cfg = openclaw
-                    .get_config()
-                    .await
-                    .ok_or("OpenClaw config not found")?;
-                let key = claw_cfg.gemini_api_key.ok_or("Gemini API key required")?;
-                (
-                    crate::rig_lib::unified_provider::ProviderKind::Gemini,
-                    "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
-                    claw_cfg
-                        .selected_cloud_model
-                        .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
-                    0,
-                    key,
-                    128000,
-                    None,
-                )
-            }
-            // ... (can add others if needed, but Local is the main standard)
-            _ => {
-                let cfg = state
-                    .get_chat_config()
-                    .ok_or("Local Neural Link not running")?;
-                (
-                    crate::rig_lib::unified_provider::ProviderKind::Local,
-                    format!("http://127.0.0.1:{}/v1", cfg.0),
-                    "default".to_string(),
-                    cfg.0,
-                    cfg.1,
-                    cfg.2,
-                    Some(cfg.3),
-                )
-            }
-        };
+    // Resolve provider via the shared function
+    let provider_cfg = resolve_provider(&user_config, &openclaw, &state).await?;
 
     let provider = crate::rig_lib::unified_provider::UnifiedProvider::new(
-        kind,
-        &base_url,
-        &token,
-        &model_name,
-        model_family,
+        provider_cfg.kind,
+        &provider_cfg.base_url,
+        &provider_cfg.token,
+        &provider_cfg.model_name,
+        provider_cfg.model_family,
     );
 
     // Construct the request

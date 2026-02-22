@@ -110,7 +110,7 @@ impl Reranker {
 
     pub fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<(usize, f32)>> {
         let mut results = Vec::new();
-        let session = self.session.lock().unwrap();
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
 
         // Batch processing (or single loop for simplicity first)
         // MS-MARCO MiniLM expects: [CLS] query [SEP] document [SEP]

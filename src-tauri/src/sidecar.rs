@@ -116,7 +116,7 @@ impl SidecarManager {
             .unwrap_or_else(|| "chatml".to_string());
 
         println!("[sidecar] Detected model family: {}", detected_family);
-        *self.detected_model_family.lock().unwrap() = Some(detected_family.clone());
+        *self.detected_model_family.lock().unwrap_or_else(|e| e.into_inner()) = Some(detected_family.clone());
         if let Some(ref meta) = gguf_meta {
             if let Some(ref tpl) = meta.chat_template {
                 println!("[sidecar] GGUF chat_template present ({} chars)", tpl.len());
@@ -151,11 +151,11 @@ impl SidecarManager {
         tracker.cleanup_by_service("chat");
         
         // Reset intentional stop flag
-        let mut process_guard = self.chat_process.lock().unwrap();
+        let mut process_guard = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(proc) = process_guard.take() {
             // Signal that this stop is intentional (restart)
-            *self.is_chat_stop_intentional.lock().unwrap() = true;
+            *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = true;
             let _ = proc.kill();
             
             // Wait for port to clear (max 2s)
@@ -405,7 +405,7 @@ impl SidecarManager {
         });
 
         // Reset intentional stop flag for the new process lifecycle
-        *self.is_chat_stop_intentional.lock().unwrap() = false;
+        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = false;
 
         Ok((port, token))
     }
@@ -419,7 +419,7 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("embedding");
 
-        let mut process_guard = self.embedding_process.lock().unwrap();
+        let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             let _ = proc.kill();
         }
@@ -506,7 +506,7 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("summarizer");
 
-        let mut process_guard = self.summarizer_process.lock().unwrap();
+        let mut process_guard = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             let _ = proc.kill();
         }
@@ -574,7 +574,7 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("stt");
 
-        let mut process_guard = self.stt_process.lock().unwrap();
+        let mut process_guard = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             let _ = proc.kill();
         }
@@ -652,26 +652,26 @@ impl SidecarManager {
         });
 
         // Also update model path for legacy check
-        *self.stt_model_path.lock().unwrap() = Some(model_path);
+        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path);
 
         Ok((port, token))
     }
 
     pub fn start_image_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
-        let mut model_guard = self.image_model_path.lock().unwrap();
+        let mut model_guard = self.image_model_path.lock().unwrap_or_else(|e| e.into_inner());
         *model_guard = Some(model_path);
         Ok(())
     }
 
     pub fn start_tts_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
-        let mut model_guard = self.tts_model_path.lock().unwrap();
+        let mut model_guard = self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner());
         *model_guard = Some(model_path);
         Ok(())
     }
 
     pub fn stop_chat_server(&self) -> Result<()> {
-        *self.is_chat_stop_intentional.lock().unwrap() = true;
-        let mut process_guard = self.chat_process.lock().unwrap();
+        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let mut process_guard = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             proc.kill()?;
         }
@@ -679,83 +679,87 @@ impl SidecarManager {
     }
 
     pub fn stop_all(&self) -> Result<()> {
-        let mut chat = self.chat_process.lock().unwrap();
+        let mut chat = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = chat.take() {
             proc.kill()?;
         }
 
-        let mut embed = self.embedding_process.lock().unwrap();
+        let mut embed = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = embed.take() {
             proc.kill()?;
         }
 
-        let mut summ = self.summarizer_process.lock().unwrap();
+        let mut summ = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = summ.take() {
             proc.kill()?;
         }
 
-        let mut stt = self.stt_process.lock().unwrap();
+        let mut stt = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = stt.take() {
             proc.kill()?;
         }
 
         // Just clear paths
-        *self.stt_model_path.lock().unwrap() = None;
-        *self.image_model_path.lock().unwrap() = None;
-        *self.tts_model_path.lock().unwrap() = None;
+        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         Ok(())
     }
 
     pub fn set_chat_intentional_stop(&self, val: bool) {
-        *self.is_chat_stop_intentional.lock().unwrap() = val;
+        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = val;
     }
 
     pub fn get_chat_config(&self) -> Option<(u16, String, u32, String)> {
-        let guard = self.chat_process.lock().unwrap();
+        let guard = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone(), p.context_size, p.model_family.clone()))
     }
 
     pub fn get_embedding_config(&self) -> Option<(u16, String)> {
-        let guard = self.embedding_process.lock().unwrap();
+        let guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone()))
     }
 
     pub fn get_summarizer_config(&self) -> Option<(u16, String)> {
-        let guard = self.summarizer_process.lock().unwrap();
+        let guard = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone()))
     }
 
     // No config for CLI, just state
     pub fn is_stt_active(&self) -> bool {
-        self.stt_model_path.lock().unwrap().is_some()
+        self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn is_image_active(&self) -> bool {
-        self.image_model_path.lock().unwrap().is_some()
+        self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn is_tts_active(&self) -> bool {
-        self.tts_model_path.lock().unwrap().is_some()
+        self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn get_stt_model(&self) -> Option<String> {
-        self.stt_model_path.lock().unwrap().clone()
+        self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn get_image_model(&self) -> Option<String> {
-        self.image_model_path.lock().unwrap().clone()
+        self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn get_tts_model(&self) -> Option<String> {
+        self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn get_status(&self) -> (bool, bool, bool, bool, bool, bool) {
-        let chat = self.chat_process.lock().unwrap().is_some();
-        let embed = self.embedding_process.lock().unwrap().is_some();
-        let summ = self.summarizer_process.lock().unwrap().is_some();
-        let stt = self.stt_process.lock().unwrap().is_some();
+        let chat = self.chat_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let embed = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let summ = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let stt = self.stt_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
         // tts and image still CLI for now? Plan says verify Streaming Voice Services (stt).
         // Let's keep tts as path check for now until implemented.
-        let tts = self.tts_model_path.lock().unwrap().is_some();
-        let image = self.image_model_path.lock().unwrap().is_some();
+        let tts = self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let image = self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some();
         (chat, embed, stt, tts, image, summ)
     }
 
@@ -832,7 +836,7 @@ pub async fn start_chat_server(
                 if code != 0 {
                     // Check if this was intentional
                     let manager = app_handle_for_closure.state::<SidecarManager>();
-                    let intentional = *manager.is_chat_stop_intentional.lock().unwrap();
+                    let intentional = *manager.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner());
                     
                     if intentional {
                          println!("[sidecar] Chat server stopped intentionally (code {}). Suppressing crash alert.", code);
@@ -887,7 +891,7 @@ pub async fn start_chat_server(
         }
 
         // Check if process died
-        if state.chat_process.lock().unwrap().is_none() {
+        if state.chat_process.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
             return Err("Chat server process exited prematurely during startup".into());
         }
 
