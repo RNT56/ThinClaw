@@ -8,6 +8,18 @@
 import { invoke } from '@tauri-apps/api/core';
 import { openPath as tauriOpenPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 
+/**
+ * Guard wrapper: only call invoke when the Tauri runtime is available.
+ * During Vite HMR reloads the IPC bridge can momentarily disappear,
+ * which otherwise causes `Cannot read properties of undefined (reading 'invoke')`.
+ */
+function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
+        return Promise.reject(new Error(`Tauri runtime not available (calling ${cmd})`));
+    }
+    return invoke<T>(cmd, args);
+}
+
 // ============================================================================
 // Types (matching Rust types from commands.rs)
 // ============================================================================
@@ -168,7 +180,7 @@ export interface OpenClawDiagnostics {
  * Get current OpenClaw status
  */
 export async function getOpenClawStatus(): Promise<OpenClawStatus> {
-    return invoke('openclaw_get_status');
+    return safeInvoke('openclaw_get_status');
 }
 
 /**

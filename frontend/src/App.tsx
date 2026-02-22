@@ -18,8 +18,13 @@ function App() {
 
   useEffect(() => {
     checkSetup();
-    const currentWindow = getCurrentWebviewWindow();
-    setWindowLabel(currentWindow.label);
+    try {
+      const currentWindow = getCurrentWebviewWindow();
+      setWindowLabel(currentWindow.label);
+    } catch (e) {
+      console.warn("getCurrentWebviewWindow() failed (not in Tauri context?):", e);
+      setWindowLabel("");
+    }
   }, []);
 
   const checkSetup = async () => {

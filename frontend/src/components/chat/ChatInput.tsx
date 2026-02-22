@@ -109,7 +109,7 @@ export const ChatInput = memo(function ChatInput({
     // Initial focus
     useEffect(() => {
         if (!isStreaming && !isRestarting) {
-            textareaRef.current?.focus();
+            textareaRef?.current?.focus();
         }
     }, [isStreaming, isRestarting]);
 
@@ -204,7 +204,7 @@ export const ChatInput = memo(function ChatInput({
                                 e.preventDefault();
                                 const doc = filteredDocs[selectedIndex];
                                 setIngestedFiles(prev => [...prev, { id: doc.id, name: doc.name }]);
-                                const cursor = textareaRef.current?.selectionStart || 0;
+                                const cursor = textareaRef?.current?.selectionStart || 0;
                                 const textBefore = input.slice(0, cursor);
                                 const lastAt = textBefore.lastIndexOf('@');
                                 if (lastAt !== -1) {

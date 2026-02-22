@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { Bot, Loader2, X, Image as ImageIcon, Paperclip, FileText, ArrowDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -6,8 +7,10 @@ import { ChatInput } from '../ChatInput';
 import { ModelSelector } from '../ModelSelector';
 import { cn } from '../../../lib/utils';
 import { useChatLayout } from '../ChatProvider';
+import { findStyle } from '../../../lib/style-library';
 
 export function ChatView() {
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
     const {
         messages,
         isStreaming,
@@ -246,7 +249,7 @@ export function ChatView() {
                             <ChatInput
                                 input={input}
                                 setInput={setInput}
-                                textareaRef={undefined as any}
+                                textareaRef={textareaRef}
                                 isStreaming={isStreaming}
                                 isRestarting={isRestarting}
                                 modelRunning={modelRunning}
@@ -292,7 +295,7 @@ export function ChatView() {
                                 handleSlashCommandExecute={handleSlashCommandExecute}
                                 activeStyleId={activeStyleId}
                                 setActiveStyleId={setActiveStyleId}
-                                findStyle={undefined as any}
+                                findStyle={findStyle}
                             />
                         </div>
                     </div>

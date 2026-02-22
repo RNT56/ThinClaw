@@ -253,7 +253,9 @@ function PageHeader({ page }: { page: SettingsPage }) {
         }
     };
 
-    const { title, description, icon: Icon } = titles[page];
+    const entry = titles[page];
+    if (!entry) return null; // Not a settings page (e.g. 'chat', 'openclaw', 'imagine')
+    const { title, description, icon: Icon } = entry;
 
     return (
         <div className="border-b border-border/50 pb-6">
