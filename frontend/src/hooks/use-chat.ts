@@ -37,7 +37,7 @@ export function useChat() {
     const { config } = useConfig();
 
     const { currentEmbeddingModelPath, maxContext, currentModelPath, currentModelTemplate, isRestarting } = useModelContext();
-    const { activeJobs, startGeneration, cancelGeneration: contextCancel } = useChatContext();
+    const { activeJobs, activeJobsRef, startGeneration, cancelGeneration: contextCancel } = useChatContext();
 
     const activeJob = currentConversationId ? activeJobs[currentConversationId] : null;
 
@@ -257,43 +257,64 @@ export function useChat() {
 
             setHasMore(msgs.length === limit);
 
-            setDbMessages(msgs.map((m) => {
-                // We only care about reconciling TEMP IDs.
-                // Search in current DB ref for a message with a Temp ID that matches this new DB message.
-                // We search from the end because we are likely matching the latest messages.
-                const existingTemp = [...dbMessagesRef.current].reverse().find(curr => {
-                    if (!curr.id?.startsWith('temp-')) return false;
+            setDbMessages(_ => {
+                const mapped: ExtendedMessage[] = msgs.map((m) => {
+                    // We only care about reconciling TEMP IDs.
+                    // Search in current DB ref for a message with a Temp ID that matches this new DB message.
+                    // We search from the end because we are likely matching the latest messages.
+                    const existingTemp = [...dbMessagesRef.current].reverse().find(curr => {
+                        if (!curr.id?.startsWith('temp-')) return false;
 
-                    // 1. If we already mapped it previously (realId matches)
-                    if (curr.realId === m.id) return true;
+                        // 1. If we already mapped it previously (realId matches)
+                        if (curr.realId === m.id) return true;
 
-                    // 2. Exact Content Match (User messages usually)
-                    if (curr.role === m.role && curr.content === m.content) return true;
+                        // 2. Exact Content Match (User messages usually)
+                        if (curr.role === m.role && curr.content === m.content) return true;
 
-                    // 3. Last Assistant Message Match:
-                    // If this is one of the last few messages from DB, and matches role
-                    // increased time buffer to 5 minutes to account for long generations
-                    if (curr.role === m.role && m.role === 'assistant') {
-                        const timeDiff = Math.abs((curr.created_at || 0) - (m.created_at || 0));
-                        return timeDiff < 300000;
-                    }
-                    return false;
+                        // 3. Last Assistant Message Match:
+                        // If this is one of the last few messages from DB, and matches role
+                        // increased time buffer to 5 minutes to account for long generations
+                        if (curr.role === m.role && m.role === 'assistant') {
+                            const timeDiff = Math.abs((curr.created_at || 0) - (m.created_at || 0));
+                            return timeDiff < 300000;
+                        }
+                        return false;
+                    });
+
+                    return {
+                        id: existingTemp ? existingTemp.id : m.id,
+                        realId: m.id,
+                        role: m.role,
+                        // Prefer DB content, but fallback to existing content if DB is empty (anti-flash)
+                        content: m.content || (existingTemp?.content || ""),
+                        images: m.images || null,
+                        attached_docs: m.attached_docs || null,
+                        web_search_results: m.web_search_results || null,
+                        is_summary: false,
+                        original_messages: null,
+                        created_at: m.created_at || existingTemp?.created_at || Date.now()
+                    };
                 });
 
-                return {
-                    id: existingTemp ? existingTemp.id : m.id,
-                    realId: m.id,
-                    role: m.role,
-                    // Prefer DB content, but fallback to existing content if DB is empty (anti-flash)
-                    content: m.content || (existingTemp?.content || ""),
-                    images: m.images || null,
-                    attached_docs: m.attached_docs || null,
-                    web_search_results: m.web_search_results || null,
-                    is_summary: false,
-                    original_messages: null,
-                    created_at: m.created_at || existingTemp?.created_at || Date.now()
-                };
-            }));
+                // If there is a live streaming job for this conversation (user switched away and back),
+                // the last assistant message in the DB snapshot will be empty (not yet saved).
+                // Patch it immediately with the live content so there's no blank-bubble flash.
+                const liveJob = activeJobsRef.current?.[id];
+                if (liveJob?.isStreaming && liveJob.fullMessage) {
+                    const lastIdx = mapped.length - 1;
+                    if (lastIdx >= 0 && mapped[lastIdx].role === 'assistant') {
+                        mapped[lastIdx] = {
+                            ...mapped[lastIdx],
+                            content: liveJob.fullMessage,
+                            web_search_results: liveJob.searchResults ?? mapped[lastIdx].web_search_results,
+                            searchStatus: liveJob.searchStatus as ExtendedMessage['searchStatus'],
+                            isStreaming: true,
+                        };
+                    }
+                }
+
+                return mapped;
+            });
             setCurrentConversationId(id);
 
             // Calculate tokens for loaded conversation

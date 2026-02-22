@@ -21,6 +21,7 @@ interface ChatJob {
 
 interface ChatContextType {
     activeJobs: Record<string, ChatJob>;
+    activeJobsRef: React.MutableRefObject<Record<string, ChatJob>>;
     startGeneration: (params: {
         content: string;
         images: string[];
@@ -254,7 +255,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }, [removeJob]);
 
     return (
-        <ChatContext.Provider value={{ activeJobs, startGeneration, cancelGeneration }}>
+        <ChatContext.Provider value={{ activeJobs, activeJobsRef, startGeneration, cancelGeneration }}>
             {children}
         </ChatContext.Provider>
     );

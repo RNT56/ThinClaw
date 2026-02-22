@@ -568,7 +568,10 @@ impl Orchestrator {
     ) {
         use crate::rig_lib::unified_provider::ProviderEvent;
 
-        let max_turns = 5;
+        // In force_web_search mode the LLM must call web_search ONCE and then synthesise.
+        // Giving it more turns causes it to keep refining / re-searching rather than answering.
+        // In auto/optional mode we allow more turns for legitimate multi-step reasoning.
+        let max_turns = if perms.force_web_search { 2 } else { 5 };
         let mut current_turn = 0;
         let mut conversation: Vec<serde_json::Value> = Vec::new();
 
@@ -630,7 +633,7 @@ impl Orchestrator {
         };
 
         let system_prompt = format!(
-            r#"{}. 
+            r#"{}.
 Current Date: {}
 
 {}
@@ -660,8 +663,9 @@ let news = web_search("gold silver price today");
 `Gold: ${{gold}}, Silver: ${{silver}}\n\nNews: ${{news}}`
 </rhai_code>
 
-After receiving <tool_result>, use the data to synthesize a helpful answer for the user.
-If a script fails, the error message will appear in <tool_result>. Fix your script and try again.
+After receiving <tool_result>, write your final answer to the user immediately.
+**CRITICAL**: Do NOT call web_search or any other tool a second time. One tool call → synthesise → done.
+If a script fails, the error message will appear in <tool_result>. Fix your script and try again ONE time only.
 
 {}"#,
             persona_instructions, date, search_rules, tools_desc
@@ -677,8 +681,9 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
         // User query
         let effective_query = if perms.force_web_search {
             format!(
-                "**SEARCH MODE ACTIVE**: Research this request using `web_search`. \
-                 Formalize the query and search.\n\nRequest: {}",
+                "**SEARCH MODE ACTIVE**: Call `web_search` ONCE with a well-formed query, \
+                 then write your complete answer using the results. \
+                 Do NOT call web_search more than once.\n\nRequest: {}",
                 query
             )
         } else if perms.allow_web_search {
