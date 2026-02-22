@@ -286,12 +286,6 @@ pub fn run() {
         .setup(move |app| {
             specta_builder.mount_events(app);
 
-            // Open devtools in dev builds for easier debugging
-            #[cfg(debug_assertions)]
-            if let Some(window) = app.get_webview_window("main") {
-                window.open_devtools();
-            }
-
             Ok(())
         })
         .build(tauri::generate_context!())
