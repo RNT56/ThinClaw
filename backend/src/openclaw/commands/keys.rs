@@ -20,7 +20,7 @@ pub async fn openclaw_get_openai_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.openai_api_key))
+    Ok(config.and_then(|cfg| cfg.openai_api_key.clone()))
 }
 
 /// Save OpenAI API key
@@ -68,7 +68,7 @@ pub async fn openclaw_get_openrouter_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.openrouter_api_key))
+    Ok(config.and_then(|cfg| cfg.openrouter_api_key.clone()))
 }
 
 /// Save OpenRouter API key
@@ -115,7 +115,7 @@ pub async fn openclaw_get_gemini_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.gemini_api_key))
+    Ok(config.and_then(|cfg| cfg.gemini_api_key.clone()))
 }
 
 /// Save Gemini API key
@@ -163,7 +163,7 @@ pub async fn openclaw_get_groq_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.groq_api_key))
+    Ok(config.and_then(|cfg| cfg.groq_api_key.clone()))
 }
 
 /// Save Groq API key
@@ -211,7 +211,7 @@ pub async fn openclaw_get_anthropic_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.anthropic_api_key))
+    Ok(config.and_then(|cfg| cfg.anthropic_api_key.clone()))
 }
 
 /// Get Brave Search API key
@@ -221,7 +221,7 @@ pub async fn openclaw_get_brave_key(
     state: State<'_, OpenClawManager>,
 ) -> Result<Option<String>, String> {
     let config = state.get_config().await;
-    Ok(config.and_then(|cfg| cfg.brave_search_api_key))
+    Ok(config.and_then(|cfg| cfg.brave_search_api_key.clone()))
 }
 
 /// Save Slack configuration
@@ -682,10 +682,15 @@ pub async fn openclaw_add_custom_secret(
     };
 
     let id = format!("custom-{}", uuid::Uuid::new_v4());
+
+    // Store the secret value in the Keychain, not in identity.json
+    crate::openclaw::config::keychain::set_key(&id, Some(&value))
+        .map_err(|e| format!("Keychain error: {}", e))?;
+
     cfg.custom_secrets.push(CustomSecret {
         id: id.clone(),
         name,
-        value,
+        value, // kept in memory only; #[serde(skip)] prevents JSON persistence
         description,
         granted: false,
     });
@@ -719,6 +724,9 @@ pub async fn openclaw_remove_custom_secret(
     } else {
         state.init_config().await?
     };
+
+    // Delete the secret value from the Keychain
+    let _ = crate::openclaw::config::keychain::set_key(&id, None);
 
     cfg.custom_secrets.retain(|s| s.id != id);
 

@@ -172,7 +172,7 @@ pub async fn download_model(
     let mut request_builder = client.get(&url);
     if url.contains("huggingface.co") {
          let config = crate::openclaw::OpenClawConfig::new(app_data_dir.clone());
-         if let Some(token) = config.huggingface_token {
+         if let Some(ref token) = config.huggingface_token {
              if !token.trim().is_empty() {
                  println!("[download_model] Using HF Token from Config for authentication");
                  request_builder = request_builder.header("Authorization", format!("Bearer {}", token));

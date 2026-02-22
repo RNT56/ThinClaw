@@ -76,12 +76,14 @@ pub async fn resolve_provider(
                 .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .anthropic_api_key
+                .clone()
                 .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::Anthropic,
                 base_url: "https://api.anthropic.com/v1".to_string(),
                 model_name: claw_cfg
                     .selected_cloud_model
+                    .clone()
                     .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
                 port: 0,
                 token: key,
@@ -97,12 +99,14 @@ pub async fn resolve_provider(
                 .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .openai_api_key
+                .clone()
                 .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 base_url: "https://api.openai.com/v1".to_string(),
                 model_name: claw_cfg
                     .selected_cloud_model
+                    .clone()
                     .unwrap_or_else(|| "gpt-4o".to_string()),
                 port: 0,
                 token: key,
@@ -118,12 +122,14 @@ pub async fn resolve_provider(
                 .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .openrouter_api_key
+                .clone()
                 .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
                 base_url: "https://openrouter.ai/api/v1".to_string(),
                 model_name: claw_cfg
                     .selected_cloud_model
+                    .clone()
                     .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string()),
                 port: 0,
                 token: key,
@@ -139,12 +145,14 @@ pub async fn resolve_provider(
                 .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .gemini_api_key
+                .clone()
                 .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::Gemini,
                 base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
                 model_name: claw_cfg
                     .selected_cloud_model
+                    .clone()
                     .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
                 port: 0,
                 token: key,
@@ -160,12 +168,14 @@ pub async fn resolve_provider(
                 .ok_or("OpenClaw config not found")?;
             let key = claw_cfg
                 .groq_api_key
+                .clone()
                 .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 base_url: "https://api.groq.com/openai/v1".to_string(),
                 model_name: claw_cfg
                     .selected_cloud_model
+                    .clone()
                     .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
                 port: 0,
                 token: key,

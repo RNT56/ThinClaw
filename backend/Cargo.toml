@@ -70,6 +70,7 @@ scrappy-mcp-tools = { path = "scrappy-mcp-tools" }
 rhai = { version = "1", features = ["sync", "serde"] }
 async-trait = "0.1"
 clawscan = "1.0.0"
+zeroize = { version = "1", features = ["derive"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]

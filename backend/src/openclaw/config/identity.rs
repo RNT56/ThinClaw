@@ -69,12 +69,41 @@ impl OpenClawConfig {
         let raw_json_value: Option<serde_json::Value> = std::fs::read_to_string(&id_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
-        if let Some(val) = raw_json_value {
-            if let Ok(mut legacy) = serde_json::from_value::<keychain::LegacyKeys>(val) {
+        if let Some(ref val) = raw_json_value {
+            if let Ok(mut legacy) = serde_json::from_value::<keychain::LegacyKeys>(val.clone()) {
                 if keychain::migrate_from_identity(&mut legacy) {
                     // Merge the now-nulled fields back into identity so save_identity()
                     // writes the sanitised version (no secrets in JSON).
                     println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                }
+            }
+
+            // Migrate custom_secrets values: the old JSON had `value` inline.
+            // Since CustomSecret now uses #[serde(skip)] on `value`, we must
+            // read the raw JSON to find and import those values into Keychain.
+            if let Some(secrets_arr) = val.get("custom_secrets").and_then(|v| v.as_array()) {
+                for raw_secret in secrets_arr {
+                    if let (Some(id), Some(value)) = (
+                        raw_secret.get("id").and_then(|v| v.as_str()),
+                        raw_secret.get("value").and_then(|v| v.as_str()),
+                    ) {
+                        if !value.is_empty() {
+                            // Only migrate if the keychain doesn't already have this key
+                            if keychain::get_key(id).is_none() {
+                                if let Err(e) = keychain::set_key(id, Some(value)) {
+                                    println!(
+                                        "[keychain] custom secret migration failed for '{}': {}",
+                                        id, e
+                                    );
+                                } else {
+                                    println!(
+                                        "[keychain] migrated custom secret '{}' to Keychain",
+                                        id
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -161,7 +190,17 @@ impl OpenClawConfig {
             remote_token: keychain::get_key("remote_token"),
             private_key: identity.private_key,
             public_key: identity.public_key,
-            custom_secrets: identity.custom_secrets,
+            // Custom secrets: values are stored in Keychain under each secret's ID.
+            // JSON only stores metadata (id, name, description, granted) — not the value.
+            custom_secrets: {
+                let mut secrets = identity.custom_secrets;
+                for secret in &mut secrets {
+                    if let Some(val) = keychain::get_key(&secret.id) {
+                        secret.value = val;
+                    }
+                }
+                secrets
+            },
             node_host_enabled: identity.node_host_enabled,
             local_inference_enabled: identity.local_inference_enabled,
             expose_inference: identity.expose_inference,

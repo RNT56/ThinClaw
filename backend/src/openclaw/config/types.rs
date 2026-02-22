@@ -8,11 +8,17 @@ pub const OPENCLAW_VERSION: &str = "2026.2.14";
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
 pub struct CustomSecret {
     pub id: String,
     pub name: String,
+    /// Secret value — stored in the macOS Keychain, NOT in identity.json.
+    /// `serde(skip)` ensures this field is never written to / read from JSON.
+    /// At runtime it is populated from keychain::get_key(&self.id) and the
+    /// in-memory copy is zeroised on Drop via OpenClawConfig's Drop impl.
+    #[serde(skip)]
     pub value: String,
     pub description: Option<String>,
     pub granted: bool,
@@ -204,6 +210,54 @@ pub struct OpenClawConfig {
     pub bedrock_secret_access_key: Option<String>,
     pub bedrock_region: Option<String>,
     pub bedrock_granted: bool,
+}
+
+/// Securely wipe all sensitive API key fields from memory when
+/// `OpenClawConfig` is dropped (app shutdown or config replacement).
+///
+/// `Zeroize::zeroize()` on `String` overwrites the buffer with 0x00
+/// before the allocator reclaims it, preventing post-free memory scraping.
+impl Drop for OpenClawConfig {
+    fn drop(&mut self) {
+        // Helper: zeroize an Option<String>
+        macro_rules! z {
+            ($field:expr) => {
+                if let Some(ref mut s) = $field {
+                    s.zeroize();
+                }
+            };
+        }
+
+        self.auth_token.zeroize();
+
+        z!(self.anthropic_api_key);
+        z!(self.brave_search_api_key);
+        z!(self.huggingface_token);
+        z!(self.openai_api_key);
+        z!(self.openrouter_api_key);
+        z!(self.gemini_api_key);
+        z!(self.groq_api_key);
+        z!(self.remote_token);
+        z!(self.custom_llm_key);
+        z!(self.xai_api_key);
+        z!(self.venice_api_key);
+        z!(self.together_api_key);
+        z!(self.moonshot_api_key);
+        z!(self.minimax_api_key);
+        z!(self.nvidia_api_key);
+        z!(self.qianfan_api_key);
+        z!(self.mistral_api_key);
+        z!(self.xiaomi_api_key);
+        z!(self.bedrock_access_key_id);
+        z!(self.bedrock_secret_access_key);
+        z!(self.private_key);
+        z!(self.public_key);
+
+        // Custom secrets: zeroize each value
+        for secret in &mut self.custom_secrets {
+            secret.value.zeroize();
+        }
+    }
 }
 
 /// Slack connector configuration

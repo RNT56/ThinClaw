@@ -78,6 +78,7 @@ async fn generate_with_gemini(
 
     let api_key = config
         .gemini_api_key
+        .clone()
         .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
 
     // Build the full prompt with style

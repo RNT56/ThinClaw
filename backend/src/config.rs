@@ -314,10 +314,10 @@ pub fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let config = crate::openclaw::OpenClawConfig::new(app_data_dir);
 
-    if let Some(token) = config.huggingface_token {
+    if let Some(ref token) = config.huggingface_token {
         if !token.trim().is_empty() {
             println!("[config] get_hf_token: success (from openclaw config)");
-            return Ok(Some(token));
+            return Ok(Some(token.clone()));
         }
     }
 
