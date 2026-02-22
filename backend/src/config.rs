@@ -106,13 +106,13 @@ pub struct UserConfig {
     /// How long (in seconds) the ToolRegistryCache holds entries before
     /// re-fetching from the MCP server. Default: 300 s (5 minutes).
     #[serde(default = "default_mcp_cache_ttl")]
-    pub mcp_cache_ttl_secs: u64,
+    pub mcp_cache_ttl_secs: u32,
 
     /// Maximum characters returned by a single tool call before truncation.
     /// Larger values give the agent more context at the cost of token usage.
     /// Default: 5000.
     #[serde(default = "default_mcp_tool_result_max_chars")]
-    pub mcp_tool_result_max_chars: usize,
+    pub mcp_tool_result_max_chars: u32,
 }
 
 impl Default for UserConfig {
@@ -201,11 +201,11 @@ fn default_spotlight_shortcut() -> String {
     "Command+Shift+K".to_string()
 }
 
-fn default_mcp_cache_ttl() -> u64 {
+fn default_mcp_cache_ttl() -> u32 {
     300
 }
 
-fn default_mcp_tool_result_max_chars() -> usize {
+fn default_mcp_tool_result_max_chars() -> u32 {
     5000
 }
 

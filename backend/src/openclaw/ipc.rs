@@ -418,7 +418,7 @@ impl McpRequestHandler {
         let max_chars = self
             .app
             .try_state::<crate::config::ConfigManager>()
-            .map(|cm| cm.get_config().mcp_tool_result_max_chars)
+            .map(|cm| cm.get_config().mcp_tool_result_max_chars as usize)
             .unwrap_or(5000);
         Ok(summarize_result(result, max_chars))
     }
