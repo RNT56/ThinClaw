@@ -117,6 +117,11 @@ where
                 tokio::runtime::Handle::current()
                     .block_on(async { rig.explicit_search(&query).await })
             });
+            eprintln!(
+                "[DEBUG web_search] Returning {} chars to Rhai. First 200: {:?}",
+                result.len(),
+                &result[..std::cmp::min(200, result.len())]
+            );
             rhai::Dynamic::from(result)
         });
 

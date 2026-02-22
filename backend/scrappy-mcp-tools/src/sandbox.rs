@@ -183,9 +183,18 @@ impl Sandbox {
 
         let elapsed = start.elapsed();
 
-        // 4. Check timeout (engine ops limit usually catches this, but belt-and-suspenders)
+        // 4. Check elapsed time (informational only).
+        // NOTE: We intentionally do NOT reject the result here. The script
+        // already completed and `result` holds valid data. Discarding it
+        // would waste expensive work (e.g. web_search with deep scraping +
+        // LLM summarization can legitimately take 60-90s). The Rhai
+        // `max_operations` limit already guards against infinite loops.
         if elapsed > Duration::from_secs(self.config.timeout_seconds) {
-            return Err(SandboxError::Timeout(self.config.timeout_seconds));
+            eprintln!(
+                "[sandbox] Warning: script took {}s (limit {}s) but completed successfully — keeping result.",
+                elapsed.as_secs(),
+                self.config.timeout_seconds
+            );
         }
 
         // 5. Serialize result

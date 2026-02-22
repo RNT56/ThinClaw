@@ -715,12 +715,53 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                 break;
             }
             current_turn += 1;
+            eprintln!("[DEBUG ReAct] === Turn {}/{} ===", current_turn, max_turns);
+
+            // Log conversation structure for debugging
+            for (i, msg) in conversation.iter().enumerate() {
+                let role = msg["role"].as_str().unwrap_or("?");
+                let content_len = msg["content"].as_str().map_or(0, |s| s.len());
+                eprintln!(
+                    "[DEBUG ReAct]   msg[{}]: role={}, len={}",
+                    i, role, content_len
+                );
+            }
 
             let mut full_response = String::new();
             let mut buffer = String::new();
             let mut code_detected = false;
+            let is_last_turn = current_turn == max_turns;
+
+            // On the last turn, force the LLM to synthesize rather than call tools again.
+            // Without this, small models often re-emit <rhai_code> and the content gets
+            // swallowed because there's no next turn for synthesis.
+            // NOTE: We append to the last user message instead of adding a new one,
+            // because Mistral's chat template enforces strict user/assistant alternation
+            // and throws an exception on consecutive same-role messages.
+            if is_last_turn && current_turn > 1 {
+                if let Some(last_msg) = conversation.last_mut() {
+                    if last_msg["role"] == "user" {
+                        let existing = last_msg["content"].as_str().unwrap_or("").to_string();
+                        last_msg["content"] = json!(format!(
+                            "{}\n\nNow write your final answer to the user based on the information above. Do NOT use any tools or write any code blocks. Respond directly in natural language.",
+                            existing
+                        ));
+                    }
+                }
+                info!("[orchestrator] Last turn — injected synthesis instruction into existing message");
+            }
 
             use futures::StreamExt;
+            let total_conv_chars: usize = conversation
+                .iter()
+                .map(|m| m["content"].as_str().map_or(0, |s| s.len()))
+                .sum();
+            info!(
+                "[orchestrator] Sending {} messages ({} total chars) to LLM for Turn {}",
+                conversation.len(),
+                total_conv_chars,
+                current_turn
+            );
             let mut stream = match rig
                 .provider
                 .stream_raw_completion(conversation.clone(), Some(0.1))
@@ -746,7 +787,16 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                             full_response.push_str(&token);
                             buffer.push_str(&token);
 
-                            if buffer.contains("<rhai_code>") {
+                            if is_last_turn {
+                                // On the last turn, forward EVERYTHING — even if the
+                                // model tries to emit <rhai_code>, we won't execute it.
+                                // Strip the code tags so only natural language reaches the user.
+                                let clean =
+                                    token.replace("<rhai_code>", "").replace("</rhai_code>", "");
+                                if !clean.is_empty() {
+                                    let _ = tx.send(Ok(ProviderEvent::Content(clean))).await;
+                                }
+                            } else if buffer.contains("<rhai_code>") {
                                 code_detected = true;
                                 if buffer.ends_with("<rhai_code>") {
                                     let _ = tx
@@ -772,8 +822,29 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                 }
             }
 
+            info!(
+                "[orchestrator] Turn {} complete: code_detected={}, response_len={}, first_80_chars={:?}",
+                current_turn,
+                code_detected,
+                full_response.len(),
+                &full_response[..std::cmp::min(80, full_response.len())]
+            );
+
             if !code_detected {
+                info!(
+                    "[orchestrator] Turn {} — LLM answered directly (no code). Breaking loop.",
+                    current_turn
+                );
                 break; // LLM answered directly without code
+            }
+
+            // On the last turn, we already forwarded all content and won't execute code.
+            if is_last_turn {
+                info!(
+                    "[orchestrator] Turn {} — last turn reached. Breaking loop (content already forwarded).",
+                    current_turn
+                );
+                break;
             }
 
             // Parse <rhai_code> block
@@ -800,19 +871,27 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
 
                     match sandbox.execute(script) {
                         Ok(result) => {
+                            eprintln!(
+                                "[DEBUG sandbox] Output {} chars. First 300: {:?}",
+                                result.output.len(),
+                                &result.output[..std::cmp::min(300, result.output.len())]
+                            );
                             info!(
                                 "[orchestrator] Script executed in {}ms",
                                 result.execution_time_ms
                             );
 
-                            // Summarize output to prevent context overflow
+                            // Summarize output to prevent context overflow.
+                            // IMPORTANT: DDGSearchTool already performs its own Map-Reduce
+                            // summarization, so we use a generous limit (8000 chars) here
+                            // to avoid double-truncating the carefully curated data.
                             let output_val: serde_json::Value =
                                 serde_json::from_str(&result.output)
                                     .unwrap_or(serde_json::Value::String(result.output.clone()));
 
                             let summarized_val =
                                 crate::rig_lib::tool_router::summarize_arbitrary_json(
-                                    output_val, 2000, 20,
+                                    output_val, 8000, 20,
                                 );
 
                             let summarized_output = match summarized_val {
@@ -820,11 +899,19 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                                 _ => serde_json::to_string(&summarized_val).unwrap_or_default(),
                             };
 
+                            info!(
+                                "[orchestrator] Tool result for LLM: {} chars, preview: {:?}",
+                                summarized_output.len(),
+                                &summarized_output[..std::cmp::min(500, summarized_output.len())]
+                            );
+
                             conversation.push(json!({
                                 "role": "user",
                                 "content": format!("<tool_result>\n{}\n</tool_result>", summarized_output)
                             }));
+                            eprintln!("[DEBUG tool_result] Injected {} chars into conversation. Total messages: {}", summarized_output.len(), conversation.len());
                             code_executed = true;
+                            info!("[orchestrator] Tool result injected. Conversation now has {} messages.", conversation.len());
                         }
                         Err(e) => {
                             warn!("[orchestrator] Script error: {}", e);

@@ -573,6 +573,36 @@ impl LlamaProvider {
             final_messages.push(m);
         }
 
+        // Enforce strict user/assistant alternation by merging consecutive same-role
+        // messages. Models like Mistral have chat templates that throw exceptions on
+        // consecutive user or assistant messages. This is a safety net that handles
+        // any upstream conversation structure issues (e.g. tool_result as user +
+        // synthesis instruction as user, or history ending with user + effective_query).
+        let mut merged_messages: Vec<serde_json::Value> = Vec::new();
+        for msg in final_messages {
+            let role = msg["role"].as_str().unwrap_or("").to_string();
+            if role != "system" {
+                if let Some(last) = merged_messages.last_mut() {
+                    if last["role"].as_str() == Some(&role) {
+                        // Merge: append content to previous message of same role
+                        if let (Some(existing), Some(new)) =
+                            (last["content"].as_str(), msg["content"].as_str())
+                        {
+                            last["content"] =
+                                serde_json::Value::String(format!("{}\n\n{}", existing, new));
+                            info!(
+                                "[llama_provider] Merged consecutive '{}' messages to enforce alternation",
+                                role
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+            merged_messages.push(msg);
+        }
+        let final_messages = merged_messages;
+
         let effective_temp = if self.is_reasoning_model() {
             None
         } else {

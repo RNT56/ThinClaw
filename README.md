@@ -48,7 +48,9 @@ npm run tauri dev
 *   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
 *   **Hybrid Inference Engine**: Seamlessly switch between local GGUF models (Llama 3, Gemma 3) and bleeding-edge cloud models (GPT-5.2, Claude 4.5) in a single workflow.
 *   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
-*   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
+*   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
+*   **MCP Server Integration**: Connect a custom FastAPI MCP server to extend the agent with remote tools — finance APIs, news feeds, domain-specific capabilities — via the Rhai script sandbox.
+*   **Voice I/O (TTS & STT)**: Native Text-to-Speech (Piper) and Speech-to-Text (Whisper) sidecars for fully voice-enabled conversations.
 *   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
 *   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`), ONNX reranking, and citation-backed generation.
 *   **Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
@@ -77,23 +79,27 @@ Scrappy uses a **Modular Sidecar Architecture**. The Rust core orchestrates seve
 
 ```mermaid
 graph TD
-    subgraph Frontend [React 19 Frontend]
+    subgraph Frontend [React 19 Frontend - frontend/src/]
         UI[User Interface / Glassmorphism]
         State[State Mgmt / Hooks]
         Stream[OpenClaw Stream Hook]
     end
     
-    subgraph Backend [Rust Core backend/]
+    subgraph Backend [Rust Core - backend/src/]
         Tauri[Tauri v2 Main]
         Manager[Sidecar Manager]
         Gateway[Gateway Controller]
         RigAgent[Native Rig Agent]
+        McpSandbox[MCP Rhai Sandbox]
     end
     
     subgraph Sidecars [Sidecar Processes]
         OpenClaw[OpenClaw Node.js Agent]
         Llama[Llama.cpp Inference]
         Chromium[Chromium Web Scraper]
+        Whisper[Whisper STT]
+        TTS[Piper TTS]
+        SD[Stable Diffusion]
     end
     
     subgraph Storage [Persistence]
@@ -108,12 +114,13 @@ graph TD
     OpenClaw <-->|ACP WebSockets| UI
     Gateway <-->|Remote/Local| OpenClaw
     RigAgent -->|Tools| Sidecars
+    McpSandbox -->|HTTP/JWT| MCP[(External MCP Server)]
 ```
 
 ### 1. The OpenClaw Engine
 The heart of Scrappy's autonomous agency. Based on the **Pi agent runtime**, it executes an iterative **Think-Act-Observe** loop:
 -   **Session Management**: Each conversation has a dedicated "lane" and JSONL transcript.
--   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, and `skill` extensions.
+-   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools** via the Rhai script sandbox.
 -   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking".
 
 ### 2. The Native Rust Agent (`backend/src/rig_lib`)
@@ -156,10 +163,12 @@ The agent's personality and rules are defined by markdown files in its workspace
 Scrappy 2026 features native integration with the world's most powerful inference engines:
 - **Anthropic**: Support for **Claude 4.5 Sonnet** and **Opus** with native Tool Use.
 - **OpenAI**: First-class support for **GPT-5.2** (with specialized reasoning) and **GPT-4o** variants.
-- **Google Gemini**: Integrated **Gemini 2.0/3.0 Flash/Pro** with support for massive 1M+ token contexts.
-- **Groq**: Ultra-fast inference for open models like **Llama 3.3 70B** and **Mixtral**.
+- **Google Gemini**: Integrated **Gemini 2.0/3.0 Flash/Pro** with support for massive 1M+ token contexts and **Imagen 3** image generation.
+- **Groq**: Ultra-fast cloud inference for open models like **Llama 3.3 70B** and **Mixtral**.
 - **OpenRouter**: Gateway access to 100+ specialized models via a single API key.
 - **Custom Secrets**: Define and grant access to any external API key for use in custom agent tools.
+
+Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key to control agent access at runtime.
 
 ---
 
@@ -167,15 +176,26 @@ Scrappy 2026 features native integration with the world's most powerful inferenc
 
 ### Backend (`backend/`)
 -   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
+    -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
+    -   `ipc.rs`: Core IPC event layer between Tauri and the OpenClaw WebSocket gateway.
 -   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
--   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium).
--   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral) used for model formatting.
+    -   `tools/`: `DDGSearchTool`, `ScrapePageTool`, `ImageGenTool`, `RagTool`.
+    -   `orchestrator.rs`: Multi-turn web search and synthesis pipeline.
+    -   `unified_provider.rs`: Unified inference provider abstraction.
+-   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium, Whisper, TTS, SD).
+-   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral, **Gemma**, **Qwen**) used for model formatting.
+-   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
+-   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
+-   `scrappy-mcp-tools/`: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
 -   `documentation/openclaw/`: Architectural deep-dives into the agent memory and tool systems.
 
-### Frontend (`src/`)
+### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
 -   `components/openclaw/`: Visualizations for agent status and tool execution.
+-   `components/imagine/`: Imagine Studio UI (gallery, prompt, style presets).
+-   `components/settings/`: Settings pages including `McpTab.tsx`, `SettingsSidebar.tsx`, `SettingsPages.tsx`.
 -   `hooks/use-openclaw-stream.ts`: Real-time agent event processing.
+-   `hooks/use-chat.ts`: Core chat state management.
 
 ---
 
@@ -183,8 +203,8 @@ Scrappy 2026 features native integration with the world's most powerful inferenc
 
 ### Adding a New Prompt Template
 Templates are defined in `backend/src/templates.rs`. To add one:
-1.  Define a new `pub const` with your Jinja-like template.
-2.  Add it to the renderer logic in the model manager.
+1.  Define a new `pub const` with your Jinja-like template (ChatML, Llama3, Mistral, Gemma, and Qwen formats already exist).
+2.  Add it to the renderer logic in the model manager (`src/model_manager.rs`).
 
 ### Adding a New OpenClaw Tool
 Tools are implemented in the **OpenClaw** engine:
@@ -196,6 +216,11 @@ Tools are implemented in the **OpenClaw** engine:
 1.  Implement the `Tool` trait in `backend/src/rig_lib/tools/`.
 2.  Register the tool in `RigManager::new` within `backend/src/rig_lib/agent.rs`.
 3.  Ensure the tool emits progress events to the UI if long-running.
+
+### Adding an MCP Remote Tool
+1.  Expose a new endpoint on your FastAPI MCP server.
+2.  Connect the server URL and token in **Settings > MCP Server**.
+3.  The Rhai sandbox (`scrappy-mcp-tools/`) will auto-discover and expose the tool to the agent.
 
 ---
 
@@ -213,7 +238,7 @@ Tools are implemented in the **OpenClaw** engine:
 Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
 1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check the `backend/src/openclaw/commands.rs` and `rig_lib/agent.rs` for backend extension points.
+2.  Check `backend/src/openclaw/commands/` and `backend/src/rig_lib/agent.rs` for backend extension points.
 
 ---
 

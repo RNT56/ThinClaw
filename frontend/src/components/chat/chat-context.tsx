@@ -179,10 +179,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         statusUnlisten();
                         searchUnlisten();
 
-                        // Final Save
-                        const current = activeJobsRef.current[id];
-                        if (current && current.fullMessage) {
-                            commands.saveMessage(id, "assistant", current.fullMessage, null, null, current.searchResults)
+                        // Final Save — use local `fullText` which is always up-to-date,
+                        // rather than `activeJobsRef` which may lag by a render cycle.
+                        const currentSearchResults = activeJobsRef.current[id]?.searchResults ?? null;
+                        if (fullText) {
+                            commands.saveMessage(id, "assistant", fullText, null, null, currentSearchResults)
                                 .then((res) => {
                                     // Store the real message ID so useChat can update in-place
                                     if (res.status === 'ok') {

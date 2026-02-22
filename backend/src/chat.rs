@@ -501,18 +501,10 @@ pub async fn chat_stream(
     {
         Ok(mut stream) => {
             info!("[chat_stream] Orchestrator turn started.");
-            if payload.auto_mode || has_context {
-                if let Some(id) = &payload.conversation_id {
-                    let _ = app.emit(
-                        "web_search_status",
-                        WebSearchStatus {
-                            id: id.clone(),
-                            step: "done".into(),
-                            message: "Responding...".into(),
-                        },
-                    );
-                }
-            }
+            // NOTE: Do NOT emit "done" status here — the stream hasn't produced
+            // content yet. The frontend's onmessage handler already transitions
+            // searchStatus to "done" when the first content token arrives, and
+            // the DDGSearchTool emits "generating" at the right time.
 
             // Consume stream and emit chunks — with batching to reduce IPC overhead.
             // During fast local inference, llama.cpp can emit 30-100+ tokens/sec.

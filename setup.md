@@ -12,7 +12,7 @@ Ensure you have the following installed on your system:
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **Node.js (v22.x or later)**: Frontend and Agent engine runtime.
+- **Node.js (v22.x or later)**: Frontend and Agent engine runtime. The `setup:all` script will automatically download a dedicated Node.js v24 runtime for the OpenClaw sidecar — your system Node only needs to be v22+.
   - [Download Node.js](https://nodejs.org/)
   - Or via Homebrew: `brew install node@22`
 - **Xcode Command Line Tools**: Required for native compilation on macOS.
@@ -46,15 +46,19 @@ npm run setup:openclaw-engine
 Scrappy uses a modular architecture. For macOS, all sidecars are Apple Silicon native (`aarch64-apple-darwin`) and leverage Metal.
 
 #### **Automated Environment Initializer**
-Run the unified setup script to download the Node.js runtime, Chromium scraper, and AI Inference engines (`llama`, `whisper`, `sd`):
+Run the unified setup script to download the Node.js runtime, Chromium scraper, and AI Inference engines (`llama`, `whisper`, `sd`, `tts`):
 ```bash
 npm run setup:all
 ```
 
 **What this script does:**
-- Downloads **Node.js v24** (Silicon native) for the agent engine.
+- Downloads **Node.js v24** (Silicon native) for the OpenClaw agent engine.
 - Downloads **Chromium** for local web scraping.
-- Fetches **Metal-optimized AI binaries** and their required `.dylib` / `.metal` libraries.
+- Fetches **Metal-optimized AI binaries** and their required `.dylib` / `.metal` libraries:
+  - `llama-server` — Local LLM inference (GGUF models via llama.cpp)
+  - `whisper-server` — Speech-to-Text (STT)
+  - `tts` — Text-to-Speech (TTS via Piper)
+  - `sd` — Stable Diffusion image generation
 
 ---
 
@@ -82,7 +86,11 @@ Scrappy is designed to take advantage of macOS Unified Memory. In **Settings > S
 
 ### 2. Local Models (GGUF)
 - Use **GGUF** models exclusively for local inference.
-- Recommended models: Llama-3-8B-Instruct (Q4_K_M or Q8_0) or Mistral-7B.
+- Recommended model families and formats:
+  - **Llama 3**: `Llama-3-8B-Instruct` (Q4_K_M or Q8_0)
+  - **Gemma 3**: `gemma-3-4b-it` or `gemma-3-12b-it` (excellent on Apple Silicon)
+  - **Mistral / Mixtral**: `Mistral-7B-Instruct`
+  - **Qwen 2.5**: `Qwen2.5-7B-Instruct` (strong reasoning)
 - Models added manually must be placed in a folder named after the model within the structure of the application's models directory. You can find and link your models folder in **Settings > Troubleshooting**.
 
 ### 3. Native Scraper (Chromium)
@@ -93,11 +101,24 @@ The bundled Chromium instance is set up to run natively on Apple Silicon, ensuri
 ## Recommended API Keys & Tokens
 
 While Scrappy can run fully local AI, its advanced features benefit from the following:
-- **Anthropic API**: Supports **Claude 4.5 Sonnet** and **Claude 4.5 Opus**. [Get a Key](https://console.anthropic.com/)
-- **OpenAI API**: For GPT-5.2 and specialized reasoning and coding models. [Get a Key](https://platform.openai.com/)
-- **OpenRouter API**: Provides access to a vast array of open-source and proprietary models through a single interface. [Get a Key](https://openrouter.ai/keys)
+- **Anthropic API**: Supports **Claude 4.5 Sonnet** and **Claude 4.5 Opus** with native Tool Use. [Get a Key](https://console.anthropic.com/)
+- **OpenAI API**: For GPT-5.2 and specialized reasoning/coding models. [Get a Key](https://platform.openai.com/)
+- **Google Gemini API**: Supports **Gemini 2.0/3.0 Flash/Pro** with massive 1M+ token contexts and Imagen 3 image generation. [Get a Key](https://aistudio.google.com/)
+- **Groq API**: Ultra-fast cloud inference for open models (Llama 3.3 70B, Mixtral). [Get a Key](https://console.groq.com/keys)
+- **OpenRouter API**: Gateway to 100+ specialized models via a single API key. [Get a Key](https://openrouter.ai/keys)
 - **Brave Search API**: Enables the agent to perform deep web research. [Get a Key](https://brave.com/search/api/)
 - **Hugging Face Token**: A **Read Access Token** is required to download gated models (like Llama 3 or Gemma). Add this in **Settings > Secrets**. [Get a Token](https://huggingface.co/settings/tokens)
+
+---
+
+## MCP Server (External Tool Integration)
+
+Scrappy supports connecting to a custom **FastAPI MCP server** to extend the agent with remote tools (finance APIs, news feeds, domain-specific capabilities).
+
+- Configure in **Settings > MCP Server**.
+- Enter your server's **Base URL** and optional **JWT Bearer Token**.
+- Toggle **Enable MCP Sandbox** to allow the agent to discover and execute MCP tools via Rhai scripts during conversations.
+- Use the **Test Connection** button to verify reachability before enabling.
 
 ---
 
