@@ -258,7 +258,7 @@ pub fn run() {
     specta_builder
         .export(
             specta_typescript::Typescript::default(),
-            "../src/lib/bindings.ts",
+            "../frontend/src/lib/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
 
