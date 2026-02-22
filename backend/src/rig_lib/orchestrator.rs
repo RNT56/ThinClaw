@@ -201,6 +201,14 @@ impl Orchestrator {
         let current_docs = last_msg.attached_docs.clone();
         let conversation_id_clone = conversation_id.clone(); // Clone for spawn
 
+        // Compute before the spawn so it moves as a plain bool (not a borrow of self).
+        let has_mcp = !self
+            .mcp_config
+            .mcp_base_url
+            .as_deref()
+            .unwrap_or("")
+            .is_empty();
+
         // Build sandbox — always attempt to build one when tools may be needed.
         // If `mcp_config.sandbox_enabled` is true, `build_sandbox` succeeds.
         // Otherwise, fall back to `build_sandbox_unconditional` so that local
@@ -524,6 +532,7 @@ impl Orchestrator {
                 &rig_clone,
                 &sandbox,
                 &perms,
+                has_mcp,
                 &final_history,
                 &all_doc_ids,
                 &current_docs,
@@ -548,6 +557,7 @@ impl Orchestrator {
         rig: &Arc<RigManager>,
         sandbox: &Sandbox,
         perms: &ToolPermissions,
+        has_mcp: bool,
         final_history: &[crate::chat::Message],
         _all_doc_ids: &[String],
         _current_docs: &Option<Vec<crate::chat::AttachedDoc>>,
@@ -564,9 +574,12 @@ impl Orchestrator {
 
         // Build available tools description for the system prompt
         let mut tools_desc = String::from("AVAILABLE TOOLS (callable as Rhai functions):\n");
-        // Unified Discovery
-        tools_desc.push_str("- search_tools(query): Discover all available tools, including Host tools, Skills, and Remote MCP tools. Returns JSON with names, descriptions, and input schemas.\n");
-        tools_desc.push_str("- mcp_call(tool_name, args_json): Call any discovered tool (Remote or Skill) by name. Args must be a JSON string. Returns JSON result.\n");
+
+        // Remote MCP tool discovery/dispatch — only advertise when a server is configured.
+        if has_mcp {
+            tools_desc.push_str("- search_tools(query): Discover all available tools, including Host tools, Skills, and Remote MCP tools. Returns JSON with names, descriptions, and input schemas.\n");
+            tools_desc.push_str("- mcp_call(tool_name, args_json): Call any discovered tool (Remote or Skill) by name. Args must be a JSON string. Returns JSON result.\n");
+        }
 
         if perms.allow_web_search {
             tools_desc.push_str(
@@ -582,25 +595,38 @@ impl Orchestrator {
                 .push_str("- generate_image(prompt): Generate an image from a text description.\n");
         }
 
-        // Dedicated Skills
+        // Skills — always available
         tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
         tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
+        // Build search rules. MCP-specific guidance is only included when a server is wired up,
+        // so the LLM never reasons about tools that will always return an error.
         let search_rules = if perms.force_web_search {
-            "CORE RULES:\n\
-             1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
-             2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`.\n\
-             3. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
-             4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them."
-        } else {
+            if has_mcp {
+                "CORE RULES:\n\
+                 1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
+                 2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`.\n\
+                 3. For financial data, model info, or domain-specific queries, you may also use `mcp_call` with the appropriate tool after searching.\n\
+                 4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them."
+            } else {
+                "CORE RULES:\n\
+                 1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
+                 2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`."
+            }
+        } else if has_mcp {
             "CORE RULES:\n\
              1. **REPLY DIRECTLY** for greetings, code, creative writing, general knowledge, opinions, or follow-up chat.\n\
              2. **USE TOOLS ONLY** when the user needs real-time information (today's news, live prices, current events), or explicitly asks you to search/look something up.\n\
              3. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
              4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them.\n\
              5. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
+        } else {
+            "CORE RULES:\n\
+             1. **REPLY DIRECTLY** for greetings, code, creative writing, general knowledge, opinions, or follow-up chat.\n\
+             2. **USE TOOLS ONLY** when the user needs real-time information (today's news, live prices, current events), or explicitly asks you to search/look something up.\n\
+             3. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
         };
 
         let system_prompt = format!(

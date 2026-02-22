@@ -291,15 +291,16 @@ All state is registered via `app.manage(...)` before `run()`:
 | `DownloadManager` | `model_manager.rs` | Tracks active GGUF download cancellation tokens |
 | `ProcessTracker` | `process_tracker.rs` | Cross-restart orphan PID cleanup |
 | `OpenClawManager` | `openclaw/commands/` | WebSocket handle + OpenClaw config |
-| `RigManager` (transient) | `rig_lib/agent.rs` | Constructed per-request inside `chat_stream` |
+| `RigManagerCache` | `rig_cache.rs` | Caches the last-built `RigManager` alongside a `RigManagerKey`; rebuilt only when provider, model, token, context size, tools, or knowledge content changes |
 
 ### 4.3 Core Modules
 
 | File | Lines | Summary |
 |------|-------|---------|
-| `chat.rs` | 799 | Primary chat command dispatcher; routes to Rig or OpenClaw based on payload |
+| `chat.rs` | ~ | Primary chat command dispatcher; routes to Rig or OpenClaw based on payload; calls `resolve_provider()` |
+| `rig_cache.rs` | ~ | `RigManagerCache` — Tauri-managed state that caches the last-built `RigManager` by key |
 | `sidecar.rs` | 1090 | Process spawning, port allocation, lifecycle management for all AI sidecars |
-| `config.rs` | 331 | `UserConfig` schema + `ConfigManager` (file-backed, Mutex-guarded) |
+| `config.rs` | ~ | `UserConfig` schema + `ConfigManager` (file-backed, Mutex-guarded, async writes) |
 | `model_manager.rs` | 774 | GGUF model scanning, HuggingFace download, catalog CRUD |
 | `gguf.rs` | ~ | Binary parser for GGUF metadata (model family, context length, architecture) |
 | `rag.rs` | 925 | Full document ingestion + retrieval pipeline (embedding → chunking → vector indexing) |
@@ -307,6 +308,7 @@ All state is registered via `app.manage(...)` before `run()`:
 | `reranker.rs` | 163 | ONNX cross-encoder (`ms-marco-MiniLM-L-6-v2`) with graceful degradation |
 | `image_gen.rs` | 679 | `sd.cpp` CLI wrapper with architecture detection (FLUX, SD 1.5, SDXL, SD3.5, Qwen, Wan) |
 | `imagine.rs` | 605 | Imagine Studio commands + Gemini Imagen 3 API |
+| `tts.rs` | ~ | Piper-based TTS sidecar: `tts_synthesize` command (stdin→stdout, returns base64 PCM) |
 | `personas.rs` | ~ | Built-in persona prompt constants |
 | `templates.rs` | ~ | ChatML, Llama 3, Mistral prompt format strings |
 | `history.rs` | ~ | Conversation + message CRUD (SQLite) |
@@ -338,7 +340,7 @@ chat_stream(ChatPayload, Channel<StreamChunk>)
                             ├─ Retrieve RAG context if docs attached or project active
                             ├─ Inject web search results if enabled
                             ├─ Stream tokens via on_event.send(StreamChunk::Token(...))
-                            ├─ Parse <tool_code> blocks (legacy) or MCP sandbox calls
+                             ├─ Route tool calls through MCP sandbox (Rhai) path
                             └─ Emit StreamChunk::Done with TokenUsage
 ```
 
@@ -356,8 +358,8 @@ chat_stream(ChatPayload, Channel<StreamChunk>)
 | **Embedding server** | `llama-server` | Dedicated instance for document embeddings |
 | **Summarizer server** | `llama-server` | Smaller model for RAG chunk summarization |
 | **STT server** | `whisper-server` | Whisper HTTP API for transcription |
-| **Image server** | `sd` (sd.cpp) | Stable Diffusion CLI |
-| **TTS server** | `tts` | Text-to-speech (placeholder) |
+| **Image server** | `sd` (sd.cpp) | Stable Diffusion CLI (one-shot invocation, not persistent) |
+| **TTS server** | `piper` | Piper TTS binary — one-shot CLI invoked per `tts_synthesize` command; returns raw PCM audio as base64 |
 | **Node.js** | `node` | OpenClaw engine runner |
 
 Port allocation uses `generate_config()` which finds a free TCP port via `TcpListener::bind("127.0.0.1:0")`. All ports + authentication tokens are stored in `SidecarManager`'s inner state.
@@ -391,12 +393,14 @@ pub enum SidecarEvent {
 | `sd_threads` | `u32` | `8` | Thread count for sd.cpp |
 | `persona` | `String` | `"default"` | Active persona identifier |
 | `spotlight_shortcut` | `String` | `"CmdOrCtrl+Shift+K"` | Global shortcut |
-| `mcp_base_url` | `Option<String>` | `None` | Remote MCP server URL |
+| `mcp_base_url` | `Option<String>` | `None` | Remote MCP server URL (read by `get_mcp_config()` in `ipc.rs`) |
 | `mcp_auth_token` | `Option<String>` | `None` | Remote MCP auth token |
+| `mcp_cache_ttl_secs` | `u64` | `300` | TTL for `ToolRegistryCache` in seconds |
+| `mcp_tool_result_max_chars` | `usize` | `5000` | Max characters before `summarize_result` truncates a tool response |
 | `knowledge_bits` | `Vec<KnowledgeBit>` | `[]` | Pinned user knowledge entries |
 | `custom_personas` | `Vec<CustomPersona>` | `[]` | User-defined personas |
 
-`ConfigManager` wraps a `Mutex<UserConfig>` and exposes `get_config()`, `save_config()`, and `reload()`. Config is written (pretty-printed JSON) synchronously on every `save_config` call.
+`ConfigManager` wraps a `Mutex<UserConfig>` and exposes `get_config()`, `save_config()`, and `reload()`. `save_config()` updates the in-memory state synchronously, then spawns a `tokio::fs::write` task to flush to disk asynchronously — keeping the hot path non-blocking.
 
 ---
 
@@ -556,21 +560,18 @@ Key methods:
 - `explicit_search(query)` → direct DDG search as a string result
 - `is_cancelled()` → checks the atomic cancel flag
 
-`RigManager` is **constructed per-request** (not cached in state) inside `chat_stream`. This avoids stale handles when provider config or model changes between requests. The `TODO` comment in `rig_lib/mod.rs` acknowledges this as a future optimization target.
+`RigManager` is **cached across requests** via `RigManagerCache` (a Tauri-managed state in `rig_cache.rs`). `chat_stream` calls `cache.get_or_build(key, || RigManager::new(…))` — the manager is only rebuilt when provider, model, token, context window size, tool set, or knowledge content changes. This avoids discarding connection pools and model state on every request.
 
 ### 6.3 Orchestrator
 
-`rig_lib/orchestrator.rs` (1299 lines) is the **agentic loop controller**. It has two execution modes:
+`rig_lib/orchestrator.rs` (~560 lines) is the **agentic loop controller**. It uses a single, unified execution mode:
 
-**Legacy Tool Loop** (XML-based, existing code)
-- Parses `<tool_code>` and `</tool_code>` XML tags in the model's response
-- Dispatches tool calls via `ToolRouter`
-- Iterates until the model produces a response without tool calls or a max-iteration limit
-
-**MCP Sandbox Loop** (new)
+**MCP Sandbox Loop** (the only path)
 - Uses `McpOrchestratorConfig` to optionally connect to a remote MCP server
-- Routes tool calls through `Sandbox` (from `scrappy-mcp-tools`)
-- Bridges `ToolEvent` to `ProviderEvent::Content` XML tags the frontend already understands
+- Routes all tool calls through `Sandbox` (from `scrappy-mcp-tools`) via `build_sandbox_unconditional()`, which ensures a Rhai sandbox is always available for host tools even without a remote MCP server
+- Bridges `ToolEvent`s from `TauriEventReporter` to structured `"tool_event"` Tauri events (kind, message, tool_name, percentage, status) emitted to the frontend
+
+> **Note:** The legacy `run_legacy_tool_loop` (~490 lines), which parsed `<tool_code>`/`</tool_code>` XML tags, was deleted. `run_turn` now unconditionally uses the sandbox path.
 
 `Orchestrator.run_turn()` is the main entry-point, returning a `Stream<ProviderEvent>`:
 
@@ -835,7 +836,7 @@ All sidecars are pre-compiled and listed in `tauri.conf.json: bundle.externalBin
 | `bin/whisper` | Whisper CLI (offline transcription) |
 | `bin/whisper-server` | Whisper HTTP server |
 | `bin/sd` | stable-diffusion.cpp CLI |
-| `bin/tts` | TTS binary (placeholder) |
+| `bin/piper` | Piper TTS binary — must be manually bundled; invoked per `tts_synthesize` command |
 | `bin/node` | Bundled Node.js runtime for OpenClaw engine |
 
 Dynamic libraries (`.dylib`) and Metal shaders (`.metal`) are bundled as resources. The `openclaw-engine/` directory (Node.js code) is also bundled as a resource.
@@ -859,6 +860,7 @@ Scrappy uses **tauri-specta** to generate TypeScript bindings (`src/lib/bindings
 | Imagine | `imagine.rs` | `imagine_generate`, `imagine_list_images`, `imagine_get_stats` |
 | Sidecar | `sidecar.rs` | `start_chat_server`, `stop_chat_server`, `get_sidecar_status` |
 | STT | `stt.rs` | `start_stt_server`, `transcribe_audio` |
+| TTS | `tts.rs` | `tts_synthesize` — synthesizes speech from text using Piper; returns base64 PCM |
 | OpenClaw | `openclaw/commands/` | `start_openclaw_gateway`, `get_openclaw_status`, `openclaw_send_message`, … |
 | Rig | `rig_lib/mod.rs` | `rig_check_web_search`, `agent_chat` |
 | Projects | `projects.rs` | `create_project`, `list_projects`, `delete_project` |
@@ -951,10 +953,8 @@ Events emitted from Rust to frontend (via `app.emit()`):
 
 | Item | Location | Notes |
 |------|----------|-------|
-| **Large legacy command files** | `openclaw/commands_old.rs` (105 KB), `openclaw/config_old.rs` (77 KB) | Pre-refactor monolithic files still present in the directory; should be deleted once the refactored `commands/` and `config/` are verified complete |
-| **RigManager constructed per-request** | `chat.rs`, `rig_lib/mod.rs` | `TODO` in source; acceptable for now but prevents provider-level connection pooling |
-| **Hardcoded app data path** | `tauri.conf.json` | Contains `/Users/mt/Library/...` as a hardcoded asset scope path — this will fail for any other user |
-| **Placeholder sidecar methods** | `sidecar.rs: start_image_server`, `start_tts_server` | Both are no-ops (`Ok(())`) — sd.cpp and TTS are invoked directly, not as persistent servers |
-| **Flat Mutex config writes** | `config.rs: save_config` | Synchronous disk write inside a mutex; could block the Tokio thread pool under contention |
-| **No TS strict null checks on bindings** | `src/lib/bindings.ts` | Auto-generated; nullable fields may need additional runtime guards in consuming components |
-| **`commands_old.rs` / `config_old.rs`** | `src-tauri/src/openclaw/` | Dead code; will bloat compile times and binary once included in the module graph |
+| **`start_image_server` is a no-op** | `sidecar.rs` | `sd.cpp` is invoked as a one-shot CLI per request, not as a persistent server; the Tauri command only stores the model path |
+| **`start_tts_server` is a no-op** | `sidecar.rs` | Piper TTS is also invoked as a one-shot CLI (stdin→stdout) per `tts_synthesize` call; no persistent server is started |
+| **`mcp_cache_ttl_secs` wired in config but not yet plumbed** | `config.rs`, `tool_discovery.rs` | `mcp_cache_ttl_secs` is stored in `UserConfig` but `ToolRegistryCache` must still be instantiated with this value at the call site in `tool_discovery.rs` |
+| **Whisper server unauthenticated** | `sidecar.rs`, `stt.rs` | `whisper-server` has no `--api-key` flag; STT endpoint is unauthenticated on localhost. Blocked on upstream (`whisper.cpp`) adding server auth support. Workaround: bound to `127.0.0.1` only. |
+| **Piper binary not auto-downloaded** | `src-tauri/bin/piper` | The `download_ai_binaries.js` script does not yet fetch Piper; it must be placed manually. |

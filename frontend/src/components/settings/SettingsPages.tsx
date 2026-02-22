@@ -13,6 +13,7 @@ import { SettingsPage } from './SettingsSidebar';
 const ModelBrowser = lazy(() => import('./ModelBrowser').then(m => ({ default: m.ModelBrowser })));
 const GatewayTab = lazy(() => import('./GatewayTab').then(m => ({ default: m.GatewayTab })));
 const SecretsTab = lazy(() => import('./SecretsTab').then(m => ({ default: m.SecretsTab })));
+const McpTab = lazy(() => import('./McpTab').then(m => ({ default: m.McpTab })));
 import {
     Cpu,
     Server,
@@ -31,7 +32,8 @@ import {
     Box,
     Command,
     Sparkles,
-    FlaskConical
+    FlaskConical,
+    Plug
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
 
@@ -176,6 +178,7 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'openclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
                         {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
                         {activePage === 'inference' && <ChatProviderTab />}
+                        {activePage === 'mcp' && <Suspense fallback={<TabSkeleton />}><McpTab /></Suspense>}
                     </div>
                 </motion.div>
             </AnimatePresence>
@@ -250,6 +253,11 @@ function PageHeader({ page }: { page: SettingsPage }) {
             title: "API Secrets",
             description: "Manage API keys for cloud providers.",
             icon: KeyRound
+        },
+        'mcp': {
+            title: "MCP Server",
+            description: "Connect your FastAPI MCP server to unlock remote tools, finance, news, and domain-specific capabilities for the AI agent.",
+            icon: Plug
         }
     };
 

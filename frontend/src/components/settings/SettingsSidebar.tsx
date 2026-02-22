@@ -11,11 +11,12 @@ import {
     MessageSquare,
     Send,
     Radio,
-    KeyRound
+    KeyRound,
+    Plug
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets';
+export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets' | 'mcp';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
             { id: 'models', label: 'Models', icon: Cpu },
             { id: 'inference', label: 'Chat Provider', icon: Radio },
             { id: 'secrets', label: 'Secrets', icon: KeyRound },
+            { id: 'mcp', label: 'MCP Server', icon: Plug },
             { id: 'appearance', label: 'Appearance', icon: Palette },
         ]
     },

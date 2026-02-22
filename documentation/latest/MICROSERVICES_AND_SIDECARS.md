@@ -15,6 +15,7 @@
    - 3.3 [Summarizer Server Instance](#33-summarizer-server-instance)
 4. [Sidecar: whisper-server (Speech-to-Text)](#4-sidecar-whisper-server-speech-to-text)
 5. [Sidecar: sd-server (Image Generation)](#5-sidecar-sd-server-image-generation)
+5a. [Sidecar: piper (Text-to-Speech)](#5a-sidecar-piper-text-to-speech)
 6. [Sidecar: node + openclaw-engine (Agent Gateway)](#6-sidecar-node--openclaw-engine-agent-gateway)
    - 6.1 [Purpose and Role](#61-purpose-and-role)
    - 6.2 [Process Startup Flow](#62-process-startup-flow)
@@ -308,6 +309,47 @@ sd [args] \
 ```
 
 ---
+
+
+---
+
+## 5a. Sidecar: piper (Text-to-Speech)
+
+**Binary:** `piper` (must be manually placed at `src-tauri/bin/piper-aarch64-apple-darwin`)  
+**Tauri command:** `tts_synthesize`  
+**Source:** `src-tauri/src/tts.rs`
+
+**Invocation model:** Like the `sd` binary, Piper is **NOT** launched as a persistent server. `tts_synthesize` invokes the binary as a **one-shot CLI process** per synthesis request using stdin→stdout piping.
+
+**Arguments:**
+
+| Arg | Value |
+|-----|-------|
+| `--model` | path to a Piper `.onnx` voice model |
+| `--output-raw` | (flag) — output raw 16-bit PCM on stdout instead of WAV |
+
+**Request/response flow:**
+
+```
+Frontend: commands.ttsSynthesize(text)
+          │
+          ▼
+tts_synthesize (Rust, tts.rs)
+          │
+          ├─ Spawn: piper --model <voice_model_path> --output-raw
+          ├─ Write text to stdin
+          ├─ Collect stdout (raw PCM bytes)
+          └─ Return: base64-encoded PCM string
+                     │
+                     ▼
+Frontend: Web Audio API decodes base64 PCM → AudioBuffer → AudioContext.play()
+```
+
+**Frontend consumer:** The `MessageBubble` component renders a speaker-icon **"Read Aloud"** button on every assistant message. Clicking it calls `commands.ttsSynthesize`, decodes the returned base64 PCM and plays it via `AudioContext`.
+
+**Note on auth:** Piper runs locally with no network access and requires no API key.
+
+**Bundling note:** The `download_ai_binaries.js` script does not yet auto-download Piper. The binary must be placed manually in `src-tauri/bin/` with the correct platform suffix.
 
 ## 6. Sidecar: node + openclaw-engine (Agent Gateway)
 
@@ -805,6 +847,7 @@ All tokens are generated at process start (not stored persistently) and re-gener
     "bin/whisper",
     "bin/sd",
     "bin/node",
+    "bin/piper",
     "bin/openclaw-engine-wrapper"
 ]
 ```
@@ -897,7 +940,7 @@ The application supports connecting to an **external FastAPI MCP (Model Context 
 
 **The external MCP server is optional.** When `mcp_base_url` is `None` (the default), the system operates with host tools and skills only. The entire integration is additive — nothing breaks if the MCP server is not reachable.
 
-**Current status:** `mcp_base_url` and `mcp_auth_token` are marked `TODO: Load from AppState/Config` in `ipc.rs` — the plumbing is fully built and wired, but the UI settings surface for pointing to a specific MCP URL has not yet been exposed to users. The value defaults to `None`.
+**Current status:** `mcp_base_url` and `mcp_auth_token` are stored in `UserConfig` and loaded from live `ConfigManager` in `get_mcp_config()` in `ipc.rs`. The `GatewayTab` settings page exposes UI fields that write these values to `UserConfig`. No code changes are needed to point at a custom MCP server — configure the URL and token in the Gateway settings tab.
 
 ---
 
@@ -967,15 +1010,17 @@ Tier 1: Is it a known Skill? (SkillManager.get_skill)
        ├── YES → Run via Sandbox: run_skill("<name>", args_json)
        │
        ▼
-Tier 2: Is it a Host Tool? (hardcoded match)
-       ├── "web_search"  → sandbox: web_search("<query>")
-       ├── "rag_search"  → sandbox: rag_search("<query>")
-       ├── "read_file"   → sandbox: read_file("<path>")
+Tier 2: Is it a Host Tool? (registry-driven — ToolRouter::host_tool_names())
+       ├── Derived from tool_discovery::get_host_tools_definitions()
+       ├── Currently: { "web_search", "rag_search", "read_file" }
+       ├── Adding a new host tool in tool_discovery auto-routes it here
        │
        ▼
 Tier 3: Remote MCP (if McpClient configured)
        └── McpClient.call_tool_raw(name, args)
 ```
+
+> **Architecture note (2026-02-22):** Tier 2 was previously a hardcoded `match` block. It is now **registry-driven**: `ToolRouter::host_tool_names()` derives the set of host tool names from `tool_discovery::get_host_tools_definitions()`. Adding a new host tool in one place auto-routes it everywhere — no changes to `ToolRouter` are required.
 
 **Sandbox routing for host tools:** Even host tools are routed *through* the sandbox — the sandbox has `web_search`, `rag_search`, and `read_file` functions registered as Rhai built-ins that invoke the backing Rust implementations. This gives security isolation and consistent result serialization.
 
@@ -1098,13 +1143,14 @@ All typed bindings use the `tools::*` modules from `scrappy-mcp-tools/src/tools/
 
 ### 8.8 Activation / Configuration
 
-**Current state:** The external MCP server URL is not yet configurable via the GUI. The `mcp_base_url` in `McpOrchestratorConfig` is always `None` until a settings surface is added.
+`mcp_base_url` and `mcp_auth_token` are standard `UserConfig` fields read from live `ConfigManager` in `get_mcp_config()`. The **Gateway settings tab** (`GatewayTab.tsx`) exposes input fields that write directly to these config keys.
 
-**To activate the external MCP server** (developer mode):
+**To activate the external MCP server:**
 
-1. Modify `McpRequestHandler.get_mcp_config()` in `ipc.rs` to populate `mcp_base_url` from `AppState` or a config file
-2. Set the `mcp_base_url` to your FastAPI MCP server URL (e.g. `https://api.example.com`)
-3. Set `mcp_auth_token` to a valid JWT bearer token
+1. Open Settings → Gateway tab
+2. Enter the MCP server URL (e.g. `https://api.example.com`) in the "MCP Base URL" field
+3. Enter the auth token in the "MCP Auth Token" field
+4. Save — the next tool call will use the configured server
 
 **Expected MCP server API:**
 
