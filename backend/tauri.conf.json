@@ -4,17 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.schack.scrappy",
   "build": {
-    "beforeDevCommand": {
-      "script": "npm run dev",
-      "cwd": "frontend",
-      "wait": false
-    },
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": {
-      "script": "npm run build",
-      "cwd": "frontend"
-    },
-    "frontendDist": "../frontend/dist"
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "frontend/dist"
   },
   "app": {
     "windows": [
