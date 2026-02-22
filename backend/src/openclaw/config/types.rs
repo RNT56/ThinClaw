@@ -33,28 +33,23 @@ pub struct AgentProfile {
 pub struct OpenClawIdentity {
     pub device_id: String,
     pub auth_token: String,
+    /// Ed25519 key pair for protocol signing (not an API credential, generated locally)
     #[serde(default)]
     pub private_key: Option<String>,
     #[serde(default)]
     pub public_key: Option<String>,
-    #[serde(default)]
-    pub anthropic_api_key: Option<String>,
+    // ── API key fields have been removed. ──────────────────────────────────────
+    // They are now stored in the macOS Keychain (service: com.schack.scrappy).
+    // Only boolean "granted" flags remain so the UI can show provider status
+    // without exposing credential values.
     #[serde(default)]
     pub anthropic_granted: bool,
     #[serde(default)]
-    pub brave_search_api_key: Option<String>,
-    #[serde(default)]
     pub brave_granted: bool,
-    #[serde(default)]
-    pub huggingface_token: Option<String>,
     #[serde(default)]
     pub huggingface_granted: bool,
     #[serde(default)]
-    pub openai_api_key: Option<String>,
-    #[serde(default)]
     pub openai_granted: bool,
-    #[serde(default)]
-    pub openrouter_api_key: Option<String>,
     #[serde(default)]
     pub openrouter_granted: bool,
     #[serde(default)]
@@ -63,8 +58,7 @@ pub struct OpenClawIdentity {
     pub gateway_mode: String,
     #[serde(default)]
     pub remote_url: Option<String>,
-    #[serde(default)]
-    pub remote_token: Option<String>,
+    // remote_token → Keychain
     #[serde(default)]
     pub custom_secrets: Vec<CustomSecret>,
     #[serde(default)]
@@ -76,11 +70,7 @@ pub struct OpenClawIdentity {
     #[serde(default)]
     pub setup_completed: bool,
     #[serde(default)]
-    pub gemini_api_key: Option<String>,
-    #[serde(default)]
     pub gemini_granted: bool,
-    #[serde(default)]
-    pub groq_api_key: Option<String>,
     #[serde(default)]
     pub groq_granted: bool,
     #[serde(default)]
@@ -93,60 +83,36 @@ pub struct OpenClawIdentity {
     pub dev_mode_wizard: bool,
     #[serde(default)]
     pub custom_llm_url: Option<String>,
-    #[serde(default)]
-    pub custom_llm_key: Option<String>,
+    // custom_llm_key → Keychain
     #[serde(default)]
     pub custom_llm_model: Option<String>,
     #[serde(default)]
     pub custom_llm_enabled: bool,
     #[serde(default)]
     pub enabled_cloud_providers: Vec<String>,
-    /// Per-provider enabled model IDs. Only these models are written to the engine config.
-    /// Key = provider name ("anthropic", "openai", etc.), Value = list of allowed model IDs.
+    /// Per-provider enabled model IDs.
     #[serde(default)]
     pub enabled_cloud_models: HashMap<String, Vec<String>>,
-    // --- Implicit cloud provider keys ---
-    #[serde(default)]
-    pub xai_api_key: Option<String>,
+    // Implicit provider booleans (keys → Keychain)
     #[serde(default)]
     pub xai_granted: bool,
     #[serde(default)]
-    pub venice_api_key: Option<String>,
-    #[serde(default)]
     pub venice_granted: bool,
-    #[serde(default)]
-    pub together_api_key: Option<String>,
     #[serde(default)]
     pub together_granted: bool,
     #[serde(default)]
-    pub moonshot_api_key: Option<String>,
-    #[serde(default)]
     pub moonshot_granted: bool,
-    #[serde(default)]
-    pub minimax_api_key: Option<String>,
     #[serde(default)]
     pub minimax_granted: bool,
     #[serde(default)]
-    pub nvidia_api_key: Option<String>,
-    #[serde(default)]
     pub nvidia_granted: bool,
-    #[serde(default)]
-    pub qianfan_api_key: Option<String>,
     #[serde(default)]
     pub qianfan_granted: bool,
     #[serde(default)]
-    pub mistral_api_key: Option<String>,
-    #[serde(default)]
     pub mistral_granted: bool,
     #[serde(default)]
-    pub xiaomi_api_key: Option<String>,
-    #[serde(default)]
     pub xiaomi_granted: bool,
-    // --- Amazon Bedrock (uses AWS credentials, not a single API key) ---
-    #[serde(default)]
-    pub bedrock_access_key_id: Option<String>,
-    #[serde(default)]
-    pub bedrock_secret_access_key: Option<String>,
+    // Bedrock: region is not a secret, access/secret keys → Keychain
     #[serde(default)]
     pub bedrock_region: Option<String>,
     #[serde(default)]

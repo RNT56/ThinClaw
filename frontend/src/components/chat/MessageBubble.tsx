@@ -403,7 +403,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         if (isSpeaking) return;
         setIsSpeaking(true);
         try {
-            const res = await commands.ttsSynthesize({ text: sanitizedContent, modelPath: null });
+            const res = await commands.ttsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
                 toast.error('TTS failed', { description: res.error });
                 return;

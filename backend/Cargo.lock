@@ -35,6 +35,7 @@ dependencies = [
  "rig-core",
  "scraper",
  "scrappy-mcp-tools",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

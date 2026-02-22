@@ -1,11 +1,22 @@
 //! Identity management and API key persistence for OpenClawConfig
 //!
-//! Contains OpenClawConfig::new() (with migration logic), save_identity(),
-//! find_available_port(), and all update_*/toggle_* methods for API keys.
+//! API keys are stored in the macOS Keychain (encrypted at rest) rather than
+//! in plaintext `identity.json`.  Non-sensitive settings (gateway mode, device
+//! ID, granted flags, etc.) remain in JSON as before.
+//!
+//! On first launch after upgrading from a pre-keychain build, any keys found
+//! in the legacy `identity.json` are imported into the Keychain and then
+//! erased from the file.
 
 use std::path::PathBuf;
 
+use super::keychain;
 use super::types::*;
+
+/// Convert a keychain `String` error into `std::io::Error` for `?` chaining.
+fn io_err(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, msg)
+}
 
 impl OpenClawConfig {
     /// Create a new config manager for OpenClaw
@@ -45,11 +56,28 @@ impl OpenClawConfig {
 
         let id_path = base_dir.join("state").join("identity.json");
 
+        // ── Load non-sensitive settings from JSON ──────────────────────────────
         let mut identity = if let Ok(data) = std::fs::read_to_string(&id_path) {
             serde_json::from_str::<OpenClawIdentity>(&data).unwrap_or_default()
         } else {
             OpenClawIdentity::default()
         };
+
+        // ── One-time migration: import any plaintext API keys → Keychain ──────
+        // This is safe to run on every startup — migrate_from_identity only acts
+        // when it finds non-empty values in the legacy struct fields.
+        let raw_json_value: Option<serde_json::Value> = std::fs::read_to_string(&id_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        if let Some(val) = raw_json_value {
+            if let Ok(mut legacy) = serde_json::from_value::<keychain::LegacyKeys>(val) {
+                if keychain::migrate_from_identity(&mut legacy) {
+                    // Merge the now-nulled fields back into identity so save_identity()
+                    // writes the sanitised version (no secrets in JSON).
+                    println!("[keychain] migrated legacy plaintext API keys to Keychain");
+                }
+            }
+        }
 
         // ENFORCE DEFAULTS IF LOADED EMPTY
         if identity.gateway_mode.is_empty() {
@@ -96,7 +124,7 @@ impl OpenClawConfig {
                     .collect();
         }
 
-        // Ensure state dir exists before writing identity
+        // Ensure state dir exists before writing identity (secrets-free JSON)
         let _ = std::fs::create_dir_all(base_dir.join("state"));
         if let Ok(json) = serde_json::to_string_pretty(&identity) {
             let _ = std::fs::write(&id_path, json);
@@ -104,29 +132,33 @@ impl OpenClawConfig {
 
         let port = Self::find_available_port().unwrap_or(18789);
 
+        // ── Load API keys from Keychain into memory ───────────────────────────
+        // Keys are never written to disk — they live only in memory (here) and
+        // in the OS Keychain (encrypted).
         Self {
             base_dir,
             device_id: identity.device_id,
             auth_token: identity.auth_token,
-            anthropic_api_key: identity.anthropic_api_key,
+            // Sensitive fields: load from Keychain
+            anthropic_api_key: keychain::get_key("anthropic"),
             anthropic_granted: identity.anthropic_granted,
-            brave_search_api_key: identity.brave_search_api_key,
+            brave_search_api_key: keychain::get_key("brave"),
             brave_granted: identity.brave_granted,
-            huggingface_token: identity.huggingface_token,
+            huggingface_token: keychain::get_key("huggingface"),
             huggingface_granted: identity.huggingface_granted,
-            openai_api_key: identity.openai_api_key,
+            openai_api_key: keychain::get_key("openai"),
             openai_granted: identity.openai_granted,
-            openrouter_api_key: identity.openrouter_api_key,
+            openrouter_api_key: keychain::get_key("openrouter"),
             openrouter_granted: identity.openrouter_granted,
-            gemini_api_key: identity.gemini_api_key,
+            gemini_api_key: keychain::get_key("gemini"),
             gemini_granted: identity.gemini_granted,
-            groq_api_key: identity.groq_api_key,
+            groq_api_key: keychain::get_key("groq"),
             groq_granted: identity.groq_granted,
             profiles: identity.profiles,
             port,
             gateway_mode: identity.gateway_mode,
             remote_url: identity.remote_url,
-            remote_token: identity.remote_token,
+            remote_token: keychain::get_key("remote_token"),
             private_key: identity.private_key,
             public_key: identity.public_key,
             custom_secrets: identity.custom_secrets,
@@ -139,33 +171,33 @@ impl OpenClawConfig {
             auto_start_gateway: identity.auto_start_gateway,
             dev_mode_wizard: identity.dev_mode_wizard,
             custom_llm_url: identity.custom_llm_url,
-            custom_llm_key: identity.custom_llm_key,
+            custom_llm_key: keychain::get_key("custom_llm_key"),
             custom_llm_model: identity.custom_llm_model,
             custom_llm_enabled: identity.custom_llm_enabled,
             enabled_cloud_providers: identity.enabled_cloud_providers,
             enabled_cloud_models: identity.enabled_cloud_models,
             local_model_family: None,
-            xai_api_key: identity.xai_api_key,
+            xai_api_key: keychain::get_key("xai"),
             xai_granted: identity.xai_granted,
-            venice_api_key: identity.venice_api_key,
+            venice_api_key: keychain::get_key("venice"),
             venice_granted: identity.venice_granted,
-            together_api_key: identity.together_api_key,
+            together_api_key: keychain::get_key("together"),
             together_granted: identity.together_granted,
-            moonshot_api_key: identity.moonshot_api_key,
+            moonshot_api_key: keychain::get_key("moonshot"),
             moonshot_granted: identity.moonshot_granted,
-            minimax_api_key: identity.minimax_api_key,
+            minimax_api_key: keychain::get_key("minimax"),
             minimax_granted: identity.minimax_granted,
-            nvidia_api_key: identity.nvidia_api_key,
+            nvidia_api_key: keychain::get_key("nvidia"),
             nvidia_granted: identity.nvidia_granted,
-            qianfan_api_key: identity.qianfan_api_key,
+            qianfan_api_key: keychain::get_key("qianfan"),
             qianfan_granted: identity.qianfan_granted,
-            mistral_api_key: identity.mistral_api_key,
+            mistral_api_key: keychain::get_key("mistral"),
             mistral_granted: identity.mistral_granted,
-            xiaomi_api_key: identity.xiaomi_api_key,
+            xiaomi_api_key: keychain::get_key("xiaomi"),
             xiaomi_granted: identity.xiaomi_granted,
-            bedrock_access_key_id: identity.bedrock_access_key_id,
-            bedrock_secret_access_key: identity.bedrock_secret_access_key,
-            bedrock_region: identity.bedrock_region,
+            bedrock_access_key_id: keychain::get_key("bedrock_access_key_id"),
+            bedrock_secret_access_key: keychain::get_key("bedrock_secret_access_key"),
+            bedrock_region: keychain::get_key("bedrock_region"),
             bedrock_granted: identity.bedrock_granted,
         }
     }
@@ -179,71 +211,51 @@ impl OpenClawConfig {
         None
     }
 
-    /// Update Anthropic API key and persist to identity.json
+    /// Update Anthropic API key — writes to Keychain, not identity.json
     pub fn update_anthropic_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("anthropic", key.as_deref()).map_err(io_err)?;
+        self.anthropic_granted = key.is_some();
         self.anthropic_api_key = key;
-        if self.anthropic_api_key.is_some() {
-            self.anthropic_granted = true;
-        } else {
-            self.anthropic_granted = false;
-        }
         self.save_identity()
     }
 
-    /// Update Brave Search API key and persist to identity.json
+    /// Update Brave Search API key — writes to Keychain
     pub fn update_brave_key(&mut self, key: Option<String>) -> std::io::Result<()> {
-        println!("[openclaw] update_brave_key called with: {:?}", key);
+        keychain::set_key("brave", key.as_deref()).map_err(io_err)?;
+        self.brave_granted = key.is_some();
         self.brave_search_api_key = key;
-        if self.brave_search_api_key.is_some() {
-            self.brave_granted = true;
-        } else {
-            println!("[openclaw] Revoking brave_granted because key is None");
-            self.brave_granted = false;
-        }
         self.save_identity()
     }
 
-    /// Update OpenAI API key and persist to identity.json
+    /// Update OpenAI API key — writes to Keychain
     pub fn update_openai_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("openai", key.as_deref()).map_err(io_err)?;
+        self.openai_granted = key.is_some();
         self.openai_api_key = key;
-        if self.openai_api_key.is_some() {
-            self.openai_granted = true;
-        } else {
-            self.openai_granted = false;
-        }
         self.save_identity()
     }
 
-    /// Update OpenRouter API key and persist to identity.json
+    /// Update OpenRouter API key — writes to Keychain
     pub fn update_openrouter_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("openrouter", key.as_deref()).map_err(io_err)?;
+        self.openrouter_granted = key.is_some();
         self.openrouter_api_key = key;
-        if self.openrouter_api_key.is_some() {
-            self.openrouter_granted = true;
-        } else {
-            self.openrouter_granted = false;
-        }
         self.save_identity()
     }
 
-    /// Update Gemini API key and persist to identity.json
+    /// Update Gemini API key — writes to Keychain
     pub fn update_gemini_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("gemini", key.as_deref()).map_err(io_err)?;
+        self.gemini_granted = key.is_some();
         self.gemini_api_key = key;
-        if self.gemini_api_key.is_some() {
-            self.gemini_granted = true;
-        } else {
-            self.gemini_granted = false;
-        }
         self.save_identity()
     }
 
-    /// Update Groq API key and persist to identity.json
+    /// Update Groq API key — writes to Keychain
     pub fn update_groq_key(&mut self, key: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("groq", key.as_deref()).map_err(io_err)?;
+        self.groq_granted = key.is_some();
         self.groq_api_key = key;
-        if self.groq_api_key.is_some() {
-            self.groq_granted = true;
-        } else {
-            self.groq_granted = false;
-        }
         self.save_identity()
     }
 
@@ -281,13 +293,15 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
-    /// Update an implicit provider API key by provider name
+    /// Update an implicit provider API key — writes to Keychain
     pub fn update_implicit_provider_key(
         &mut self,
         provider: &str,
         key: Option<String>,
     ) -> std::io::Result<()> {
         let has_key = key.is_some();
+        // Write to Keychain first, then update in-memory state
+        keychain::set_key(provider, key.as_deref()).map_err(io_err)?;
         match provider {
             "xai" => {
                 self.xai_api_key = key;
@@ -335,7 +349,7 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
-    /// Get an implicit provider API key by provider name
+    /// Get an implicit provider API key (reads from in-memory cache, populated from Keychain at startup)
     pub fn get_implicit_provider_key(&self, provider: &str) -> Option<String> {
         match provider {
             "xai" => self.xai_api_key.clone(),
@@ -351,18 +365,21 @@ impl OpenClawConfig {
         }
     }
 
-    /// Update Amazon Bedrock AWS credentials
+    /// Update Amazon Bedrock AWS credentials — writes to Keychain
     pub fn update_bedrock_credentials(
         &mut self,
         access_key_id: Option<String>,
         secret_access_key: Option<String>,
         region: Option<String>,
     ) -> std::io::Result<()> {
-        let has_creds = access_key_id.is_some() && secret_access_key.is_some();
+        keychain::set_key("bedrock_access_key_id", access_key_id.as_deref()).map_err(io_err)?;
+        keychain::set_key("bedrock_secret_access_key", secret_access_key.as_deref())
+            .map_err(io_err)?;
+        keychain::set_key("bedrock_region", region.as_deref()).map_err(io_err)?;
+        self.bedrock_granted = access_key_id.is_some() && secret_access_key.is_some();
         self.bedrock_access_key_id = access_key_id;
         self.bedrock_secret_access_key = secret_access_key;
         self.bedrock_region = region;
-        self.bedrock_granted = has_creds;
         self.save_identity()
     }
 
@@ -376,12 +393,9 @@ impl OpenClawConfig {
     }
 
     pub fn update_huggingface_token(&mut self, token: Option<String>) -> std::io::Result<()> {
+        keychain::set_key("huggingface", token.as_deref()).map_err(io_err)?;
+        self.huggingface_granted = token.is_some();
         self.huggingface_token = token;
-        if self.huggingface_token.is_some() {
-            self.huggingface_granted = true;
-        } else {
-            self.huggingface_granted = false;
-        }
         self.save_identity()
     }
 
@@ -395,13 +409,14 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
-    /// Update gateway settings and persist to identity.json
+    /// Update gateway settings — remote_token goes to Keychain
     pub fn update_gateway_settings(
         &mut self,
         mode: String,
         url: Option<String>,
         token: Option<String>,
     ) -> std::io::Result<()> {
+        keychain::set_key("remote_token", token.as_deref()).map_err(io_err)?;
         self.gateway_mode = mode;
         self.remote_url = url;
         self.remote_token = token;
@@ -423,28 +438,29 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
+    /// Persist non-sensitive settings to identity.json.
+    /// API keys are NOT written here — they live only in the macOS Keychain.
     pub fn save_identity(&self) -> std::io::Result<()> {
         let id_path = self.base_dir.join("state").join("identity.json");
-        println!("[openclaw] saving identity to: {:?}", id_path);
+        println!(
+            "[openclaw] saving identity (secrets-free) to: {:?}",
+            id_path
+        );
         let identity = OpenClawIdentity {
             device_id: self.device_id.clone(),
             auth_token: self.auth_token.clone(),
-            anthropic_api_key: self.anthropic_api_key.clone(),
+            // API key fields are intentionally omitted — stored in Keychain
+            // Only the boolean `*_granted` flags are kept in JSON so the UI
+            // knows whether a key has been configured without exposing the value.
             anthropic_granted: self.anthropic_granted,
-            brave_search_api_key: self.brave_search_api_key.clone(),
             brave_granted: self.brave_granted,
-            huggingface_token: self.huggingface_token.clone(),
             huggingface_granted: self.huggingface_granted,
-            openai_api_key: self.openai_api_key.clone(),
             openai_granted: self.openai_granted,
-            openrouter_api_key: self.openrouter_api_key.clone(),
             openrouter_granted: self.openrouter_granted,
-            gemini_api_key: self.gemini_api_key.clone(),
             gemini_granted: self.gemini_granted,
-            groq_api_key: self.groq_api_key.clone(),
             groq_granted: self.groq_granted,
             custom_llm_url: self.custom_llm_url.clone(),
-            custom_llm_key: self.custom_llm_key.clone(),
+            // custom_llm_key goes to Keychain — not saved here
             custom_llm_model: self.custom_llm_model.clone(),
             custom_llm_enabled: self.custom_llm_enabled,
             enabled_cloud_providers: self.enabled_cloud_providers.clone(),
@@ -452,7 +468,7 @@ impl OpenClawConfig {
             profiles: self.profiles.clone(),
             gateway_mode: self.gateway_mode.clone(),
             remote_url: self.remote_url.clone(),
-            remote_token: self.remote_token.clone(),
+            // remote_token goes to Keychain — not saved here
             private_key: self.private_key.clone(),
             public_key: self.public_key.clone(),
             custom_secrets: self.custom_secrets.clone(),
@@ -464,28 +480,17 @@ impl OpenClawConfig {
             selected_cloud_model: self.selected_cloud_model.clone(),
             auto_start_gateway: self.auto_start_gateway,
             dev_mode_wizard: self.dev_mode_wizard,
-            xai_api_key: self.xai_api_key.clone(),
             xai_granted: self.xai_granted,
-            venice_api_key: self.venice_api_key.clone(),
             venice_granted: self.venice_granted,
-            together_api_key: self.together_api_key.clone(),
             together_granted: self.together_granted,
-            moonshot_api_key: self.moonshot_api_key.clone(),
             moonshot_granted: self.moonshot_granted,
-            minimax_api_key: self.minimax_api_key.clone(),
             minimax_granted: self.minimax_granted,
-            nvidia_api_key: self.nvidia_api_key.clone(),
             nvidia_granted: self.nvidia_granted,
-            qianfan_api_key: self.qianfan_api_key.clone(),
             qianfan_granted: self.qianfan_granted,
-            mistral_api_key: self.mistral_api_key.clone(),
             mistral_granted: self.mistral_granted,
-            xiaomi_api_key: self.xiaomi_api_key.clone(),
             xiaomi_granted: self.xiaomi_granted,
-            bedrock_access_key_id: self.bedrock_access_key_id.clone(),
-            bedrock_secret_access_key: self.bedrock_secret_access_key.clone(),
-            bedrock_region: self.bedrock_region.clone(),
             bedrock_granted: self.bedrock_granted,
+            bedrock_region: self.bedrock_region.clone(), // region is not a secret
         };
         if let Ok(json) = serde_json::to_string_pretty(&identity) {
             std::fs::write(id_path, json)?;

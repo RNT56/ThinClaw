@@ -71,6 +71,10 @@ rhai = { version = "1", features = ["sync", "serde"] }
 async-trait = "0.1"
 clawscan = "1.0.0"
 
+# macOS Keychain — secure encrypted storage for API keys
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
+
 # ---------------------------------------------------------------------------
 # Build Profiles — keep target/ size under control
 # ---------------------------------------------------------------------------
