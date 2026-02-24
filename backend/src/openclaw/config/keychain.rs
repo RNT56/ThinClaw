@@ -18,7 +18,10 @@
 //! # Migration
 //! On first launch after upgrade from the per-key storage format,
 //! `migrate_per_key_items()` reads each legacy Keychain item, consolidates
-//! them into the single JSON blob, then deletes the old items.
+//! them into the single JSON blob, then deletes the old items.  This ONLY
+//! runs when the unified blob doesn't exist yet — on subsequent launches,
+//! the blob is found and migration is skipped entirely (avoiding 21 extra
+//! Keychain access prompts).
 //!
 //! On first launch from pre-keychain builds, `migrate_from_identity()` imports
 //! plaintext keys from `identity.json` into the blob.
@@ -101,12 +104,16 @@ pub fn load_all() {
 
     let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
 
+    // Track whether we found an existing unified blob — if so, skip legacy migration
+    let mut blob_existed = false;
+
     match get_generic_password(SERVICE, ACCOUNT) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(json_str) => match serde_json::from_str::<HashMap<String, String>>(&json_str) {
                 Ok(map) => {
                     let count = map.len();
                     *cache = map;
+                    blob_existed = true;
                     info!(
                         "[keychain] loaded {} keys from unified Keychain entry",
                         count
@@ -128,12 +135,17 @@ pub fn load_all() {
         }
     }
 
-    // Migrate from legacy per-key Keychain items (if any exist)
-    let migrated = migrate_per_key_items(&mut cache);
-    if migrated {
-        // Flush the consolidated blob back to Keychain
-        if let Err(e) = flush_cache(&cache) {
-            warn!("[keychain] flush after per-key migration failed: {}", e);
+    // Migrate from legacy per-key Keychain items ONLY if the unified blob
+    // didn't exist yet.  This avoids 21 extra `get_generic_password` calls
+    // on every launch, each of which macOS treats as a separate Keychain
+    // access that may trigger an additional authorization prompt.
+    if !blob_existed {
+        let migrated = migrate_per_key_items(&mut cache);
+        if migrated {
+            // Flush the consolidated blob back to Keychain
+            if let Err(e) = flush_cache(&cache) {
+                warn!("[keychain] flush after per-key migration failed: {}", e);
+            }
         }
     }
 
