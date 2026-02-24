@@ -713,7 +713,13 @@ impl OpenClawConfig {
         let auth_profiles = serde_json::json!({ "profiles": profiles });
         let auth_json = serde_json::to_string_pretty(&auth_profiles)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(agent_auth_path.join("auth-profiles.json"), auth_json)?;
+        let auth_file = agent_auth_path.join("auth-profiles.json");
+        std::fs::write(&auth_file, auth_json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600));
+        }
 
         // Restore writing agent.json for instructions
         // We only really need instructions here, model/name are in openclaw_engine.json
@@ -744,6 +750,12 @@ impl OpenClawConfig {
     pub fn deep_migrate(&self) -> std::io::Result<()> {
         let sessions_dir = self.base_dir.join("agents").join("main").join("sessions");
         if !sessions_dir.exists() {
+            return Ok(());
+        }
+
+        // Skip if migration has already run successfully
+        let marker = sessions_dir.join(".migration_v1_complete");
+        if marker.exists() {
             return Ok(());
         }
 
@@ -899,6 +911,12 @@ impl OpenClawConfig {
             std::fs::write(&sessions_index_path, json)?;
             info!("[openclaw] deep_migrate completed and index updated.");
         }
+
+        // Write completion marker so we don't re-run on next start
+        let _ = std::fs::write(
+            &marker,
+            format!("completed: {}", chrono::Utc::now().to_rfc3339()),
+        );
 
         Ok(())
     }

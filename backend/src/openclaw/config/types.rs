@@ -3,7 +3,7 @@
 //! Contains all data structures used for configuration management,
 //! including identity, engine config, and connector configs.
 
-pub const OPENCLAW_VERSION: &str = "2026.2.14";
+pub const OPENCLAW_VERSION: &str = "2026.2.23-beta.1";
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

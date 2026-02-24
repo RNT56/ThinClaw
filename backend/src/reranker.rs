@@ -109,52 +109,62 @@ impl Reranker {
     }
 
     pub fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<(usize, f32)>> {
-        let mut results = Vec::new();
-        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Batch processing (or single loop for simplicity first)
-        // MS-MARCO MiniLM expects: [CLS] query [SEP] document [SEP]
-        for (index, doc) in documents.iter().enumerate() {
-            // Encode: sequence_pair(query, doc)
-            let encoding = self
-                .tokenizer
-                .encode((query, doc.as_str()), true)
-                .map_err(|e| anyhow!("Encoding failed: {}", e))?;
-
-            let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
-            let attention_mask: Vec<i64> = encoding
-                .get_attention_mask()
-                .iter()
-                .map(|&x| x as i64)
-                .collect();
-            let token_type_ids: Vec<i64> =
-                encoding.get_type_ids().iter().map(|&x| x as i64).collect();
-
-            let seq_len = input_ids.len();
-
-            // Create tensors
-            // Shape: [Batch(1), SeqLen]
-            let input_ids_array = Array2::from_shape_vec((1, seq_len), input_ids)?;
-            let attention_mask_array = Array2::from_shape_vec((1, seq_len), attention_mask)?;
-            let token_type_ids_array = Array2::from_shape_vec((1, seq_len), token_type_ids)?;
-
-            let outputs = session.run(ort::inputs![
-                "input_ids" => input_ids_array,
-                "attention_mask" => attention_mask_array,
-                "token_type_ids" => token_type_ids_array,
-            ]?)?;
-
-            // Output is usually [Batch, 1] logits
-            let logits = outputs["logits"].try_extract_tensor::<f32>()?;
-            let score = logits[[0, 0]]; // First element
-
-            // Sigmoid to get 0..1 probability if needed, or just use raw logit for sorting
-            // Model was trained with BCE, so sigmoid is appropriate for probability,
-            // but for ranking, raw logit is fine.
-            results.push((index, score));
+        if documents.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Sort descending
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Tokenize all query-document pairs
+        // MS-MARCO MiniLM expects: [CLS] query [SEP] document [SEP]
+        let encodings: Vec<_> = documents
+            .iter()
+            .map(|doc| self.tokenizer.encode((query, doc.as_str()), true))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("Batch encoding failed: {}", e))?;
+
+        let batch_size = encodings.len();
+        let max_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0);
+
+        // Build padded tensors for the full batch
+        let mut input_ids = vec![0i64; batch_size * max_len];
+        let mut attention_mask = vec![0i64; batch_size * max_len];
+        let mut token_type_ids = vec![0i64; batch_size * max_len];
+
+        for (i, enc) in encodings.iter().enumerate() {
+            let offset = i * max_len;
+            for (j, &id) in enc.get_ids().iter().enumerate() {
+                input_ids[offset + j] = id as i64;
+            }
+            for (j, &mask) in enc.get_attention_mask().iter().enumerate() {
+                attention_mask[offset + j] = mask as i64;
+            }
+            for (j, &tid) in enc.get_type_ids().iter().enumerate() {
+                token_type_ids[offset + j] = tid as i64;
+            }
+        }
+
+        // Shape: [BatchSize, MaxSeqLen]
+        let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids)?;
+        let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask)?;
+        let token_type_ids_array = Array2::from_shape_vec((batch_size, max_len), token_type_ids)?;
+
+        // Single forward pass for the entire batch
+        let outputs = session.run(ort::inputs![
+            "input_ids" => input_ids_array,
+            "attention_mask" => attention_mask_array,
+            "token_type_ids" => token_type_ids_array,
+        ]?)?;
+
+        // Output shape: [BatchSize, 1] — one logit per candidate
+        let logits = outputs["logits"].try_extract_tensor::<f32>()?;
+        let mut results: Vec<(usize, f32)> = (0..batch_size).map(|i| (i, logits[[i, 0]])).collect();
+
+        // Sort descending (highest relevance first)
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)

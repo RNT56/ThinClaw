@@ -472,7 +472,7 @@ Download progress events from the backend fire many times per second per chunk. 
 - Hardware detection: fetches `SystemSpecs` on mount; recommends a model on first run based on RAM
 - Syncs remote model catalog from a local server endpoint (falls back to cached SQLite catalog)
 - Provides `startDownload` (with HuggingFace token check for gated models + component/projector download)
-- **`downloadHfFiles(repoId, files, destSubdir?)`** — downloads model files from HuggingFace Hub, hooks into global `downloading` state for consistent progress tracking across Library and Discover tabs
+- **`downloadHfFiles(repoId, files, destSubdir?, category?)`** — downloads model files from HuggingFace Hub, hooks into global `downloading` state for consistent progress tracking across Library and Discover tabs. `category` controls the destination subdirectory (`LLM`, `Embedding`, `Diffusion`, `STT`).
 - **`engineInfo`** — active inference engine info (`{ id, display_name, hf_tag, ... }`), loaded on mount from `get_active_engine_info` Tauri command
 - **Discovery state** — `discoveryState` (search query, results, expanded model, downloading files, repo progress) is lifted from `HFDiscovery` so it survives tab switches
 

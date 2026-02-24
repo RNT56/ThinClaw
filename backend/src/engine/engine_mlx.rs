@@ -407,22 +407,48 @@ impl InferenceEngine for MlxEngine {
                 return Err("MLX server startup timeout (60s)".into());
             }
 
-            // Check if process is still alive
-            {
+            // Check if process is still alive — extract dead child if exited
+            let dead_child = {
                 let mut guard = self.process.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref mut child) = *guard {
                     match child.try_wait() {
-                        Ok(Some(status)) => {
-                            *guard = None;
-                            return Err(format!(
-                                "MLX server exited during startup with code {:?}",
-                                status.code()
-                            ));
-                        }
-                        Ok(None) => {} // Still running
+                        Ok(Some(status)) => Some((guard.take().unwrap(), status)),
+                        Ok(None) => None,
                         Err(e) => return Err(format!("Failed to check MLX process: {}", e)),
                     }
+                } else {
+                    None
                 }
+            };
+            // guard dropped here — safe to .await below
+
+            if let Some((mut child, status)) = dead_child {
+                let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
+                    let mut buf = String::new();
+                    use tokio::io::AsyncReadExt;
+                    let _ = stderr.read_to_string(&mut buf).await;
+                    if buf.trim().is_empty() {
+                        String::from("(no stderr output)")
+                    } else {
+                        let trimmed = if buf.len() > 500 {
+                            format!("...{}", &buf[buf.len() - 500..])
+                        } else {
+                            buf
+                        };
+                        trimmed.trim().to_string()
+                    }
+                } else {
+                    String::from("(stderr not available)")
+                };
+                println!(
+                    "[mlx] Server crashed during startup. stderr:\n{}",
+                    stderr_msg
+                );
+                return Err(format!(
+                    "MLX server exited during startup (code {:?}):\n{}",
+                    status.code(),
+                    stderr_msg
+                ));
             }
 
             match client

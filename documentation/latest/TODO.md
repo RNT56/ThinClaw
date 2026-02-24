@@ -1,7 +1,7 @@
 # Scrappy — Outstanding Issues & Tech Debt
 
-> Generated from `TECHNICAL_ARCHITECTURE.md`, `MICROSERVICES_AND_SIDECARS.md`, `FRONTEND_ARCHITECTURE.md`  
-> Last updated: 2026-02-23
+> Generated from `TECHNICAL_ARCHITECTURE.md`, `MICROSERVICES_AND_SIDECARS.md`, `FRONTEND_ARCHITECTURE.md`, `OPENCLAW_IMPLEMENTATION.md`  
+> Last updated: 2026-02-24
 
 ---
 
@@ -148,55 +148,128 @@
 
 ---
 
-## 🔵 Repository Structure — Planned Refactor
+## 🟠 OpenClaw — Issues Found During Deep Analysis *(2026-02-24)*
+
+> Discovered during comprehensive frontend/backend analysis. All 12 issues are now fixed.
+
+- [x] **🔴 Bug #1: Tool message ID has stray spaces** *(fixed 2026-02-24)*  
+  Template literal `tool - ${name} -${runId} ` had errant spaces, causing tool status updates to never match existing entries → duplicate/stale tool messages in chat.  
+  → `frontend/src/components/openclaw/OpenClawChatView.tsx` line 634
+
+- [x] **🔴 Bug #2: Fleet event listener never cleaned up (memory leak)** *(fixed 2026-02-24)*  
+  The `useEffect` cleanup function was returned inside the `.then()` callback of the dynamic import, not from the `useEffect` itself. React never called it, causing zombie listeners to accumulate on mount/unmount cycles. Refactored to ref-based cleanup with `cancelled` guard for race conditions.  
+  → `frontend/src/components/openclaw/fleet/FleetCommandCenter.tsx` lines 108–239
+
+- [x] **🟠 Risk #3: No timeout on WS RPC calls — can hang forever** *(fixed 2026-02-24)*  
+  Added 30s `tokio::time::timeout` wrapper around the oneshot receiver in `rpc()`. Returns `ClientError::Timeout` instead of blocking indefinitely.  
+  → `backend/src/openclaw/ws_client.rs` lines 96–112
+
+- [x] **🟠 Risk #4: Pending RPC HashMap not drained on disconnect** *(fixed 2026-02-24)*  
+  Added `self.pending.drain()` in the `run_once()` error path inside `run_forever()`. All pending senders now receive a clear "WebSocket disconnected" error immediately on disconnect.  
+  → `backend/src/openclaw/ws_client.rs` line 411
+
+- [x] **🟠 Risk #5: auth-profiles.json persists plaintext API keys on disk** *(fixed 2026-02-24)*  
+  Two mitigations: (1) `chmod 600` on write via `std::os::unix::fs::PermissionsExt` (2) File deleted in `openclaw_stop_gateway()`. Safe because it's fully regenerated on every start from `SecretStore`.  
+  → `backend/src/openclaw/config/engine.rs` line 716, `backend/src/openclaw/commands/gateway.rs` line 462
+
+- [x] **🟠 Risk #6: `deep_migrate()` runs on every gateway start** *(fixed 2026-02-24)*  
+  Added `.migration_v1_complete` marker file check at the top of `deep_migrate()`. Written with timestamp after first successful run. Subsequent starts skip migration entirely.  
+  → `backend/src/openclaw/config/engine.rs` lines 750–910
+
+- [x] **🟡 Arch #7: Duplicated session delete retry logic** *(fixed 2026-02-24)*  
+  Stripped the frontend's abort→reset→retry cascade. `handleDeleteSession` now calls `deleteOpenClawSession()` once — the backend handles the full lifecycle (abort → wait → delete → reset → retry) in `sessions.rs`.  
+  → `frontend/src/components/openclaw/OpenClawChatView.tsx` lines 687–724
+
+- [x] **🟡 Arch #8: Verbose `info!()` logging on every WS message** *(fixed 2026-02-24)*  
+  Downgraded 10+ hot-path `info!()` calls to `debug!()` or `trace!()`. Per-message WS preview → `trace!`. Per-event frame → `debug!`. Session list/delete/reset RPC → `debug!`. Lifecycle events (connect/disconnect) remain at `info!`.  
+  → `backend/src/openclaw/ws_client.rs` (10 call sites)
+
+- [x] **🟡 Arch #9: Fleet polls every 3s unconditionally** *(fixed 2026-02-24)*  
+  Added `document.visibilityState === 'visible'` check to the polling interval. Fleet status is only fetched when the browser tab is active.  
+  → `frontend/src/components/openclaw/fleet/FleetCommandCenter.tsx` line 104
+
+- [x] **🟡 Arch #10: Hardcoded `agent:main:primary` session key** *(fixed 2026-02-24)*  
+  Changed to `'agent:main'` to align with the backend's canonical session key. The backend's `openclaw_get_sessions()` always normalizes to `agent:main`.  
+  → `frontend/src/components/openclaw/OpenClawChatView.tsx` line 385
+
+- [x] **🟡 Arch #11: No backpressure on UI event channel (64-deep mpsc)** *(fixed 2026-02-24)*  
+  Increased channel buffer from 64 to 256. Changed `ui_tx.send().await` to `ui_tx.try_send()` with a `warn!()` on overflow — the WS event loop never blocks now, even under heavy tool load.  
+  → `backend/src/openclaw/commands/gateway.rs` line 406, `backend/src/openclaw/ws_client.rs` line 670
+
+- [x] **🟡 Arch #12: Optimistic message ID has stray spaces** *(fixed 2026-02-24)*  
+  Same template literal whitespace bug as #1, in the optimistic user message: `temp - ${Date.now()} `.  
+  → `frontend/src/components/openclaw/OpenClawChatView.tsx` line 665
+
+---
+
+## 🔴 Storage & Database — Issues Found During Deep Analysis *(2026-02-24)*
+
+> Discovered during comprehensive analysis of all storage subsystems: SQLite, USearch vector store, keychain, filesystem, config management.  
+> See `documentation/latest/STORAGE_AND_DATABASE.md` for full architecture reference.
+
+### 🔴 Bugs (Correctness)
+
+- [x] **S-Bug #1: Vector search relevance ordering destroyed by rowid sort** *(fixed 2026-02-24)*  
+  `search_scoped()` now returns results sorted by cosine distance (ascending = most similar). `VectorStore::search()` returns `(key, distance)` pairs; multi-scope merge preserves similarity ordering via distance-based sort + `HashSet` dedup.  
+  → `backend/src/vector_store.rs:113–140, 280–310`
+
+- [x] **S-Bug #2: `delete_all_history` orphans `generated_images` DB records** *(fixed 2026-02-24)*  
+  Added `DELETE FROM generated_images` to the transaction, after projects and before commit.  
+  → `backend/src/history.rs:388–393`
+
+- [x] **S-Bug #3: Duplicate `--vae-tiling` flag in image generation** *(fixed 2026-02-24)*  
+  Removed unconditional `--vae-tiling` (line 177). macOS gets it from the per-architecture block (line 258). Non-macOS gets it from a new addition in the `#[cfg(not(target_os = "macos"))]` block.  
+  → `backend/src/image_gen.rs:177, 194`
+
+- [x] **S-Bug #4: `delete_document` doesn't clean up vector store entries** *(fixed 2026-02-24)*  
+  Now logs ghost vector count for diagnostics (USearch lacks per-key removal). Ghost vectors remain until scope reset — documented as a known USearch limitation.  
+  → `backend/src/projects.rs:201–252`
+
+- [x] **S-Bug #5: FTS5 search ignores scope filtering** *(fixed 2026-02-24)*  
+  FTS queries now JOIN through `chunks` → `documents` and filter by `project_id` or `chat_id` (plus global documents). Three query paths: project-scoped, chat-scoped, and global-only — mirrors the vector search scope logic.  
+  → `backend/src/rag.rs:707–755`
+
+- [x] **S-Bug #6: Document files never deleted on individual deletion** *(fixed 2026-02-24)*  
+  `delete_document()` now looks up the path before deletion and removes the file from `app_data/documents/`. Errors are logged but non-fatal.  
+  → `backend/src/projects.rs:201–252`
+
+### 🟡 Performance / Efficiency
+
+- [x] **S-Perf #7: Reranker processes candidates sequentially (no batching)** *(fixed 2026-02-24)*  
+  Replaced per-document loop with batched tokenization + padding + single ONNX forward pass. All query-document pairs encoded into `[BatchSize, MaxSeqLen]` tensors.  
+  → `backend/src/reranker.rs:111–175`
+
+- [x] **S-Perf #8: Missing composite index on `messages(conversation_id, created_at)`** *(fixed 2026-02-24)*  
+  Added migration `20260224000000_add_messages_index.sql` with `CREATE INDEX idx_messages_conv_created ON messages(conversation_id, created_at DESC)`.  
+  → `backend/migrations/20260224000000_add_messages_index.sql`
+
+- [ ] **S-Perf #9: Imagine search uses `LIKE %query%` (full table scan)** *(accepted)*  
+  The `LIKE %query%` pattern is acceptable for a local gallery (< 100K images). Adding FTS5 for `generated_images` is deferred — overkill for the current use case.  
+  → `backend/src/imagine.rs:478`
+
+### 🟡 Data Integrity / Robustness
+
+- [x] **S-Data #10: Inconsistent timestamp units across tables** *(fixed 2026-02-24)*  
+  Normalized all integer timestamps to milliseconds. Migration `20260225000000_normalize_timestamps.sql` converts existing seconds-based rows (`WHERE created_at < 10B` guard prevents double-multiply). Backend `history.rs` changed from `as_secs()` to `as_millis()`. `documents`/`projects` already used ms. `generated_images` uses RFC 3339 strings (unchanged). Also fixed a latent frontend bug: message reconciliation window was 3.5 days instead of 5 minutes due to unit mismatch.  
+  → `backend/migrations/20260225000000_normalize_timestamps.sql`, `backend/src/history.rs:77,259,329`
+
+- [x] **S-Data #11: PDF OCR has no overall timeout** *(fixed 2026-02-24)*  
+  Wrapped the Vision-OCR loop in `tokio::time::timeout(120s)`. If the timeout fires, partial transcription is preserved and ingestion continues with whatever was extracted.  
+  → `backend/src/rag.rs:140–220`
+
+### 🟠 Architecture
+
+- [x] **S-Arch #12: Dual in-memory key cache may drift** *(fixed 2026-02-24)*  
+  `SecretStore` is now a thin delegation wrapper — removed its `RwLock<HashMap>`, all reads/writes delegate to `keychain::get_key`/`set_key` which use a single `Mutex<HashMap>` cache. Eliminates the dual-cache drift risk.  
+  → `backend/src/secret_store.rs`
+
+- [x] **S-Arch #13: `auth-profiles.json` contains plaintext API keys** *(mitigated 2026-02-24)*  
+  Already mitigated: chmod 600 on write + deleted on gateway stop. Remaining risk (file readable by same-user processes while gateway is active) is accepted — full elimination would require OpenClaw Engine to accept keys via env vars/stdin instead of file.  
+  → `backend/src/openclaw/config/engine.rs`
+
+---
+
+## 🔵 Repository Structure — Refactor *(done 2026-02-22)*
 
 - [x] **Reorganise project into `backend/` + `frontend/` top-level folders** *(done 2026-02-22)*  
-  The current mixed layout (Rust sources in `src-tauri/`, React sources in `src/` at root) makes the repository hard to navigate.  
-  Goal: move everything into two clearly-named siblings.
-
-  **Proposed new layout:**
-  ```
-  scrappy/
-  ├── backend/              ← rename of src-tauri/
-  │   ├── Cargo.toml
-  │   ├── build.rs
-  │   ├── tauri.conf.json
-  │   ├── capabilities/
-  │   ├── icons/
-  │   ├── resources/
-  │   ├── scrappy-mcp-tools/
-  │   └── src/
-  ├── frontend/             ← new folder containing all web assets
-  │   ├── src/              ← current root src/
-  │   ├── public/           ← current root public/
-  │   ├── index.html        ← current root index.html
-  │   ├── vite.config.ts
-  │   ├── vitest.config.ts
-  │   ├── tsconfig.json
-  │   ├── tsconfig.node.json
-  │   ├── tsconfig.test.json
-  │   ├── tailwind.config.cjs
-  │   └── postcss.config.js
-  ├── documentation/
-  ├── package.json          ← root package.json stays (Tauri CLI entry point)
-  └── ...
-  ```
-
-  **Files that need updating after the move:**
-  | File | Change required |
-  |---|---|
-  | `backend/tauri.conf.json` | `"frontendDist": "../../frontend/dist"`, `"devUrl"` same |
-  | `backend/tauri.conf.json` `build` section | `"beforeDevCommand"` / `"beforeBuildCommand"` must call into `frontend/` |
-  | Root `package.json` | `scripts.dev` / `scripts.build` → `cd frontend && npm run …` |
-  | `frontend/vite.config.ts` | `watch.ignored` → `["**/backend/**"]` |
-  | `frontend/tsconfig.json` | `"include": ["src"]` — unchanged (relative to `frontend/`) |
-  | `.gitignore` | Update `src-tauri/target` → `backend/target` |
-  | CI / Dockerfile | Update any path references to `src-tauri` |
-
-  **Key gotchas:**
-  - Tauri's `tauri.conf.json` paths are resolved relative to the **config file's location**, not the workspace root. Double-check `frontendDist` and `"devUrl"` after move.
-  - The `tauri-build` build script (`build.rs`) must stay in `backend/` at the crate root — no change needed.  
-  - `scrappy-mcp-tools` is a workspace sub-crate; its path in `backend/Cargo.toml` is already relative (`path = "scrappy-mcp-tools"`) — no change needed.
-  - The Tauri CLI (`npm run tauri`) must be run from the **root** `package.json`, not from `frontend/`.
-  - Any VS Code launch configs (`.vscode/`) referencing `src-tauri` need updating.
-  - Run `cargo check` from `backend/` and `npm run build` from `frontend/` independently before running `tauri build` to catch any residual path issues.
+  `src-tauri/` → `backend/`, root `src/` → `frontend/src/`. All path references in `tauri.conf.json`, `vite.config.ts`, `tsconfig.json`, `.gitignore`, root `package.json` scripts, and CI updated accordingly.

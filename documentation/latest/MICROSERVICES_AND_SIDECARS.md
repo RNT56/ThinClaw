@@ -260,23 +260,26 @@ Provides live search of HuggingFace Hub models, filtered by the active engine's 
 
 | Command | Purpose |
 |---------|---------|
-| `discover_hf_models(query, engine, limit?)` | Searches HF API (`/api/models?search=...&tags=...`) sorted by downloads. Returns `Vec<HfModelCard>`. |
+| `discover_hf_models(query, engine, limit?, pipeline_tags?)` | Searches HF API (`/api/models?search=...&filter=...&pipeline_tag=...`) sorted by downloads. Supports multiple `pipeline_tags` (e.g. `["text-generation", "image-text-to-text"]`) — makes one request per tag, merges, deduplicates, re-sorts. Post-filters results to verify the engine tag is genuinely present in each model's `tags` array. Returns `Vec<HfModelCard>`. |
 | `get_model_files(repo_id, engine)` | Fetches the repo file tree, parses GGUF quantization types or MLX/vLLM directory listing. Returns `ModelDownloadInfo`. |
-| `download_hf_model_files(repo_id, files, dest_subdir?)` | Downloads selected files to `$APP_DATA/models/`, emitting `download_progress` events. |
+| `download_hf_model_files(repo_id, files, dest_subdir?, category?)` | Downloads selected files to `$APP_DATA/models/{category}/`, emitting `download_progress` events. `category` defaults to `"LLM"` but can be `"Embedding"`, `"Diffusion"`, `"STT"`, etc. |
 
 ### Engine-to-tag mapping
 
-| Engine ID | HF Tag | Model format |
-|-----------|--------|--------------|
-| `llamacpp` | `gguf` | Single GGUF files with quantization picker |
-| `mlx` | `mlx` | Safetensors directory (Download All) |
-| `vllm` | `awq` | AWQ/HF directory (Download All) |
-| `ollama` | `gguf` | Single GGUF files (same as llamacpp) |
+| Engine ID | HF Filter Tag | API Parameter | Model format |
+|-----------|--------------|---------------|--------------|
+| `llamacpp` | `gguf` | `filter=gguf` | Single GGUF files with quantization picker |
+| `mlx` | `mlx` | `filter=mlx` | Safetensors directory (Download All) |
+| `vllm` | `awq` | `filter=awq` | AWQ/HF directory (Download All) |
+| `ollama` | `gguf` | `filter=gguf` | Single GGUF files (same as llamacpp) |
+
+> **Why `filter=` instead of `tags=` or `library=`?** The HF API's `tags=` and `library=` parameters are unreliable search hints that return false positives (e.g. `library=mlx` returns `sentence-transformers/all-MiniLM-L6-v2`). The `filter=` parameter performs strict tag matching — the same mechanism the HF Hub web UI uses when clicking library filter chips.
 
 ### Key features
-- **HF token injection**: Reads `huggingface_token` from `OpenClawConfig` for gated model access
+- **HF token injection**: Reads `huggingface_token` from `SecretStore` (macOS Keychain) for gated model access
 - **GGUF quant detection**: Regex extracts quantization type (`Q4_K_M`, `IQ3_XXS`, `F16`, etc.) from filenames
 - **mmproj auto-detection**: Identifies multimodal projector files and auto-includes them in downloads
+- **Post-filter validation**: After each API response, verifies the engine tag is genuinely in each model's `tags` array (safety net against API false positives)
 - **Rate limit handling**: Returns user-friendly error message when HF API rate limit is hit
 - **Progress events**: Emits `download_progress` events compatible with the existing `model_manager.rs` format
 
@@ -1099,7 +1102,7 @@ Tauri automatically adds the platform triple suffix at bundle time (e.g. `llama-
 2. Implement `InferenceEngine` for your struct (must expose OpenAI-compatible HTTP API)
 3. Add a feature flag in `backend/Cargo.toml`: `myengine = []`
 4. Add the conditional compilation block in `engine/mod.rs` (`create_engine()`, `get_active_engine_info()`)
-5. Update `hf_hub.rs` `engine_to_hf_tag()` to map your engine to an HF tag
+5. Update `hf_hub.rs` `engine_to_hf_tag()` to map your engine to an HF `filter=` tag
 6. Update `frontend/src/components/settings/ActiveEngineChip.tsx` `ENGINE_STYLES` with your engine's colour
 
 ### Replacing llama-server

@@ -74,7 +74,7 @@ pub async fn create_conversation(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_millis() as i64;
 
     let conv = Conversation {
         id: id.clone(),
@@ -256,7 +256,7 @@ pub async fn save_message(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_millis() as i64;
 
     let images_json = images.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
     let docs_json = attached_docs.map(|v| serde_json::to_string(&v).unwrap_or("[]".to_string()));
@@ -326,7 +326,7 @@ pub async fn edit_message(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_millis() as i64;
 
     sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
         .bind(now)
@@ -385,6 +385,12 @@ pub async fn delete_all_history(
         .await
         .map_err(|e| format!("failed to delete projects: {}", e))?;
     println!("[history] - projects cleared");
+
+    sqlx::query("DELETE FROM generated_images")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("failed to delete generated images: {}", e))?;
+    println!("[history] - generated images cleared");
 
     tx.commit()
         .await

@@ -110,7 +110,8 @@ impl VectorStore {
         Ok(())
     }
 
-    pub fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<u64>, String> {
+    /// Search for nearest neighbors. Returns (key, distance) pairs sorted by distance ascending.
+    pub fn search(&self, vector: &[f32], limit: usize) -> Result<Vec<(u64, f32)>, String> {
         if vector.len() != self.dimensions {
             return Err(format!(
                 "Vector dimension mismatch: expected {}, got {}",
@@ -129,7 +130,12 @@ impl VectorStore {
             .search(vector, limit)
             .map_err(|e| format!("Search failed: {}", e))?;
 
-        Ok(result.keys.to_vec())
+        Ok(result
+            .keys
+            .iter()
+            .copied()
+            .zip(result.distances.iter().copied())
+            .collect())
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -275,29 +281,31 @@ impl VectorStoreManager {
     }
 
     /// Search across multiple scopes and merge results.
-    /// Returns (rowid, rank_position) pairs sorted by the index's native
-    /// ordering (cosine similarity).
+    /// Returns rowids sorted by cosine similarity (most similar first).
     pub fn search_scoped(
         &self,
         vector: &[f32],
         scopes: &[VectorScope],
         limit: usize,
     ) -> Result<Vec<u64>, String> {
-        let mut all_results = Vec::new();
+        let mut all_results: Vec<(u64, f32)> = Vec::new();
 
         for scope in scopes {
             if let Ok(store) = self.get(scope) {
-                if let Ok(keys) = store.search(vector, limit) {
-                    all_results.extend(keys);
+                if let Ok(pairs) = store.search(vector, limit) {
+                    all_results.extend(pairs);
                 }
             }
         }
 
-        // Deduplicate (same rowid could theoretically appear if global + project overlap — shouldn't
-        // happen with proper scoping, but defensive)
-        all_results.sort_unstable();
-        all_results.dedup();
-        Ok(all_results)
+        // Sort by distance ascending (lower = more similar for cosine metric)
+        all_results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Deduplicate by key, keeping the entry with the lowest distance
+        let mut seen = std::collections::HashSet::new();
+        all_results.retain(|(key, _)| seen.insert(*key));
+
+        Ok(all_results.into_iter().map(|(key, _)| key).collect())
     }
 
     /// Perform integrity check: compare total DB chunks vs total vectors

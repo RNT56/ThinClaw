@@ -1,32 +1,19 @@
 /**
  * EngineSetupBanner — shows when MLX/vLLM needs first-launch bootstrap.
  *
- * Checks `get_engine_setup_status` on mount. If `needs_setup` is true,
- * displays a prominent banner with a "Set Up Now" button that triggers
+ * Uses the shared `useEngineSetup` hook for setup state and actions.
+ * Displays a prominent banner with a "Set Up Now" button that triggers
  * `setup_engine` and shows a progress indicator.
- *
- * Listens to `engine_setup_progress` events for real-time status.
  *
  * Design: follows the app's card pattern (border-border/50, rounded-xl,
  * bg-card, shadow-sm) and uses design-token colours for all states.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Loader2, Wrench, CheckCircle2, AlertTriangle, Zap } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { toast } from "sonner";
-
-interface EngineSetupStatus {
-    needs_setup: boolean;
-    setup_in_progress: boolean;
-    message: string;
-}
-
-interface SetupProgress {
-    stage: string; // "creating_venv" | "installing" | "complete" | "error"
-    message: string;
-}
+import { useEngineSetup } from "../../hooks/useEngineSetup";
 
 interface EngineInfo {
     id: string;
@@ -35,65 +22,32 @@ interface EngineInfo {
 }
 
 export function EngineSetupBanner() {
-    const [status, setStatus] = useState<EngineSetupStatus | null>(null);
+    const {
+        status,
+        isSettingUp,
+        setupStage,
+        setupMessage,
+        setupComplete,
+        setupError,
+        triggerSetup,
+    } = useEngineSetup();
+
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
-    const [isSettingUp, setIsSettingUp] = useState(false);
-    const [setupStage, setSetupStage] = useState<string>("");
-    const [setupMessage, setSetupMessage] = useState<string>("");
-    const [setupComplete, setSetupComplete] = useState(false);
-    const [setupError, setSetupError] = useState<string | null>(null);
 
-    // Check setup status on mount
     useEffect(() => {
-        invoke<EngineSetupStatus>("get_engine_setup_status")
-            .then(setStatus)
-            .catch((err) => console.warn("Failed to check engine setup:", err));
-
         invoke<EngineInfo>("get_active_engine_info")
             .then(setEngineInfo)
             .catch((err) => console.warn("Failed to get engine info:", err));
     }, []);
 
-    // Listen for setup progress events
+    // Toast on complete/error (hook doesn't do toasts — UI concern)
     useEffect(() => {
-        const unlisten = listen<SetupProgress>("engine_setup_progress", (event) => {
-            const { stage, message } = event.payload;
-            setSetupStage(stage);
-            setSetupMessage(message);
+        if (setupComplete) toast.success(`${engineInfo?.display_name ?? "Engine"} setup complete!`);
+    }, [setupComplete, engineInfo]);
 
-            if (stage === "complete") {
-                setIsSettingUp(false);
-                setSetupComplete(true);
-                toast.success(message);
-            } else if (stage === "error") {
-                setIsSettingUp(false);
-                setSetupError(message);
-                toast.error(message);
-            }
-        });
-
-        return () => {
-            unlisten.then((fn) => fn());
-        };
-    }, []);
-
-    // Trigger setup
-    const handleSetup = useCallback(async () => {
-        setIsSettingUp(true);
-        setSetupError(null);
-        setSetupStage("creating_venv");
-        setSetupMessage("Starting setup...");
-
-        try {
-            await invoke("setup_engine");
-            // Events will handle the rest
-        } catch (err: any) {
-            const msg = typeof err === "string" ? err : "Setup failed";
-            setIsSettingUp(false);
-            setSetupError(msg);
-            toast.error(msg);
-        }
-    }, []);
+    useEffect(() => {
+        if (setupError) toast.error(setupError);
+    }, [setupError]);
 
     // Don't render if no setup needed
     if (!status || (!status.needs_setup && !setupComplete) || !engineInfo) {
@@ -201,7 +155,7 @@ export function EngineSetupBanner() {
                 {/* Action button */}
                 {!isSettingUp && (
                     <button
-                        onClick={handleSetup}
+                        onClick={triggerSetup}
                         className={cn(
                             "w-full py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider",
                             "flex items-center justify-center gap-2 transition-all shadow-sm",

@@ -174,7 +174,6 @@ async fn run_inference(
     args.push(width_val);
     args.push("-H".to_string());
     args.push(height_val);
-    args.push("--vae-tiling".to_string());
 
     // Performance & Modern Features
     if arch.is_modern_dit() {
@@ -193,6 +192,7 @@ async fn run_inference(
 
     #[cfg(not(target_os = "macos"))]
     {
+        args.push("--vae-tiling".into());
         if arch.is_modern_dit() {
             args.push("--offload-to-cpu".to_string());
         }

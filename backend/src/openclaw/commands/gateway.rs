@@ -403,7 +403,7 @@ pub async fn start_gateway_core(
     }
 
     // Step 3: Connect WS client to the gateway (local or remote)
-    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let (event_tx, mut event_rx) = mpsc::channel(256);
 
     let mcp_handler =
         std::sync::Arc::new(super::super::ipc::McpRequestHandler::new(state.app.clone()));
@@ -467,6 +467,24 @@ pub async fn openclaw_stop_gateway(state: State<'_, OpenClawManager>) -> Result<
 
     // Stop openclaw_engine process
     state.stop_openclaw_engine_process().await?;
+
+    // Clean up auth-profiles.json (contains plaintext API keys)
+    // It is fully regenerated on every gateway start from SecretStore.
+    if let Some(cfg) = state.get_config().await {
+        let auth_path = cfg
+            .state_dir()
+            .join("agents")
+            .join("main")
+            .join("agent")
+            .join("auth-profiles.json");
+        if auth_path.exists() {
+            if let Err(e) = std::fs::remove_file(&auth_path) {
+                warn!("[openclaw] Failed to clean up auth-profiles.json: {}", e);
+            } else {
+                info!("[openclaw] Cleaned up auth-profiles.json");
+            }
+        }
+    }
 
     *state.running.write().await = false;
     info!("Stopped OpenClaw gateway and openclaw_engine process");

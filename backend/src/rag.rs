@@ -137,72 +137,85 @@ pub async fn extract_document_content(
             let client = reqwest::Client::new();
             let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 
-            // Extract up to 15 pages via Vision-OCR
-            for i in 1..=15 {
-                if i > 1 {
-                    let _ = page.evaluate("window.scrollBy(0, 1800)").await;
-                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                }
-
-                if let Ok(screenshot) = page
-                    .screenshot(
-                        chromiumoxide::page::ScreenshotParams::builder()
-                            .format(
-                                chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg,
-                            )
-                            .quality(85)
-                            .build(),
-                    )
-                    .await
-                {
-                    // Save first page as preview if needed
-                    if i == 1 {
-                        if let Ok(app_data_dir) = app.path().app_data_dir() {
-                            let preview_path = app_data_dir.join("previews").join(format!("{}.jpg", hash));
-                            let _ = fs::create_dir_all(preview_path.parent().unwrap());
-                            let _ = fs::write(preview_path, &screenshot);
-                        }
+            // Extract up to 15 pages via Vision-OCR, with a 2-minute overall timeout
+            // to prevent a slow/stuck LLM from blocking the ingestion pipeline.
+            let ocr_future = async {
+                for i in 1..=15 {
+                    if i > 1 {
+                        let _ = page.evaluate("window.scrollBy(0, 1800)").await;
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                     }
 
-                    use base64::Engine;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot);
-
-                    let body = serde_json::json!({
-                        "model": "default",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    { "type": "text", "text": "Transcribe all visible text in this image. Maintain the original structure. Output ONLY the text. If the page is blank or has no meaningful text, output [empty]." },
-                                    { "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{}", b64) } }
-                                ]
-                            }
-                        ]
-                    });
-
-                    if let Ok(resp) = client
-                        .post(&url)
-                        .header("Authorization", format!("Bearer {}", token))
-                        .json(&body)
-                        .send()
+                    if let Ok(screenshot) = page
+                        .screenshot(
+                            chromiumoxide::page::ScreenshotParams::builder()
+                                .format(
+                                    chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg,
+                                )
+                                .quality(85)
+                                .build(),
+                        )
                         .await
                     {
-                        if let Ok(json) = resp.json::<serde_json::Value>().await {
-                            if let Some(transcription) =
-                                json["choices"][0]["message"]["content"].as_str()
-                            {
-                                if transcription != "[empty]" && !transcription.trim().is_empty() {
-                                    ocr_text.push_str(&format!("--- Page {} ---\n", i));
-                                    ocr_text.push_str(transcription);
-                                    ocr_text.push_str("\n\n");
-                                } else if i > 1 && transcription.contains("[empty]") {
-                                    break;
+                        // Save first page as preview if needed
+                        if i == 1 {
+                            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                                let preview_path = app_data_dir.join("previews").join(format!("{}.jpg", hash));
+                                let _ = fs::create_dir_all(preview_path.parent().unwrap());
+                                let _ = fs::write(preview_path, &screenshot);
+                            }
+                        }
+
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot);
+
+                        let body = serde_json::json!({
+                            "model": "default",
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        { "type": "text", "text": "Transcribe all visible text in this image. Maintain the original structure. Output ONLY the text. If the page is blank or has no meaningful text, output [empty]." },
+                                        { "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{}", b64) } }
+                                    ]
+                                }
+                            ]
+                        });
+
+                        if let Ok(resp) = client
+                            .post(&url)
+                            .header("Authorization", format!("Bearer {}", token))
+                            .json(&body)
+                            .send()
+                            .await
+                        {
+                            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                if let Some(transcription) =
+                                    json["choices"][0]["message"]["content"].as_str()
+                                {
+                                    if transcription != "[empty]" && !transcription.trim().is_empty() {
+                                        ocr_text.push_str(&format!("--- Page {} ---\n", i));
+                                        ocr_text.push_str(transcription);
+                                        ocr_text.push_str("\n\n");
+                                    } else if i > 1 && transcription.contains("[empty]") {
+                                        break;
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        break;
                     }
-                } else {
-                    break;
+                }
+            };
+
+            match tokio::time::timeout(std::time::Duration::from_secs(120), ocr_future).await {
+                Ok(()) => {}
+                Err(_) => {
+                    println!(
+                        "[rag] OCR timed out after 120s, using {} chars of partial results",
+                        ocr_text.len()
+                    );
                 }
             }
         }
@@ -705,14 +718,52 @@ pub async fn retrieve_context_internal(
     }
 
     let fts_query = format!("\"{}\"", query.replace("\"", " "));
-    let fts_results: Vec<i64> =
-        sqlx::query("SELECT rowid FROM chunks_fts WHERE content MATCH ? ORDER BY rank LIMIT ?")
+    let fts_results: Vec<i64> = {
+        // Scope-filter FTS results to match the vector search scopes:
+        // project documents + global, or chat documents + global.
+        if let Some(ref pid) = project_id {
+            sqlx::query(
+                r#"SELECT f.rowid FROM chunks_fts f
+                   JOIN chunks c ON c.rowid = f.rowid
+                   JOIN documents d ON c.document_id = d.id
+                   WHERE f.content MATCH ?
+                   AND (d.project_id = ? OR (d.project_id IS NULL AND d.chat_id IS NULL))
+                   ORDER BY f.rank LIMIT ?"#,
+            )
             .bind(&fts_query)
+            .bind(pid)
             .bind(initial_top_k as i64)
             .fetch_all(&pool)
             .await
             .map(|rows| rows.into_iter().map(|r| r.get::<i64, _>("rowid")).collect())
-            .unwrap_or(Vec::new());
+            .unwrap_or(Vec::new())
+        } else if let Some(ref cid) = chat_id {
+            sqlx::query(
+                r#"SELECT f.rowid FROM chunks_fts f
+                   JOIN chunks c ON c.rowid = f.rowid
+                   JOIN documents d ON c.document_id = d.id
+                   WHERE f.content MATCH ?
+                   AND (d.chat_id = ? OR (d.project_id IS NULL AND d.chat_id IS NULL))
+                   ORDER BY f.rank LIMIT ?"#,
+            )
+            .bind(&fts_query)
+            .bind(cid)
+            .bind(initial_top_k as i64)
+            .fetch_all(&pool)
+            .await
+            .map(|rows| rows.into_iter().map(|r| r.get::<i64, _>("rowid")).collect())
+            .unwrap_or(Vec::new())
+        } else {
+            // Global scope — no filter needed
+            sqlx::query("SELECT rowid FROM chunks_fts WHERE content MATCH ? ORDER BY rank LIMIT ?")
+                .bind(&fts_query)
+                .bind(initial_top_k as i64)
+                .fetch_all(&pool)
+                .await
+                .map(|rows| rows.into_iter().map(|r| r.get::<i64, _>("rowid")).collect())
+                .unwrap_or(Vec::new())
+        }
+    };
 
     let mut fused_scores: HashMap<i64, f32> = HashMap::new();
 

@@ -382,7 +382,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
 
     const isCoreView = sessionKey === 'agent:main';
     // Use a valid session key for the engine if in Core View
-    const effectiveSessionKey = isCoreView ? 'agent:main:primary' : sessionKey;
+    const effectiveSessionKey = isCoreView ? 'agent:main' : sessionKey;
     const [coreTab, setCoreTab] = useState<'chat' | 'console' | 'memory'>(isCoreView ? 'chat' : 'console');
 
 
@@ -631,7 +631,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                 return [...prev, { id: uiEvent.message_id, role: 'assistant', ts_ms: Date.now(), text: uiEvent.delta, source: 'openclaw' }];
             }
             if (uiEvent.kind === 'ToolUpdate') {
-                const toolMsgId = `tool - ${uiEvent.tool_name} -${uiEvent.run_id} `;
+                const toolMsgId = `tool-${uiEvent.tool_name}-${uiEvent.run_id}`;
                 const existing = prev.find(m => m.id === toolMsgId);
                 let content = `[Tool Call: ${uiEvent.tool_name}]`;
                 const metadata = { type: 'tool', name: uiEvent.tool_name, status: uiEvent.status, input: uiEvent.input, output: uiEvent.output, run_id: uiEvent.run_id };
@@ -662,7 +662,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
         setIsSending(true);
         // Optimistic update (show original input, not the thinking prefix)
         const displayMsg = input.trim();
-        const optimisticMsg: OpenClawMessage = { id: `temp - ${Date.now()} `, role: 'user', ts_ms: Date.now(), text: displayMsg, source: 'openclaw' };
+        const optimisticMsg: OpenClawMessage = { id: `temp-${Date.now()}`, role: 'user', ts_ms: Date.now(), text: displayMsg, source: 'openclaw' };
         setMessages(prev => [...prev, optimisticMsg]);
         isUserScrolling.current = false;
         scrollToBottom();
@@ -698,28 +698,13 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
 
         const tId = toast.loading("Deleting session...");
 
-        try { await openclaw.abortOpenClawChat(sessionKey, currentRunId || undefined); } catch (ignored) { }
-
         try {
+            // Backend handles the full lifecycle: abort → wait → delete → reset → retry
             await openclaw.deleteOpenClawSession(sessionKey);
             toast.success("Session deleted", { id: tId });
             if (onNavigateToSettings) onNavigateToSettings('openclaw-gateway');
         } catch (e: any) {
-            console.error("Delete session failed", e);
-            const msg = e?.message || String(e);
-            if (msg.includes("still active") || msg.includes("timeout")) {
-                try {
-                    toast.loading("Session active, force deleting...", { id: tId });
-                    await openclaw.resetOpenClawSession(sessionKey);
-                    await openclaw.deleteOpenClawSession(sessionKey);
-                    toast.success("Session force deleted", { id: tId });
-                    if (onNavigateToSettings) onNavigateToSettings('openclaw-gateway');
-                } catch (e2) {
-                    toast.error("Force delete failed: " + String(e2), { id: tId });
-                }
-            } else {
-                toast.error("Failed to delete session: " + msg, { id: tId });
-            }
+            toast.error("Failed to delete session: " + (e?.message || String(e)), { id: tId });
         }
     };
 

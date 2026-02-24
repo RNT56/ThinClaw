@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use tungstenite::Message;
 
 use super::frames::{self, WsFrame};
@@ -93,7 +93,7 @@ pub struct OpenClawWsHandle {
 }
 
 impl OpenClawWsHandle {
-    /// Send an RPC request and await response
+    /// Send an RPC request and await response (30s timeout)
     pub async fn rpc(&self, method: &str, params: Value) -> Result<Value, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -105,7 +105,10 @@ impl OpenClawWsHandle {
             .await
             .map_err(|_| ClientError::ChannelClosed)?;
 
-        rx.await.map_err(|_| ClientError::ChannelClosed)?
+        tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::ChannelClosed)?
     }
 
     /// Request gateway status
@@ -117,7 +120,7 @@ impl OpenClawWsHandle {
     /// Get session list
     pub async fn sessions_list(&self) -> Result<Value, ClientError> {
         let res = self.rpc("sessions.list", serde_json::json!({})).await?;
-        info!("Sessions list raw response: {:?}", res);
+        debug!("Sessions list raw response: {:?}", res);
         Ok(res)
     }
 
@@ -159,7 +162,7 @@ impl OpenClawWsHandle {
 
     /// Delete a session
     pub async fn session_delete(&self, session_key: &str) -> Result<Value, ClientError> {
-        info!("Sending sessions.delete for key: {}", session_key);
+        debug!("Sending sessions.delete for key: {}", session_key);
         let res = self
             .rpc(
                 "sessions.delete",
@@ -168,13 +171,13 @@ impl OpenClawWsHandle {
                 }),
             )
             .await?;
-        info!("sessions.delete response: {:?}", res);
+        debug!("sessions.delete response: {:?}", res);
         Ok(res)
     }
 
     /// Reset a session (clear history)
     pub async fn session_reset(&self, session_key: &str) -> Result<Value, ClientError> {
-        info!("Sending sessions.reset for key: {}", session_key);
+        debug!("Sending sessions.reset for key: {}", session_key);
         let res = self
             .rpc(
                 "sessions.reset",
@@ -183,7 +186,7 @@ impl OpenClawWsHandle {
                 }),
             )
             .await?;
-        info!("sessions.reset response: {:?}", res);
+        debug!("sessions.reset response: {:?}", res);
         Ok(res)
     }
 
@@ -409,6 +412,13 @@ impl OpenClawWsClient {
                     backoff = Duration::from_millis(250);
                 }
                 Err(e) => {
+                    // Drain all pending RPC requests so callers get a clear error
+                    // instead of waiting forever or getting a generic ChannelClosed
+                    for (_, tx) in self.pending.drain() {
+                        let _ =
+                            tx.send(Err(ClientError::Protocol("WebSocket disconnected".into())));
+                    }
+
                     // Log first few attempts as INFO (openclaw-engine is booting)
                     // After that, log as ERROR (something is actually wrong)
                     if self.connection_attempts <= 5 {
@@ -505,9 +515,9 @@ impl OpenClawWsClient {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(txt))) => {
-                            // Log first 200 chars to show what's coming in
+                            // Log first 200 chars at trace level (hot path)
                             let preview: String = txt.chars().take(200).collect();
-                            info!("[ws_client] WS Received: {}...", preview);
+                            trace!("[ws_client] WS Received: {}...", preview);
                             match serde_json::from_str::<WsFrame>(&txt) {
                                 Ok(frame) => self.handle_incoming_frame(&mut write, frame).await?,
                                 Err(e) => warn!("Failed to parse WS frame: {}", e),
@@ -654,16 +664,18 @@ impl OpenClawWsClient {
                 }
             }
             WsFrame::Event { event, .. } => {
-                info!("[ws_client] Received Event frame: {}", event);
+                debug!("[ws_client] Received Event frame: {}", event);
                 if let Some(ui) = normalizer::normalize_event(&frame) {
-                    info!("[ws_client] Forwarding normalized UI event to frontend");
-                    let _ = self.ui_tx.send(ui).await;
+                    trace!("[ws_client] Forwarding normalized UI event to frontend");
+                    if self.ui_tx.try_send(ui).is_err() {
+                        warn!("[ws_client] UI event channel full, dropping event");
+                    }
                 } else {
-                    info!("[ws_client] Event was not normalized (dropped): {}", event);
+                    debug!("[ws_client] Event was not normalized (dropped): {}", event);
                 }
             }
             WsFrame::Req { id, method, params } => {
-                info!("[ws_client] Received Req frame: {} (id={})", method, id);
+                debug!("[ws_client] Received Req frame: {} (id={})", method, id);
 
                 // Delegate to McpRequestHandler
                 let result = if method.starts_with("mcp.") {

@@ -201,18 +201,51 @@ pub async fn get_project_documents(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_document(pool: State<'_, SqlitePool>, id: String) -> Result<(), String> {
-    // Delete chunks first (though CASCADE usually handles this if configured, but let's be sure)
+    // 1. Look up document path before deleting (for file cleanup)
+    let doc_path: Option<(String,)> = sqlx::query_as("SELECT path FROM documents WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 2. Count chunks for vector store diagnostics
+    let chunk_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM chunks WHERE document_id = ?")
+        .bind(&id)
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 3. Delete chunks (DB records — vector entries remain as ghosts since
+    //    USearch does not support efficient per-key removal)
     sqlx::query("DELETE FROM chunks WHERE document_id = ?")
         .bind(&id)
         .execute(pool.inner())
         .await
         .map_err(|e| e.to_string())?;
 
+    // 4. Delete document record
     sqlx::query("DELETE FROM documents WHERE id = ?")
         .bind(&id)
         .execute(pool.inner())
         .await
         .map_err(|e| e.to_string())?;
+
+    if chunk_count.0 > 0 {
+        println!(
+            "[projects] deleted document {} ({} chunks removed from DB; vectors remain as ghosts until scope reset)",
+            id, chunk_count.0
+        );
+    }
+
+    // 5. Clean up source file from disk
+    if let Some((path,)) = doc_path {
+        if std::path::Path::new(&path).exists() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => println!("[projects] deleted document file: {}", path),
+                Err(e) => eprintln!("[projects] failed to delete file {}: {}", path, e),
+            }
+        }
+    }
 
     Ok(())
 }

@@ -13,8 +13,18 @@
 //! ## Storage
 //!
 //! Keys are encrypted at rest in the macOS Keychain as a single JSON blob
-//! (one Keychain item → one unlock prompt on app launch).  At runtime, all
-//! keys live in an in-memory `HashMap` behind a `RwLock` for concurrent reads.
+//! (one Keychain item → one unlock prompt on app launch).  At runtime, keys
+//! are cached in `keychain::key_cache()` — a single `Mutex<HashMap>` shared
+//! by both this store and `OpenClawConfig`.
+//!
+//! ## Architecture note (2026-02-24)
+//!
+//! Previously, `SecretStore` maintained its OWN `RwLock<HashMap>` that was
+//! populated from `keychain::key_cache()` on startup.  This created two caches
+//! that could drift: if `OpenClawConfig` called `keychain::set_key()` directly,
+//! `SecretStore`'s copy went stale.  Now `SecretStore` is a thin delegation
+//! wrapper over `keychain` — exactly one cache (the keychain module's), exactly
+//! one source of truth.
 //!
 //! ## Why this exists separately from OpenClawConfig
 //!
@@ -27,39 +37,33 @@
 //! Now: `SecretStore` owns the keys.  `OpenClawConfig` reads from it when
 //! generating engine config.  Everyone else reads from it directly.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use crate::openclaw::config::keychain;
 
 /// Application-wide API key / secret store.
 ///
 /// Managed as `app.manage(SecretStore::new())` — accessible from any Tauri
 /// command via `State<'_, SecretStore>`.
+///
+/// This is a thin delegation wrapper over `keychain`.  All reads and writes
+/// go through the single `keychain::key_cache()` `Mutex<HashMap>`, ensuring
+/// consistency with `OpenClawConfig` which also uses `keychain` directly.
 pub struct SecretStore {
-    /// In-memory cache of all secrets.  Populated from Keychain on startup.
-    keys: RwLock<HashMap<String, String>>,
+    // No local cache — delegates entirely to keychain::get_key / set_key
+    // which maintain a single Mutex<HashMap> as the in-memory cache.
 }
 
 impl SecretStore {
-    /// Create and load the store.
+    /// Create the store.
     ///
     /// Call `keychain::load_all()` before constructing this — it populates the
     /// module-level cache that `get_key` / `set_key` read from.
     pub fn new() -> Self {
-        use crate::openclaw::config::keychain;
-
-        // Read all keys from the keychain cache into our own HashMap
-        let mut map = HashMap::new();
-        for &provider in keychain::PROVIDERS {
-            if let Some(val) = keychain::get_key(provider) {
-                map.insert(provider.to_string(), val);
-            }
-        }
-
-        println!("[secret_store] loaded {} keys from keychain", map.len());
-
-        Self {
-            keys: RwLock::new(map),
-        }
+        let count = keychain::PROVIDERS
+            .iter()
+            .filter(|p| keychain::get_key(p).is_some())
+            .count();
+        println!("[secret_store] keychain has {} keys loaded", count);
+        Self {}
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -68,19 +72,12 @@ impl SecretStore {
 
     /// Get a secret by key name.  Returns `None` if not set.
     pub fn get(&self, key: &str) -> Option<String> {
-        self.keys
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned()
+        keychain::get_key(key)
     }
 
     /// Check if a key exists and is non-empty.
     pub fn has(&self, key: &str) -> bool {
-        self.keys
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
+        keychain::get_key(key)
             .map(|v| !v.is_empty())
             .unwrap_or(false)
     }
@@ -92,23 +89,7 @@ impl SecretStore {
     /// Store a secret.  Writes to both in-memory cache and Keychain.
     /// Pass `None` or empty string to delete.
     pub fn set(&self, key: &str, value: Option<&str>) -> Result<(), String> {
-        use crate::openclaw::config::keychain;
-
-        // Write to Keychain (encrypted at rest)
-        keychain::set_key(key, value)?;
-
-        // Update in-memory cache
-        let mut map = self.keys.write().unwrap_or_else(|e| e.into_inner());
-        match value {
-            Some(v) if !v.is_empty() => {
-                map.insert(key.to_string(), v.to_string());
-            }
-            _ => {
-                map.remove(key);
-            }
-        }
-
-        Ok(())
+        keychain::set_key(key, value)
     }
 
     // ─────────────────────────────────────────────────────────────────────

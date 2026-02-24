@@ -98,17 +98,28 @@ export function FleetCommandCenter() {
         }
     }, []);
 
-    // Poll logic
+    // Poll logic — skip when tab is hidden to avoid unnecessary network I/O
     useEffect(() => {
         refreshFleet();
-        const interval = setInterval(refreshFleet, 3000);
+        const interval = setInterval(() => {
+            if (document.visibilityState === 'visible') {
+                refreshFleet();
+            }
+        }, 3000);
         return () => clearInterval(interval);
     }, [refreshFleet]);
 
     // Real-time Event Listener — updates both logs AND agent states
+    // Uses a ref to store the unlisten function so the useEffect cleanup can actually call it
+    const unlistenRef = useRef<(() => void) | null>(null);
+
     useEffect(() => {
+        let cancelled = false;
+
         import('@tauri-apps/api/event').then(({ listen }) => {
-            const unlisten = listen<any>('openclaw-event', (event) => {
+            if (cancelled) return; // Component unmounted during dynamic import
+
+            listen<any>('openclaw-event', (event) => {
                 const payload = event.payload;
                 if (!payload || !payload.kind) return;
 
@@ -230,12 +241,22 @@ export function FleetCommandCenter() {
                         return { ...prev, [agent.id]: updated };
                     });
                 }
+            }).then(fn => {
+                if (cancelled) {
+                    fn(); // Already unmounted, clean up immediately
+                } else {
+                    unlistenRef.current = fn;
+                }
             });
-
-            return () => {
-                unlisten.then(f => f());
-            };
         });
+
+        return () => {
+            cancelled = true;
+            if (unlistenRef.current) {
+                unlistenRef.current();
+                unlistenRef.current = null;
+            }
+        };
     }, []);
 
     // Merge backend run_status with frontend real-time states

@@ -1452,10 +1452,15 @@ async isEngineReady() : Promise<Result<boolean, string>> {
  * 
  * Uses the HF `/api/models` endpoint filtered by engine-specific tag,
  * sorted by download count (most popular first).
+ * 
+ * `pipeline_tags` accepts multiple HF pipeline tags (e.g.
+ * `["text-generation", "image-text-to-text"]`) so a single search covers
+ * both text-only and multimodal LLMs.  One API request is made per tag,
+ * results are merged, deduplicated by repo ID, and re-sorted by downloads.
  */
-async discoverHfModels(query: string, engine: string, limit: number | null) : Promise<Result<HfModelCard[], string>> {
+async discoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("discover_hf_models", { query, engine, limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("discover_hf_models", { query, engine, limit, pipelineTags }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1484,10 +1489,13 @@ async getModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownlo
  * Reuses the existing streaming download infrastructure from `model_manager.rs`.
  * For single-file (GGUF): downloads the selected quant + optional mmproj.
  * For multi-file (MLX/vLLM): downloads all files preserving directory structure.
+ * 
+ * `category` controls which subdirectory the model is saved under
+ * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
  */
-async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null) : Promise<Result<string, string>> {
+async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("download_hf_model_files", { repoId, filesToDownload, destSubdir }) };
+    return { status: "ok", data: await TAURI_INVOKE("download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
