@@ -102,7 +102,7 @@ interface ModelContextType {
     isRestarting: boolean;
     setIsRestarting: (val: boolean) => void;
     /** Download files from HuggingFace Hub (used by HFDiscovery) */
-    downloadHfFiles: (repoId: string, files: string[], destSubdir?: string | null) => Promise<void>;
+    downloadHfFiles: (repoId: string, files: string[], destSubdir?: string | null, category?: string) => Promise<void>;
     /** Active inference engine info (null while loading) */
     engineInfo: EngineInfo | null;
     /** Persistent HF discovery state (survives tab switches) */
@@ -445,6 +445,11 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                     const localFiles = await refreshModels();
 
                     if (!hasChecked && localFiles.length === 0) {
+                        // Skip if onboarding wizard is handling model selection
+                        if (localStorage.getItem('scrappy_onboarding_in_progress') === 'true') {
+                            localStorage.setItem(FIRST_RUN_KEY, "true");
+                            return;
+                        }
                         const ramGB = specs.total_memory / (1024 * 1024 * 1024);
 
                         let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
@@ -643,7 +648,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     }, [refreshModels]);
 
     // Download files from HuggingFace Hub (shared via context)
-    const downloadHfFiles = useCallback(async (repoId: string, files: string[], destSubdir?: string | null) => {
+    const downloadHfFiles = useCallback(async (repoId: string, files: string[], destSubdir?: string | null, category?: string) => {
         // Track each file in the global download state
         const trackKey = files.length === 1 ? files[0] : repoId;
         setDownloading(prev => ({ ...prev, [trackKey]: 0 }));
@@ -653,6 +658,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 repoId,
                 filesToDownload: files,
                 destSubdir: destSubdir ?? null,
+                category: category ?? null,
             });
             toast.success(`Downloaded: ${files.length === 1 ? files[0] : repoId}`);
             refreshModels();

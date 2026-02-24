@@ -122,47 +122,30 @@ fn parse_model_card(v: &serde_json::Value) -> Option<HfModelCard> {
     })
 }
 
-/// Map engine ID to HF search tag.
+/// Map engine ID to HF Hub tag used with the `filter=` API parameter.
+///
+/// The `filter=` parameter performs strict tag matching on the HF API,
+/// unlike `library=` or `tags=` which are unreliable search hints.
 fn engine_to_hf_tag(engine: &str) -> Option<&'static str> {
     match engine {
-        "llamacpp" => Some("gguf"),
+        "llamacpp" | "ollama" => Some("gguf"),
         "mlx" => Some("mlx"),
         "vllm" => Some("awq"),
-        "ollama" => Some("gguf"),
         _ => None,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tauri Commands
-// ---------------------------------------------------------------------------
-
-/// Search HuggingFace Hub for models compatible with the active engine.
+/// Fetch & parse models from a single HF API URL, post-filtering by engine tag.
 ///
-/// Uses the HF `/api/models` endpoint filtered by engine-specific tag,
-/// sorted by download count (most popular first).
-#[tauri::command]
-#[specta::specta]
-pub async fn discover_hf_models(
-    app: AppHandle,
-    query: String,
-    engine: String,
-    limit: Option<u32>,
+/// We use the `filter=` API parameter for strict tag matching.  The post-filter
+/// is a safety-net that verifies each returned card genuinely carries the
+/// engine-format tag in its `tags` array.
+async fn fetch_hf_models(
+    client: &reqwest::Client,
+    url: &str,
+    engine_tag: &str,
 ) -> Result<Vec<HfModelCard>, String> {
-    let tag = engine_to_hf_tag(&engine)
-        .ok_or_else(|| format!("Unknown engine '{}' — cannot map to HF tag", engine))?;
-
-    let client = build_hf_client(&app).await?;
-    let limit = limit.unwrap_or(20).min(100); // Cap at 100
-
-    let url = format!(
-        "https://huggingface.co/api/models?search={}&tags={}&sort=downloads&direction=-1&limit={}",
-        urlencoding::encode(&query),
-        tag,
-        limit
-    );
-
-    let response = client.get(&url).send().await.map_err(|e| {
+    let response = client.get(url).send().await.map_err(|e| {
         if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
             "HuggingFace rate limit reached. Add an HF token in settings to increase limits."
                 .to_string()
@@ -183,7 +166,96 @@ pub async fn discover_hf_models(
         .await
         .map_err(|e| format!("Failed to parse HF response: {}", e))?;
 
-    Ok(body.iter().filter_map(parse_model_card).collect())
+    // Post-filter: verify each result actually has the engine tag in its tags list.
+    Ok(body
+        .iter()
+        .filter_map(parse_model_card)
+        .filter(|card| card.tags.iter().any(|t| t.eq_ignore_ascii_case(engine_tag)))
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Tauri Commands
+// ---------------------------------------------------------------------------
+
+/// Search HuggingFace Hub for models compatible with the active engine.
+///
+/// Uses the HF `/api/models` endpoint filtered by engine-specific tag,
+/// sorted by download count (most popular first).
+///
+/// `pipeline_tags` accepts multiple HF pipeline tags (e.g.
+/// `["text-generation", "image-text-to-text"]`) so a single search covers
+/// both text-only and multimodal LLMs.  One API request is made per tag,
+/// results are merged, deduplicated by repo ID, and re-sorted by downloads.
+#[tauri::command]
+#[specta::specta]
+pub async fn discover_hf_models(
+    app: AppHandle,
+    query: String,
+    engine: String,
+    limit: Option<u32>,
+    // Optional list of HF pipeline tags to filter by task type.
+    // When provided, one request per tag is made and results are merged.
+    pipeline_tags: Option<Vec<String>>,
+) -> Result<Vec<HfModelCard>, String> {
+    let tag = engine_to_hf_tag(&engine)
+        .ok_or_else(|| format!("Unknown engine '{}' — cannot map to HF tag", engine))?;
+
+    let client = build_hf_client(&app).await?;
+    let limit = limit.unwrap_or(20).min(100); // Cap at 100
+
+    // Determine which pipeline tags to query
+    let tags_to_query: Vec<String> = pipeline_tags
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut all_cards: Vec<HfModelCard> = Vec::new();
+
+    if tags_to_query.is_empty() {
+        // No pipeline tag filter — single request
+        let url = format!(
+            "https://huggingface.co/api/models?search={}&filter={}&sort=downloads&direction=-1&limit={}",
+            urlencoding::encode(&query),
+            tag,
+            limit
+        );
+        all_cards = fetch_hf_models(&client, &url, tag).await?;
+    } else {
+        // One request per pipeline tag, then merge & deduplicate
+        for pt in &tags_to_query {
+            let url = format!(
+                "https://huggingface.co/api/models?search={}&filter={}&sort=downloads&direction=-1&limit={}&pipeline_tag={}",
+                urlencoding::encode(&query),
+                tag,
+                limit,
+                urlencoding::encode(pt)
+            );
+            match fetch_hf_models(&client, &url, tag).await {
+                Ok(cards) => all_cards.extend(cards),
+                Err(e) => {
+                    eprintln!("[hf_hub] Search for pipeline_tag='{}' failed: {}", pt, e);
+                }
+            }
+        }
+
+        // Deduplicate by model ID
+        let mut seen = std::collections::HashSet::new();
+        all_cards.retain(|card| seen.insert(card.id.clone()));
+
+        // Re-sort by downloads (descending)
+        all_cards.sort_by(|a, b| {
+            b.downloads
+                .partial_cmp(&a.downloads)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply limit after merge
+        all_cards.truncate(limit as usize);
+    }
+
+    Ok(all_cards)
 }
 
 /// Fetch the file tree of an HF repo and parse it intelligently.
@@ -325,6 +397,9 @@ pub async fn get_model_files(
 /// Reuses the existing streaming download infrastructure from `model_manager.rs`.
 /// For single-file (GGUF): downloads the selected quant + optional mmproj.
 /// For multi-file (MLX/vLLM): downloads all files preserving directory structure.
+///
+/// `category` controls which subdirectory the model is saved under
+/// (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
 #[tauri::command]
 #[specta::specta]
 pub async fn download_hf_model_files(
@@ -332,14 +407,14 @@ pub async fn download_hf_model_files(
     repo_id: String,
     files_to_download: Vec<String>,
     dest_subdir: Option<String>,
+    category: Option<String>,
 ) -> Result<String, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let sanitized = repo_id.replace('/', "_");
-    // Always download into models/LLM/<model-name>/ to match the expected hierarchy.
-    // The LLM category subfolder ensures the model shows up correctly in the chat tab.
+    let model_category = category.unwrap_or_else(|| "LLM".to_string());
     let dest_dir = app_data
         .join("models")
-        .join("LLM")
+        .join(&model_category)
         .join(dest_subdir.unwrap_or_else(|| sanitized.clone()));
 
     // Ensure destination directory exists

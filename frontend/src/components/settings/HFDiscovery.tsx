@@ -283,6 +283,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     query: debouncedQuery,
                     engine: engineInfo.id,
                     limit: 20,
+                    pipelineTags: ["text-generation", "image-text-to-text"],
                 });
                 setResults(models);
             } catch (err: any) {
