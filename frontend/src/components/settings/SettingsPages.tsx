@@ -378,11 +378,18 @@ function ServerSettings() {
         setMaxContext,
         localModels,
         systemSpecs,
-        currentModelTemplate
+        currentModelTemplate,
+        engineInfo
     } = useModelContext();
     const [loading, setLoading] = useState(false);
     const [metadata, setMetadata] = useState<GGUFMetadata | undefined>();
     const [config, setConfig] = useState<any>(null);
+    const [engineReady, setEngineReady] = useState(false);
+
+    // Determine if we should use the EngineManager health check (MLX/vLLM/Ollama)
+    // vs the SidecarManager chat_process (llamacpp)
+    const isLlamaCpp = !engineInfo || engineInfo.id === 'llamacpp';
+    const isCloudOnly = engineInfo?.id === 'none';
 
     useEffect(() => {
         commands.getUserConfig().then(setConfig);
@@ -406,19 +413,47 @@ function ServerSettings() {
         } catch (e) {
             console.error("Failed to get status", e);
         }
+
+        // For non-llamacpp engines, also poll the EngineManager health endpoint
+        if (!isLlamaCpp && !isCloudOnly) {
+            try {
+                const res = await commands.isEngineReady();
+                if (res.status === 'ok') setEngineReady(res.data);
+            } catch {
+                setEngineReady(false);
+            }
+        }
     };
 
     useEffect(() => {
         checkStatus();
         const interval = setInterval(checkStatus, 2000);
         return () => clearInterval(interval);
-    }, []);
+    }, [isLlamaCpp, isCloudOnly]);
+
+    // Unified "is the inference server running?" across all engines
+    const isServerRunning = isCloudOnly
+        ? false
+        : isLlamaCpp
+            ? (status?.chat_running ?? false)
+            : engineReady;
+
+    const engineDisplayName = engineInfo?.display_name ?? 'Local AI';
 
     const manualRestart = async () => {
         setLoading(true);
-        const toastId = toast.loading("Restarting server manually...");
+        const toastId = toast.loading(`Restarting ${engineDisplayName}...`);
         try {
-            await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
+            if (isLlamaCpp) {
+                // llama.cpp — use the existing sidecar restart command
+                await commands.startChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
+            } else if (!isCloudOnly) {
+                // MLX / vLLM / Ollama — stop then start via EngineManager
+                try { await commands.stopEngine(); } catch { /* may already be stopped */ }
+                await new Promise(r => setTimeout(r, 500));
+                const startRes = await commands.startEngine(modelPath, maxContext);
+                if (startRes.status === 'error') throw new Error(startRes.error);
+            }
             await checkStatus();
 
             // Attempt dynamic config update for OpenClaw
@@ -490,8 +525,8 @@ function ServerSettings() {
             <div className="flex items-center justify-between p-6 border border-border/50 rounded-xl bg-card shadow-sm">
                 <div className="space-y-1">
                     <div className="flex items-center font-semibold text-lg">
-                        Local AI Inference
-                        {status?.chat_running ? (
+                        {engineDisplayName} Inference
+                        {isServerRunning ? (
                             <span className="ml-3 flex items-center text-emerald-600 dark:text-emerald-400 text-xs bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
                                 <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" /> Running
                             </span>
@@ -502,17 +537,23 @@ function ServerSettings() {
                         )}
                     </div>
                     <p className="text-sm text-muted-foreground">
-                        {status?.chat_running ? "The Local AI Server is active and ready." : "The server is currently stopped or initializing."}
+                        {isServerRunning
+                            ? `The ${engineDisplayName} server is active and ready.`
+                            : isCloudOnly
+                                ? "No local inference engine — using cloud providers only."
+                                : "The server is currently stopped or initializing."}
                     </p>
                 </div>
-                <button
-                    onClick={manualRestart}
-                    disabled={loading}
-                    className="inline-flex items-center justify-center rounded-xl text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 border border-input bg-background hover:bg-accent hover:text-accent-foreground shadow-sm"
-                >
-                    <RotateCcw className={cn("w-4 h-4 mr-2", loading && "animate-spin")} />
-                    Restart Server
-                </button>
+                {!isCloudOnly && (
+                    <button
+                        onClick={manualRestart}
+                        disabled={loading}
+                        className="inline-flex items-center justify-center rounded-xl text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 h-10 px-6 border border-input bg-background hover:bg-accent hover:text-accent-foreground shadow-sm"
+                    >
+                        <RotateCcw className={cn("w-4 h-4 mr-2", loading && "animate-spin")} />
+                        Restart Server
+                    </button>
+                )}
             </div>
 
             <div className="p-6 border border-border/50 rounded-xl bg-card space-y-6 shadow-sm">
