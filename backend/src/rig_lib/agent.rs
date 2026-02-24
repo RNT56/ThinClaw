@@ -1,3 +1,4 @@
+use crate::rig_lib::tools::calculator_tool::CalculatorTool;
 use crate::rig_lib::tools::image_gen_tool::ImageGenTool;
 use crate::rig_lib::tools::rag_tool::RAGTool;
 use crate::rig_lib::tools::web_search::DDGSearchTool;
@@ -55,9 +56,14 @@ You have access to `web_search` for looking up real-time information. Use it wis
 - Questions about yourself: Who are you, What can you do, etc.
 - Code / programming: Write, debug, explain code
 - Creative writing: Stories, poems, essays
-- General knowledge you are confident about: Math, science concepts, history, definitions
+- General knowledge you are confident about: Science concepts, history, definitions
 - Opinions, advice, brainstorming
 - Follow-up conversation that does not need new data
+
+**USE `calculator` for**:
+- Any arithmetic, percentages, currency conversions (after getting the rate), tip/tax calculations
+- Compound interest, unit conversions, or any precise number crunching
+- ALWAYS prefer calculator over mental math — it is faster and more accurate
 
 **USE `web_search` ONLY for**:
 - Today's news, current events, or anything that changes daily
@@ -75,8 +81,9 @@ or
             base_preamble.push_str("
 CORE RULES:
 1. **NO TOOLS FOR CHAT**: If the user says 'Hello', 'Hi', asks a question about you, or asks for code/logic -> YOU MUST REPLY DIRECTLY. Do not call any tools.
-2. **SEARCH ONLY FOR FACTS**: Only use `web_search` if the user explicitly asks for real-time news, prices, or specific data you do not know.
-3. **DRAW ONLY ON COMMAND**: Only use `generate_image` if the user explicitly starts with 'Draw', 'Create image', or 'Generate picture'.
+2. **CALCULATOR FOR MATH**: Use `calculator` for ANY arithmetic, percentages, currency conversions, unit conversions, or precise calculations. ALWAYS prefer calculator over mental math.
+3. **SEARCH ONLY FOR FACTS**: Only use `web_search` if the user explicitly asks for real-time news, prices, or specific data you do not know.
+4. **DRAW ONLY ON COMMAND**: Only use `generate_image` if the user explicitly starts with 'Draw', 'Create image', or 'Generate picture'.
 
 Start your response with a clear thought:
 'Thought: User said X. This is chat. I will reply.'
@@ -92,8 +99,31 @@ or
             ));
         }
 
-        // Build agent using the provider
-        let mut builder = rig::agent::AgentBuilder::new(provider.clone()).preamble(&base_preamble);
+        // Build agent using the provider.
+        //
+        // IMPORTANT: The `rig` crate resolves model context windows by querying
+        // HuggingFace when the model name is unknown.  For Local providers
+        // (mlx_lm.server, llama-server) the model name is "default" — not a real
+        // HF repo — which causes a spurious 404 error on first chat.
+        //
+        // Workaround: for Local providers, substitute a well-known model name that
+        // rig has hardcoded so no HF request is made.  This is safe because the
+        // orchestrator always streams through `provider.stream_raw_completion()` on
+        // our *own* `UnifiedProvider` (which uses `self.base_url`, not rig's URL)
+        // and never calls `agent.prompt()` for the main chat path.
+        let agent_provider = if matches!(provider.kind, ProviderKind::Local) {
+            UnifiedProvider::new(
+                ProviderKind::Local,
+                &provider.base_url,
+                &provider.api_key,
+                "gpt-3.5-turbo", // well-known name → rig skips HF lookup
+                provider.model_family.clone(),
+            )
+        } else {
+            provider.clone()
+        };
+
+        let mut builder = rig::agent::AgentBuilder::new(agent_provider).preamble(&base_preamble);
 
         if enable_web_search {
             builder = builder
@@ -109,6 +139,7 @@ or
         }
 
         let agent = builder
+            .tool(CalculatorTool)
             .tool(RAGTool {
                 app: app_handle
                     .clone()

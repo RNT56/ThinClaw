@@ -250,50 +250,71 @@ impl OpenClawConfig {
         None
     }
 
-    /// Update Anthropic API key — writes to Keychain, not identity.json
+    /// Update Anthropic API key — writes to Keychain, not identity.json.
+    ///
+    /// **Security**: Does NOT auto-grant to OpenClaw.  The user must explicitly
+    /// toggle access via Settings › Secrets.  If the key is *removed*, the
+    /// grant is also revoked to prevent stale authorizations.
     pub fn update_anthropic_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("anthropic", key.as_deref()).map_err(io_err)?;
-        self.anthropic_granted = key.is_some();
+        if key.is_none() {
+            self.anthropic_granted = false; // Revoke on delete
+        }
         self.anthropic_api_key = key;
         self.save_identity()
     }
 
-    /// Update Brave Search API key — writes to Keychain
+    /// Update Brave Search API key — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_brave_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("brave", key.as_deref()).map_err(io_err)?;
-        self.brave_granted = key.is_some();
+        if key.is_none() {
+            self.brave_granted = false;
+        }
         self.brave_search_api_key = key;
         self.save_identity()
     }
 
-    /// Update OpenAI API key — writes to Keychain
+    /// Update OpenAI API key — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_openai_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("openai", key.as_deref()).map_err(io_err)?;
-        self.openai_granted = key.is_some();
+        if key.is_none() {
+            self.openai_granted = false;
+        }
         self.openai_api_key = key;
         self.save_identity()
     }
 
-    /// Update OpenRouter API key — writes to Keychain
+    /// Update OpenRouter API key — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_openrouter_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("openrouter", key.as_deref()).map_err(io_err)?;
-        self.openrouter_granted = key.is_some();
+        if key.is_none() {
+            self.openrouter_granted = false;
+        }
         self.openrouter_api_key = key;
         self.save_identity()
     }
 
-    /// Update Gemini API key — writes to Keychain
+    /// Update Gemini API key — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_gemini_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("gemini", key.as_deref()).map_err(io_err)?;
-        self.gemini_granted = key.is_some();
+        if key.is_none() {
+            self.gemini_granted = false;
+        }
         self.gemini_api_key = key;
         self.save_identity()
     }
 
-    /// Update Groq API key — writes to Keychain
+    /// Update Groq API key — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_groq_key(&mut self, key: Option<String>) -> std::io::Result<()> {
         keychain::set_key("groq", key.as_deref()).map_err(io_err)?;
-        self.groq_granted = key.is_some();
+        if key.is_none() {
+            self.groq_granted = false;
+        }
         self.groq_api_key = key;
         self.save_identity()
     }
@@ -332,51 +353,73 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
-    /// Update an implicit provider API key — writes to Keychain
+    /// Update an implicit cloud provider API key — writes to Keychain.
+    ///
+    /// **Security**: Does NOT auto-grant to OpenClaw.  The user must explicitly
+    /// toggle access via Settings › Secrets.  If the key is *removed*, the
+    /// grant is also revoked to prevent stale authorizations.
     pub fn update_implicit_provider_key(
         &mut self,
         provider: &str,
         key: Option<String>,
     ) -> std::io::Result<()> {
-        let has_key = key.is_some();
+        let is_delete = key.is_none();
         // Write to Keychain first, then update in-memory state
         keychain::set_key(provider, key.as_deref()).map_err(io_err)?;
         match provider {
             "xai" => {
                 self.xai_api_key = key;
-                self.xai_granted = has_key;
+                if is_delete {
+                    self.xai_granted = false;
+                }
             }
             "venice" => {
                 self.venice_api_key = key;
-                self.venice_granted = has_key;
+                if is_delete {
+                    self.venice_granted = false;
+                }
             }
             "together" => {
                 self.together_api_key = key;
-                self.together_granted = has_key;
+                if is_delete {
+                    self.together_granted = false;
+                }
             }
             "moonshot" => {
                 self.moonshot_api_key = key;
-                self.moonshot_granted = has_key;
+                if is_delete {
+                    self.moonshot_granted = false;
+                }
             }
             "minimax" => {
                 self.minimax_api_key = key;
-                self.minimax_granted = has_key;
+                if is_delete {
+                    self.minimax_granted = false;
+                }
             }
             "nvidia" => {
                 self.nvidia_api_key = key;
-                self.nvidia_granted = has_key;
+                if is_delete {
+                    self.nvidia_granted = false;
+                }
             }
             "qianfan" => {
                 self.qianfan_api_key = key;
-                self.qianfan_granted = has_key;
+                if is_delete {
+                    self.qianfan_granted = false;
+                }
             }
             "mistral" => {
                 self.mistral_api_key = key;
-                self.mistral_granted = has_key;
+                if is_delete {
+                    self.mistral_granted = false;
+                }
             }
             "xiaomi" => {
                 self.xiaomi_api_key = key;
-                self.xiaomi_granted = has_key;
+                if is_delete {
+                    self.xiaomi_granted = false;
+                }
             }
             _ => {
                 return Err(std::io::Error::new(
@@ -404,7 +447,8 @@ impl OpenClawConfig {
         }
     }
 
-    /// Update Amazon Bedrock AWS credentials — writes to Keychain
+    /// Update Amazon Bedrock AWS credentials — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_bedrock_credentials(
         &mut self,
         access_key_id: Option<String>,
@@ -415,7 +459,10 @@ impl OpenClawConfig {
         keychain::set_key("bedrock_secret_access_key", secret_access_key.as_deref())
             .map_err(io_err)?;
         keychain::set_key("bedrock_region", region.as_deref()).map_err(io_err)?;
-        self.bedrock_granted = access_key_id.is_some() && secret_access_key.is_some();
+        // Only revoke grant when credentials are removed
+        if access_key_id.is_none() || secret_access_key.is_none() {
+            self.bedrock_granted = false;
+        }
         self.bedrock_access_key_id = access_key_id;
         self.bedrock_secret_access_key = secret_access_key;
         self.bedrock_region = region;
@@ -431,9 +478,13 @@ impl OpenClawConfig {
         )
     }
 
+    /// Update HuggingFace token — writes to Keychain.
+    /// See `update_anthropic_key` for security notes.
     pub fn update_huggingface_token(&mut self, token: Option<String>) -> std::io::Result<()> {
         keychain::set_key("huggingface", token.as_deref()).map_err(io_err)?;
-        self.huggingface_granted = token.is_some();
+        if token.is_none() {
+            self.huggingface_granted = false;
+        }
         self.huggingface_token = token;
         self.save_identity()
     }

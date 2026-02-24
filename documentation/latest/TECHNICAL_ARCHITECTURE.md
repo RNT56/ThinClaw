@@ -1,6 +1,6 @@
 # Scrappy — Technical Architecture Reference
 
-> **Last updated:** 2026-02-22  
+> **Last updated:** 2026-02-23  
 > **Version:** 0.1.0  
 > **Stack:** Tauri v2 · Rust 2021 edition · React 19 · TypeScript 5.8 · Vite 7
 
@@ -292,6 +292,7 @@ All state is registered via `app.manage(...)` before `run()`:
 | `ProcessTracker` | `process_tracker.rs` | Cross-restart orphan PID cleanup |
 | `OpenClawManager` | `openclaw/commands/` | WebSocket handle + OpenClaw config |
 | `RigManagerCache` | `rig_cache.rs` | Caches the last-built `RigManager` alongside a `RigManagerKey`; rebuilt only when provider, model, token, context size, tools, or knowledge content changes |
+| `EngineManager` | `engine/mod.rs` | Holds the active `Box<dyn InferenceEngine>` + `app_data_dir`. Auto-creates the correct engine instance based on compile-time feature flag (`llamacpp`, `mlx`, `vllm`, or `ollama`). Exposes `start_engine`, `stop_engine`, `is_engine_ready`, `setup_engine`, and `get_engine_setup_status` Tauri commands. |
 
 ### 4.3 Core Modules
 
@@ -317,6 +318,12 @@ All state is registered via `app.manage(...)` before `run()`:
 | `web_search.rs` | ~ | Brave Search API thin wrapper |
 | `system.rs` | ~ | `sysinfo`-based machine info commands |
 | `process_tracker.rs` | 131 | PID registry (persisted to JSON) for orphan cleanup on restart |
+| `engine/mod.rs` | ~460 | `InferenceEngine` trait, `EngineManager` state, engine Tauri commands (`setup_engine`, `start_engine`, `stop_engine`, `is_engine_ready`, `get_active_engine_info`, `get_engine_setup_status`). Compile-time feature flags select the active engine. |
+| `engine/engine_llamacpp.rs` | ~ | LlamaCpp engine: wraps `llama-server` sidecar via existing `SidecarManager` |
+| `engine/engine_mlx.rs` | ~ | MLX engine: `uv` (bundled sidecar) bootstraps Python + `mlx_lm.server` at runtime |
+| `engine/engine_vllm.rs` | ~ | vLLM engine: `uv` bootstraps Python + `vllm.entrypoints.openai.api_server` (Linux CUDA only) |
+| `engine/engine_ollama.rs` | ~ | Ollama engine: detects/connects to existing Ollama daemon |
+| `hf_hub.rs` | ~ | HuggingFace Hub model discovery: `discover_hf_models`, `get_model_files`, `download_hf_model_files` — live HF API search with engine-aware tag filtering |
 
 ### 4.4 Chat Pipeline (`chat.rs`)
 
@@ -867,6 +874,8 @@ Scrappy uses **tauri-specta** to generate TypeScript bindings (`src/lib/bindings
 | System | `system.rs` | `get_system_info` |
 | Personas | `personas.rs` | `get_personas` |
 | Spotlight | `lib.rs` | `toggle_spotlight`, `hide_spotlight` |
+| Engine | `engine/mod.rs` | `get_active_engine_info`, `get_engine_setup_status`, `setup_engine`, `start_engine`, `stop_engine`, `is_engine_ready` |
+| HF Hub | `hf_hub.rs` | `discover_hf_models`, `get_model_files`, `download_hf_model_files` |
 
 Events emitted from Rust to frontend (via `app.emit()`):
 
@@ -876,29 +885,90 @@ Events emitted from Rust to frontend (via `app.emit()`):
 | `openclaw-event` | `UiEvent` | `openclaw/ipc.rs` |
 | `download-progress` | `DownloadProgress` | `model_manager.rs` |
 | `imagine-progress` | `{ step, total, preview_b64 }` | `image_gen.rs` |
+| `engine_setup_progress` | `{ stage, message }` | `engine/mod.rs` — emitted during MLX/vLLM first-launch bootstrap |
 
 ---
 
 ## 13. Security Model
 
-1. **Secret isolation**: API keys live in `identity.json` (OpenClaw-managed) or are injected per-request from `UserConfig`. They are never exposed in the frontend bundle or Tauri command return values that go into chat logs.
+### 13.1 API Key Storage — macOS Keychain
 
-2. **Content Security Policy**: Defined in `tauri.conf.json`:
-   ```
-   default-src 'self' ipc: http://ipc.localhost;
-   img-src 'self' blob: data: asset: http://asset.localhost https://asset.localhost
-   ```
-   External network requests from the WebView are blocked; all external calls go through Rust.
+All API keys are stored in the **macOS Keychain** (AES-256 encrypted at rest), not in JSON config files.
+The `keychain` module (`backend/src/openclaw/config/keychain.rs`) wraps the macOS Security framework via the `security-framework` crate.
 
-3. **Asset protocol scope**: Only `$APP_DATA/images/**` is accessible via `asset://` URLs (Imagine Studio gallery). All other filesystem access goes through explicit Tauri commands with path validation.
+**Key flow:**
 
-4. **HITL approval**: High-risk OpenClaw tool executions (shell commands above a configurable risk threshold) are blocked by the gateway until the user explicitly approves them via `openclaw_resolve_approval`.
+```
+┌───────────────────────────┐
+│  macOS Keychain (encrypted)│
+│  AES-256 at rest           │
+└──────────┬────────────────┘
+           │ keychain::get_key()       ← Tauri app process only
+           ▼
+┌───────────────────────────┐
+│  OpenClawConfig (in-memory)│
+│  xxx_api_key + xxx_granted │
+└──────────┬────────────────┘
+           │ write_config()            ← checks `granted` per key
+           ▼
+┌───────────────────────────┐
+│  auth-profiles.json       │          ← ONLY granted keys written
+│  (on disk, read by engine) │
+└───────────────────────────┘
+           │
+           ▼
+┌───────────────────────────┐
+│  OpenClaw Engine (Node.js) │          ← Separate process
+│  Reads auth-profiles.json  │
+│  + env vars from env_vars()│
+└───────────────────────────┘
+```
 
-5. **Model allowlist**: `enabled_cloud_providers` and `enabled_cloud_models` in `identity.json` strictly limit which providers and models the OpenClaw agent can use, preventing cost overruns from model hallucination or injection.
+- `identity.json` stores **only** non-sensitive metadata (granted flags, display names, enabled providers list). It never contains API keys.
+- `SecretStore` (`secret_store.rs`) is an app-level managed state. The `snapshot()` method was intentionally removed — it returned all keys without checking grant flags, which was a potential leak vector.
 
-6. **macOS entitlements** (`Entitlements.plist`): Only the minimum required entitlements are granted (network access, file access, child process spawning).
+### 13.2 Explicit Grant Enforcement
 
-7. **Orphan process cleanup**: `ProcessTracker` with PID-name verification ensures no lingering inference processes persist after crashes.
+**Saving a key does NOT auto-grant it to OpenClaw.** The `update_*_key()` methods in `identity.rs` write to Keychain and update in-memory state, but leave `xxx_granted` unchanged. The user must explicitly toggle the grant via Settings › Secrets.
+
+Only key *deletion* auto-revokes: setting a key to `None` forces `xxx_granted = false` to prevent stale authorizations.
+
+This applies uniformly to:
+- Major providers: Anthropic, OpenAI, OpenRouter, Gemini, Groq, Brave Search
+- Implicit providers: xAI, Venice, Together, Moonshot, MiniMax, NVIDIA, Qianfan, Mistral, Xiaomi
+- Amazon Bedrock credentials (access key, secret key, region)
+- HuggingFace token
+
+### 13.3 Environment Variable Gating
+
+The `env_vars()` method (used when spawning the OpenClaw engine process) conditionally exposes secrets:
+
+| Env Var | Condition |
+|---------|-----------|
+| `OPENCLAW_CUSTOM_LLM_KEY` / `_URL` / `_MODEL` | Only set when `custom_llm_enabled = true` |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | Only set when `bedrock_granted = true` |
+| `OPENCLAW_GATEWAY_TOKEN` | Always set (engine's own auth token) |
+
+### 13.4 Content Security Policy
+
+Defined in `tauri.conf.json`:
+```
+default-src 'self' ipc: http://ipc.localhost;
+img-src 'self' blob: data: asset: http://asset.localhost https://asset.localhost
+```
+External network requests from the WebView are blocked; all external calls go through Rust.
+
+### 13.5 Other Security Boundaries
+
+1. **Asset protocol scope**: Only `$APP_DATA/images/**` is accessible via `asset://` URLs (Imagine Studio gallery). All other filesystem access goes through explicit Tauri commands with path validation.
+
+2. **HITL approval**: High-risk OpenClaw tool executions (shell commands above a configurable risk threshold) are blocked by the gateway until the user explicitly approves them via `openclaw_resolve_approval`.
+
+3. **Model allowlist**: `enabled_cloud_providers` and `enabled_cloud_models` in `identity.json` strictly limit which providers and models the OpenClaw agent can use, preventing cost overruns from model hallucination or injection.
+
+4. **macOS entitlements** (`Entitlements.plist`): Only the minimum required entitlements are granted (network access, file access, child process spawning).
+
+5. **Orphan process cleanup**: `ProcessTracker` with PID-name verification ensures no lingering inference processes persist after crashes.
 
 ---
 
@@ -946,6 +1016,8 @@ Events emitted from Rust to frontend (via `app.emit()`):
 | `npm run setup:chromium` | Downloads Chromium binary for web scraping |
 | `npm run setup:ai` | Downloads AI model binaries (llama, sd, whisper) |
 | `npm run setup:openclaw-engine` | Installs Node.js dependencies for the OpenClaw engine |
+| `scripts/setup_uv.sh` | Downloads the `uv` Python package manager as a Tauri sidecar (for MLX/vLLM builds) |
+| `scripts/generate_tauri_overrides.sh` | Generates `tauri.override.json` for engine-specific builds (externalBin, productName) |
 
 ---
 

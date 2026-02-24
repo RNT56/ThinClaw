@@ -60,7 +60,9 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 
 pub mod chat;
 pub mod config;
+pub mod engine;
 pub mod gguf;
+pub mod hf_hub;
 mod history;
 pub mod image_gen;
 pub mod images;
@@ -75,6 +77,7 @@ pub mod rag;
 pub mod reranker;
 pub mod rig_cache;
 pub mod rig_lib;
+pub mod secret_store;
 pub mod sidecar;
 pub mod stt;
 pub mod system;
@@ -252,6 +255,16 @@ pub fn run() {
         permissions::request_permission,
         toggle_spotlight,
         hide_spotlight,
+        // Engine & HF Hub
+        engine::get_active_engine_info,
+        engine::get_engine_setup_status,
+        engine::setup_engine,
+        engine::start_engine,
+        engine::stop_engine,
+        engine::is_engine_ready,
+        hf_hub::discover_hf_models,
+        hf_hub::get_model_files,
+        hf_hub::download_hf_model_files,
     ]);
 
     #[cfg(debug_assertions)]
@@ -308,6 +321,20 @@ pub fn run() {
                 .app_data_dir()
                 .expect("failed to get app data dir");
             fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
+
+            // ── Load ALL API keys from Keychain in a single read ─────────────
+            // This triggers exactly one macOS authorization prompt, then caches
+            // everything in memory.  Must happen before OpenClawConfig::new()
+            // or any other code that calls keychain::get_key().
+            openclaw::config::keychain::load_all();
+
+            // ── App-wide secret store (reads from the just-loaded keychain) ───
+            let secret_store = secret_store::SecretStore::new();
+            handle.manage(secret_store);
+
+            // Engine Manager — singleton inference engine instance
+            let engine_manager = engine::EngineManager::new(app_data_dir.clone());
+            handle.manage(engine_manager);
 
             // Process Tracker - Cleanup orphans from previous runs
             let tracker = process_tracker::ProcessTracker::new(app_data_dir.clone());

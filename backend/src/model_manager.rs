@@ -58,24 +58,30 @@ fn scan_models_recursive(
                     if path.file_name().is_some_and(|n| {
                         n != "standard" && !n.to_string_lossy().starts_with(".")
                     }) {
-                        scan_models_recursive(&path, base_dir, models);
-                    }
-                } else if file_type.is_file() && path.extension().is_some_and(|ext| {
-                        let s = ext.to_string_lossy().to_ascii_lowercase();
-                        // Extensions we care about
-                        let is_valid_ext = s == "gguf"
-                            || s == "bin"
-                            || s == "safetensors"
-                            || s == "sft"
-                            || s == "pt"
-                            || s == "ckpt"
-                            || s == "json";
+                        // Check if this directory IS a model bundle
+                        // (contains config.json + .safetensors or .bin weight files)
+                        if is_model_bundle_dir(&path) {
+                            // Group the entire directory as a single model entry
+                            let total_size = dir_total_size(&path);
+                            let relative_name = path
+                                .strip_prefix(base_dir)
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| {
+                                    path.file_name().unwrap().to_string_lossy().to_string()
+                                });
 
-                        is_valid_ext
-                    }) {
-                    // For display/ID purposes, we want the path relative to the models directory
-                    // If it's in the root, it's just the filename.
-                    // If it's in a subdir, it's subdir/filename.
+                            models.push(ModelFile {
+                                name: relative_name,
+                                size: total_size,
+                                path: path.to_string_lossy().to_string(),
+                            });
+                        } else {
+                            // Not a model bundle — recurse into it (e.g. category folder like LLM/)
+                            scan_models_recursive(&path, base_dir, models);
+                        }
+                    }
+                } else if file_type.is_file() && is_model_file(&path) {
+                    // Single-file model (e.g. a .gguf file sitting directly in a category)
                     let relative_name = path
                         .strip_prefix(base_dir)
                         .map(|p| p.to_string_lossy().to_string())
@@ -92,6 +98,62 @@ fn scan_models_recursive(
             }
         }
     }
+}
+
+/// Check if a file has a recognized model extension.
+fn is_model_file(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|ext| {
+        let s = ext.to_string_lossy().to_ascii_lowercase();
+        matches!(
+            s.as_str(),
+            "gguf" | "bin" | "safetensors" | "sft" | "pt" | "ckpt"
+        )
+    })
+}
+
+/// Check if a directory is a multi-file model bundle.
+///
+/// Criteria: contains `config.json` AND at least one weight file
+/// (.safetensors, .bin, .pt, .ckpt, .sft).
+/// This covers MLX models, HuggingFace Transformers, and similar formats.
+fn is_model_bundle_dir(dir: &std::path::Path) -> bool {
+    let mut has_config = false;
+    let mut has_weights = false;
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if path.file_name().is_some_and(|n| n == "config.json") {
+                    has_config = true;
+                }
+                if is_model_file(&path) {
+                    has_weights = true;
+                }
+                if has_config && has_weights {
+                    return true;
+                }
+            }
+        }
+    }
+
+    has_config && has_weights
+}
+
+/// Calculate total size of all files in a directory (recursively).
+fn dir_total_size(dir: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                total += path.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if path.is_dir() {
+                total += dir_total_size(&path);
+            }
+        }
+    }
+    total
 }
 
 fn display_size(path: &std::path::Path) -> u64 {
@@ -119,7 +181,76 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelFile>, String> {
 
     let mut models = Vec::new();
     scan_models_recursive(&models_dir, &models_dir, &mut models);
-    Ok(models)
+
+    // Filter to only show models compatible with the *active* engine.
+    // This prevents MLX builds showing GGUF files (which llama.cpp would need)
+    // and prevents llamacpp builds showing safetensors directories.
+    let filtered = engine_filter_models(models);
+    Ok(filtered)
+}
+
+/// Keep only the model entries that the active engine can actually load.
+///
+/// Uses compile-time feature flags so the check is zero-cost at runtime.
+fn engine_filter_models(models: Vec<ModelFile>) -> Vec<ModelFile> {
+    // MLX: directories only (safetensors bundles with config.json)
+    #[cfg(feature = "mlx")]
+    {
+        return models
+            .into_iter()
+            .filter(|m| {
+                let p = std::path::Path::new(&m.path);
+                p.is_dir()
+            })
+            .collect();
+    }
+
+    // vLLM: directories only (same as MLX — safetensors bundles)
+    #[cfg(all(feature = "vllm", not(feature = "mlx")))]
+    {
+        return models
+            .into_iter()
+            .filter(|m| {
+                let p = std::path::Path::new(&m.path);
+                p.is_dir()
+            })
+            .collect();
+    }
+
+    // llama.cpp: single-file GGUF models only.
+    //
+    // Explicitly EXCLUDE mmproj companion files (e.g. mmproj-model-f16.gguf,
+    // llava-clip-mmproj.gguf).  These are vision projectors that are auto-
+    // detected and injected by the sidecar startup logic — they are not
+    // loadable as primary models and must not appear in the selection list.
+    #[cfg(all(feature = "llamacpp", not(feature = "mlx"), not(feature = "vllm")))]
+    {
+        return models
+            .into_iter()
+            .filter(|m| {
+                let p = std::path::Path::new(&m.path);
+                if !p.is_file() {
+                    return false;
+                }
+                let ext_ok = p.extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase() == "gguf")
+                    .unwrap_or(false);
+                if !ext_ok {
+                    return false;
+                }
+                // Exclude mmproj companion files — they contain "mmproj" in the filename
+                // (convention used across all llava/minicpmv/idefics models)
+                let is_mmproj = p.file_name()
+                    .map(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj"))
+                    .unwrap_or(false);
+                !is_mmproj
+            })
+            .collect();
+    }
+
+    // Fallback (Ollama or no engine): show everything
+    #[allow(unreachable_code)]
+    models
 }
 
 #[tauri::command]
@@ -168,16 +299,17 @@ pub async fn download_model(
 
     println!("[download_model] Sending request to {}", url);
 
-    // HF Token Injection
+    // HF Token Injection — read from the app-wide SecretStore
     let mut request_builder = client.get(&url);
     if url.contains("huggingface.co") {
-         let config = crate::openclaw::OpenClawConfig::new(app_data_dir.clone());
-         if let Some(ref token) = config.huggingface_token {
-             if !token.trim().is_empty() {
-                 println!("[download_model] Using HF Token from Config for authentication");
-                 request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
-             }
-         }
+        if let Some(store) = app.try_state::<crate::secret_store::SecretStore>() {
+            if let Some(token) = store.huggingface_token() {
+                if !token.trim().is_empty() {
+                    println!("[download_model] Using HF Token from SecretStore for authentication");
+                    request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+                }
+            }
+        }
     }
 
     let res = match request_builder.send().await {
@@ -333,7 +465,8 @@ pub async fn cancel_download(
 #[specta::specta]
 pub async fn check_model_path(path: String) -> bool {
     let p = std::path::Path::new(&path);
-    p.exists() && p.is_file()
+    // Accept single-file models (GGUF) and directory models (MLX, safetensors bundles)
+    p.exists() && (p.is_file() || p.is_dir())
 }
 
 #[tauri::command]

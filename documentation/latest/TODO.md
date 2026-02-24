@@ -1,7 +1,7 @@
 # Scrappy — Outstanding Issues & Tech Debt
 
 > Generated from `TECHNICAL_ARCHITECTURE.md`, `MICROSERVICES_AND_SIDECARS.md`, `FRONTEND_ARCHITECTURE.md`  
-> Last updated: 2026-02-22
+> Last updated: 2026-02-23
 
 ---
 
@@ -53,6 +53,14 @@
   The full `Box<dyn InferenceBackend>` trait (as originally envisioned) is deferred until the orchestrator's streaming API is stable.  
   → `src-tauri/src/chat.rs`
 
+- [x] **⑤ Multi-engine inference architecture** *(done 2026-02-23)*  
+  Implemented `InferenceEngine` trait + 4 engines (`llamacpp`, `mlx`, `vllm`, `ollama`). `EngineManager` (Tauri managed state) auto-selects engine via compile-time feature flags. Added `setup_engine`, `start_engine`, `stop_engine`, `is_engine_ready`, `get_active_engine_info`, `get_engine_setup_status` commands. CI matrix covers all 4 engine×platform variants.  
+  → `backend/src/engine/`, `backend/src/lib.rs`, `.github/workflows/build-release.yml`
+
+- [x] **⑥ HuggingFace Hub model discovery** *(done 2026-02-23)*  
+  Live HF API search with engine-aware tag filtering, GGUF quantization picker, multi-file download for MLX/vLLM directory models. Frontend `HFDiscovery` component with debounced search, `EngineSetupBanner` for first-launch bootstrap, `ActiveEngineChip` for engine status display.  
+  → `backend/src/hf_hub.rs`, `frontend/src/components/settings/HFDiscovery.tsx`, `EngineSetupBanner.tsx`, `ActiveEngineChip.tsx`, `model-context.tsx`
+
 ---
 
 ## 🟡 Missing / Incomplete Features
@@ -88,6 +96,22 @@
 
 ---
 
+## 🔒 Security Hardening
+
+- [x] **Remove auto-grant on key save** *(done 2026-02-23)*  
+  `update_*_key()` methods no longer set `xxx_granted = true` when saving. Users must explicitly toggle grants in Settings › Secrets. Key deletion still auto-revokes.  
+  → `backend/src/openclaw/config/identity.rs`
+
+- [x] **Remove `SecretStore::snapshot()` method** *(done 2026-02-23)*  
+  Returned all keys without checking grant flags — eliminated as a potential leak vector.  
+  → `backend/src/secret_store.rs`
+
+- [x] **Gate `OPENCLAW_CUSTOM_LLM_KEY` env var** *(done 2026-02-23)*  
+  Only injected when `custom_llm_enabled = true`. Previously leaked unconditionally.  
+  → `backend/src/openclaw/config/engine.rs`
+
+---
+
 ## 🟢 Performance / Minor
 
 - [x] **Lazy-load heavy settings tabs** *(done 2026-02-22)*  
@@ -105,6 +129,22 @@
 - [x] **Make `summarize_result` truncation limit configurable** *(done 2026-02-22)*  
   Added `mcp_tool_result_max_chars: usize` to `UserConfig` (default: 5000). `McpRequestHandler::call_tool` now reads this value from `ConfigManager`.  
   → `src-tauri/src/openclaw/ipc.rs`, `src-tauri/src/config.rs`
+
+- [x] **Split `ModelProvider` into two contexts** *(done 2026-02-23)*  
+  `ModelStateContext` (models, paths, engine — rarely changes) + `ModelProgressContext` (downloading, discovery — hot during downloads). Single `useModelContext()` hook merges both. Components that only read state won't re-render during downloads.  
+  → `frontend/src/components/model-context.tsx`
+
+- [x] **Throttle download progress updates** *(done 2026-02-23)*  
+  Progress events are buffered in `useRef` and flushed to state at ~4fps (250ms interval), down from every-chunk (~10-100fps). Both `downloading` percentages and `discoveryState.repoProgress` are throttled.  
+  → `frontend/src/components/model-context.tsx`
+
+- [x] **Memoize all `ModelProvider` function refs** *(done 2026-02-23)*  
+  All action callbacks (`setModelPath`, `selectModel`, `cancelDownload`, `deleteModel`, `downloadHfFiles`, `downloadStandardAsset`, etc.) wrapped in `useCallback` for stable identity in `useMemo` dependency arrays.  
+  → `frontend/src/components/model-context.tsx`
+
+- [x] **Fix HFDiscovery "No files found" flash on tab return** *(done 2026-02-23)*  
+  `ModelBrowser` now uses `display: none` keep-alive for the Discover tab. Auto-expand effect loads file info when cache is lost (remount). Render shows loading spinner instead of "No files found" while file info is being fetched.  
+  → `frontend/src/components/settings/ModelBrowser.tsx`, `frontend/src/components/settings/HFDiscovery.tsx`
 
 ---
 

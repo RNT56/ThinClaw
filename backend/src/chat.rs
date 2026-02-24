@@ -66,6 +66,7 @@ pub async fn resolve_provider(
     user_config: &crate::config::UserConfig,
     openclaw: &State<'_, crate::openclaw::commands::OpenClawManager>,
     sidecar_manager: &State<'_, SidecarManager>,
+    engine_manager: &State<'_, crate::engine::EngineManager>,
 ) -> Result<ProviderConfig, String> {
     match user_config.selected_chat_provider.as_deref() {
         Some("anthropic") => {
@@ -185,16 +186,57 @@ pub async fn resolve_provider(
         }
         _ => {
             info!("[resolve_provider] Routing to Local Provider");
-            let cfg = sidecar_manager.get_chat_config().ok_or("Local Neural Link is not running. Please start it or select a Cloud Brain in Settings > Chat Provider.")?;
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::Local,
-                base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
-                model_name: "default".to_string(),
-                port: cfg.0,
-                token: cfg.1,
-                context_size: cfg.2,
-                model_family: Some(cfg.3),
-            })
+
+            // Primary: llama.cpp sidecar (always present in llamacpp builds)
+            if let Some(cfg) = sidecar_manager.get_chat_config() {
+                return Ok(ProviderConfig {
+                    kind: crate::rig_lib::unified_provider::ProviderKind::Local,
+                    base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
+                    model_name: "default".to_string(),
+                    port: cfg.0,
+                    token: cfg.1,
+                    context_size: cfg.2,
+                    model_family: Some(cfg.3),
+                });
+            }
+
+            // Fallback: non-llamacpp engine (MLX, vLLM, Ollama) running via EngineManager.
+            // start_engine() must have been called first (done by useAutoStart).
+            {
+                let guard = engine_manager.engine.lock().await;
+                if let Some(engine) = guard.as_ref() {
+                    if let Some(url) = engine.base_url() {
+                        let model_name = engine.model_id().unwrap_or_else(|| "default".to_string());
+                        let context_size = engine.max_context().unwrap_or(4096);
+                        info!(
+                            "[resolve_provider] Using EngineManager base_url: {}, model: {}, context: {}",
+                            url, model_name, context_size
+                        );
+                        // Parse port from URL like "http://127.0.0.1:PORT/v1"
+                        let port: u16 = url
+                            .trim_end_matches('/')
+                            .rsplit(':')
+                            .next()
+                            .and_then(|p| p.split('/').next())
+                            .and_then(|p| p.parse().ok())
+                            .unwrap_or(8080);
+                        return Ok(ProviderConfig {
+                            kind: crate::rig_lib::unified_provider::ProviderKind::Local,
+                            base_url: url,
+                            model_name,
+                            port,
+                            // mlx_lm.server runs unauthenticated by default
+                            token: String::new(),
+                            context_size,
+                            model_family: None,
+                        });
+                    }
+                }
+            }
+
+            Err("No local inference server is running. \
+                 Select a model in the chat tab — the engine will start automatically."
+                .to_string())
         }
     }
 }
@@ -206,6 +248,7 @@ pub async fn chat_stream(
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
     openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     rig_cache: State<'_, crate::rig_cache::RigManagerCache>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
@@ -228,7 +271,7 @@ pub async fn chat_stream(
     let user_config = config.get_config();
 
     // Provider Routing Logic
-    let provider_cfg = resolve_provider(&user_config, &openclaw, &state).await?;
+    let provider_cfg = resolve_provider(&user_config, &openclaw, &state, &engine_manager).await?;
     let kind = provider_cfg.kind;
     let base_url = provider_cfg.base_url;
     let model_name = provider_cfg.model_name;
@@ -725,6 +768,7 @@ pub async fn chat_completion(
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
     openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
 ) -> Result<String, String> {
     info!("[chat_completion] Starting chat_completion...");
@@ -732,7 +776,7 @@ pub async fn chat_completion(
     let user_config = config.get_config();
 
     // Resolve provider via the shared function
-    let provider_cfg = resolve_provider(&user_config, &openclaw, &state).await?;
+    let provider_cfg = resolve_provider(&user_config, &openclaw, &state, &engine_manager).await?;
 
     let provider = crate::rig_lib::unified_provider::UnifiedProvider::new(
         provider_cfg.kind,

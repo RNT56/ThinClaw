@@ -937,18 +937,6 @@ impl OpenClawConfig {
             ("OPENCLAW_GATEWAY_TOKEN".into(), self.auth_token.clone()),
             ("CLAWDBOT_GATEWAY_TOKEN".into(), self.auth_token.clone()),
             (
-                "OPENCLAW_CUSTOM_LLM_URL".into(),
-                self.custom_llm_url.clone().unwrap_or_default(),
-            ),
-            (
-                "OPENCLAW_CUSTOM_LLM_KEY".into(),
-                self.custom_llm_key.clone().unwrap_or_default(),
-            ),
-            (
-                "OPENCLAW_CUSTOM_LLM_MODEL".into(),
-                self.custom_llm_model.clone().unwrap_or_default(),
-            ),
-            (
                 "OPENCLAW_CUSTOM_LLM_ENABLED".into(),
                 self.custom_llm_enabled.to_string(),
             ),
@@ -982,6 +970,22 @@ impl OpenClawConfig {
                 self.expose_inference.to_string(),
             ),
         ];
+
+        // Only inject custom LLM credentials when the feature is explicitly enabled.
+        // The key must not leak to the OpenClaw process when disabled.
+        if self.custom_llm_enabled {
+            if let Some(ref url) = self.custom_llm_url {
+                vars.push(("OPENCLAW_CUSTOM_LLM_URL".into(), url.clone()));
+            }
+            if let Some(ref key) = self.custom_llm_key {
+                if !key.trim().is_empty() {
+                    vars.push(("OPENCLAW_CUSTOM_LLM_KEY".into(), key.clone()));
+                }
+            }
+            if let Some(ref model) = self.custom_llm_model {
+                vars.push(("OPENCLAW_CUSTOM_LLM_MODEL".into(), model.clone()));
+            }
+        }
 
         // Inject Amazon Bedrock AWS credentials as env vars
         if self.bedrock_granted {

@@ -16,6 +16,7 @@ The Native agent is built on `rig-core`. It is designed for high-performance, co
 | `scrape_page` | `ScrapePageTool` | Directly visits a URL using a bundled Chromium sidecar to extract clean markdown content. | `scrape_page.rs` |
 | `rag_tool` | `RAGTool` | Hooks into the local USearch vector store to retrieve relevant document snippets based on embeddings. | `rag_tool.rs` |
 | `generate_image` | `ImageGenTool`| Interface for the Stable Diffusion (`sd.cpp`) sidecar. Supports multiple residents, resolved VAE/CLIP/T5 components, and real-time progress callbacks. | `image_gen_tool.rs` |
+| `calculator` | `CalculatorTool` | Pure-Rust math expression evaluator. Supports arithmetic (`+`, `-`, `*`, `/`, `^`, `%`), parentheses, functions (`sqrt`, `abs`, `round`, `ceil`, `floor`, `log`, `ln`, `sin`, `cos`, `tan`, `min`, `max`), and constants (`pi`, `e`). Helps smaller models with precise calculations, currency conversions, percentages, and unit conversions. | `calculator_tool.rs` |
 
 ### 🔍 The Integrated "Scraping" Workflow (Deep Search)
 

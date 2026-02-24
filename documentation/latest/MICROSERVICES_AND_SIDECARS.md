@@ -1,7 +1,7 @@
 # Scrappy — Microservices & Sidecar Reference
 
-> **Last updated:** 2026-02-22  
-> **Scope:** All external processes spawned or managed by the Tauri host, the OpenClaw Node.js engine, the `scrappy-mcp-tools` Rust crate, and all build- and dev-time infrastructure scripts.
+> **Last updated:** 2026-02-23  
+> **Scope:** All external processes spawned or managed by the Tauri host, the multi-engine inference system (`InferenceEngine` trait + `EngineManager`), the OpenClaw Node.js engine, the `scrappy-mcp-tools` Rust crate, and all build- and dev-time infrastructure scripts.
 
 ---
 
@@ -9,6 +9,13 @@
 
 1. [Architecture Overview](#1-architecture-overview)
 2. [SidecarManager — the Process Supervisor](#2-sidecarmanager--the-process-supervisor)
+2a. [Multi-Engine Inference System](#2a-multi-engine-inference-system)
+   - 2a.1 [InferenceEngine Trait](#2a1-inferenceengine-trait)
+   - 2a.2 [EngineManager — Tauri Managed State](#2a2-enginemanager--tauri-managed-state)
+   - 2a.3 [Engine Implementations](#2a3-engine-implementations)
+   - 2a.4 [Engine Tauri Commands](#2a4-engine-tauri-commands)
+   - 2a.5 [Engine Setup & Bootstrap](#2a5-engine-setup--bootstrap)
+2b. [HuggingFace Hub Model Discovery](#2b-huggingface-hub-model-discovery)
 3. [Sidecar: llama-server (LLM Inference)](#3-sidecar-llama-server-llm-inference)
    - 3.1 [Chat Server Instance](#31-chat-server-instance)
    - 3.2 [Embedding Server Instance](#32-embedding-server-instance)
@@ -40,40 +47,51 @@
    - 8.7 [Remote MCP Tool Bindings in the Sandbox](#87-remote-mcp-tool-bindings-in-the-sandbox)
    - 8.8 [Activation / Configuration](#88-activation--configuration)
 9. [ProcessTracker — Zombie Prevention](#9-processtracker--zombie-prevention)
-9. [Build-time Infrastructure Scripts](#9-build-time-infrastructure-scripts)
-   - 9.1 [download_ai_binaries.js](#91-download_ai_binariesjs)
-   - 9.2 [download_node.js](#92-download_nodejs)
-   - 9.3 [setup_chromium.sh](#93-setup_chromiumsh)
-10. [Port & Token Reference](#10-port--token-reference)
-11. [Tauri Sidecar Registration](#11-tauri-sidecar-registration)
-12. [Event Flow Diagram](#12-event-flow-diagram)
-13. [Replacing or Extending Services](#13-replacing-or-extending-services)
+10. [Build-time Infrastructure Scripts](#10-build-time-infrastructure-scripts)
+    - 10.1 [download_ai_binaries.js](#101-download_ai_binariesjs)
+    - 10.2 [download_node.js](#102-download_nodejs)
+    - 10.3 [setup_uv.sh](#103-setup_uvsh)
+    - 10.4 [setup_llama.sh](#104-setup_llamash)
+    - 10.5 [generate_tauri_overrides.sh](#105-generate_tauri_overridessh)
+    - 10.6 [setup_chromium.sh](#106-setup_chromiumsh)
+11. [Port & Token Reference](#11-port--token-reference)
+12. [Tauri Sidecar Registration](#12-tauri-sidecar-registration)
+13. [Event Flow Diagram](#13-event-flow-diagram)
+14. [Replacing or Extending Services](#14-replacing-or-extending-services)
 
 ---
 
 ## 1. Architecture Overview
 
-Scrappy's process model is a **multi-process star topology**: the Rust/Tauri host sits at the center and manages several child processes that each provide a distinct capability:
+Scrappy's process model is a **multi-process star topology**: the Rust/Tauri host sits at the center and manages several child processes that each provide a distinct capability.
+
+**Each build of Scrappy targets exactly ONE inference engine** (selected via Cargo feature flags at compile time). The `EngineManager` holds the active `Box<dyn InferenceEngine>` instance; the rest of the stack is engine-agnostic.
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                  Tauri Host (Rust)                         │
-│                  src-tauri/src/lib.rs                      │
-│                                                            │
-│  SidecarManager ─── llama-server (chat)      :53755       │
-│                 ─── llama-server (embedding) :53756        │
-│                 ─── whisper-server (STT)     :53757        │
-│                 ─── llama-server (summarizer):53758        │
-│                                                            │
-│  OpenClawManager ── node (openclaw-engine)   :18789       │
-│                       │                                    │
-│                       └── WebSocket Client (ws_client.rs) │
-│                                                            │
-│  ProcessTracker — global PID registry for cleanup         │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   Tauri Host (Rust)                          │
+│                   backend/src/lib.rs                         │
+│                                                              │
+│  EngineManager ──── Box<dyn InferenceEngine>                 │
+│    (one per build)  ├─ LlamaCppEngine  (feature: llamacpp)   │
+│                     ├─ MlxEngine       (feature: mlx)        │
+│                     ├─ VllmEngine      (feature: vllm)       │
+│                     └─ OllamaEngine    (feature: ollama)     │
+│                                                              │
+│  SidecarManager ─── llama-server (chat)      :53755  [1]     │
+│                 ─── llama-server (embedding) :53756           │
+│                 ─── whisper-server (STT)     :53757           │
+│                 ─── llama-server (summarizer):53758           │
+│                                                              │
+│  OpenClawManager ── node (openclaw-engine)   :18789          │
+│                       │                                      │
+│                       └── WebSocket Client (ws_client.rs)    │
+│                                                              │
+│  ProcessTracker — global PID registry for cleanup            │
+└──────────────────────────────────────────────────────────────┘
          │
-         │  sd binary / whisper-cli
-         │  (invoked as CLI tools, no persistent server)
+         │  sd binary / whisper-cli / piper
+         │  (invoked as one-shot CLI tools, no persistent server)
          │
 ┌────────┴────────────────────┐
 │  Frontend (React WebView)   │
@@ -81,6 +99,9 @@ Scrappy's process model is a **multi-process star topology**: the Rust/Tauri hos
 │  • Tauri IPC commands       │
 │  • Tauri Events             │
 └─────────────────────────────┘
+
+[1] For llamacpp builds. MLX/vLLM spawn a Python process
+    instead. Ollama connects to an external daemon.
 ```
 
 All child processes are **sidecar binaries** bundled inside the Tauri app (or downloaded at first run) and managed exclusively by the host — they are never user-accessible directly.
@@ -89,7 +110,7 @@ All child processes are **sidecar binaries** bundled inside the Tauri app (or do
 
 ## 2. SidecarManager — the Process Supervisor
 
-**File:** `src-tauri/src/sidecar.rs`  
+**File:** `backend/src/sidecar.rs`  
 **Rust type:** `SidecarManager` (cloneable, all fields wrapped in `Arc<Mutex<>>` or `Arc<AtomicBool>`)
 
 The `SidecarManager` is registered as Tauri global state on app startup. It provides:
@@ -145,10 +166,128 @@ Emitted on Tauri event channel `"sidecar_event"`.
 
 ---
 
+## 2a. Multi-Engine Inference System
+
+**Files:** `backend/src/engine/mod.rs`, `engine_llamacpp.rs`, `engine_mlx.rs`, `engine_vllm.rs`, `engine_ollama.rs`
+
+The multi-engine system abstracts how local inference is provided. Each build of Scrappy compiles exactly **one** engine implementation, selected by a Cargo feature flag (`default = ["llamacpp"]` in `backend/Cargo.toml`).
+
+### 2a.1 InferenceEngine Trait
+
+```rust
+#[async_trait]
+pub trait InferenceEngine: Send + Sync {
+    async fn start(&self, model_path: &str, context_size: u32, options: EngineStartOptions)
+        -> Result<(u16, String), String>;  // Returns (port, api_token)
+    async fn stop(&self) -> Result<(), String>;
+    async fn is_ready(&self) -> bool;
+    fn base_url(&self) -> Option<String>;
+    fn display_name(&self) -> &'static str;
+    fn engine_id(&self) -> &'static str;
+    fn uses_single_file_model(&self) -> bool;
+    fn hf_search_tag(&self) -> &'static str;
+}
+```
+
+All engines expose an **OpenAI-compatible HTTP API** on a local port, so the rest of the stack (`chat.rs`, `rig_lib`, Orchestrator) is engine-agnostic.
+
+### 2a.2 EngineManager — Tauri Managed State
+
+```rust
+pub struct EngineManager {
+    pub engine: tokio::sync::Mutex<Option<Box<dyn InferenceEngine>>>,
+    pub app_data_dir: PathBuf,
+}
+```
+
+Registered as `app.manage(EngineManager::new(app_data_dir))` in `lib.rs`. The `create_engine()` method instantiates the correct engine struct based on compile-time feature flags (priority: mlx > vllm > llamacpp > ollama).
+
+### 2a.3 Engine Implementations
+
+| Engine | File | Binary | Bootstrap | Model Format | HF Tag |
+|--------|------|--------|-----------|-------------|--------|
+| **LlamaCpp** | `engine_llamacpp.rs` | Bundled `llama-server` sidecar | None | Single GGUF file | `gguf` |
+| **MLX** | `engine_mlx.rs` | `uv` (bundled) → Python + `mlx_lm.server` | First-launch: creates `mlx-env/` venv, installs `mlx_lm` (~200MB, 2-3 min) | Safetensors directory | `mlx` |
+| **vLLM** | `engine_vllm.rs` | `uv` (bundled) → Python + `vllm.entrypoints.openai.api_server` | First-launch: creates `vllm-env/` venv, installs `vllm` (~1GB, 5-10 min) | AWQ / HF directory | `awq` |
+| **Ollama** | `engine_ollama.rs` | External `ollama` daemon | None (user must install [ollama.ai](https://ollama.ai)) | GGUF (managed by Ollama) | `gguf` |
+
+**MLX/vLLM bootstrap flow:**
+1. `setup_engine` Tauri command invoked (via `EngineSetupBanner` frontend component)
+2. `engine.bootstrap()` creates a Python virtual environment via the bundled `uv` sidecar
+3. Installs the inference framework into the venv (`pip install mlx_lm` or `pip install vllm`)
+4. Progress emitted via `engine_setup_progress` Tauri events (`{ stage, message }`)
+5. Subsequent starts use the cached venv — no re-bootstrap needed
+
+### 2a.4 Engine Tauri Commands
+
+| Command | Purpose |
+|---------|---------|
+| `get_active_engine_info` | Returns `EngineInfo { id, display_name, available, requires_setup, description, hf_tag, single_file_model }` — used by frontend to adapt UI |
+| `get_engine_setup_status` | Returns `EngineSetupStatus { needs_setup, setup_in_progress, message }` — checks if venv exists |
+| `setup_engine` | Triggers first-launch bootstrap (MLX/vLLM only); emits `engine_setup_progress` events |
+| `start_engine` | Starts the active engine with a given model path + context size; returns `{ port, token }` |
+| `stop_engine` | Stops the active engine and frees GPU/RAM |
+| `is_engine_ready` | Health check — returns `true` if the engine's HTTP endpoint is accepting requests |
+
+### 2a.5 Engine Setup & Bootstrap
+
+**Setup detection:** `get_engine_setup_status` checks for the existence of the Python venv:
+- MLX: `$APP_DATA/mlx-env/bin/python3`
+- vLLM: `$APP_DATA/vllm-env/bin/python3`
+- llamacpp / Ollama: always returns `needs_setup = false`
+
+**Frontend flow:**
+1. `ModelBrowser` renders `EngineSetupBanner` which calls `get_engine_setup_status` on mount
+2. If `needs_setup = true`, an amber banner appears with a "Set Up Now" button
+3. Clicking it calls `setup_engine` and shows a 3-stage progress bar (Create Environment → Install Packages → Ready)
+4. `engine_setup_progress` events update the UI in real time
+5. On completion, banner turns green; on error, banner turns red with a "Retry" button
+
+**Tauri event `engine_setup_progress`:**
+```json
+{ "stage": "creating_venv" | "installing" | "complete" | "error", "message": "..." }
+```
+
+---
+
+## 2b. HuggingFace Hub Model Discovery
+
+**File:** `backend/src/hf_hub.rs`
+
+Provides live search of HuggingFace Hub models, filtered by the active engine's tag. Used by the **Discover** tab in the frontend `ModelBrowser`.
+
+### Tauri Commands
+
+| Command | Purpose |
+|---------|---------|
+| `discover_hf_models(query, engine, limit?)` | Searches HF API (`/api/models?search=...&tags=...`) sorted by downloads. Returns `Vec<HfModelCard>`. |
+| `get_model_files(repo_id, engine)` | Fetches the repo file tree, parses GGUF quantization types or MLX/vLLM directory listing. Returns `ModelDownloadInfo`. |
+| `download_hf_model_files(repo_id, files, dest_subdir?)` | Downloads selected files to `$APP_DATA/models/`, emitting `download_progress` events. |
+
+### Engine-to-tag mapping
+
+| Engine ID | HF Tag | Model format |
+|-----------|--------|--------------|
+| `llamacpp` | `gguf` | Single GGUF files with quantization picker |
+| `mlx` | `mlx` | Safetensors directory (Download All) |
+| `vllm` | `awq` | AWQ/HF directory (Download All) |
+| `ollama` | `gguf` | Single GGUF files (same as llamacpp) |
+
+### Key features
+- **HF token injection**: Reads `huggingface_token` from `OpenClawConfig` for gated model access
+- **GGUF quant detection**: Regex extracts quantization type (`Q4_K_M`, `IQ3_XXS`, `F16`, etc.) from filenames
+- **mmproj auto-detection**: Identifies multimodal projector files and auto-includes them in downloads
+- **Rate limit handling**: Returns user-friendly error message when HF API rate limit is hit
+- **Progress events**: Emits `download_progress` events compatible with the existing `model_manager.rs` format
+
+---
+
 ## 3. Sidecar: llama-server (LLM Inference)
 
+> **Note:** This section describes the llama.cpp sidecar used in `llamacpp` builds (the default). For other engines, see §2a.
+
 **Binary:** `llama-server` (from [llama.cpp](https://github.com/ggerganov/llama.cpp) release `b4618`)  
-**Platform naming:** `llama-server-aarch64-apple-darwin` (macOS ARM64)  
+**Platform naming:** `llama-server-aarch64-apple-darwin` (macOS ARM64), `llama-server-x86_64-unknown-linux-gnu` (Linux x64), `llama-server-x86_64-pc-windows-msvc.exe` (Windows x64)  
 **API:** OpenAI-compatible HTTP REST (`/v1/chat/completions`, `/v1/embeddings`, `/health`)
 
 The same binary is launched up to **three times** in different modes for different roles.
@@ -203,7 +342,7 @@ The `gguf::read_gguf_metadata()` function reads the GGUF file header to detect t
 
 **Crash detection:** If the process exits with non-zero code and `is_chat_stop_intentional == false`, a `SidecarEvent::Crashed` is emitted to the frontend; the `chat_process` state is cleared.
 
-**Environment (macOS):** `DYLD_LIBRARY_PATH` is set to `$RESOURCE_DIR/bin:$CWD/src-tauri/bin` so the bundled `.dylib` and `.metal` shader files are found at runtime.
+**Environment:** On macOS, `DYLD_LIBRARY_PATH` is set to `$RESOURCE_DIR/bin:$CWD/backend/bin` so the bundled `.dylib` and `.metal` shader files are found at runtime. On Linux, `LD_LIBRARY_PATH` is set analogously for `.so` files.
 
 **Progress parsing:** The monitor task listens to stdout/stderr and parses `"prompt processing progress = N"` lines, forwarding them as `SidecarEvent::Progress`.
 
@@ -315,11 +454,11 @@ sd [args] \
 
 ## 5a. Sidecar: piper (Text-to-Speech)
 
-**Binary:** `piper` (must be manually placed at `src-tauri/bin/piper-aarch64-apple-darwin`)  
+**Binary:** Piper TTS, registered as Tauri sidecar `bin/tts` (must be manually placed at `backend/bin/tts-{target-triple}`, e.g. `tts-aarch64-apple-darwin`)  
 **Tauri command:** `tts_synthesize`  
-**Source:** `src-tauri/src/tts.rs`
+**Source:** `backend/src/tts.rs`
 
-**Invocation model:** Like the `sd` binary, Piper is **NOT** launched as a persistent server. `tts_synthesize` invokes the binary as a **one-shot CLI process** per synthesis request using stdin→stdout piping.
+**Invocation model:** Like the `sd` binary, the TTS sidecar is **NOT** launched as a persistent server. `tts_synthesize` invokes the binary as a **one-shot CLI process** per synthesis request using stdin→stdout piping. The Rust code calls `.sidecar("bin/tts")` to spawn the process.
 
 **Arguments:**
 
@@ -349,7 +488,7 @@ Frontend: Web Audio API decodes base64 PCM → AudioBuffer → AudioContext.play
 
 **Note on auth:** Piper runs locally with no network access and requires no API key.
 
-**Bundling note:** The `download_ai_binaries.js` script does not yet auto-download Piper. The binary must be placed manually in `src-tauri/bin/` with the correct platform suffix.
+**Bundling note:** The `download_ai_binaries.js` script does not yet auto-download the TTS binary. It must be placed manually in `backend/bin/` with the Tauri sidecar naming convention: `tts-{target-triple}` (e.g. `tts-aarch64-apple-darwin`, `tts-x86_64-unknown-linux-gnu`). The binary must be the Piper executable renamed to match the `bin/tts` sidecar registration in `tauri.conf.json`.
 
 ## 6. Sidecar: node + openclaw-engine (Agent Gateway)
 
@@ -484,7 +623,13 @@ Written to `$APP_DATA/openclaw/agents/main/agent/auth-profiles.json`:
 }
 ```
 
-Profiles are only written when the provider is `granted` AND the key is non-empty, ensuring no stale/unauthorized keys reach the engine.
+**Security invariants:**
+
+1. Profiles are only written when the provider is `granted` AND the key is non-empty, ensuring no stale/unauthorized keys reach the engine.
+2. API keys are sourced from the **macOS Keychain** at runtime (via `keychain::get_key()`), never from `identity.json`.
+3. Saving a key to Keychain does **not** auto-grant — the user must explicitly toggle the grant in Settings › Secrets.  Only key *deletion* auto-revokes.
+4. Custom LLM credentials (`OPENCLAW_CUSTOM_LLM_KEY`, `_URL`, `_MODEL`) are only injected as **environment variables** when `custom_llm_enabled = true` — they are never written to `auth-profiles.json`.
+5. Amazon Bedrock credentials are injected as env vars (`AWS_ACCESS_KEY_ID`, etc.) only when `bedrock_granted = true`, in addition to their `auth-profiles.json` entry.
 
 ### 6.5 Gateway Protocol (WebSocket)
 
@@ -588,7 +733,7 @@ The engine can be deployed to a remote Linux server via `deploy-remote.sh`:
 
 ## 7. scrappy-mcp-tools Crate
 
-**Location:** `src-tauri/scrappy-mcp-tools/`  
+**Location:** `backend/scrappy-mcp-tools/`  
 **Type:** Separate Rust workspace crate (not a Tauri plugin)  
 **Purpose:** MCP (Model Context Protocol) client, sandboxed Rhai script execution, tool discovery, and skill management for agent tool integration.
 
@@ -747,7 +892,7 @@ Each module provides strongly-typed Rust structs for request/response and calls 
 
 ## 8. ProcessTracker — Zombie Prevention
 
-**File:** `src-tauri/src/process_tracker.rs`  
+**File:** `backend/src/process_tracker.rs`  
 **Rust type:** `ProcessTracker` (Tauri global state, `Arc<Mutex<HashMap<u32, ProcessEntry>>>`)
 
 Every child process spawned by `SidecarManager` is registered in `ProcessTracker` with:
@@ -765,34 +910,36 @@ This prevents "zombie" llama-server processes from accumulating after crashes or
 
 ---
 
-## 9. Build-time Infrastructure Scripts
+## 10. Build-time Infrastructure Scripts
 
-### 9.1 download_ai_binaries.js
+### 10.1 download_ai_binaries.js
 
-**File:** `src-tauri/scripts/download_ai_binaries.js`  
+**File:** `backend/scripts/download_ai_binaries.js`  
 **Run:** `node download_ai_binaries.js` (typically in a `preinstall` or `prepare` npm script)  
-**Purpose:** Download and install the three ML inference binaries for macOS ARM64
+**Purpose:** Download and install the three ML inference binaries for the current platform
 
 **Binaries managed:**
 
-| Binary | Source | From |
-|--------|--------|------|
-| `llama-server-aarch64-apple-darwin` | `llama.cpp` release `b4618` | GitHub Releases ZIP |
-| `whisper-server-aarch64-apple-darwin` | `whisper.cpp` release `v1.7.4` | GitHub Releases ZIP |
-| `sd-aarch64-apple-darwin` | `stable-diffusion.cpp` release `master-7010bb4` | GitHub Releases ZIP |
+| Binary | Source | Platforms |
+|--------|--------|--------|
+| `llama-server-{triple}` | `llama.cpp` release `b4618` | macOS ARM64, Linux x64, Windows x64 |
+| `whisper-server-{triple}` | `whisper.cpp` release `v1.7.4` | macOS ARM64, Linux x64, Windows x64 |
+| `sd-{triple}` | `stable-diffusion.cpp` release `master-7010bb4` | macOS ARM64, Linux x64 |
+
+> `{triple}` = Rust target triple, e.g. `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`
 
 **Also copies:**
-- `*.dylib` — shared libraries (Metal shader support, etc.)
-- `*.metal` — Metal shader kernel files
-- `whisper-cli` — Whisper CLI binary (renamed to `whisper-aarch64-apple-darwin`)
+- macOS: `*.dylib` (shared libraries), `*.metal` (Metal shader kernels)
+- Linux: `*.so` (shared libraries, CUDA/CPU)
+- `whisper-cli` — Whisper CLI binary (renamed to `whisper-{triple}`)
 
-**Idempotent:** Skips any binary that already exists in `src-tauri/bin/`.
+**Idempotent:** Skips any binary that already exists in `backend/bin/`.
 
 **Error handling:** Non-fatal on any individual binary failure — logs a warning and prints the download URL for manual installation.
 
-### 9.2 download_node.js
+### 10.2 download_node.js
 
-**File:** `src-tauri/scripts/download_node.js`  
+**File:** `backend/scripts/download_node.js`  
 **Purpose:** Download Node.js `v24.13.0` binaries for all target platforms
 
 | Platform binary | Source |
@@ -804,23 +951,60 @@ This prevents "zombie" llama-server processes from accumulating after crashes or
 
 The downloaded Node.js binary is registered as a Tauri sidecar binary in `tauri.conf.json` and used to run the `openclaw-engine` wrapper script. This ensures users never need Node.js installed separately.
 
-### 9.3 setup_chromium.sh
+### 10.3 setup_uv.sh
 
-**File:** `src-tauri/scripts/setup_chromium.sh`  
+**File:** `scripts/setup_uv.sh`  
+**Purpose:** Download the `uv` Python package manager binary as a Tauri sidecar (for MLX/vLLM builds)
+
+| Platform binary | Source |
+|----------------|--------|
+| `uv-aarch64-apple-darwin` | `astral.sh/uv` GitHub Releases |
+| `uv-x86_64-unknown-linux-gnu` | `astral.sh/uv` GitHub Releases |
+
+**Only needed for `--features mlx` or `--features vllm` builds.** The `uv` binary is used at first launch to bootstrap a Python virtual environment containing the inference framework.
+
+### 10.4 setup_llama.sh
+
+**File:** `scripts/setup_llama.sh`  
+**Purpose:** Cross-platform download of the `llama-server` binary from GitHub Releases
+
+Detects the current OS and architecture, downloads the correct release ZIP from `ggerganov/llama.cpp`, extracts the binary and shared libraries, and places them in `backend/bin/`.
+
+| Platform | Asset suffix | Target binary |
+|----------|-------------|---------------|
+| macOS ARM64 | `bin-macos-arm64` | `llama-server-aarch64-apple-darwin` |
+| macOS x86_64 | `bin-macos-x64` | `llama-server-x86_64-apple-darwin` |
+| Linux x86_64 | `bin-ubuntu-x64` | `llama-server-x86_64-unknown-linux-gnu` |
+| Windows (Git Bash/WSL) | `bin-win-avx2-x64` | `llama-server-x86_64-pc-windows-msvc.exe` |
+
+**Usage:** `bash scripts/setup_llama.sh [release_tag]` — defaults to `b4406` if no tag specified.
+
+**Post-download (macOS):** Fixes `@rpath` references in `libllama.dylib` via `install_name_tool` so the dynamic library is found alongside the binary.
+
+### 10.5 generate_tauri_overrides.sh
+
+**File:** `scripts/generate_tauri_overrides.sh`  
+**Purpose:** Generate `tauri.override.json` for engine-specific builds
+
+This script modifies Tauri's configuration overrides to include the correct `externalBin` list and product name suffix for each engine variant (e.g. `Scrappy MLX`, `Scrappy vLLM`). Called by CI before `tauri build`.
+
+### 10.6 setup_chromium.sh
+
+**File:** `backend/scripts/setup_chromium.sh`  
 **Purpose:** Download a specific Chromium snapshot for browser automation / web scraping
 
 **Configuration:**
 - Revision: `1313161`
-- Target: `src-tauri/resources/chromium/`
-- Source: `https://storage.googleapis.com/chromium-browser-snapshots/Mac_Arm/{revision}/chrome-mac.zip`
+- Target: `backend/resources/chromium/`
+- Source: `https://storage.googleapis.com/chromium-browser-snapshots/Mac_Arm/{revision}/chrome-mac.zip` (macOS) or `Linux_x64/{revision}/chrome-linux.zip` (Linux)
 
-**Post-download:** Runs `xattr -cr` on `Chromium.app` to remove macOS quarantine attributes (allows Chromium to run without Gatekeeper prompt).
+**Post-download (macOS):** Runs `xattr -cr` on `Chromium.app` to remove macOS quarantine attributes.
 
-**Usage:** The `clawscan` crate (dependency in `scrappy-mcp-tools/Cargo.toml`) uses Chromium headlessly for JavaScript-rendered web page scraping via the `rig_lib` web search pipeline. The Chromium binary path is passed via environment variable or config at runtime.
+**Usage:** Used headlessly for JavaScript-rendered web page scraping via the `rig_lib` web search pipeline. The Chromium binary path is passed via environment variable or config at runtime.
 
 ---
 
-## 10. Port & Token Reference
+## 11. Port & Token Reference
 
 | Service | Default Port | Preferred Port | Auth | Managed By |
 |---------|------------|----------------|------|-----------|
@@ -836,9 +1020,9 @@ All tokens are generated at process start (not stored persistently) and re-gener
 
 ---
 
-## 11. Tauri Sidecar Registration
+## 12. Tauri Sidecar Registration
 
-`src-tauri/tauri.conf.json` — `bundle.externalBin` list:
+`backend/tauri.conf.json` — `bundle.externalBin` list:
 
 ```json
 "externalBin": [
@@ -852,11 +1036,13 @@ All tokens are generated at process start (not stored persistently) and re-gener
 ]
 ```
 
-Tauri automatically adds the platform triple suffix at bundle time (e.g. `llama-server-aarch64-apple-darwin`) matching the binaries in `src-tauri/bin/`. The `sidecar()` / `command()` shell calls in Rust use the short name; Tauri resolves to the full path.
+> **Engine-specific builds** may also include `bin/uv` (for MLX/vLLM Python bootstrapping). The `generate_tauri_overrides.sh` script adjusts this list per engine.
+
+Tauri automatically adds the platform triple suffix at bundle time (e.g. `llama-server-aarch64-apple-darwin`) matching the binaries in `backend/bin/`. The `sidecar()` / `command()` shell calls in Rust use the short name; Tauri resolves to the full path.
 
 ---
 
-## 12. Event Flow Diagram
+## 13. Event Flow Diagram
 
 ```
 [User types prompt in ChatInput]
@@ -906,7 +1092,15 @@ Tauri automatically adds the platform triple suffix at bundle time (e.g. `llama-
 
 ---
 
-## 13. Replacing or Extending Services
+## 14. Replacing or Extending Services
+
+### Adding a new inference engine
+1. Add a new file `backend/src/engine/engine_myengine.rs`
+2. Implement `InferenceEngine` for your struct (must expose OpenAI-compatible HTTP API)
+3. Add a feature flag in `backend/Cargo.toml`: `myengine = []`
+4. Add the conditional compilation block in `engine/mod.rs` (`create_engine()`, `get_active_engine_info()`)
+5. Update `hf_hub.rs` `engine_to_hf_tag()` to map your engine to an HF tag
+6. Update `frontend/src/components/settings/ActiveEngineChip.tsx` `ENGINE_STYLES` with your engine's colour
 
 ### Replacing llama-server
 Any OpenAI-compatible HTTP server (`/v1/chat/completions`, `/v1/embeddings`) can substitute for llama-server. Change `SidecarManager.start_chat_server` to spawn your binary instead, preserving the same port/token pattern. The rest of the stack (chat.rs, rag.rs) depends only on the HTTP API format.
@@ -946,7 +1140,7 @@ The application supports connecting to an **external FastAPI MCP (Model Context 
 
 ### 8.2 McpRequestHandler — Reverse-RPC Entry Point
 
-**File:** `src-tauri/src/openclaw/ipc.rs`
+**File:** `backend/src/openclaw/ipc.rs`
 
 When the `openclaw-engine` Node.js gateway needs a tool executed on the Rust host, it sends a WebSocket `Req` frame with `method` starting with `"mcp."`. The `ws_client.rs` loop detects this prefix and dispatches to `McpRequestHandler`:
 
@@ -998,7 +1192,7 @@ All tool outputs are wrapped in this envelope before being returned to the gatew
 
 ### 8.3 ToolRouter — Three-Tier Dispatch
 
-**File:** `src-tauri/src/rig_lib/tool_router.rs`
+**File:** `backend/src/rig_lib/tool_router.rs`
 
 The `ToolRouter` is called for every `mcp.call_tool` request. It routes to the correct backend in strict priority order:
 
@@ -1030,7 +1224,7 @@ Tier 3: Remote MCP (if McpClient configured)
 
 ### 8.4 sandbox_factory — Sandbox Wiring
 
-**File:** `src-tauri/src/rig_lib/sandbox_factory.rs`
+**File:** `backend/src/rig_lib/sandbox_factory.rs`
 
 `create_sandbox(rig, mcp_config, reporter) -> Option<Sandbox>` is the factory that wires all tool functions into the Rhai engine. It is called in two contexts:
 - By the **Orchestrator** (`rig_lib/orchestrator.rs`) for Rig agent turns
@@ -1069,7 +1263,7 @@ Tier 3: Remote MCP (if McpClient configured)
 
 ### 8.5 tool_discovery — Unified Tool Search
 
-**File:** `src-tauri/src/rig_lib/tool_discovery.rs`
+**File:** `backend/src/rig_lib/tool_discovery.rs`
 
 `search_all_tools(query, mcp_client, skill_manager, include_host) -> SearchResult` aggregates tools from all three tiers into a single list for the agent to browse:
 

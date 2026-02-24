@@ -1,29 +1,42 @@
 //! macOS Keychain integration for secure API key storage.
 //!
-//! Each provider API key is stored as a separate Keychain item:
+//! **Storage model:** All API keys are stored as a **single JSON object** in
+//! one Keychain item:
 //!   - Service:  `com.schack.scrappy`
-//!   - Account:  the provider slug, e.g. `"anthropic"`, `"openai"`, `"bedrock_access_key_id"`
-//!   - Password: the raw key/token string (UTF-8)
+//!   - Account:  `api_keys`
+//!   - Password: `{"anthropic":"sk-...","openai":"sk-...","huggingface":"hf_..."}`
 //!
-//! Advantages over plaintext `identity.json`:
+//! This means exactly **one** `get_generic_password()` call on app startup,
+//! which triggers a single macOS Keychain authorization prompt — not 25+
+//! individual prompts (one per key, as the previous per-key design caused).
+//!
+//! **Advantages:**
 //!   - Encrypted at rest by the OS (protected by the user's login password / Secure Enclave)
-//!   - Other processes cannot read these values without explicit Keychain access approval
-//!   - Not included in unencrypted backups (iCloud Keychain syncs, but that's user-controlled)
+//!   - Other processes cannot read without explicit Keychain access approval
+//!   - Single unlock prompt on app launch
 //!
 //! # Migration
-//! On first launch after upgrade, `migrate_from_identity` checks each provider field in the
-//! legacy `identity.json` dict and, if a value is present, imports it into the Keychain and
-//! then clears it from the JSON file so it is no longer stored in plaintext.
+//! On first launch after upgrade from the per-key storage format,
+//! `migrate_per_key_items()` reads each legacy Keychain item, consolidates
+//! them into the single JSON blob, then deletes the old items.
+//!
+//! On first launch from pre-keychain builds, `migrate_from_identity()` imports
+//! plaintext keys from `identity.json` into the blob.
 
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tracing::{info, warn};
 
 /// The Keychain service name — matches the app bundle identifier.
 const SERVICE: &str = "com.schack.scrappy";
 
-/// Provider slugs — each maps to a Keychain `account` string.
+/// The single Keychain account that holds all API keys as a JSON object.
+const ACCOUNT: &str = "api_keys";
+
+/// Provider slugs — used for migration and as JSON map keys.
 ///
 /// This list is intentionally explicit so it's easy to audit.
 pub const PROVIDERS: &[&str] = &[
@@ -54,69 +67,139 @@ pub const PROVIDERS: &[&str] = &[
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// In-memory cache — loaded once, written back on mutation
+// ─────────────────────────────────────────────────────────────────────────────
+
+use std::sync::OnceLock;
+
+/// In-memory cache of all API keys. Populated by `load_all()` on startup,
+/// mutated by `set_key()`, and flushed to the Keychain on every write.
+fn key_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether the cache has been loaded from the Keychain yet.
+fn cache_loaded() -> &'static Mutex<bool> {
+    static LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
+    LOADED.get_or_init(|| Mutex::new(false))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Store `value` in the Keychain under `account`.
-/// Passing `None` or an empty string deletes the entry.
-pub fn set_key(account: &str, value: Option<&str>) -> Result<(), String> {
-    match value {
-        Some(v) if !v.is_empty() => {
-            set_generic_password(SERVICE, account, v.as_bytes())
-                .map_err(|e| format!("Keychain write failed for '{}': {}", account, e))?;
-            info!("[keychain] stored '{}'", account);
-        }
-        _ => {
-            // Ignore NotFound errors on delete — key may not exist yet
-            match delete_generic_password(SERVICE, account) {
-                Ok(()) => info!("[keychain] deleted '{}'", account),
-                Err(e) if is_not_found(&e) => {} // already absent — fine
-                Err(e) => warn!("[keychain] delete '{}' failed: {}", account, e),
+/// Load ALL API keys from the Keychain in a single read.
+///
+/// Call this **once** during app startup (before any `get_key` / `set_key`).
+/// This triggers exactly one macOS Keychain authorization prompt.
+pub fn load_all() {
+    let mut loaded = cache_loaded().lock().unwrap_or_else(|e| e.into_inner());
+    if *loaded {
+        return; // Already loaded
+    }
+
+    let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
+
+    match get_generic_password(SERVICE, ACCOUNT) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(json_str) => match serde_json::from_str::<HashMap<String, String>>(&json_str) {
+                Ok(map) => {
+                    let count = map.len();
+                    *cache = map;
+                    info!(
+                        "[keychain] loaded {} keys from unified Keychain entry",
+                        count
+                    );
+                }
+                Err(e) => {
+                    warn!("[keychain] failed to parse JSON blob: {}", e);
+                }
+            },
+            Err(e) => {
+                warn!("[keychain] UTF-8 decode error: {}", e);
             }
+        },
+        Err(e) if is_not_found(&e) => {
+            info!("[keychain] no existing api_keys entry — starting fresh");
+        }
+        Err(e) => {
+            warn!("[keychain] failed to read api_keys: {}", e);
         }
     }
-    Ok(())
+
+    // Migrate from legacy per-key Keychain items (if any exist)
+    let migrated = migrate_per_key_items(&mut cache);
+    if migrated {
+        // Flush the consolidated blob back to Keychain
+        if let Err(e) = flush_cache(&cache) {
+            warn!("[keychain] flush after per-key migration failed: {}", e);
+        }
+    }
+
+    *loaded = true;
 }
 
-/// Retrieve a value from the Keychain. Returns `None` if not found.
-pub fn get_key(account: &str) -> Option<String> {
-    match get_generic_password(SERVICE, account) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .map_err(|e| warn!("[keychain] utf8 decode error for '{}': {}", account, e))
-            .ok(),
-        Err(e) if is_not_found(&e) => None,
-        Err(e) => {
-            warn!("[keychain] read '{}' failed: {}", account, e);
-            None
+/// Store `value` in the Keychain under the given key name.
+/// Passing `None` or an empty string removes the entry.
+///
+/// This updates the in-memory cache and flushes the entire JSON blob
+/// back to the Keychain (one write operation).
+pub fn set_key(key: &str, value: Option<&str>) -> Result<(), String> {
+    // Ensure cache is loaded
+    ensure_loaded();
+
+    let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
+
+    match value {
+        Some(v) if !v.is_empty() => {
+            cache.insert(key.to_string(), v.to_string());
+            info!("[keychain] stored '{}'", key);
+        }
+        _ => {
+            cache.remove(key);
+            info!("[keychain] removed '{}'", key);
         }
     }
+
+    // Flush entire blob back to Keychain
+    flush_cache(&cache)
+}
+
+/// Retrieve a value by key name. Returns `None` if not found.
+///
+/// Reads from the in-memory cache (no Keychain access).
+pub fn get_key(key: &str) -> Option<String> {
+    ensure_loaded();
+
+    let cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.get(key).cloned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Migration helper
+// Legacy identity.json migration
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Migrate plaintext API keys from a legacy `identity.json` value into the Keychain.
 ///
-/// Call this once in `OpenClawConfig::new()` after loading the identity file.
-/// For every field that is `Some(non-empty)`, it is written to the Keychain and
+/// For every field that is `Some(non-empty)`, it is stored in the cache and
 /// cleared from `identity` so the caller can write back a sanitised JSON.
 ///
 /// Returns `true` if any migration was performed (caller should `save_identity`).
 pub fn migrate_from_identity(identity: &mut LegacyKeys) -> bool {
+    ensure_loaded();
+
+    let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
     let mut migrated = false;
 
     macro_rules! migrate {
-        ($field:expr, $account:expr) => {
+        ($field:expr, $key:expr) => {
             if let Some(ref val) = $field {
                 if !val.is_empty() {
-                    if let Err(e) = set_key($account, Some(val)) {
-                        warn!("[keychain] migration failed for '{}': {}", $account, e);
-                    } else {
-                        info!("[keychain] migrated '{}' from identity.json", $account);
-                        $field = None;
-                        migrated = true;
-                    }
+                    cache.insert($key.to_string(), val.clone());
+                    info!("[keychain] migrated '{}' from identity.json", $key);
+                    $field = None;
+                    migrated = true;
                 }
             }
         };
@@ -146,6 +229,56 @@ pub fn migrate_from_identity(identity: &mut LegacyKeys) -> bool {
     migrate!(identity.bedrock_region, "bedrock_region");
     migrate!(identity.custom_llm_key, "custom_llm_key");
     migrate!(identity.remote_token, "remote_token");
+
+    if migrated {
+        if let Err(e) = flush_cache(&cache) {
+            warn!("[keychain] flush after identity migration failed: {}", e);
+        }
+    }
+
+    migrated
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy per-key Keychain migration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Migrate from the old per-key Keychain format (one item per provider)
+/// to the unified JSON blob format.
+///
+/// For each known provider slug, checks if a legacy Keychain item exists.
+/// If so, imports it into the cache and deletes the old item.
+///
+/// Returns `true` if any legacy items were found and migrated.
+fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> bool {
+    let mut migrated = false;
+
+    for &provider in PROVIDERS {
+        // Try to read a legacy per-key item
+        match get_generic_password(SERVICE, provider) {
+            Ok(bytes) => {
+                if let Ok(value) = String::from_utf8(bytes) {
+                    if !value.is_empty() && !cache.contains_key(provider) {
+                        info!("[keychain] migrating legacy per-key item: '{}'", provider);
+                        cache.insert(provider.to_string(), value);
+                        migrated = true;
+                    }
+                }
+                // Delete the old per-key item regardless
+                match delete_generic_password(SERVICE, provider) {
+                    Ok(()) => info!("[keychain] deleted legacy per-key item: '{}'", provider),
+                    Err(e) if is_not_found(&e) => {}
+                    Err(e) => warn!("[keychain] failed to delete legacy '{}': {}", provider, e),
+                }
+            }
+            Err(e) if is_not_found(&e) => {} // No legacy item
+            Err(_) => {}                     // Ignore read errors during migration
+        }
+    }
+
+    if migrated {
+        info!("[keychain] per-key migration complete — consolidated into single entry");
+    }
 
     migrated
 }
@@ -205,6 +338,40 @@ pub struct LegacyKeys {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Ensure the cache has been loaded from the Keychain.
+fn ensure_loaded() {
+    let loaded = cache_loaded().lock().unwrap_or_else(|e| e.into_inner());
+    if !*loaded {
+        drop(loaded); // Release lock before calling load_all
+        load_all();
+    }
+}
+
+/// Flush the in-memory cache to the Keychain as a single JSON blob.
+fn flush_cache(cache: &HashMap<String, String>) -> Result<(), String> {
+    // Only write non-empty values
+    let clean: HashMap<&String, &String> = cache.iter().filter(|(_, v)| !v.is_empty()).collect();
+
+    if clean.is_empty() {
+        // No keys → delete the Keychain item
+        match delete_generic_password(SERVICE, ACCOUNT) {
+            Ok(()) => info!("[keychain] deleted api_keys entry (no keys stored)"),
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => warn!("[keychain] delete api_keys error: {}", e),
+        }
+        return Ok(());
+    }
+
+    let json = serde_json::to_string(&clean)
+        .map_err(|e| format!("Failed to serialize API keys: {}", e))?;
+
+    set_generic_password(SERVICE, ACCOUNT, json.as_bytes())
+        .map_err(|e| format!("Keychain write failed: {}", e))?;
+
+    info!("[keychain] flushed {} keys to Keychain", clean.len());
+    Ok(())
+}
 
 fn is_not_found(e: &security_framework::base::Error) -> bool {
     // errSecItemNotFound = -25300

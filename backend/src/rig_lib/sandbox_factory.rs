@@ -183,6 +183,26 @@ where
             }
         });
 
+    // -- Register host tool: calculator (pure computation, no async needed) --
+    sandbox
+        .engine_mut()
+        .register_fn("calculator", |expr: String| -> rhai::Dynamic {
+            match crate::rig_lib::tools::calculator_tool::evaluate(&expr) {
+                Ok(result) => {
+                    let formatted = if result == result.floor() && result.abs() < 1e15 {
+                        format!("{}", result as i64)
+                    } else {
+                        let s = format!("{:.10}", result);
+                        let s = s.trim_end_matches('0');
+                        let s = s.trim_end_matches('.');
+                        s.to_string()
+                    };
+                    rhai::Dynamic::from(formatted)
+                }
+                Err(e) => rhai::Dynamic::from(format!("Calculator Error: {}", e)),
+            }
+        });
+
     // -- search_tools(query) → progressive discovery --
     let mcp_client_for_discovery = if let Some(base_url) = &mcp_config.mcp_base_url {
         scrappy_mcp_tools::McpClient::new(scrappy_mcp_tools::McpConfig {

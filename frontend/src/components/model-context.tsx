@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
@@ -22,6 +22,50 @@ interface DownloadEvent {
     percentage: number;
 }
 
+interface EngineInfo {
+    id: string;
+    display_name: string;
+    available: boolean;
+    requires_setup: boolean;
+    description: string;
+    hf_tag: string;
+    single_file_model: boolean;
+}
+
+// Persistent discovery state — survives tab switches
+interface HfModelCard {
+    id: string;
+    author: string;
+    name: string;
+    downloads: number;
+    likes: number;
+    tags: string[];
+    last_modified: string;
+    gated: boolean;
+}
+
+interface RepoProgressInfo {
+    pct: number;
+    currentFile: string;
+    fileIndex: number;
+    fileCount: number;
+    /** Per-file progress: filename → percentage */
+    filePct: Record<string, number>;
+}
+
+interface DiscoveryState {
+    searchQuery: string;
+    results: HfModelCard[];
+    hasSearched: boolean;
+    expandedModel: string | null;
+    downloadingFiles: Set<string>;
+    repoProgress: Record<string, RepoProgressInfo>;
+}
+
+// ---------------------------------------------------------------------------
+// Context type (single API surface — consumers don't need to know about the
+// internal two-context split)
+// ---------------------------------------------------------------------------
 interface ModelContextType {
     models: ModelDefinition[];
     localModels: ModelFile[];
@@ -57,9 +101,33 @@ interface ModelContextType {
     setMaxContext: (size: number) => void;
     isRestarting: boolean;
     setIsRestarting: (val: boolean) => void;
+    /** Download files from HuggingFace Hub (used by HFDiscovery) */
+    downloadHfFiles: (repoId: string, files: string[], destSubdir?: string | null) => Promise<void>;
+    /** Active inference engine info (null while loading) */
+    engineInfo: EngineInfo | null;
+    /** Persistent HF discovery state (survives tab switches) */
+    discoveryState: DiscoveryState;
+    setDiscoveryState: React.Dispatch<React.SetStateAction<DiscoveryState>>;
 }
 
-const ModelContext = createContext<ModelContextType | undefined>(undefined);
+// ---------------------------------------------------------------------------
+// Internal contexts: state (rarely changes) vs progress (changes during DL)
+// ---------------------------------------------------------------------------
+
+/** Stable state — models, paths, engine info, system specs, categories.
+ *  Only changes on user action (model select, category switch, etc). */
+type ModelStateContextType = Omit<ModelContextType, 'downloading' | 'discoveryState' | 'setDiscoveryState'>;
+
+/** Hot state — download progress, discovery state.
+ *  Changes at ~4fps during active downloads (throttled). */
+interface ModelProgressContextType {
+    downloading: Record<string, number>;
+    discoveryState: DiscoveryState;
+    setDiscoveryState: React.Dispatch<React.SetStateAction<DiscoveryState>>;
+}
+
+const ModelStateContext = createContext<ModelStateContextType | undefined>(undefined);
+const ModelProgressContext = createContext<ModelProgressContextType | undefined>(undefined);
 
 const STORAGE_KEY = "scrappy_model_path";
 const EMBEDDING_STORAGE_KEY = "scrappy_embedding_model_path";
@@ -79,12 +147,29 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [isRestarting, setIsRestarting] = useState(false);
     const [systemSpecs, setSystemSpecs] = useState<SystemSpecs | null>(null);
     const [_currentModel, setCurrentModel] = useState<ModelDefinition | null>(null);
-    const [_downloadedModels, _setDownloadedModels] = useState<string[]>([]);
     const [activeCategory, setActiveCategory] = useState("Chat");
     const [modelsDir, setModelsDir] = useState<string | null>(null);
-    const [downloadSpeed, _setDownloadSpeed] = useState("");
+    const [downloadSpeed] = useState("");
     const [standardAssets, setStandardAssets] = useState<StandardAsset[]>([]);
     const [models, setModels] = useState<ModelDefinition[]>(MODEL_LIBRARY);
+    const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
+
+    // Persistent discovery state — lifted from HFDiscovery so it survives tab switches
+    const [discoveryState, setDiscoveryState] = useState<DiscoveryState>({
+        searchQuery: "",
+        results: [],
+        hasSearched: false,
+        expandedModel: null,
+        downloadingFiles: new Set(),
+        repoProgress: {},
+    });
+
+    // Load engine info on mount
+    useEffect(() => {
+        invoke<EngineInfo>("get_active_engine_info")
+            .then(setEngineInfo)
+            .catch(err => console.warn("Failed to get engine info:", err));
+    }, []);
 
     const syncRemoteCatalog = useCallback(async () => {
         try {
@@ -146,15 +231,14 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         });
     }, []);
 
-    // Helper to check downloaded status (Mock for now or rely on localModels)
-    // const _checkDownloadedModels = useCallback(async () => {
-    //     // Logic mainly relies on localModels from refreshModels
-    // }, []);
+    // -----------------------------------------------------------------------
+    // Memoized callbacks — stable identity between renders
+    // -----------------------------------------------------------------------
 
-    const selectModel = (modelId: string) => {
+    const selectModel = useCallback((modelId: string) => {
         const model = models.find(m => m.id === modelId);
         if (model) setCurrentModel(model);
-    };
+    }, [models]);
 
     // Model Selection State
     const [currentModelPath, _setCurrentModelPath] = useState<string>(() => {
@@ -185,7 +269,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         return localStorage.getItem(TEMPLATE_STORAGE_KEY) || "chatml";
     });
 
-    const setModelPath = (path: string, template?: string) => {
+    const setModelPath = useCallback((path: string, template?: string) => {
         _setCurrentModelPath(path);
         localStorage.setItem(STORAGE_KEY, path);
         if (template) {
@@ -203,42 +287,42 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             _setCurrentModelTemplate(inferred);
             localStorage.setItem(TEMPLATE_STORAGE_KEY, inferred);
         }
-    };
+    }, []);
 
-    const setEmbeddingModelPath = (path: string) => {
+    const setEmbeddingModelPath = useCallback((path: string) => {
         _setCurrentEmbeddingModelPath(path);
         localStorage.setItem(EMBEDDING_STORAGE_KEY, path);
-    };
+    }, []);
 
-    const setVisionModelPath = (path: string) => {
+    const setVisionModelPath = useCallback((path: string) => {
         _setCurrentVisionModelPath(path);
         localStorage.setItem(VISION_STORAGE_KEY, path);
-    };
+    }, []);
 
-    const setSttModelPath = (path: string) => {
+    const setSttModelPath = useCallback((path: string) => {
         _setCurrentSttModelPath(path);
         localStorage.setItem(STT_STORAGE_KEY, path);
-    };
+    }, []);
 
-    const setImageGenModelPath = (path: string) => {
+    const setImageGenModelPath = useCallback((path: string) => {
         _setCurrentImageGenModelPath(path);
         localStorage.setItem(IMAGE_GEN_STORAGE_KEY, path);
-    };
+    }, []);
 
-    const setSummarizerModelPath = (path: string) => {
+    const setSummarizerModelPath = useCallback((path: string) => {
         _setCurrentSummarizerModelPath(path);
         localStorage.setItem(SUMMARIZER_STORAGE_KEY, path);
-    };
+    }, []);
 
     const [maxContext, _setMaxContext] = useState<number>(() => {
         const stored = localStorage.getItem(MAX_CONTEXT_STORAGE_KEY);
         return stored ? parseInt(stored) : 32768; // Default to 32k
     });
 
-    const setMaxContext = (size: number) => {
+    const setMaxContext = useCallback((size: number) => {
         _setMaxContext(size);
         localStorage.setItem(MAX_CONTEXT_STORAGE_KEY, size.toString());
-    };
+    }, []);
 
     const refreshModels = useCallback(async () => {
         setIsRefreshing(true);
@@ -292,7 +376,8 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
         const mainFullPath = getTargetPath(v.filename);
 
-        if (downloading[mainFullPath]) return;
+        // Guard against duplicate downloads — check ref buffer too
+        if (downloadPctBufferRef.current[mainFullPath] !== undefined) return;
 
         console.log("Starting download for", mainFullPath);
         setDownloading(prev => ({ ...prev, [mainFullPath]: 0 }));
@@ -303,7 +388,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             if (model.components) {
                 for (const comp of model.components) {
                     const compFullPath = getTargetPath(comp.filename);
-                    if (!downloading[compFullPath]) {
+                    if (downloadPctBufferRef.current[compFullPath] === undefined) {
                         console.log(`Starting component download: ${comp.filename} -> ${compFullPath}`);
                         setDownloading(prev => ({ ...prev, [compFullPath]: 0 }));
                         invoke("download_model", { url: comp.url, filename: compFullPath }).catch(e => {
@@ -321,7 +406,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             // Projector handling
             if (model.mmproj) {
                 const projFullPath = getTargetPath(model.mmproj.filename);
-                if (!downloading[projFullPath]) {
+                if (downloadPctBufferRef.current[projFullPath] === undefined) {
                     setDownloading(prev => ({ ...prev, [projFullPath]: 0 }));
                     invoke("download_model", { url: model.mmproj.url, filename: projFullPath }).catch(e => {
                         console.error("Projector download failed", e);
@@ -344,7 +429,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 return c;
             });
         }
-    }, [downloading]);
+    }, []);
 
     // Check hardware and recommend model on first empty run
     useEffect(() => {
@@ -401,14 +486,94 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         return () => clearInterval(interval);
     }, [refreshModels, startDownload]);
 
+    // -----------------------------------------------------------------------
+    // Throttled progress buffer — prevents per-chunk re-renders of the entire
+    // component tree.  Progress events fire many times per second during
+    // downloads; we accumulate them in a ref and flush to state at ~4fps.
+    // -----------------------------------------------------------------------
+    const progressBufferRef = useRef<Record<string, RepoProgressInfo>>({});
+    const downloadPctBufferRef = useRef<Record<string, number>>({});
+    const progressFlushTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // Start/stop the flush timer based on active downloads
+    useEffect(() => {
+        const hasActiveDownloads = Object.keys(downloading).length > 0;
+
+        if (hasActiveDownloads && !progressFlushTimer.current) {
+            progressFlushTimer.current = setInterval(() => {
+                // Flush download percentages
+                const pctBuf = downloadPctBufferRef.current;
+                if (Object.keys(pctBuf).length > 0) {
+                    setDownloading(prev => ({ ...prev, ...pctBuf }));
+                }
+                // Flush discovery progress
+                const discBuf = progressBufferRef.current;
+                if (Object.keys(discBuf).length > 0) {
+                    setDiscoveryState(prev => ({
+                        ...prev,
+                        repoProgress: { ...prev.repoProgress, ...discBuf },
+                    }));
+                }
+            }, 250); // ~4fps
+        } else if (!hasActiveDownloads && progressFlushTimer.current) {
+            clearInterval(progressFlushTimer.current);
+            progressFlushTimer.current = null;
+            // Final flush
+            const pctBuf = downloadPctBufferRef.current;
+            if (Object.keys(pctBuf).length > 0) {
+                setDownloading(prev => ({ ...prev, ...pctBuf }));
+                downloadPctBufferRef.current = {};
+            }
+            const discBuf = progressBufferRef.current;
+            if (Object.keys(discBuf).length > 0) {
+                setDiscoveryState(prev => ({
+                    ...prev,
+                    repoProgress: { ...prev.repoProgress, ...discBuf },
+                }));
+                progressBufferRef.current = {};
+            }
+        }
+
+        return () => {
+            if (progressFlushTimer.current) {
+                clearInterval(progressFlushTimer.current);
+                progressFlushTimer.current = null;
+            }
+        };
+    }, [downloading, setDiscoveryState]);
+
     // Listen for download progress globally
     useEffect(() => {
         const unlisten = listen<DownloadEvent>("download_progress", (event) => {
-            console.log("Received download progress:", event.payload.filename, event.payload.percentage);
-            setDownloading(prev => ({
-                ...prev,
-                [event.payload.filename]: event.payload.percentage
-            }));
+            const { filename, percentage } = event.payload;
+
+            // Buffer percentage — flushed to state by the timer above
+            downloadPctBufferRef.current[filename] = percentage;
+
+            // Buffer per-file progress updates — flushed to state by the timer above
+            const payload = event.payload as any;
+            if (payload.current_file || payload.file_count) {
+                // Repo-level progress event
+                const existing = progressBufferRef.current[filename];
+                progressBufferRef.current[filename] = {
+                    pct: percentage,
+                    currentFile: payload.current_file ?? "",
+                    fileIndex: payload.file_index ?? 0,
+                    fileCount: payload.file_count ?? 1,
+                    filePct: {
+                        ...(existing?.filePct ?? {}),
+                        ...(payload.current_file ? { [payload.current_file]: payload.file_percentage ?? 0 } : {}),
+                    },
+                };
+            } else {
+                // Per-file progress event — update filePct in matching repos
+                for (const rp of Object.values(progressBufferRef.current)) {
+                    if (rp.currentFile === filename || filename.includes('/')) {
+                        continue;
+                    }
+                    rp.filePct = { ...rp.filePct, [filename]: percentage };
+                }
+            }
 
             if (event.payload.percentage >= 100) {
                 // Download complete
@@ -416,11 +581,27 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 // Ensure refresh happens after a slight delay to allow filesystem to settle/close handle
                 setTimeout(() => {
                     refreshModels();
+                    // Clean up buffers for completed download
+                    delete downloadPctBufferRef.current[event.payload.filename];
                     setDownloading(prev => {
                         const copy = { ...prev };
                         delete copy[event.payload.filename];
                         return copy;
                     });
+                    // Clean up discovery state for completed repo downloads
+                    if (event.payload.filename.includes('/')) {
+                        setTimeout(() => {
+                            // Flush any remaining buffer for this repo first
+                            delete progressBufferRef.current[event.payload.filename];
+                            setDiscoveryState(prev => {
+                                const rp = { ...prev.repoProgress };
+                                delete rp[event.payload.filename];
+                                const df = new Set(prev.downloadingFiles);
+                                df.delete(event.payload.filename);
+                                return { ...prev, repoProgress: rp, downloadingFiles: df };
+                            });
+                        }, 1500);
+                    }
                     toast.success(`Download complete: ${event.payload.filename} `);
                 }, 1000);
             }
@@ -432,7 +613,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     }, [refreshModels]);
 
 
-    const cancelDownload = async (filename: string) => {
+    const cancelDownload = useCallback(async (filename: string) => {
         try {
             await invoke("cancel_download", { filename });
             // Also try cancelling potential mmproj
@@ -441,15 +622,16 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         } catch (e) {
             console.warn("Backend cancel failed (task might be finished):", e);
         } finally {
+            delete downloadPctBufferRef.current[filename];
             setDownloading(prev => {
                 const copy = { ...prev };
                 delete copy[filename];
                 return copy;
             });
         }
-    };
+    }, []);
 
-    const deleteModel = async (filename: string) => {
+    const deleteModel = useCallback(async (filename: string) => {
         try {
             await invoke("delete_local_model", { filename });
             toast.success("Model deleted");
@@ -458,66 +640,128 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             console.error("Delete failed:", e);
             toast.error(`Failed to delete: ${e} `);
         }
-    };
+    }, [refreshModels]);
+
+    // Download files from HuggingFace Hub (shared via context)
+    const downloadHfFiles = useCallback(async (repoId: string, files: string[], destSubdir?: string | null) => {
+        // Track each file in the global download state
+        const trackKey = files.length === 1 ? files[0] : repoId;
+        setDownloading(prev => ({ ...prev, [trackKey]: 0 }));
+
+        try {
+            await invoke("download_hf_model_files", {
+                repoId,
+                filesToDownload: files,
+                destSubdir: destSubdir ?? null,
+            });
+            toast.success(`Downloaded: ${files.length === 1 ? files[0] : repoId}`);
+            refreshModels();
+        } catch (e: any) {
+            const msg = typeof e === "string" ? e : "Download failed";
+            toast.error(msg);
+        } finally {
+            delete downloadPctBufferRef.current[trackKey];
+            setDownloading(prev => {
+                const copy = { ...prev };
+                delete copy[trackKey];
+                return copy;
+            });
+        }
+    }, [refreshModels]);
+
+    const downloadStandardAsset = useCallback(async (filename: string) => {
+        if (downloading[filename]) return;
+        setDownloading(prev => ({ ...prev, [filename]: 0 }));
+        toast.info(`Downloading Standard Asset: ${filename}`);
+        try {
+            await commands.downloadStandardAsset(filename);
+        } catch (e) {
+            toast.error(`Standard Asset Download Failed: ${e}`);
+            setDownloading(prev => {
+                const c = { ...prev };
+                delete c[filename];
+                return c;
+            });
+        }
+    }, [downloading]);
+
+    // -----------------------------------------------------------------------
+    // Memoized context values — split into stable state vs hot progress
+    // -----------------------------------------------------------------------
+
+    const stateValue = useMemo<ModelStateContextType>(() => ({
+        models,
+        localModels,
+        currentModelPath,
+        currentEmbeddingModelPath,
+        currentVisionModelPath,
+        currentSttModelPath,
+        currentImageGenModelPath,
+        currentSummarizerModelPath,
+        currentModelTemplate,
+        setModelPath,
+        setEmbeddingModelPath,
+        setVisionModelPath,
+        setSttModelPath,
+        setImageGenModelPath,
+        setSummarizerModelPath,
+        refreshModels,
+        startDownload,
+        downloadSpeed,
+        selectModel,
+        activeCategory,
+        setActiveCategory,
+        cancelDownload,
+        deleteModel,
+        isRefreshing,
+        modelsDir,
+        systemSpecs,
+        standardAssets,
+        checkStandardAssets,
+        downloadStandardAsset,
+        maxContext,
+        setMaxContext,
+        isRestarting,
+        setIsRestarting,
+        downloadHfFiles,
+        engineInfo,
+    }), [
+        models, localModels, currentModelPath,
+        currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath,
+        currentImageGenModelPath, currentSummarizerModelPath, currentModelTemplate,
+        setModelPath, setEmbeddingModelPath, setVisionModelPath, setSttModelPath,
+        setImageGenModelPath, setSummarizerModelPath, refreshModels, startDownload,
+        downloadSpeed, selectModel, activeCategory, cancelDownload, deleteModel,
+        isRefreshing, modelsDir, systemSpecs, standardAssets, checkStandardAssets,
+        downloadStandardAsset, maxContext, isRestarting, downloadHfFiles, engineInfo,
+    ]);
+
+    const progressValue = useMemo<ModelProgressContextType>(() => ({
+        downloading,
+        discoveryState,
+        setDiscoveryState,
+    }), [downloading, discoveryState]);
 
     return (
-        <ModelContext.Provider value={{
-            models,
-            localModels,
-            downloading,
-            currentModelPath,
-            currentEmbeddingModelPath,
-            currentVisionModelPath,
-            currentSttModelPath,
-            currentImageGenModelPath,
-            currentSummarizerModelPath,
-            currentModelTemplate,
-            setModelPath,
-            setEmbeddingModelPath,
-            setVisionModelPath,
-            setSttModelPath,
-            setImageGenModelPath,
-            setSummarizerModelPath,
-            refreshModels,
-            startDownload,
-            downloadSpeed,
-            selectModel,
-            activeCategory,
-            setActiveCategory,
-            cancelDownload,
-            deleteModel,
-            isRefreshing,
-            modelsDir,
-            systemSpecs,
-            standardAssets,
-            checkStandardAssets,
-            downloadStandardAsset: async (filename: string) => {
-                if (downloading[filename]) return;
-                setDownloading(prev => ({ ...prev, [filename]: 0 }));
-                toast.info(`Downloading Standard Asset: ${filename}`);
-                try {
-                    await commands.downloadStandardAsset(filename);
-                } catch (e) {
-                    toast.error(`Standard Asset Download Failed: ${e}`);
-                    setDownloading(prev => {
-                        const c = { ...prev };
-                        delete c[filename];
-                        return c;
-                    });
-                }
-            },
-            maxContext,
-            setMaxContext,
-            isRestarting,
-            setIsRestarting
-        }}>
-            {children}
-        </ModelContext.Provider>
+        <ModelStateContext.Provider value={stateValue}>
+            <ModelProgressContext.Provider value={progressValue}>
+                {children}
+            </ModelProgressContext.Provider>
+        </ModelStateContext.Provider>
     );
 }
 
-export function useModelContext() {
-    const context = useContext(ModelContext);
-    if (!context) throw new Error("useModelContext must be used within ModelProvider");
-    return context;
+/**
+ * Single hook to access the full model context.
+ *
+ * Internally reads from two contexts: `ModelStateContext` (stable) and
+ * `ModelProgressContext` (hot during downloads).  Components that only
+ * use state fields (paths, models, engine info, etc.) won't re-render
+ * when download progress changes.
+ */
+export function useModelContext(): ModelContextType {
+    const state = useContext(ModelStateContext);
+    const progress = useContext(ModelProgressContext);
+    if (!state || !progress) throw new Error("useModelContext must be used within ModelProvider");
+    return useMemo(() => ({ ...state, ...progress }), [state, progress]);
 }

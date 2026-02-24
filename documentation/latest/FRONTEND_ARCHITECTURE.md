@@ -1,6 +1,6 @@
 # Scrappy — Frontend Architecture Reference
 
-> **Last updated:** 2026-02-22  
+> **Last updated:** 2026-02-23  
 > **Stack:** React 19 · TypeScript 5.8 · Tailwind CSS 3.4 · Vite 7 · Framer Motion · `react-markdown` · `highlight.js`
 
 ---
@@ -90,7 +90,7 @@ src/
 ├── components/
 │   ├── theme-provider.tsx     # ThemeProvider + useTheme + ThemeToggle
 │   ├── config-context.tsx     # ConfigProvider + useConfigContext
-│   ├── model-context.tsx      # ModelProvider + useModelContext (524 lines)
+│   ├── model-context.tsx      # ModelProvider + useModelContext (~560 lines)
 │   │
 │   ├── chat/
 │   │   ├── ChatLayout.tsx     # Thin shell — provider wrap + animated view router (~75 lines)
@@ -149,6 +149,9 @@ src/
 │   │   ├── SecretsTab.tsx         (64 KB)
 │   │   ├── GatewayTab.tsx         (68 KB)
 │   │   ├── ModelBrowser.tsx       (63 KB)
+│   │   ├── HFDiscovery.tsx        # HuggingFace Hub model search (∼430 lines)
+│   │   ├── EngineSetupBanner.tsx   # MLX/vLLM first-launch setup wizard (∼200 lines)
+│   │   ├── ActiveEngineChip.tsx    # Engine status badge (∼50 lines)
 │   │   ├── PersonaTab.tsx
 │   │   ├── PersonalizationTab.tsx
 │   │   ├── ChatProviderTab.tsx
@@ -442,15 +445,38 @@ interface ConfigContextType {
 
 ### 6.2 ModelProvider
 
-`src/components/model-context.tsx` (524 lines) — the most complex provider.
+`src/components/model-context.tsx` (~600 lines) — the most complex provider.
+
+**Architecture — Two-Context Split:**
+
+Internally uses _two_ React contexts for performance isolation:
+
+| Context | Contents | Update frequency |
+|---------|----------|------------------|
+| `ModelStateContext` | Models, paths, engine info, system specs, categories, memoized actions | Rarely — only on user action (model select, category switch, refresh) |
+| `ModelProgressContext` | `downloading` record, `discoveryState` (HF discovery progress) | ~4fps during active downloads (throttled) |
+
+Both are merged into a single `useModelContext()` hook — **no consumer code changes needed**. Components that only read state fields (e.g. `ChatView` reading `engineInfo`, `SpotlightBar` reading `currentModelPath`) **won't re-render** when download progress changes.
+
+**Throttled Progress Buffer:**
+
+Download progress events from the backend fire many times per second per chunk. Instead of updating state on every event:
+1. Progress percentages are buffered in `useRef` objects (`progressBufferRef`, `downloadPctBufferRef`)
+2. A `setInterval(250ms)` timer flushes buffered values to state in batch (~4fps)
+3. State transitions (download start, download complete, cancel) are **not** buffered — they update state immediately
 
 **Responsibilities:**
 - Tracks paths for all 6 model roles (chat, embedding, vision, STT, image gen, summarizer) — persisted in `localStorage` per role
-- Manages GGUF `download` state (`Record<filename, percentage>`) — fed by `download_progress` Tauri events
+- Manages GGUF `download` state (`Record<filename, percentage>`) — fed by buffered `download_progress` Tauri events
 - Syncs `localModels` list by calling `list_models` on mount and after downloads
 - Hardware detection: fetches `SystemSpecs` on mount; recommends a model on first run based on RAM
 - Syncs remote model catalog from a local server endpoint (falls back to cached SQLite catalog)
 - Provides `startDownload` (with HuggingFace token check for gated models + component/projector download)
+- **`downloadHfFiles(repoId, files, destSubdir?)`** — downloads model files from HuggingFace Hub, hooks into global `downloading` state for consistent progress tracking across Library and Discover tabs
+- **`engineInfo`** — active inference engine info (`{ id, display_name, hf_tag, ... }`), loaded on mount from `get_active_engine_info` Tauri command
+- **Discovery state** — `discoveryState` (search query, results, expanded model, downloading files, repo progress) is lifted from `HFDiscovery` so it survives tab switches
+
+**Memoization:** All function references (`setModelPath`, `selectModel`, `cancelDownload`, `deleteModel`, `downloadHfFiles`, `downloadStandardAsset`, etc.) are wrapped in `useCallback`  for stable identity in the `useMemo` dependency arrays.
 
 **localStorage keys:**
 ```
@@ -615,7 +641,10 @@ The main content area (right of `Sidebar`) switches between four route-level vie
 |-----------|------|-------------|
 | `SettingsPages` | — | Tab host |
 | `SettingsSidebar` | — | Tab navigation list |
-| `ModelBrowser` | 63 KB | GGUF model catalogue, download with progress bars, variant selection, hardware recommender |
+| `ModelBrowser` | 63 KB | Model catalogue with **Library** (curated GGUF list) and **Discover** (live HF Hub search) tabs. Shows `ActiveEngineChip` and `EngineSetupBanner`. The Discover tab uses `display: none` keep-alive (not conditional render) so `HFDiscovery`'s local state (file info cache) persists across tab switches. |
+| `HFDiscovery` | ~780 lines | HuggingFace Hub live search: debounced query, engine-aware tag filtering, model card grid (downloads/likes/gated badge), click-to-expand file tree with quant picker (GGUF) or Download All (MLX/vLLM), mmproj auto-include. Downloads via shared `downloadHfFiles()`. Accepts `isVisible` prop for auto-expand-on-return: when becoming visible, auto-expands the first downloading model and loads file info if the cache was lost (e.g. after full remount). File info cache (`fileInfoCache`) is local state keyed by repo ID; the loading spinner shows until data arrives (no "No files found" flash). |
+| `EngineSetupBanner` | ~200 lines | First-launch setup wizard for MLX/vLLM: checks `get_engine_setup_status`, shows amber banner with “Set Up Now” button, real-time progress bar (3 stages), error/retry/success states. Listens to `engine_setup_progress` events. |
+| `ActiveEngineChip` | ~50 lines | Color-coded engine status badge (🟦 llamacpp / 🟠 MLX / 🟢 vLLM / 🟣 Ollama). Rendered in the Model Browser header. |
 | `SecretsTab` | 64 KB | API key management for all providers, HuggingFace token, custom secrets |
 | `GatewayTab` | 68 KB | OpenClaw gateway config, port, auth, local inference settings |
 | `PersonaTab` | — | Persona browser + custom persona editor |

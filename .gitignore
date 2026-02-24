@@ -17,6 +17,7 @@ backend/scrappy-mcp-tools/target/
 backend/gen/
 backend/bin/
 backend/resources/chromium/
+backend/tauri.override.json
 
 # Generated Binaries & Heavy Assets
 binaries/

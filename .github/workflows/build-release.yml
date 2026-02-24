@@ -1,0 +1,309 @@
+# ==========================================================================
+# Scrappy Multi-Engine CI/CD Pipeline
+#
+# Builds platform-specific variants with the correct inference engine:
+#   - macOS ARM   → llamacpp (Metal)
+#   - macOS Intel → llamacpp (CPU)
+#   - Linux x64   → llamacpp (CUDA)   [future: vllm]
+#   - Windows x64 → llamacpp (AVX2)
+#
+# Each platform build:
+#   1. Sets up the correct engine feature flag
+#   2. Downloads platform-specific sidecar binaries
+#   3. Builds the frontend
+#   4. Builds the Tauri app
+#   5. Uploads release artifacts
+# ==========================================================================
+
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ========================================================================
+  # Backend Tests (all features)
+  # ========================================================================
+  test:
+    name: Test (${{ matrix.feature }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [llamacpp, mlx, vllm, ollama]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            backend/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.feature }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.feature }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests (--features ${{ matrix.feature }})
+        working-directory: backend
+        run: |
+          cargo test --no-default-features --features ${{ matrix.feature }} \
+            -- --skip web_search  # Skip network-dependent tests in CI
+
+  # ========================================================================
+  # Frontend Type Check
+  # ========================================================================
+  typecheck:
+    name: Frontend TypeCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: cd frontend && npx tsc --noEmit
+
+  # ========================================================================
+  # Build Matrix — one job per (os, engine) combination
+  # ========================================================================
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [test, typecheck]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- macOS ARM (Apple Silicon) — llama.cpp / Metal ----
+          - name: macOS-ARM-llamacpp
+            os: macos-14  # M1 runner
+            target: aarch64-apple-darwin
+            engine: llamacpp
+            sidecar_suffix: aarch64-apple-darwin
+            bundle_llama: true
+            bundle_whisper: true
+            bundle_sd: true
+
+          # ---- macOS ARM (Apple Silicon) — MLX (native Apple Silicon only) ----
+          - name: macOS-ARM-mlx
+            os: macos-14  # M1 runner — MLX requires Apple Silicon
+            target: aarch64-apple-darwin
+            engine: mlx
+            sidecar_suffix: aarch64-apple-darwin
+            bundle_llama: false   # No llama-server — MLX manages its own Python env
+            bundle_whisper: true  # Whisper STT still needed
+            bundle_sd: false      # SD not yet MLX-accelerated
+            bundle_uv: true       # uv needed to bootstrap mlx_lm at first launch
+
+          # ---- macOS Intel ----
+          - name: macOS-Intel-llamacpp
+            os: macos-13  # Intel runner
+            target: x86_64-apple-darwin
+            engine: llamacpp
+            sidecar_suffix: x86_64-apple-darwin
+            bundle_llama: true
+            bundle_whisper: true
+            bundle_sd: true
+
+          # ---- Linux x64 — llama.cpp ----
+          - name: Linux-x64-llamacpp
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            engine: llamacpp
+            sidecar_suffix: x86_64-unknown-linux-gnu
+            bundle_llama: true
+            bundle_whisper: true
+            bundle_sd: false
+
+          # ---- Linux x64 — vLLM (CUDA) ----
+          - name: Linux-x64-vllm
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            engine: vllm
+            sidecar_suffix: x86_64-unknown-linux-gnu
+            bundle_llama: false   # No llama-server — vLLM manages its own Python env
+            bundle_whisper: true
+            bundle_sd: false
+            bundle_uv: true       # uv needed to bootstrap vllm at first launch
+
+          # ---- Windows x64 ----
+          - name: Windows-x64-llamacpp
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            engine: llamacpp
+            sidecar_suffix: x86_64-pc-windows-msvc
+            bundle_llama: true
+            bundle_whisper: true
+            bundle_sd: false
+
+          # ---- macOS ARM — Ollama ----
+          - name: macOS-ARM-ollama
+            os: macos-14
+            target: aarch64-apple-darwin
+            engine: ollama
+            sidecar_suffix: aarch64-apple-darwin
+            bundle_llama: false   # Ollama brings its own model runner
+            bundle_whisper: true
+            bundle_sd: false
+
+          # ---- Linux x64 — Ollama ----
+          - name: Linux-x64-ollama
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            engine: ollama
+            sidecar_suffix: x86_64-unknown-linux-gnu
+            bundle_llama: false
+            bundle_whisper: true
+            bundle_sd: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # ---- Sidecar: llama-server (llamacpp only) ----
+      - name: Setup llama-server sidecar
+        if: matrix.bundle_llama == true
+        run: bash scripts/setup_llama.sh
+        env:
+          SIDECAR_TARGET: ${{ matrix.sidecar_suffix }}
+
+      # ---- Sidecar: uv (mlx / vllm only) ----
+      - name: Setup uv sidecar
+        if: matrix.bundle_uv == true
+        run: bash scripts/setup_uv.sh
+        env:
+          UV_VERSION: "0.4.30"
+
+      - name: Setup OpenClaw engine
+        run: cd backend/openclaw-engine && npm install --ignore-scripts
+
+      # ---- Generate engine-specific Tauri config override ----
+      - name: Generate Tauri config override
+        run: bash scripts/generate_tauri_overrides.sh ${{ matrix.engine }}
+
+      # ---- Cache Rust builds ----
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            backend/target/
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ matrix.engine }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-${{ matrix.engine }}-
+            ${{ runner.os }}-${{ matrix.target }}-
+
+      # ---- Build Tauri app with engine feature ----
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows signing
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          # Embed the engine variant into the release name so both macOS
+          # ARM builds appear as distinct downloadable assets on the release page
+          releaseName: "Scrappy ${{ github.ref_name }} (${{ matrix.name }})"
+          releaseBody: "See CHANGELOG.md for details."
+          releaseDraft: true
+          prerelease: false
+          args: >-
+            --target ${{ matrix.target }}
+            --config backend/tauri.override.json
+            --
+            --no-default-features
+            --features ${{ matrix.engine }}
+          tauriScript: npx tauri
+
+      # ---- Upload artifacts (for non-tag / PR builds) ----
+      - name: Upload build artifacts
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrappy-${{ matrix.name }}
+          path: |
+            backend/target/${{ matrix.target }}/release/bundle/
+          retention-days: 7
+
+  # ========================================================================
+  # Release — aggregate all platform builds
+  # ========================================================================
+  release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true

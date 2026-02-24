@@ -36,7 +36,7 @@ export function useChat() {
     const [autoMode, setAutoMode] = useState(false);
     const { config } = useConfig();
 
-    const { currentEmbeddingModelPath, maxContext, currentModelPath, currentModelTemplate, isRestarting } = useModelContext();
+    const { currentEmbeddingModelPath, maxContext, currentModelPath, currentModelTemplate, isRestarting, engineInfo } = useModelContext();
     const { activeJobs, activeJobsRef, startGeneration, cancelGeneration: contextCancel } = useChatContext();
 
     const activeJob = currentConversationId ? activeJobs[currentConversationId] : null;
@@ -198,7 +198,16 @@ export function useChat() {
         const checkStatus = async () => {
             try {
                 const s = await commands.getSidecarStatus();
-                setModelRunning(s?.chat_running || false);
+                // For llamacpp: modelRunning tracks whether llama-server is live
+                // For other engines (MLX, vLLM, Ollama): they manage their own server;
+                // we consider "running" if a model is selected (the engine handles startup).
+                const isLlamaCpp = engineInfo?.single_file_model ?? true; // default true for safety
+                if (isLlamaCpp) {
+                    setModelRunning(s?.chat_running || false);
+                } else {
+                    // Non-llamacpp: always ready when a model path is set
+                    setModelRunning(!!currentModelPath.trim());
+                }
                 setSttRunning(s?.stt_running || false);
                 setImageRunning(s?.image_running || false);
             } catch (e) {
@@ -242,7 +251,15 @@ export function useChat() {
             window.removeEventListener('focus', onFocus);
             unlisten.then(f => f());
         };
-    }, [fetchConversations, currentModelPath, startServer, isRestarting]);
+    }, [fetchConversations, currentModelPath, startServer, isRestarting, engineInfo]);
+
+    // For non-llamacpp engines: keep modelRunning in sync with whether a model path is selected.
+    // This runs independently of the sidecar status polling above.
+    useEffect(() => {
+        if (engineInfo && !engineInfo.single_file_model) {
+            setModelRunning(!!currentModelPath.trim());
+        }
+    }, [engineInfo, currentModelPath]);
 
     const loadConversation = useCallback(async (id: string, silent = false) => {
         if (!silent) setLoadingHistory(true);

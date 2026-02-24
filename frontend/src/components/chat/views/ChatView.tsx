@@ -8,6 +8,7 @@ import { ModelSelector } from '../ModelSelector';
 import { cn } from '../../../lib/utils';
 import { useChatLayout } from '../ChatProvider';
 import { findStyle } from '../../../lib/style-library';
+import { useModelContext } from '../../model-context';
 
 export function ChatView() {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -82,6 +83,11 @@ export function ChatView() {
         removeImage,
         removeIngestedFile,
     } = useChatLayout() as any;
+
+    // Only llamacpp builds use the llama-server sidecar; MLX/vLLM manage their
+    // own server. We hide the manual "Start Server" button for those engines.
+    const { engineInfo } = useModelContext();
+    const isLlamaCppEngine = !engineInfo || engineInfo.single_file_model;
 
     return (
         <div {...getRootProps()} className="flex-1 flex flex-col h-full overflow-hidden">
@@ -274,10 +280,10 @@ export function ChatView() {
                                 setShowImageSettings={setShowImageSettings}
                                 showImageSettings={showImageSettings}
                                 imageRunning={imageRunning}
-                                startServer={async () => {
+                                startServer={isLlamaCppEngine ? async () => {
                                     const { commands: cmds } = await import('../../../lib/bindings');
                                     await cmds.startChatServer(modelPath || localModels[0]?.path, maxContext, currentModelTemplate, null, false, false, false);
-                                }}
+                                } : undefined}
                                 slashQuery={slashQuery}
                                 setSlashQuery={setSlashQuery}
                                 mentionQuery={mentionQuery}

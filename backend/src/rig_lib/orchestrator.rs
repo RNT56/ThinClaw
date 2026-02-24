@@ -602,6 +602,9 @@ impl Orchestrator {
         tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
         tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
 
+        // Calculator — always available (no permissions gate needed)
+        tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, sin, cos, tan, min, max), constants (pi, e). Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");
+
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // Build search rules. MCP-specific guidance is only included when a server is wired up,

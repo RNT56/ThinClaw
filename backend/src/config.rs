@@ -310,18 +310,18 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let config = crate::openclaw::OpenClawConfig::new(app_data_dir);
-
-    if let Some(ref token) = config.huggingface_token {
-        if !token.trim().is_empty() {
-            println!("[config] get_hf_token: success (from openclaw config)");
-            return Ok(Some(token.clone()));
+pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
+    // Read from the app-level SecretStore (NOT OpenClawConfig)
+    if let Some(store) = app.try_state::<crate::secret_store::SecretStore>() {
+        if let Some(token) = store.huggingface_token() {
+            if !token.trim().is_empty() {
+                println!("[config] get_hf_token: success (from SecretStore)");
+                return Ok(Some(token));
+            }
         }
     }
 
-    println!("[config] get_hf_token: NoEntry (openclaw config)");
+    println!("[config] get_hf_token: NoEntry (SecretStore)");
     Ok(None)
 }
 

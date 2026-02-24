@@ -12,31 +12,34 @@ Scrappy is a professional, open-source AI cockpit designed for executive-level w
 
 ## Installation & Setup
 
-For a deep dive into environment configuration, see the specialized **[macOS (Apple Silicon) Setup Guide](setup.md)**.
+For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](setup.md)**.
 
 ### 1. Requirements
 - **macOS / Linux / Windows** (Tauri v2 compatible).
 - **Node.js 22.x+** and **npm**.
 - **Rust (Stable)**.
 
-### 2. Quick Start (macOS)
+### 2. Quick Start
 ```bash
 # 1. Install project dependencies
 npm install
-npm run setup:openclaw-engine
 
-# 2. Automated sidecar initialization (Node, Chromium, AI)
+# 2. Automated sidecar initialization (Node, Chromium, AI binaries, OpenClaw)
 npm run setup:all
 
-# 3. Launch in Developer Mode
+# 3. Launch in Developer Mode (default engine: llama.cpp)
 npm run tauri dev
+
+# Or with a different inference engine:
+# npm run tauri dev -- -- --no-default-features --features mlx
+# npm run tauri dev -- -- --no-default-features --features ollama
 ```
 
 ### 3. Setup Advice
 - **Secrets**: Go to **Settings > Secrets** to add your API keys. Scrappy now supports **Anthropic**, **OpenAI**, **Google Gemini**, **Groq**, **OpenRouter**, and **Brave Search**. Remember to toggle "Grant Access" for each key to enable them for the agent.
 - **Custom Secrets**: You can now add arbitrary custom secrets for specialized agent workflows.
 - **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models. You can add this in **Settings > Secrets**.
-- **Models**: Download GGUF models and point Scrappy to them in **Settings > Models**.
+- **Models**: Download models via the in-app **Model Browser** (Settings → Models). Use the **Library** tab for bundled models or the **Discover** tab to search HuggingFace Hub. The Discover tab auto-filters by your active engine (GGUF for llama.cpp/Ollama, MLX safetensors for MLX, AWQ for vLLM).
 
 ---
 
@@ -46,7 +49,8 @@ npm run tauri dev
 *   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
 *   **Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
 *   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
-*   **Hybrid Inference Engine**: Seamlessly switch between local GGUF models (Llama 3, Gemma 3) and bleeding-edge cloud models (GPT-5.2, Claude 4.5) in a single workflow.
+*   **Multi-Engine Inference**: Supports **llama.cpp** (Metal/CUDA), **MLX** (Apple Silicon), **vLLM** (CUDA), and **Ollama** as swappable local inference backends — selected at compile time via Cargo feature flags. Each engine exposes a unified OpenAI-compatible HTTP API.
+*   **HuggingFace Hub Discovery**: Live search of HuggingFace models filtered by the active engine, with GGUF quantization picker, auto-mmproj detection, and streamed downloads.
 *   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
 *   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
 *   **MCP Server Integration**: Connect a custom FastAPI MCP server to extend the agent with remote tools — finance APIs, news feeds, domain-specific capabilities — via the Rhai script sandbox.
@@ -94,8 +98,9 @@ graph TD
     end
     
     subgraph Sidecars [Sidecar Processes]
+        EngineManager[/EngineManager\]
+        Llama[llama.cpp / MLX / vLLM / Ollama]
         OpenClaw[OpenClaw Node.js Agent]
-        Llama[Llama.cpp Inference]
         Chromium[Chromium Web Scraper]
         Whisper[Whisper STT]
         TTS[Piper TTS]
@@ -105,12 +110,13 @@ graph TD
     subgraph Storage [Persistence]
         SQLite[(SQLite DB)]
         Vectors[(USearch Index)]
-        Identity[(Identity.json Secrets)]
+        Identity[(macOS Keychain + Identity.json)]
     end
 
     UI <-->|IPC Events| Tauri
     Tauri -->|Spawns/Monitors| Sidecars
     Tauri <-->|Reads/Writes| Storage
+    EngineManager -->|Manages| Llama
     OpenClaw <-->|ACP WebSockets| UI
     Gateway <-->|Remote/Local| OpenClaw
     RigAgent -->|Tools| Sidecars
@@ -137,9 +143,9 @@ OpenClaw is highly configurable through a combination of system files and worksp
 
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`~/Library/Application Support/com.schack.scrappy/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, and API keys for Cloud Providers.
+- **`identity.json`**: (`$APP_DATA/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
 - **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
-- **`auth-profiles.json`**: Secure storage for API keys that the agent is permitted to use, including Brave Search and Custom Secrets.
+- **`auth-profiles.json`**: Filtered output containing only the API keys the user has explicitly **granted** to the agent. Written at engine startup from Keychain data; never edited directly.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
 The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
@@ -182,7 +188,9 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
     -   `tools/`: `DDGSearchTool`, `ScrapePageTool`, `ImageGenTool`, `RagTool`.
     -   `orchestrator.rs`: Multi-turn web search and synthesis pipeline.
     -   `unified_provider.rs`: Unified inference provider abstraction.
+-   `src/engine/`: Multi-engine inference system (`InferenceEngine` trait, `EngineManager`, engine implementations for llama.cpp, MLX, vLLM, Ollama).
 -   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium, Whisper, TTS, SD).
+-   `src/hf_hub.rs`: HuggingFace Hub model discovery, file parsing, and download.
 -   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral, **Gemma**, **Qwen**) used for model formatting.
 -   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
@@ -227,9 +235,11 @@ Tools are implemented in the **OpenClaw** engine:
 ## Security & Safety Philosophy
 
 1.  **Strict Local-First**: Your data and AI transcripts stay on your machine.
-2.  **Isolated Secrets**: API keys are only injected into the agent environment when explicitly allowed.
-3.  **Human Governance**: Every dangerous command triggers a UI approval request.
-4.  **Sandbox Ready**: Tool execution can be configured to run in Docker containers.
+2.  **Keychain-Secured Secrets**: API keys are stored in the **macOS Keychain** (AES-256 encrypted at rest), never in plaintext config files. `identity.json` stores only non-sensitive metadata (grant flags, enabled providers).
+3.  **Explicit Grant Enforcement**: Saving an API key does **not** automatically expose it to the agent. You must toggle "Grant Access" per key in Settings › Secrets. Only granted keys are written to `auth-profiles.json` or injected as environment variables.
+4.  **Environment Variable Gating**: Sensitive credentials (Custom LLM keys, AWS Bedrock) are only injected into the engine process when their corresponding feature is explicitly enabled.
+5.  **Human Governance**: Every dangerous command triggers a UI approval request (HITL).
+6.  **Sandbox Ready**: Tool execution can be configured to run in Docker containers.
 
 ---
 

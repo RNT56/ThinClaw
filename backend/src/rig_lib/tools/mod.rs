@@ -1,3 +1,4 @@
+pub mod calculator_tool;
 pub mod models;
 mod scrape_page;
 pub mod trusted_sources;

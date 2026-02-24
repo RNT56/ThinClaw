@@ -31,7 +31,7 @@ const binaries = [
         url: `https://github.com/leejet/stable-diffusion.cpp/releases/download/${SD_VERSION.split('-')[1]}/sd-${SD_VERSION}-bin-macos-arm64.zip`,
         // Note: SD release names can vary. Falls back to manual if URL fails.
         type: 'zip',
-        targetBin: 'sd-server',
+        targetBin: 'sd',
         patterns: ['*.dylib', '*.metal']
     }
 ];

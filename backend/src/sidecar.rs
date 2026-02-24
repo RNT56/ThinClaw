@@ -803,6 +803,7 @@ use tauri::Emitter;
 
 #[tauri::command]
 #[specta::specta]
+#[allow(unused_variables)] // params are intentionally unused in MLX/vLLM builds that return early
 pub async fn start_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
@@ -814,10 +815,32 @@ pub async fn start_chat_server(
     mlock: Option<bool>,
     quantize_kv: Option<bool>,
 ) -> Result<(), String> {
-    // 1. Start Chat Server
-    // Clone app handle for the closure
-    let app_handle_for_closure = app.clone();
+    // Guard: this command starts the llama.cpp sidecar and is only meaningful
+    // in llamacpp builds.  In MLX/vLLM builds the binary may still be on disk
+    // from a previous install, but we must NOT launch it — the user should
+    // pick a model through the engine's own selector instead.
+    #[cfg(feature = "mlx")]
+    {
+        return Err(
+            "This build uses the MLX engine. GGUF/llama.cpp models are not supported. \
+             Please select an MLX-compatible model (safetensors directory) from the model list."
+                .to_string(),
+        );
+    }
 
+    #[cfg(all(feature = "vllm", not(feature = "mlx")))]
+    {
+        return Err(
+            "This build uses the vLLM engine. GGUF/llama.cpp models are not supported. \
+             Please select a vLLM-compatible model (safetensors directory) from the model list."
+                .to_string(),
+        );
+    }
+
+    // llama.cpp path — only reached in llamacpp builds
+    // The allow is needed because cfg(mlx/vllm) returns above make this unreachable in those builds.
+    #[allow(unreachable_code)]
+    let app_handle_for_closure = app.clone();
     let (port, _) = state
         .start_chat_server(
             app.clone(),
