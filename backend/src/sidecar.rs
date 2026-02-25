@@ -1246,6 +1246,14 @@ pub async fn start_stt_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
+    // Route to MLX STT server when compiled with MLX feature
+    #[cfg(feature = "mlx")]
+    let res = state
+        .start_mlx_stt_server(app.clone(), model_path)
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+
+    #[cfg(not(feature = "mlx"))]
     let res = state
         .start_stt_server(app.clone(), model_path)
         .map(|_| ())
