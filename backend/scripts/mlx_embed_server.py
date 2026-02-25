@@ -79,16 +79,21 @@ def load_model(model_name: str):
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Generate embeddings for a list of texts."""
-    # Use batch_encode_plus to get properly padded input_ids + attention_mask.
-    # Passing attention_mask explicitly avoids the dtype mismatch error in
-    # scaled_dot_product_attention when model weights are float16.
-    inputs = _tokenizer.batch_encode_plus(
-        texts,
+    # Some tokenizers (e.g. GemmaTokenizer) are wrapped by mlx_embeddings in a
+    # TokenizerWrapper that doesn't expose batch_encode_plus.
+    # Fall back to direct __call__ which all tokenizer types support.
+    encode_kwargs = dict(
         return_tensors="mlx",
         padding=True,
         truncation=True,
         max_length=512,
     )
+
+    if hasattr(_tokenizer, "batch_encode_plus"):
+        inputs = _tokenizer.batch_encode_plus(texts, **encode_kwargs)
+    else:
+        # TokenizerWrapper / GemmaTokenizer: use __call__ directly
+        inputs = _tokenizer(texts, **encode_kwargs)
 
     input_ids = inputs["input_ids"]
     attention_mask = inputs.get("attention_mask")
@@ -97,6 +102,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         outputs = _model(input_ids, attention_mask=attention_mask)
     else:
         outputs = _model(input_ids)
+
 
     # Use mean-pooled normalized embeddings if available, else CLS token
     if hasattr(outputs, "text_embeds") and outputs.text_embeds is not None:

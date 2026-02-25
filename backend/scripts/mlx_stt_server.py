@@ -21,43 +21,55 @@ from io import BytesIO
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Monkey-patch: mlx_whisper 0.4.x passes the entire config.json dict to
-# ModelDimensions(**config), but newer models include extra keys like
-# `sample_rate` that ModelDimensions doesn't accept.  We patch load_models
-# before importing mlx_whisper so all model loads are safe.
+# Fix mlx_whisper compatibility with mlx-community 4-bit models
 # ---------------------------------------------------------------------------
+#
+# mlx_whisper 0.4.x load_models.py only looks for:
+#   - weights.safetensors
+#   - weights.npz
+# But mlx-community 4-bit models (e.g. whisper-small-4bit) name the file
+# model.safetensors.  We create a weights.safetensors symlink at startup so
+# the original mlx_whisper code finds it without any monkey-patching.
+#
+# Why not monkey-patch?  transcribe.py does:
+#   from .load_models import load_model   ← direct binding, not a module ref
+# so patching the module attribute has no effect on the already-bound name.
+#
+# Also fix ModelDimensions(**config): newer model configs may include extra
+# keys (e.g. sample_rate) not accepted by ModelDimensions.  We patch the
+# load_models module to strip them before constructing ModelDimensions.
+
 try:
+    import dataclasses as _dc
     import mlx_whisper.load_models as _lm
     import mlx_whisper.whisper as _mw
+    import mlx.core as _mx_core
+    import mlx.nn as _mx_nn
+    from mlx.utils import tree_unflatten as _tree_unflatten
+    from pathlib import Path as _LmPath
+    import json as _lm_json
 
-    _orig_load_model = _lm.load_model
-
-    def _patched_load_model(path_or_hf_repo: str, dtype=None):
-        """Drop unknown keys from config.json before passing to ModelDimensions."""
-        from pathlib import Path as _Path
-        import json as _json
-        from mlx.utils import tree_unflatten
-        import mlx.core as mx
-        import mlx.nn as nn
-
-        model_path = _Path(path_or_hf_repo)
+    def _safe_load_model(path_or_hf_repo, dtype=None):
+        """
+        Patched version of load_model that:
+        1. Strips unknown keys from config.json (e.g. sample_rate = not in ModelDimensions)
+        2. Supports model.safetensors in addition to weights.safetensors / weights.npz
+        """
+        model_path = _LmPath(path_or_hf_repo)
         if not model_path.exists():
             from huggingface_hub import snapshot_download
-            model_path = _Path(snapshot_download(repo_id=path_or_hf_repo))
+            model_path = _LmPath(snapshot_download(repo_id=str(path_or_hf_repo)))
 
-        with open(str(model_path / "config.json"), "r") as f:
-            config = _json.loads(f.read())
+        with open(str(model_path / "config.json")) as f:
+            config = _lm_json.load(f)
 
         config.pop("model_type", None)
         quantization = config.pop("quantization", None)
 
-        # --- KEY FIX: strip any keys not accepted by ModelDimensions ---
-        known_fields = {f.name for f in dataclasses.fields(_mw.ModelDimensions)}
-        unknown = {k for k in list(config.keys()) if k not in known_fields}
-        if unknown:
-            print(f"[mlx-stt] Stripping unknown ModelDimensions keys: {unknown}", flush=True)
-            for k in unknown:
-                config.pop(k)
+        known = {field.name for field in _dc.fields(_mw.ModelDimensions)}
+        for k in [k for k in list(config) if k not in known]:
+            print(f"[mlx-stt] Ignoring unknown config key: {k}", flush=True)
+            config.pop(k)
 
         model_args = _mw.ModelDimensions(**config)
 
@@ -65,32 +77,61 @@ try:
         if not wf.exists():
             wf = model_path / "weights.npz"
         if not wf.exists():
-            wf = model_path / "model.safetensors"  # mlx-community 4-bit models use this name
-        weights = mx.load(str(wf))
+            wf = model_path / "model.safetensors"
+
+        print(f"[mlx-stt] Loading weights: {wf.name}", flush=True)
+        weights = _mx_core.load(str(wf))
 
         if dtype is None:
-            dtype = mx.float16
+            dtype = _mx_core.float16
         model = _mw.Whisper(model_args, dtype)
 
         if quantization is not None:
-            class_predicate = (
-                lambda p, m: isinstance(m, (nn.Linear, nn.Embedding))
-                and f"{p}.scales" in weights
+            nn_quantize = _mx_nn.quantize
+            nn_quantize(
+                model,
+                **quantization,
+                class_predicate=lambda p, m: isinstance(m, (_mx_nn.Linear, _mx_nn.Embedding))
+                    and f"{p}.scales" in weights
             )
-            nn.quantize(model, **quantization, class_predicate=class_predicate)
 
-        from mlx.utils import tree_unflatten
-        weights = tree_unflatten(list(weights.items()))
+        weights = _tree_unflatten(list(weights.items()))
         model.update(weights)
-        mx.eval(model.parameters())
+        _mx_core.eval(model.parameters())
         return model
 
-    _lm.load_model = _patched_load_model
-    print("[mlx-stt] ModelDimensions patch applied.", flush=True)
-except Exception as _patch_err:
-    print(f"[mlx-stt] Warning: could not apply ModelDimensions patch: {_patch_err}", flush=True)
+    # Patch at the module level AND at the call site (transcribe.py binds load_model directly)
+    _lm.load_model = _safe_load_model
+    import mlx_whisper.transcribe as _tr_mod
+    # transcribe.ModelHolder.get_model uses load_model from its __globals__
+    # which IS transcribe.__dict__ — so this assignment IS seen at call time
+    _tr_mod.__dict__['load_model'] = _safe_load_model
+    print("[mlx-stt] Compatibility patches applied (ModelDimensions + model.safetensors).", flush=True)
+except Exception as _pe:
+    print(f"[mlx-stt] Warning: patch failed ({_pe}). Will attempt symlink fallback.", flush=True)
 
 import mlx_whisper
+
+
+def _prepare_model_weights(model_path: str):
+    """
+    Ensure mlx_whisper can find the model weights:
+    - If model.safetensors exists but weights.safetensors doesn't,
+      create a weights.safetensors symlink (symlink is the belt-and-suspenders
+      fallback in case the module-level patch doesn't intercept the call).
+    """
+    p = Path(model_path)
+    if not p.is_dir():
+        return
+    model_st = p / "model.safetensors"
+    weights_st = p / "weights.safetensors"
+    if model_st.exists() and not weights_st.exists():
+        try:
+            weights_st.symlink_to("model.safetensors")
+            print(f"[mlx-stt] Created symlink: weights.safetensors -> model.safetensors", flush=True)
+        except Exception as e:
+            print(f"[mlx-stt] Warning: could not create symlink: {e}", flush=True)
+
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +345,9 @@ def main():
     if err:
         print(f"[mlx-stt] ERROR: {err}", flush=True)
         sys.exit(1)
+
+    # Prepare model weights (symlink model.safetensors → weights.safetensors if needed)
+    _prepare_model_weights(_model_path)
 
     print(f"[mlx-stt] Model validated: {_model_path}", flush=True)
 
