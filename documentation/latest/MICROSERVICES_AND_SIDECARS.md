@@ -159,6 +159,7 @@ pub enum SidecarEvent {
     Started  { service: String },
     Stopped  { service: String },
     Crashed  { service: String, code: i32 },
+    Error    { service: String, message: String },
     Progress { service: String, message: String, progress: f32, total: f32 },
 }
 ```
@@ -358,12 +359,16 @@ The `gguf::read_gguf_metadata()` function reads the GGUF file header to detect t
 
 **Progress parsing:** The monitor task listens to stdout/stderr and parses `"prompt processing progress = N"` lines, forwarding them as `SidecarEvent::Progress`.
 
-### 3.2 Embedding Server Instance
+ ### 3.2 Embedding Server Instance
 
 **Default port:** `53756`  
-**Tauri command:** `start_embedding_server`
+**Tauri commands:** `start_embedding_server` (user-triggered), auto-started by `ingest_document`
 
-Additional args vs. chat server:
+The embedding server implementation depends on the active build feature:
+
+#### llamacpp builds (default)
+
+Spawns the bundled `llama-server` sidecar in embedding-only mode:
 
 | Arg | Value | Notes |
 |-----|-------|-------|
@@ -373,11 +378,31 @@ Additional args vs. chat server:
 | `--ubatch-size` | `512` | Micro-batch size |
 | `--n-gpu-layers` | `0` | CPU-only; prevents VRAM contention with chat |
 
-**Note:** Prompt caching, Flash Attention, and continuous batching are **not** enabled for the embedding server (not relevant/harmful for embedding mode).
+**Environment:** On macOS, `DYLD_LIBRARY_PATH` is set to `$RESOURCE_DIR/bin:$CWD/backend/bin` so that shared libraries like `libmtmd.0.dylib` are found at runtime.
 
-**Environment:** On macOS, `DYLD_LIBRARY_PATH` is set to `$RESOURCE_DIR/bin:$CWD/backend/bin` (same as the chat server) so that shared libraries like `libmtmd.0.dylib` are found at runtime.
+#### MLX builds (`--features mlx`)
 
-**Used by:** `rag.rs` — vector store ingestion (`POST /v1/embeddings`) and similarity retrieval. Passes text chunks; receives 768- or 1024-dimensional float vectors.
+Spawns the Python script `backend/scripts/mlx_embed_server.py` via the `mlx-env` virtualenv:
+
+```
+$APP_DATA/mlx-env/bin/python3 mlx_embed_server.py \
+  --model <model_dir> --port 53756 --host 127.0.0.1 --api-key <token>
+```
+
+The server exposes the same OpenAI-compatible `/v1/embeddings` endpoint, so `rag.rs` is engine-agnostic.
+
+#### Lifecycle — on-demand auto-start
+
+The core startup logic lives in `start_embedding_server_core()` (public free function in `sidecar.rs`), called by both the Tauri command and by `ingest_document` automatically:
+
+1. **Dimension probe:** Reads `config.json` (or `tokenizer_config.json`) from the model directory to extract `hidden_size`.
+2. **Reinit:** If the probed dimension differs from the current `VectorStoreManager` dimension (e.g. switching from a 384-dim to a 768-dim model), the vector store is purged and reinitialized at the new size. `config.json:vector_dimensions` is updated.
+3. **Spawn:** The appropriate server process is launched and `SidecarManager.embedding_process` is set.
+4. **Health-check wait:** `ingest_document` probes `GET /health` before proceeding; `start_embedding_server_core` waits for `"Server listening"` on stdout (30 s deadline).
+
+`ingest_document` performs a live HTTP health-check (`GET /health`) before attempting to embed. If the server is dead or never started, it calls `start_embedding_server_core` automatically — the frontend no longer needs to manually manage embedding server lifecycle for ingestion.
+
+**Used by:** `rag.rs` — vector store ingestion (`POST /v1/embeddings`) and similarity retrieval.
 
 ### 3.3 Summarizer Server Instance
 

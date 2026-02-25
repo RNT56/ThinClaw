@@ -641,11 +641,19 @@ Located in `rig_lib/tools/`:
    c. HTML → html2text + Chromium scraper fallback
    d. Plain text / code → direct
 4. Chunk text into fixed-size windows (chunk_size tokens, with overlap)
-5. Call embedding server (llama-server) → float32 embedding vectors
-6. Store (chunk text, embedding_id) in SQLite `document_chunks` table
-7. Store embedding vector in usearch VectorStore for the appropriate scope
-8. Persist VectorStore to disk (.usearch file)
+5. Ensure embedding server is live:
+   a. Probe SidecarManager for existing config (port + token)
+   b. If found, HTTP health-check GET /health with 2 s timeout
+   c. If dead or absent → call start_embedding_server_core() with
+      the embedding_model_path passed from the frontend
+      (probes dimension, reinits vector store if needed, spawns server)
+6. POST text chunks to embedding server → float32 embedding vectors
+7. Store (chunk text, embedding_id) in SQLite document_chunks table
+8. Store embedding vector in usearch VectorStore for the appropriate scope
+9. Persist VectorStore to disk (.usearch file)
 ```
+
+`ingest_document` accepts an `embedding_model_path: Option<String>` parameter from the frontend. The frontend no longer manages embedding server lifecycle; it simply passes the configured model path and lets the backend handle the rest.
 
 Deduplication is hash-based — re-ingesting the same file skips all processing.
 
@@ -659,7 +667,8 @@ Deduplication is hash-based — re-ingesting the same file skips all processing.
 `vector_store.rs: VectorStoreManager` manages multiple `VectorStore` instances (one per scope), each wrapping a `usearch::Index`:
 - **Metric**: Cosine similarity
 - **Scalar kind**: F32
-- **Default dimensions**: 768 (configurable via `UserConfig.vector_dims`)
+- **Dimensions**: Runtime-configurable via `Arc<Mutex<usize>>`; initialized from `UserConfig.vector_dimensions` (default 768). `start_embedding_server_core` probes the actual model's `hidden_size` and calls `VectorStoreManager::reinit()` when the dimension changes.
+- **`reinit(new_dim)`**: Purges all existing indices (calls `purge_by_dimension` to remove vectors with mismatched dims), creates fresh usearch indices at the new dimension, and updates the persisted config.
 - **Persistence**: `$APP_DATA/vectors/<scope>.usearch`
 
 `search_scoped()` searches across multiple scopes and merges results.
