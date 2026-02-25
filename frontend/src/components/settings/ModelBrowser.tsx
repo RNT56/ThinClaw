@@ -113,8 +113,10 @@ export function ModelBrowser() {
     );
 
     const unifiedModels = useMemo(() => {
-        // Only include curated GGUF models for llama.cpp/ollama engines
-        const merged = isLlamaCpp ? [...models] : [];
+        // Curated GGUF models only for llama.cpp/ollama; cloud models always shown
+        const merged = isLlamaCpp
+            ? [...models]
+            : models.filter(m => m.category === 'Cloud');
 
         // Helper to get basename
         const getBasename = (path: string) => path.split(/[\\/]/).pop() || path;
