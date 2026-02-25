@@ -603,7 +603,8 @@ impl Orchestrator {
         tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
 
         // Calculator — always available (no permissions gate needed)
-        tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, sin, cos, tan, min, max), constants (pi, e). Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");
+        tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision and show work step-by-step. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, asin, acos, atan, min, max, pow, exp), constants (pi, e, tau). Supports inline variables: 'x = 3; y = 5; 2*x^2 + y'. Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");
+        tools_desc.push_str("- calculator_with_vars(expression, vars_json): Same as calculator but accepts named variables as JSON, e.g. calculator_with_vars(\"2*x + 1\", `{\"x\": 5}`) → 11.\n");
 
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 

@@ -126,11 +126,16 @@ pub fn get_host_tools_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "calculator".into(),
-            description: "Evaluate mathematical expressions with high precision. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, sin, cos, tan, min, max), and constants (pi, e). Use for any calculation — currency conversions, percentages, unit conversions, etc.".into(),
+            description: "Evaluate mathematical expressions with high precision and show work. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, asin, acos, atan, min, max, pow, exp), constants (pi, e, tau), and named variables. Returns step-by-step trace. Use inline variables with semicolons: 'x = 3; 2*x^2 + 5*x - 7'.".into(),
             input_schema: Some(json!({
                 "type": "object",
                 "properties": {
-                    "expression": { "type": "string", "description": "Math expression to evaluate, e.g. '(100 * 1.35) + 20'" }
+                    "expression": { "type": "string", "description": "Math expression to evaluate. Supports inline variables: 'x = 3; 2*x + 1'" },
+                    "variables": {
+                        "type": "object",
+                        "description": "Optional named variables, e.g. {\"x\": 3, \"rate\": 0.05}",
+                        "additionalProperties": { "type": "number" }
+                    }
                 },
                 "required": ["expression"]
             })),

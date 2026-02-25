@@ -2,6 +2,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use thiserror::Error;
 
 // =============================================================================
@@ -21,6 +22,24 @@ pub enum CalcError {
 #[derive(Deserialize)]
 pub struct CalcArgs {
     pub expression: String,
+    /// Optional named variables, e.g. {"x": 3, "rate": 0.05}
+    #[serde(default)]
+    pub variables: Option<HashMap<String, f64>>,
+}
+
+// =============================================================================
+// Evaluation output with trace
+// =============================================================================
+
+/// Full result of evaluating a math expression.
+#[derive(Debug, Clone)]
+pub struct EvalOutput {
+    /// The numeric result.
+    pub result: f64,
+    /// Human-readable formatted result (e.g. "42" not "42.0").
+    pub formatted: String,
+    /// Step-by-step trace of operations performed, in order.
+    pub trace: Vec<String>,
 }
 
 // =============================================================================
@@ -39,11 +58,15 @@ impl Tool for CalculatorTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "calculator".to_string(),
-            description: "Evaluate mathematical expressions with high precision. \
+            description: "Evaluate mathematical expressions with high precision and show work. \
                 Supports basic arithmetic (+, -, *, /, ^, %), parentheses, \
-                functions (sqrt, abs, round, ceil, floor, log, ln, sin, cos, tan, min, max), \
-                and constants (pi, e). Use this for ANY calculation — currency conversions, \
-                percentages, unit conversions, tip calculations, etc. \
+                functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, \
+                asin, acos, atan, min, max, pow, exp), constants (pi, e, tau), and \
+                named variables. Returns a step-by-step trace of all operations. \
+                Variables can be passed via the 'variables' parameter or defined inline \
+                with semicolons: 'x = 3; y = 5; 2*x^2 + y'. \
+                Use this for ANY calculation — currency conversions, percentages, \
+                unit conversions, tip calculations, compound interest, etc. \
                 Example: '(1299.99 * 0.85) + (1299.99 * 0.85 * 0.19)' for discount + tax."
                 .to_string(),
             parameters: json!({
@@ -51,7 +74,12 @@ impl Tool for CalculatorTool {
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "The math expression to evaluate, e.g. '(100 * 1.35) + 20'"
+                        "description": "The math expression to evaluate. Supports inline variable assignments separated by ';', e.g. 'x = 3; 2*x^2 + 5*x - 7'"
+                    },
+                    "variables": {
+                        "type": "object",
+                        "description": "Optional named variables as key-value pairs, e.g. {\"x\": 3, \"rate\": 0.05}",
+                        "additionalProperties": { "type": "number" }
                     }
                 },
                 "required": ["expression"]
@@ -60,12 +88,9 @@ impl Tool for CalculatorTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        match evaluate(&args.expression) {
-            Ok(result) => {
-                // Format nicely: strip trailing zeros for clean display
-                let formatted = format_number(result);
-                Ok(format!("Result: {}", formatted))
-            }
+        let vars = args.variables.unwrap_or_default();
+        match evaluate_with_vars(&args.expression, vars) {
+            Ok(output) => Ok(format_eval_output(&output)),
             Err(e) => Err(CalcError::Eval(e)),
         }
     }
@@ -76,9 +101,105 @@ impl Tool for CalculatorTool {
 // =============================================================================
 
 /// Evaluate a mathematical expression string and return the numeric result.
+/// This is the simple backward-compatible interface — no variables, no trace.
 pub fn evaluate(expr: &str) -> Result<f64, String> {
-    let tokens = tokenize(expr)?;
-    let mut parser = Parser::new(tokens);
+    let output = evaluate_full(expr, HashMap::new())?;
+    Ok(output.result)
+}
+
+/// Evaluate with named variables and return full output including step-by-step trace.
+pub fn evaluate_with_vars(
+    expr: &str,
+    variables: HashMap<String, f64>,
+) -> Result<EvalOutput, String> {
+    evaluate_full(expr, variables)
+}
+
+/// Format an EvalOutput into a human-readable string with trace.
+pub fn format_eval_output(output: &EvalOutput) -> String {
+    let mut result = String::new();
+    if !output.trace.is_empty() {
+        for (i, step) in output.trace.iter().enumerate() {
+            result.push_str(&format!("Step {}: {}\n", i + 1, step));
+        }
+    }
+    result.push_str(&format!("Result: {}", output.formatted));
+    result
+}
+
+/// Internal full evaluator supporting variables, inline assignments, and trace.
+fn evaluate_full(expr: &str, mut variables: HashMap<String, f64>) -> Result<EvalOutput, String> {
+    // Support inline variable assignments separated by ';'
+    // e.g. "x = 3; y = 5; 2*x + y"
+    let segments: Vec<&str> = expr.split(';').collect();
+    let mut all_trace = Vec::new();
+
+    if segments.len() > 1 {
+        // Process all but the last segment as variable assignments
+        for segment in &segments[..segments.len() - 1] {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            // Parse "name = expression"
+            if let Some(eq_pos) = segment.find('=') {
+                let var_name = segment[..eq_pos].trim().to_lowercase();
+                let var_expr = segment[eq_pos + 1..].trim();
+
+                // Validate variable name
+                if var_name.is_empty()
+                    || !var_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Err(format!("Invalid variable name: '{}'", var_name));
+                }
+                if var_name.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+                    return Err(format!(
+                        "Variable name cannot start with a digit: '{}'",
+                        var_name
+                    ));
+                }
+                // Prevent shadowing built-in constants
+                if matches!(var_name.as_str(), "pi" | "e" | "tau" | "inf" | "infinity") {
+                    return Err(format!(
+                        "Cannot use reserved constant name as variable: '{}'",
+                        var_name
+                    ));
+                }
+
+                // Evaluate the right-hand side with current variables
+                let tokens = tokenize(var_expr)?;
+                let mut parser = Parser::new(tokens, variables.clone());
+                let value = parser.parse_expr()?;
+                if parser.pos < parser.tokens.len() {
+                    return Err(format!(
+                        "Unexpected token in assignment for '{}': {:?}",
+                        var_name, parser.tokens[parser.pos]
+                    ));
+                }
+
+                // Collect inner trace first, then the assignment itself
+                all_trace.extend(parser.trace);
+                all_trace.push(format!("let {} = {}", var_name, format_number(value)));
+                variables.insert(var_name, value);
+            } else {
+                return Err(format!(
+                    "Expected variable assignment (name = value), got: '{}'",
+                    segment
+                ));
+            }
+        }
+    }
+
+    // Evaluate the final (or only) expression
+    let final_expr = segments.last().unwrap_or(&"").trim();
+    if final_expr.is_empty() {
+        return Err("Empty expression".to_string());
+    }
+
+    let tokens = tokenize(final_expr)?;
+    let mut parser = Parser::new(tokens, variables);
     let result = parser.parse_expr()?;
     if parser.pos < parser.tokens.len() {
         return Err(format!(
@@ -92,7 +213,14 @@ pub fn evaluate(expr: &str) -> Result<f64, String> {
     if result.is_infinite() {
         return Err("Result is infinite (division by zero or overflow)".to_string());
     }
-    Ok(result)
+
+    all_trace.extend(parser.trace);
+
+    Ok(EvalOutput {
+        result,
+        formatted: format_number(result),
+        trace: all_trace,
+    })
 }
 
 // =============================================================================
@@ -218,17 +346,24 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 }
 
 // =============================================================================
-// Recursive-descent parser
+// Recursive-descent parser with variable context and trace
 // =============================================================================
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    variables: HashMap<String, f64>,
+    trace: Vec<String>,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+    fn new(tokens: Vec<Token>, variables: HashMap<String, f64>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            variables,
+            trace: Vec::new(),
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -266,11 +401,27 @@ impl Parser {
             match tok {
                 Token::Plus => {
                     self.advance();
-                    left += self.parse_term()?;
+                    let right = self.parse_term()?;
+                    let result = left + right;
+                    self.trace.push(format!(
+                        "{} + {} = {}",
+                        format_number(left),
+                        format_number(right),
+                        format_number(result)
+                    ));
+                    left = result;
                 }
                 Token::Minus => {
                     self.advance();
-                    left -= self.parse_term()?;
+                    let right = self.parse_term()?;
+                    let result = left - right;
+                    self.trace.push(format!(
+                        "{} − {} = {}",
+                        format_number(left),
+                        format_number(right),
+                        format_number(result)
+                    ));
+                    left = result;
                 }
                 _ => break,
             }
@@ -284,7 +435,15 @@ impl Parser {
             match tok {
                 Token::Star => {
                     self.advance();
-                    left *= self.parse_power()?;
+                    let right = self.parse_power()?;
+                    let result = left * right;
+                    self.trace.push(format!(
+                        "{} × {} = {}",
+                        format_number(left),
+                        format_number(right),
+                        format_number(result)
+                    ));
+                    left = result;
                 }
                 Token::Slash => {
                     self.advance();
@@ -292,7 +451,14 @@ impl Parser {
                     if right == 0.0 {
                         return Err("Division by zero".to_string());
                     }
-                    left /= right;
+                    let result = left / right;
+                    self.trace.push(format!(
+                        "{} ÷ {} = {}",
+                        format_number(left),
+                        format_number(right),
+                        format_number(result)
+                    ));
+                    left = result;
                 }
                 Token::Percent => {
                     self.advance();
@@ -300,7 +466,14 @@ impl Parser {
                     if right == 0.0 {
                         return Err("Modulo by zero".to_string());
                     }
-                    left %= right;
+                    let result = left % right;
+                    self.trace.push(format!(
+                        "{} mod {} = {}",
+                        format_number(left),
+                        format_number(right),
+                        format_number(result)
+                    ));
+                    left = result;
                 }
                 _ => break,
             }
@@ -313,7 +486,14 @@ impl Parser {
         if let Some(Token::Caret) = self.peek() {
             self.advance();
             let exp = self.parse_power()?; // right-associative recursion
-            Ok(base.powf(exp))
+            let result = base.powf(exp);
+            self.trace.push(format!(
+                "{} ^ {} = {}",
+                format_number(base),
+                format_number(exp),
+                format_number(result)
+            ));
+            Ok(result)
         } else {
             Ok(base)
         }
@@ -343,10 +523,23 @@ impl Parser {
                     self.advance(); // consume '('
                     let args = self.parse_args()?;
                     self.expect(&Token::RParen)?;
-                    eval_function(&name, &args)
+                    let result = eval_function(&name, &args)?;
+                    // Build trace for function call
+                    let args_str: Vec<String> = args.iter().map(|a| format_number(*a)).collect();
+                    self.trace.push(format!(
+                        "{}({}) = {}",
+                        name,
+                        args_str.join(", "),
+                        format_number(result)
+                    ));
+                    Ok(result)
                 } else {
-                    // It's a constant
-                    eval_constant(&name)
+                    // Check variables first, then constants
+                    if let Some(&value) = self.variables.get(&name) {
+                        Ok(value)
+                    } else {
+                        eval_constant(&name)
+                    }
                 }
             }
 
@@ -796,5 +989,231 @@ mod tests {
     #[test]
     fn format_trailing_zeros() {
         assert_eq!(format_number(2.50), "2.5");
+    }
+
+    // =========================================================================
+    // NEW: Variable support tests
+    // =========================================================================
+
+    fn eval_vars(expr: &str, vars: Vec<(&str, f64)>) -> f64 {
+        let variables: HashMap<String, f64> =
+            vars.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        evaluate_with_vars(expr, variables)
+            .unwrap_or_else(|e| panic!("Failed to evaluate '{}': {}", expr, e))
+            .result
+    }
+
+    #[test]
+    fn variable_simple() {
+        assert_eq!(eval_vars("x + 1", vec![("x", 5.0)]), 6.0);
+    }
+
+    #[test]
+    fn variable_quadratic() {
+        // 2x² + 5x - 7 with x=3 → 2*9 + 15 - 7 = 26
+        assert_eq!(eval_vars("2*x^2 + 5*x - 7", vec![("x", 3.0)]), 26.0);
+    }
+
+    #[test]
+    fn variable_multiple() {
+        // a*x + b with a=2, x=5, b=3 → 13
+        assert_eq!(
+            eval_vars("a*x + b", vec![("a", 2.0), ("x", 5.0), ("b", 3.0)]),
+            13.0
+        );
+    }
+
+    #[test]
+    fn variable_in_function() {
+        assert_eq!(eval_vars("sqrt(x)", vec![("x", 144.0)]), 12.0);
+    }
+
+    #[test]
+    fn variable_with_constant() {
+        // r * pi with r=5 → 5π ≈ 15.707963
+        let result = eval_vars("r * pi", vec![("r", 5.0)]);
+        assert!((result - 5.0 * std::f64::consts::PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn variable_compound_interest() {
+        // P * (1 + r/n)^(n*t) with P=1000, r=0.05, n=12, t=10
+        let result = eval_vars(
+            "p * (1 + r/n) ^ (n*t)",
+            vec![("p", 1000.0), ("r", 0.05), ("n", 12.0), ("t", 10.0)],
+        );
+        let expected = 1000.0 * (1.0 + 0.05 / 12.0_f64).powf(120.0);
+        assert!((result - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn variable_unknown_still_errors() {
+        let vars: HashMap<String, f64> = HashMap::new();
+        let err = evaluate_with_vars("x + 1", vars).unwrap_err();
+        assert!(err.contains("Unknown identifier"), "got: {}", err);
+    }
+
+    // =========================================================================
+    // NEW: Inline variable assignment tests
+    // =========================================================================
+
+    #[test]
+    fn inline_single_var() {
+        assert_eq!(eval("x = 5; x + 1"), 6.0);
+    }
+
+    #[test]
+    fn inline_multiple_vars() {
+        assert_eq!(eval("x = 3; y = 5; x + y"), 8.0);
+    }
+
+    #[test]
+    fn inline_var_references_previous() {
+        // x = 3; y = x + 2 (= 5); x * y = 15
+        assert_eq!(eval("x = 3; y = x + 2; x * y"), 15.0);
+    }
+
+    #[test]
+    fn inline_quadratic() {
+        // x = 3; 2*x^2 + 5*x - 7 = 26
+        assert_eq!(eval("x = 3; 2*x^2 + 5*x - 7"), 26.0);
+    }
+
+    #[test]
+    fn inline_with_functions() {
+        // r = 5; area = pi * r^2
+        let result = eval("r = 5; pi * r^2");
+        let expected = std::f64::consts::PI * 25.0;
+        assert!((result - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn inline_empty_segments_skipped() {
+        // Extra semicolons should be handled gracefully
+        assert_eq!(eval("x = 5; ; x + 1"), 6.0);
+    }
+
+    #[test]
+    fn inline_invalid_var_name_digit() {
+        let err = evaluate("3x = 5; 3x + 1").unwrap_err();
+        assert!(
+            err.contains("digit") || err.contains("Invalid"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn inline_cannot_shadow_constant() {
+        let err = evaluate("pi = 5; pi + 1").unwrap_err();
+        assert!(
+            err.contains("reserved") || err.contains("constant"),
+            "got: {}",
+            err
+        );
+    }
+
+    // =========================================================================
+    // NEW: Trace output tests
+    // =========================================================================
+
+    fn get_trace(expr: &str) -> Vec<String> {
+        evaluate_full(expr, HashMap::new()).unwrap().trace
+    }
+
+    fn get_trace_with_vars(expr: &str, vars: Vec<(&str, f64)>) -> Vec<String> {
+        let variables: HashMap<String, f64> =
+            vars.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        evaluate_full(expr, variables).unwrap().trace
+    }
+
+    #[test]
+    fn trace_simple_addition() {
+        let trace = get_trace("2 + 3");
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0], "2 + 3 = 5");
+    }
+
+    #[test]
+    fn trace_compound_expression() {
+        let trace = get_trace("(2 + 3) * 4");
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0], "2 + 3 = 5");
+        assert_eq!(trace[1], "5 × 4 = 20");
+    }
+
+    #[test]
+    fn trace_function_call() {
+        let trace = get_trace("sqrt(144)");
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0], "sqrt(144) = 12");
+    }
+
+    #[test]
+    fn trace_power() {
+        let trace = get_trace("2 ^ 10");
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0], "2 ^ 10 = 1024");
+    }
+
+    #[test]
+    fn trace_no_steps_for_literal() {
+        // A single number has nothing to trace
+        let trace = get_trace("42");
+        assert!(trace.is_empty());
+    }
+
+    #[test]
+    fn trace_inline_variables() {
+        let trace = get_trace("x = 3; y = 5; x + y");
+        // Should have: "let x = 3", "let y = 5", "3 + 5 = 8"
+        assert!(trace.len() >= 2);
+        assert!(trace.contains(&"let x = 3".to_string()));
+        assert!(trace.contains(&"let y = 5".to_string()));
+        assert!(trace.contains(&"3 + 5 = 8".to_string()));
+    }
+
+    #[test]
+    fn trace_variables_from_params() {
+        let trace = get_trace_with_vars("2*x + 1", vec![("x", 5.0)]);
+        // Should trace: "2 × 5 = 10", "10 + 1 = 11"
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0], "2 × 5 = 10");
+        assert_eq!(trace[1], "10 + 1 = 11");
+    }
+
+    #[test]
+    fn trace_quadratic_with_vars() {
+        // 2*x^2 + 5*x - 7 with x=3
+        // Steps: 3^2=9, 2×9=18, 5×3=15, 18+15=33, 33−7=26
+        let trace = get_trace_with_vars("2*x^2 + 5*x - 7", vec![("x", 3.0)]);
+        assert_eq!(trace.len(), 5);
+        assert_eq!(trace[0], "3 ^ 2 = 9");
+        assert_eq!(trace[1], "2 × 9 = 18");
+        assert_eq!(trace[2], "5 × 3 = 15");
+        assert_eq!(trace[3], "18 + 15 = 33");
+        assert_eq!(trace[4], "33 − 7 = 26");
+    }
+
+    #[test]
+    fn trace_discount_plus_tax() {
+        let trace = get_trace("(100 * 0.85) + (100 * 0.85 * 0.19)");
+        // 100×0.85=85, 100×0.85=85, 85×0.19=16.15, 85+16.15=101.15
+        assert_eq!(trace.len(), 4);
+    }
+
+    #[test]
+    fn format_eval_output_simple() {
+        let output = evaluate_full("2 + 3", HashMap::new()).unwrap();
+        let formatted = format_eval_output(&output);
+        assert!(formatted.contains("Step 1:"));
+        assert!(formatted.contains("Result: 5"));
+    }
+
+    #[test]
+    fn format_eval_output_no_trace() {
+        let output = evaluate_full("42", HashMap::new()).unwrap();
+        let formatted = format_eval_output(&output);
+        assert_eq!(formatted, "Result: 42");
     }
 }

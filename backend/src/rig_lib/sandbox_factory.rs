@@ -184,24 +184,35 @@ where
         });
 
     // -- Register host tool: calculator (pure computation, no async needed) --
+    // Returns full trace + result for transparency
     sandbox
         .engine_mut()
         .register_fn("calculator", |expr: String| -> rhai::Dynamic {
-            match crate::rig_lib::tools::calculator_tool::evaluate(&expr) {
-                Ok(result) => {
-                    let formatted = if result == result.floor() && result.abs() < 1e15 {
-                        format!("{}", result as i64)
-                    } else {
-                        let s = format!("{:.10}", result);
-                        let s = s.trim_end_matches('0');
-                        let s = s.trim_end_matches('.');
-                        s.to_string()
-                    };
-                    rhai::Dynamic::from(formatted)
-                }
+            match crate::rig_lib::tools::calculator_tool::evaluate_with_vars(
+                &expr,
+                std::collections::HashMap::new(),
+            ) {
+                Ok(output) => rhai::Dynamic::from(
+                    crate::rig_lib::tools::calculator_tool::format_eval_output(&output),
+                ),
                 Err(e) => rhai::Dynamic::from(format!("Calculator Error: {}", e)),
             }
         });
+
+    // -- calculator_with_vars(expression, vars_json) for variable support --
+    sandbox.engine_mut().register_fn(
+        "calculator_with_vars",
+        |expr: String, vars_json: String| -> rhai::Dynamic {
+            let vars: std::collections::HashMap<String, f64> =
+                serde_json::from_str(&vars_json).unwrap_or_default();
+            match crate::rig_lib::tools::calculator_tool::evaluate_with_vars(&expr, vars) {
+                Ok(output) => rhai::Dynamic::from(
+                    crate::rig_lib::tools::calculator_tool::format_eval_output(&output),
+                ),
+                Err(e) => rhai::Dynamic::from(format!("Calculator Error: {}", e)),
+            }
+        },
+    );
 
     // -- search_tools(query) → progressive discovery --
     let mcp_client_for_discovery = if let Some(base_url) = &mcp_config.mcp_base_url {
