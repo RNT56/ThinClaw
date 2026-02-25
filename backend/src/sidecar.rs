@@ -515,10 +515,8 @@ impl SidecarManager {
         Ok((port, token))
     }
 
-    /// Start the MLX-native embedding server using `mlx-embeddings` Python package.
-    /// This replaces `llama-server --embedding` when the MLX engine is active.
     #[cfg(feature = "mlx")]
-    pub fn start_mlx_embedding_server(
+    pub async fn start_mlx_embedding_server(
         &self,
         app: AppHandle,
         model_path: String,
@@ -526,15 +524,16 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("embedding");
 
-        let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(proc) = process_guard.take() {
-            let _ = proc.kill();
-        }
+        // Kill existing process, then DROP the lock before any await point.
+        {
+            let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(proc) = process_guard.take() {
+                let _ = proc.kill();
+            }
+        } // lock released here
 
         let (port, token) = Self::generate_config(Some(53756));
 
-        // Resolve the MLX venv Python path directly from app_data_dir
-        // (MlxEngine always creates the venv at {app_data_dir}/mlx-env/)
         let python_path = app.path().app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
             .join("mlx-env")
@@ -545,7 +544,6 @@ impl SidecarManager {
             return Err(anyhow!("MLX venv not bootstrapped — Python not found at {:?}", python_path));
         }
 
-        // Locate the embedding server script
         let script_path = Self::resolve_mlx_script(&app, "mlx_embed_server.py")?;
 
         let mut args = vec![
@@ -557,7 +555,6 @@ impl SidecarManager {
             "--host".to_string(),
             "127.0.0.1".to_string(),
         ];
-
         if !token.is_empty() {
             args.push("--api-key".to_string());
             args.push(token.clone());
@@ -565,8 +562,7 @@ impl SidecarManager {
 
         println!("[sidecar-embed-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
 
-        let command = app
-            .shell()
+        let command = app.shell()
             .command(python_path.to_string_lossy().as_ref())
             .args(&args);
 
@@ -577,27 +573,60 @@ impl SidecarManager {
         let pid = child.pid();
         tracker.add_pid(pid, "mlx-embed-server", "embedding");
 
+        // --- Async startup wait (no lock held) ---
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut startup_error: Option<String> = None;
+        let mut ready = false;
+
+        while !ready && tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(CommandEvent::Stdout(line))) => {
+                    let msg = String::from_utf8_lossy(&line);
+                    println!("[mlx-embed] {}", msg);
+                    if msg.contains("ERROR:") { startup_error = Some(msg.trim().to_string()); break; }
+                    if msg.contains("listening") || msg.contains("Model loaded") { ready = true; }
+                }
+                Ok(Some(CommandEvent::Stderr(line))) => {
+                    let msg = String::from_utf8_lossy(&line);
+                    eprintln!("[mlx-embed] {}", msg);
+                    if msg.contains("ERROR:") || msg.contains("Error:") {
+                        startup_error = Some(msg.trim().to_string());
+                    }
+                }
+                Ok(Some(CommandEvent::Terminated(status))) => {
+                    let code = status.code.unwrap_or(-1);
+                    if code != 0 {
+                        let msg = startup_error.take()
+                            .unwrap_or_else(|| format!("Embedding server exited with code {}", code));
+                        return Err(anyhow!("{}", msg));
+                    }
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => { ready = true; break; }
+            }
+        }
+
+        if let Some(err) = startup_error {
+            return Err(anyhow!("{}", err));
+        }
+
+        // Background monitor
         let monitor_app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(line) => {
-                        let msg = String::from_utf8_lossy(&line);
-                        eprintln!("[mlx-embed] {}", msg);
-                    }
-                    CommandEvent::Stdout(line) => {
-                        let msg = String::from_utf8_lossy(&line);
-                        println!("[mlx-embed] {}", msg);
-                    }
+                    CommandEvent::Stderr(l) => eprintln!("[mlx-embed] {}", String::from_utf8_lossy(&l)),
+                    CommandEvent::Stdout(l) => println!("[mlx-embed] {}", String::from_utf8_lossy(&l)),
                     _ => {}
                 }
             }
-            monitor_app
-                .state::<crate::process_tracker::ProcessTracker>()
-                .remove_pid(pid);
+            monitor_app.state::<crate::process_tracker::ProcessTracker>().remove_pid(pid);
         });
 
-        *process_guard = Some(SidecarProcess {
+        // Re-acquire lock to store process
+        *self.embedding_process.lock().unwrap_or_else(|e| e.into_inner()) = Some(SidecarProcess {
             child: Some(child),
             port,
             token: token.clone(),
@@ -608,10 +637,8 @@ impl SidecarManager {
         Ok((port, token))
     }
 
-    /// Start the MLX-native STT server using `mlx-whisper` Python package.
-    /// This replaces `whisper-server` / whisper.cpp when the MLX engine is active.
     #[cfg(feature = "mlx")]
-    pub fn start_mlx_stt_server(
+    pub async fn start_mlx_stt_server(
         &self,
         app: AppHandle,
         model_path: String,
@@ -619,14 +646,16 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("stt");
 
-        let mut process_guard = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(proc) = process_guard.take() {
-            let _ = proc.kill();
+        // Kill existing, drop lock before await
+        {
+            let mut process_guard = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(proc) = process_guard.take() {
+                let _ = proc.kill();
+            }
         }
 
         let (port, token) = Self::generate_config(Some(53757));
 
-        // Resolve the MLX venv Python path directly from app_data_dir
         let python_path = app.path().app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
             .join("mlx-env")
@@ -648,7 +677,6 @@ impl SidecarManager {
             "--host".to_string(),
             "127.0.0.1".to_string(),
         ];
-
         if !token.is_empty() {
             args.push("--api-key".to_string());
             args.push(token.clone());
@@ -656,8 +684,7 @@ impl SidecarManager {
 
         println!("[sidecar-stt-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
 
-        let command = app
-            .shell()
+        let command = app.shell()
             .command(python_path.to_string_lossy().as_ref())
             .args(&args);
 
@@ -668,35 +695,66 @@ impl SidecarManager {
         let pid = child.pid();
         tracker.add_pid(pid, "mlx-stt-server", "stt");
 
+        // Async startup wait (no lock held)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut startup_error: Option<String> = None;
+        let mut ready = false;
+
+        while !ready && tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(CommandEvent::Stdout(line))) => {
+                    let msg = String::from_utf8_lossy(&line);
+                    println!("[mlx-stt] {}", msg);
+                    if msg.contains("ERROR:") { startup_error = Some(msg.trim().to_string()); break; }
+                    if msg.contains("listening") { ready = true; }
+                }
+                Ok(Some(CommandEvent::Stderr(line))) => {
+                    let msg = String::from_utf8_lossy(&line);
+                    eprintln!("[mlx-stt] {}", msg);
+                    if msg.contains("ERROR:") || msg.contains("Error:") {
+                        startup_error = Some(msg.trim().to_string());
+                    }
+                }
+                Ok(Some(CommandEvent::Terminated(status))) => {
+                    let code = status.code.unwrap_or(-1);
+                    if code != 0 {
+                        let msg = startup_error.take()
+                            .unwrap_or_else(|| format!("STT server exited with code {}", code));
+                        return Err(anyhow!("{}", msg));
+                    }
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => { ready = true; break; }
+            }
+        }
+
+        if let Some(err) = startup_error {
+            return Err(anyhow!("{}", err));
+        }
+
+        // Background monitor
         let monitor_app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(line) => {
-                        let msg = String::from_utf8_lossy(&line);
-                        eprintln!("[mlx-stt] {}", msg);
-                    }
-                    CommandEvent::Stdout(line) => {
-                        let msg = String::from_utf8_lossy(&line);
-                        println!("[mlx-stt] {}", msg);
-                    }
+                    CommandEvent::Stderr(l) => eprintln!("[mlx-stt] {}", String::from_utf8_lossy(&l)),
+                    CommandEvent::Stdout(l) => println!("[mlx-stt] {}", String::from_utf8_lossy(&l)),
                     _ => {}
                 }
             }
-            monitor_app
-                .state::<crate::process_tracker::ProcessTracker>()
-                .remove_pid(pid);
+            monitor_app.state::<crate::process_tracker::ProcessTracker>().remove_pid(pid);
         });
 
-        *process_guard = Some(SidecarProcess {
+        // Re-acquire lock to store process
+        *self.stt_process.lock().unwrap_or_else(|e| e.into_inner()) = Some(SidecarProcess {
             child: Some(child),
             port,
             token: token.clone(),
             context_size: 0,
             model_family: "mlx-whisper".into(),
         });
-
-        // Store the STT model path
         *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path);
 
         Ok((port, token))
@@ -1191,6 +1249,7 @@ pub async fn start_embedding_server(
     #[cfg(feature = "mlx")]
     let res = state
         .start_mlx_embedding_server(app.clone(), model_path)
+        .await
         .map(|_| ())
         .map_err(|e| e.to_string());
 
@@ -1250,6 +1309,7 @@ pub async fn start_stt_server(
     #[cfg(feature = "mlx")]
     let res = state
         .start_mlx_stt_server(app.clone(), model_path)
+        .await
         .map(|_| ())
         .map_err(|e| e.to_string());
 

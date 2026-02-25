@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -17,8 +18,143 @@ import tempfile
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Monkey-patch: mlx_whisper 0.4.x passes the entire config.json dict to
+# ModelDimensions(**config), but newer models include extra keys like
+# `sample_rate` that ModelDimensions doesn't accept.  We patch load_models
+# before importing mlx_whisper so all model loads are safe.
+# ---------------------------------------------------------------------------
+try:
+    import mlx_whisper.load_models as _lm
+    import mlx_whisper.whisper as _mw
+
+    _orig_load_model = _lm.load_model
+
+    def _patched_load_model(path_or_hf_repo: str, dtype=None):
+        """Drop unknown keys from config.json before passing to ModelDimensions."""
+        from pathlib import Path as _Path
+        import json as _json
+        from mlx.utils import tree_unflatten
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        model_path = _Path(path_or_hf_repo)
+        if not model_path.exists():
+            from huggingface_hub import snapshot_download
+            model_path = _Path(snapshot_download(repo_id=path_or_hf_repo))
+
+        with open(str(model_path / "config.json"), "r") as f:
+            config = _json.loads(f.read())
+
+        config.pop("model_type", None)
+        quantization = config.pop("quantization", None)
+
+        # --- KEY FIX: strip any keys not accepted by ModelDimensions ---
+        known_fields = {f.name for f in dataclasses.fields(_mw.ModelDimensions)}
+        unknown = {k for k in list(config.keys()) if k not in known_fields}
+        if unknown:
+            print(f"[mlx-stt] Stripping unknown ModelDimensions keys: {unknown}", flush=True)
+            for k in unknown:
+                config.pop(k)
+
+        model_args = _mw.ModelDimensions(**config)
+
+        wf = model_path / "weights.safetensors"
+        if not wf.exists():
+            wf = model_path / "weights.npz"
+        weights = mx.load(str(wf))
+
+        if dtype is None:
+            dtype = mx.float16
+        model = _mw.Whisper(model_args, dtype)
+
+        if quantization is not None:
+            class_predicate = (
+                lambda p, m: isinstance(m, (nn.Linear, nn.Embedding))
+                and f"{p}.scales" in weights
+            )
+            nn.quantize(model, **quantization, class_predicate=class_predicate)
+
+        from mlx.utils import tree_unflatten
+        weights = tree_unflatten(list(weights.items()))
+        model.update(weights)
+        mx.eval(model.parameters())
+        return model
+
+    _lm.load_model = _patched_load_model
+    print("[mlx-stt] ModelDimensions patch applied.", flush=True)
+except Exception as _patch_err:
+    print(f"[mlx-stt] Warning: could not apply ModelDimensions patch: {_patch_err}", flush=True)
 
 import mlx_whisper
+
+
+# ---------------------------------------------------------------------------
+# Model validation
+# ---------------------------------------------------------------------------
+def validate_whisper_model(model_path: str) -> str:
+    """
+    Validate that model_path points to a Whisper-architecture MLX model.
+    Returns an error string if invalid, or empty string if OK.
+    """
+    p = Path(model_path)
+
+    # Check for HuggingFace-format directory
+    if p.is_dir():
+        config_file = p / "config.json"
+        if not config_file.exists():
+            return (
+                f"No config.json found in {model_path}. "
+                "This does not appear to be a valid MLX model directory. "
+                "Please download a Whisper model via the Discover tab (e.g. mlx-community/whisper-large-v3-turbo)."
+            )
+
+        try:
+            with open(config_file) as f:
+                cfg = json.load(f)
+        except Exception as e:
+            return f"Failed to read config.json: {e}"
+
+        model_type = cfg.get("model_type", "")
+        # Whisper models have model_type "whisper" or no model_type (older MLX exports)
+        # Parakeet / NeMo models have no model_type but have NeMo-specific keys
+        nemo_keys = {"preprocessor", "encoder", "decoder", "joint", "decoding", "rnnt_reduction"}
+        if nemo_keys.intersection(cfg.keys()):
+            return (
+                f"Model at {model_path} appears to be a NeMo/Parakeet model, "
+                "which is not supported by mlx-whisper. "
+                "Please use a Whisper-architecture model such as "
+                "mlx-community/whisper-large-v3-turbo or mlx-community/whisper-small."
+            )
+
+        if model_type and model_type != "whisper":
+            return (
+                f"Model type '{model_type}' is not supported by mlx-whisper. "
+                "Please use a Whisper-architecture model."
+            )
+
+        # Check for weights file
+        if not (p / "weights.safetensors").exists() and not (p / "weights.npz").exists():
+            return (
+                f"No weights.safetensors or weights.npz found in {model_path}. "
+                "The model may be incomplete — try re-downloading it."
+            )
+
+    elif p.suffix in (".bin", ".gguf", ".ggml"):
+        return (
+            f"Model file {p.name} is a GGML/GGUF binary — only compatible with whisper.cpp. "
+            "For the MLX engine, please download an MLX Whisper model via the Discover tab "
+            "(e.g. mlx-community/whisper-large-v3-turbo)."
+        )
+    else:
+        return (
+            f"Unrecognized model format at {model_path}. "
+            "Please use an MLX Whisper model directory from HuggingFace."
+        )
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -85,15 +221,11 @@ class STTHandler(BaseHTTPRequestHandler):
                 tmp_path = f.name
 
             try:
-                kwargs = {"path_or_hf_repo": _model_path}
-                if language:
-                    kwargs["language"] = language
-
-                result = mlx_whisper.transcribe(tmp_path, **kwargs)
+                # mlx_whisper.transcribe does not have a 'language' parameter in 0.4.x
+                result = mlx_whisper.transcribe(tmp_path, path_or_hf_repo=_model_path)
                 text = result.get("text", "")
 
                 # Return in OpenAI format
-                response_format = "json"  # default
                 self._send_json({"text": text})
             finally:
                 os.unlink(tmp_path)
@@ -159,9 +291,13 @@ def main():
     global _model_path
     _model_path = args.model
 
-    # Warm up: do a small transcription to load the model into memory
-    print(f"[mlx-stt] Pre-loading model: {_model_path}", flush=True)
-    # mlx_whisper lazily loads on first transcribe, so the server starts fast
+    # Validate model before starting server
+    err = validate_whisper_model(_model_path)
+    if err:
+        print(f"[mlx-stt] ERROR: {err}", flush=True)
+        sys.exit(1)
+
+    print(f"[mlx-stt] Model validated: {_model_path}", flush=True)
 
     STTHandler.api_key = args.api_key
     server = HTTPServer((args.host, args.port), STTHandler)

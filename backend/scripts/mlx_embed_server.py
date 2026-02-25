@@ -14,6 +14,7 @@ import json
 import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from typing import List
 
 import mlx.core as mx
@@ -26,6 +27,46 @@ from mlx_embeddings.utils import load
 _model = None
 _tokenizer = None
 _model_name = ""
+
+
+def validate_embedding_model(model_path: str) -> str:
+    """
+    Validate that model_path refers to an MLX-compatible embedding model.
+    Returns a human-readable error string if invalid, or "" if OK.
+    """
+    p = Path(model_path)
+
+    # GGUF / GGML / binary files — only work with llama.cpp
+    if p.is_file():
+        if p.suffix in (".gguf", ".ggml", ".bin", ".pt", ".safetensors"):
+            return (
+                f"Model file '{p.name}' is a single binary file. "
+                "MLX embedding requires a HuggingFace model directory with config.json and safetensors weights. "
+                "Please download an MLX-compatible embedding model via the Discover tab, "
+                "e.g. 'mlx-community/mxbai-embed-xsmall-v1' or 'mlx-community/bge-small-en-v1.5-4bit'."
+            )
+        return f"Unrecognized model format: {model_path}"
+
+    if p.is_dir():
+        config_file = p / "config.json"
+        if not config_file.exists():
+            # Check if it contains only binary files (GGUF downloaded into a folder)
+            files = list(p.iterdir())
+            binary_exts = {".gguf", ".ggml", ".bin"}
+            if files and all(f.suffix in binary_exts for f in files if f.is_file()):
+                return (
+                    f"Directory '{p.name}' contains only GGUF/binary files which require llama.cpp. "
+                    "Please download an MLX-native model from the Discover tab, "
+                    "e.g. 'mlx-community/mxbai-embed-xsmall-v1'."
+                )
+            return (
+                f"No config.json found in '{p.name}'. "
+                "This doesn't appear to be a valid HuggingFace model directory. "
+                "Download an MLX embedding model via the Discover tab."
+            )
+        return ""
+
+    return f"Model path not found: {model_path}"
 
 
 def load_model(model_name: str):
@@ -158,6 +199,12 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Server host")
     parser.add_argument("--api-key", default=None, help="Optional API key")
     args = parser.parse_args()
+
+    # Validate model compatibility before trying to load it
+    err = validate_embedding_model(args.model)
+    if err:
+        print(f"[mlx-embed] ERROR: {err}", flush=True)
+        sys.exit(1)
 
     load_model(args.model)
 
