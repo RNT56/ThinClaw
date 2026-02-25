@@ -181,7 +181,7 @@ except Exception as e:
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data dir: {}", e))?
-        .join("mlx-venv")
+        .join("mlx-env")
         .join("bin")
         .join("python3");
 

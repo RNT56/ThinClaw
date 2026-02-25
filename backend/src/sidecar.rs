@@ -534,10 +534,10 @@ impl SidecarManager {
         let (port, token) = Self::generate_config(Some(53756));
 
         // Resolve the MLX venv Python path directly from app_data_dir
-        // (MlxEngine always creates the venv at {app_data_dir}/mlx-venv/)
+        // (MlxEngine always creates the venv at {app_data_dir}/mlx-env/)
         let python_path = app.path().app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
-            .join("mlx-venv")
+            .join("mlx-env")
             .join("bin")
             .join("python3");
 
@@ -629,7 +629,7 @@ impl SidecarManager {
         // Resolve the MLX venv Python path directly from app_data_dir
         let python_path = app.path().app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
-            .join("mlx-venv")
+            .join("mlx-env")
             .join("bin")
             .join("python3");
 
