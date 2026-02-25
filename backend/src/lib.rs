@@ -342,7 +342,13 @@ pub fn run() {
             handle.manage(tracker);
 
             // Vector Store Manager Init (per-scope index files)
-            let dims = 384;
+            // Use the dimension stored in user config (updated whenever a new
+            // embedding model with a different hidden_size is loaded).
+            let dims = handle
+                .state::<config::ConfigManager>()
+                .get_config()
+                .vector_dimensions as usize;
+            println!("[main] Initializing vector store with dimension {}.", dims);
             let vectors_dir = app_data_dir.join("vectors");
             let vector_manager = vector_store::VectorStoreManager::new(vectors_dir, dims)
                 .expect("failed to init vector store manager");

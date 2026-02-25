@@ -187,7 +187,10 @@ impl VectorStore {
 pub struct VectorStoreManager {
     /// Base directory for all index files (e.g. `app_data/vectors/`).
     base_dir: PathBuf,
-    dimensions: usize,
+    /// Current embedding dimension — may change at runtime when a new
+    /// embedding model is loaded.  Protected by a Mutex so Tauri's shared
+    /// State<VectorStoreManager> (which requires Sync) stays sound.
+    dimensions: Arc<Mutex<usize>>,
     /// Cached stores keyed by scope.
     stores: Arc<Mutex<HashMap<VectorScope, Arc<VectorStore>>>>,
 }
@@ -199,21 +202,22 @@ impl VectorStoreManager {
 
         Ok(Self {
             base_dir,
-            dimensions,
+            dimensions: Arc::new(Mutex::new(dimensions)),
             stores: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     /// Get (or lazily create) the `VectorStore` for a given scope.
     pub fn get(&self, scope: &VectorScope) -> Result<Arc<VectorStore>, String> {
+        let dims = *self.dimensions.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.stores.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(store) = map.get(scope) {
             return Ok(store.clone());
         }
 
-        let path = self.base_dir.join(scope.filename(self.dimensions));
-        let store = Arc::new(VectorStore::new(path, self.dimensions)?);
+        let path = self.base_dir.join(scope.filename(dims));
+        let store = Arc::new(VectorStore::new(path, dims)?);
         map.insert(scope.clone(), store.clone());
         Ok(store)
     }
@@ -231,6 +235,38 @@ impl VectorStoreManager {
             }
         }
         VectorScope::Global
+    }
+
+    /// Delete all .usearch files in the base directory whose filename
+    /// contains `old_dim` (e.g. `chat_abc_384.usearch`).  Called when
+    /// the embedding model changes and produces a different hidden_size.
+    pub fn purge_by_dimension(&self, old_dim: usize) {
+        if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.extension().and_then(|e| e.to_str()) == Some("usearch")
+                    && name.contains(&format!("_{}", old_dim))
+                {
+                    eprintln!("[vector_store] Purging stale index: {}", name);
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
+    /// Reinitialize the manager with a new embedding dimension.
+    /// Drops all cached in-memory stores; they will be lazily recreated
+    /// from the new (empty) index files on the next `get()` call.
+    pub fn reinit(&self, new_dim: usize) -> Result<(), String> {
+        // Clear cached stores
+        let mut map = self.stores.lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+
+        // Update dimension
+        *self.dimensions.lock().unwrap_or_else(|e| e.into_inner()) = new_dim;
+
+        Ok(())
     }
 
     /// Save all dirty indices to disk.
@@ -269,13 +305,14 @@ impl VectorStoreManager {
 
     /// Delete the index for a specific scope (e.g. when a project is deleted).
     pub fn delete_scope(&self, scope: &VectorScope) -> Result<(), String> {
+        let dims = *self.dimensions.lock().unwrap_or_else(|e| e.into_inner());
         let mut map = self.stores.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(store) = map.remove(scope) {
             let _ = store.reset();
         }
 
-        let path = self.base_dir.join(scope.filename(self.dimensions));
+        let path = self.base_dir.join(scope.filename(dims));
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
@@ -320,6 +357,6 @@ impl VectorStoreManager {
     }
 
     pub fn dimensions(&self) -> usize {
-        self.dimensions
+        *self.dimensions.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

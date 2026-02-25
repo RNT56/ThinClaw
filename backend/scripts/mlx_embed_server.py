@@ -77,49 +77,87 @@ def load_model(model_name: str):
     print(f"[mlx-embed] Model loaded successfully", flush=True)
 
 
+def _tokenize_texts(texts: List[str], max_length: int = 512):
+    """
+    Tokenize a batch of texts into (input_ids, attention_mask) MLX arrays.
+
+    Handles three tokenizer types returned by mlx_embeddings.load():
+      1. Standard HuggingFace tokenizer  — has batch_encode_plus
+      2. Callable tokenizer              — supports __call__(texts, ...)
+      3. TokenizerWrapper (e.g. Gemma)  — neither; wraps ._tokenizer which
+                                           has encode(text) -> List[int]
+    """
+    import mlx.core as mx
+
+    # Path 1: standard HF tokenizer with batch_encode_plus
+    if hasattr(_tokenizer, "batch_encode_plus"):
+        inputs = _tokenizer.batch_encode_plus(
+            texts,
+            return_tensors="mlx",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+        )
+        return inputs["input_ids"], inputs.get("attention_mask")
+
+    # Path 2: callable tokenizer (__call__ supports same kwargs)
+    if callable(_tokenizer):
+        inputs = _tokenizer(
+            texts,
+            return_tensors="mlx",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+        )
+        return inputs["input_ids"], inputs.get("attention_mask")
+
+    # Path 3: TokenizerWrapper — unwrap and encode manually
+    inner = getattr(_tokenizer, "_tokenizer", None)
+    if inner is None or not hasattr(inner, "encode"):
+        raise RuntimeError(
+            f"Cannot tokenize: tokenizer type '{type(_tokenizer).__name__}' has no "
+            "batch_encode_plus, __call__, or ._tokenizer.encode"
+        )
+
+    pad_id = getattr(inner, "pad_token_id", None) or 0
+
+    encoded = [inner.encode(t) for t in texts]
+    # Truncate to max_length, then pad to the longest sequence in batch
+    encoded = [e[:max_length] for e in encoded]
+    max_len = max(len(e) for e in encoded)
+
+    input_ids_list = []
+    mask_list = []
+    for e in encoded:
+        pad_n = max_len - len(e)
+        input_ids_list.append(e + [pad_id] * pad_n)
+        mask_list.append([1] * len(e) + [0] * pad_n)
+
+    return mx.array(input_ids_list), mx.array(mask_list)
+
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Generate embeddings for a list of texts."""
-    # Some tokenizers (e.g. GemmaTokenizer) are wrapped by mlx_embeddings in a
-    # TokenizerWrapper that doesn't expose batch_encode_plus.
-    # Fall back to direct __call__ which all tokenizer types support.
-    encode_kwargs = dict(
-        return_tensors="mlx",
-        padding=True,
-        truncation=True,
-        max_length=512,
-    )
-
-    if hasattr(_tokenizer, "batch_encode_plus"):
-        inputs = _tokenizer.batch_encode_plus(texts, **encode_kwargs)
-    else:
-        # TokenizerWrapper / GemmaTokenizer: use __call__ directly
-        inputs = _tokenizer(texts, **encode_kwargs)
-
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs.get("attention_mask")
+    input_ids, attention_mask = _tokenize_texts(texts)
 
     if attention_mask is not None:
         outputs = _model(input_ids, attention_mask=attention_mask)
     else:
         outputs = _model(input_ids)
 
-
-    # Use mean-pooled normalized embeddings if available, else CLS token
+    # Use normalized embeddings if available (e.g. SentenceTransformer-style),
+    # otherwise fall back to the CLS token hidden state
     if hasattr(outputs, "text_embeds") and outputs.text_embeds is not None:
         emb = outputs.text_embeds
     else:
         emb = outputs.last_hidden_state[:, 0, :]
 
-    # Convert to list of lists
-    results = []
+    # Convert to Python list of lists
     if len(emb.shape) == 1:
-        # Single embedding (shouldn't happen with batch, but be safe)
-        results.append(emb.tolist())
-    else:
-        for i in range(emb.shape[0]):
-            results.append(emb[i].tolist())
+        return [emb.tolist()]
+    return [emb[i].tolist() for i in range(emb.shape[0])]
 
-    return results
+
 
 
 # ---------------------------------------------------------------------------

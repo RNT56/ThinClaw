@@ -1245,6 +1245,51 @@ pub async fn start_embedding_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
+    // ── Probe the actual embedding dimension from the model's config.json ──
+    // mlx-embeddings models store their output dimension in `hidden_size`.
+    // We need to know this BEFORE starting the server so we can:
+    //  (a) update the persisted vector_dimensions setting,
+    //  (b) wipe & reinitialize the VectorStoreManager if the dim changed.
+    let actual_dim: Option<usize> = (|| -> Option<usize> {
+        let p = std::path::Path::new(&model_path);
+        let cfg_path = if p.is_dir() { p.join("config.json") } else { return None; };
+        let content = std::fs::read_to_string(&cfg_path).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+        // Check common keys: hidden_size (standard HF), d_model, embedding_dim
+        v.get("hidden_size")
+            .or_else(|| v.get("d_model"))
+            .or_else(|| v.get("embedding_dim"))
+            .and_then(|x| x.as_u64())
+            .map(|n| n as usize)
+    })();
+
+    if let Some(dim) = actual_dim {
+        let vec_manager = app.state::<crate::vector_store::VectorStoreManager>();
+        let current_dim = vec_manager.dimensions();
+
+        if dim != current_dim {
+            eprintln!(
+                "[embedding] Dimension changed: {} → {}. Purging stale vector indices.",
+                current_dim, dim
+            );
+
+            // Delete all .usearch files named with the old dimension
+            vec_manager.purge_by_dimension(current_dim);
+
+            // Reinitialize the manager in-place with the new dimension
+            vec_manager.reinit(dim)
+                .map_err(|e| format!("Failed to reinit vector store: {}", e))?;
+
+            // Persist the new dimension in user config
+            let config_mgr = app.state::<crate::config::ConfigManager>();
+            let mut cfg = config_mgr.get_config();
+            cfg.vector_dimensions = dim as u32;
+            config_mgr.save_config(&cfg);
+
+            println!("[embedding] Vector store reinitialized at dimension {}.", dim);
+        }
+    }
+
     // Route to the correct embedding server implementation based on engine
     #[cfg(feature = "mlx")]
     let res = state
