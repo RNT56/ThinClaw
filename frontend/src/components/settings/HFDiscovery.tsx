@@ -108,6 +108,8 @@ interface PipelineFilterDef {
     placeholder: string;
     /** Download category folder name — null means default (LLM) */
     downloadCategory: string | null;
+    /** Default search query per engine — uses this for trending when empty. Key = engine id, '*' = all engines. */
+    defaultQuery?: Record<string, string>;
 }
 
 const PIPELINE_FILTERS: PipelineFilterDef[] = [
@@ -116,7 +118,16 @@ const PIPELINE_FILTERS: PipelineFilterDef[] = [
     { id: 'vision', label: 'Vision', icon: Eye, tags: ['image-text-to-text'], placeholder: 'Search vision models... (e.g. pixtral, llava, gemma)', downloadCategory: null },
     { id: 'embedding', label: 'Embedding', icon: Database, tags: ['feature-extraction', 'sentence-similarity'], placeholder: 'Search embedding models... (e.g. bge, nomic, gte, qwen)', downloadCategory: 'Embedding' },
     { id: 'diffusion', label: 'Diffusion', icon: Image, tags: ['text-to-image', 'image-to-image'], placeholder: 'Search diffusion models... (e.g. flux, stable-diffusion, sdxl)', downloadCategory: 'Diffusion' },
-    { id: 'stt', label: 'STT', icon: Mic, tags: ['automatic-speech-recognition'], placeholder: 'Search speech models... (e.g. whisper, parakeet, voxtral)', downloadCategory: 'STT' },
+    {
+        id: 'stt',
+        label: 'STT',
+        icon: Mic,
+        tags: ['automatic-speech-recognition'],
+        placeholder: 'Search speech models... (e.g. mlx-community/whisper-large-v3-turbo)',
+        downloadCategory: 'STT',
+        // For MLX engine: default to mlx-community whisper collection so users see compatible models immediately
+        defaultQuery: { mlx: 'mlx-community whisper', '*': '' },
+    },
     { id: 'video', label: 'Video', icon: Video, tags: ['text-to-video'], placeholder: 'Search video gen models... (e.g. mochi, ltx-video)', downloadCategory: 'Diffusion' },
 ];
 
@@ -324,8 +335,12 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                 setIsSearching(true);
                 setIsTrending(true);
                 try {
+                    // Use engine-specific default query if defined (e.g. 'mlx-community whisper' for MLX+STT)
+                    const defaultQueryMap = activeFilterDef.defaultQuery || {};
+                    const defaultQ = defaultQueryMap[engineInfo.id] ?? defaultQueryMap['*'] ?? '';
+
                     const models = await invoke<HfModelCard[]>("discover_hf_models", {
-                        query: "",
+                        query: defaultQ,
                         engine: engineInfo.id,
                         limit: 15,
                         pipelineTags,
