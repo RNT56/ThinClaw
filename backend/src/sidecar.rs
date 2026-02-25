@@ -604,7 +604,7 @@ impl SidecarManager {
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => break,
-                Err(_) => { ready = true; break; }
+                Err(_) => break, // Deadline elapsed — proceed; startup_error handles real failures
             }
         }
 
@@ -726,7 +726,7 @@ impl SidecarManager {
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => break,
-                Err(_) => { ready = true; break; }
+                Err(_) => break, // Deadline elapsed — proceed; startup_error handles real failures
             }
         }
 
