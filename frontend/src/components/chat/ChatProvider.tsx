@@ -687,21 +687,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     toast.error('Failed to upload image', { id: toastId });
                 }
             } else {
-                if (!isRagCapable) { toast.error(`Cannot ingest ${file.name}: Start an embedding model first.`); continue; }
-                try {
-                    const status = await commands.getSidecarStatus();
-                    if (!status.embedding_running && currentEmbeddingModelPath) {
-                        const loadingToast = toast.loading('Waking up Embedding Engine... (this takes a few seconds)');
-                        await commands.startEmbeddingServer(currentEmbeddingModelPath);
-                        await new Promise(r => setTimeout(r, 3000));
-                        toast.dismiss(loadingToast);
-                    }
-                } catch (e) {
-                    console.error('Failed to lazy start embedding server:', e);
-                    toast.error('Failed to start embedding server.');
-                    continue;
-                }
-
+                if (!isRagCapable) { toast.error(`Cannot ingest ${file.name}: Select an embedding model in Settings first.`); continue; }
+                // Note: the backend ingest_document command auto-starts the embedding server
+                // if it's not running (using the model path passed with the request).
                 const toastId = toast.loading(`Uploading ${file.name}...`);
                 try {
                     const buffer = await file.arrayBuffer();

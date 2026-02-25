@@ -513,17 +513,16 @@ export function useChat() {
     }, []);
 
     const ingestFile = useCallback(async (path: string, projectId: string | null = null): Promise<string> => {
-        // ... Logic for ensuring conversation exists before ingestion ...
-        // Reusing createNewConversation pattern
         let convId = currentConversationId;
         if (!convId) {
             const newConv = await createNewConversation("New Context Chat", projectId);
             convId = newConv.id;
         }
         if (!convId) return "";
-        const res = await commands.ingestDocument(path, convId, projectId);
+        // Pass the embedding model path so the backend can auto-start the server if needed
+        const res = await commands.ingestDocument(path, convId, projectId, currentEmbeddingModelPath || null);
         return unwrap(res);
-    }, [currentConversationId, createNewConversation]);
+    }, [currentConversationId, createNewConversation, currentEmbeddingModelPath]);
 
     const moveConversation = useCallback(async (id: string, projectId: string | null) => {
         try {

@@ -280,6 +280,7 @@ pub async fn ingest_document(
     file_path: String,
     chat_id: Option<String>,
     project_id: Option<String>,
+    embedding_model_path: Option<String>,
 ) -> Result<String, String> {
     println!(
         "[rag] ingest_document: start for {}, chat_id={:?}, project_id={:?}",
@@ -378,9 +379,57 @@ pub async fn ingest_document(
         }
     }
 
-    let (port, token) = sidecar
-        .get_embedding_config()
-        .ok_or("Embedding server not running")?;
+    // ── Ensure the embedding server is alive ────────────────────────────────
+    // Check if the server is actually responding; if not, start it on-demand.
+    // This is more reliable than trusting sidecar state (which can be stale).
+    let (port, token) = {
+        // Quick liveness check: try getting config + an HTTP health ping
+        let maybe_live = if let Some((p, t)) = sidecar.get_embedding_config() {
+            let health_url = format!("http://127.0.0.1:{}/health", p);
+            let alive = reqwest::Client::new()
+                .get(&health_url)
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .is_ok();
+            if alive {
+                Some((p, t))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(cfg) = maybe_live {
+            cfg
+        } else {
+            // Server isn't running or not responding — start it now
+            let model_path = embedding_model_path
+                .clone()
+                .ok_or_else(|| "Embedding server is not running and no embedding_model_path provided. Please select an embedding model in Settings.".to_string())?;
+
+            println!(
+                "[rag] Embedding server not alive — starting on demand with model: {}",
+                model_path
+            );
+
+            // Reuse start_embedding_server logic (handles dim-detection + reinit)
+            crate::sidecar::start_embedding_server_core(
+                &app,
+                &sidecar,
+                &vector_manager,
+                model_path.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to auto-start embedding server: {}", e))?;
+
+            sidecar.get_embedding_config().ok_or_else(|| {
+                "Embedding server failed to start (no config after launch)".to_string()
+            })?
+        }
+    };
+
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
 

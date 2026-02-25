@@ -5,1502 +5,1502 @@
 
 
 export const commands = {
-async greet(name: string) : Promise<string> {
-    return await TAURI_INVOKE("greet", { name });
-},
-async chatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chat_stream", { payload, onEvent }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async chatCompletion(payload: ChatPayload) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chat_completion", { payload }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async countTokens(conversationId: string) : Promise<Result<TokenUsage, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("count_tokens", { conversationId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async stopChatServer(modelPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("stop_chat_server", { modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startEmbeddingServer(modelPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_embedding_server", { modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startSummarizerServer(modelPath: string, contextSize: number) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_summarizer_server", { modelPath, contextSize }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getSidecarStatus() : Promise<SidecarStatus> {
-    return await TAURI_INVOKE("get_sidecar_status");
-},
-async getChatServerConfig() : Promise<ChatServerConfig | null> {
-    return await TAURI_INVOKE("get_chat_server_config");
-},
-async startSttServer(modelPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_stt_server", { modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startImageServer(modelPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_image_server", { modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startTtsServer(modelPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_tts_server", { modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async cancelGeneration() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_generation") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Synthesise `text` using the Piper TTS ONNX model at `model_path`.
- * 
- * Returns base64-encoded raw PCM (16-bit signed, mono, 22050 Hz by default)
- * suitable for decoding with `AudioContext.decodeAudioData()` on the frontend.
- * 
- * The `model_path` should point to the `.onnx` file (Piper will automatically
- * locate the companion `.onnx.json` config file in the same directory).
- */
-async ttsSynthesize(text: string, modelPath: string | null) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("tts_synthesize", { text, modelPath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async checkWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async generateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_image", { params }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async transcribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("transcribe_audio", { audioBytes }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async ingestDocument(filePath: string, chatId: string | null, projectId: string | null) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("ingest_document", { filePath, chatId, projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async uploadDocument(fileBytes: number[], filename: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("upload_document", { fileBytes, filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async retrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null) : Promise<Result<string[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("retrieve_context", { query, chatId, docIds, projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async checkVectorIndexIntegrity() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_vector_index_integrity") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listModels() : Promise<Result<ModelFile[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_models") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async downloadModel(url: string, filename: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_model", { url, filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async cancelDownload(filename: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_download", { filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async checkModelPath(path: string) : Promise<boolean> {
-    return await TAURI_INVOKE("check_model_path", { path });
-},
-async openModelsFolder() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_models_folder") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteLocalModel(filename: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_local_model", { filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openUrl(url: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_url", { url }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async checkMissingStandardAssets() : Promise<Result<StandardAsset[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_missing_standard_assets") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async downloadStandardAsset(filename: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_standard_asset", { filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openStandardModelsFolder() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_standard_models_folder") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getModelMetadata(path: string) : Promise<Result<GGUFMetadata, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_model_metadata", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateRemoteModelCatalog(entries: RemoteModelEntry[]) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_remote_model_catalog", { entries }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getRemoteModelCatalog() : Promise<Result<RemoteModelEntry[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_remote_model_catalog") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getConversations() : Promise<Result<Conversation[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_conversations") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openConfigFile() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_config_file") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getUserConfig() : Promise<UserConfig> {
-    return await TAURI_INVOKE("get_user_config");
-},
-async updateUserConfig(config: UserConfig) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getHfToken() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async createConversation(title: string, projectId: string | null) : Promise<Result<Conversation, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_conversation", { title, projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteConversation(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_conversation", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null) : Promise<Result<FrontendMessage[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_messages", { conversationId, limit, beforeCreatedAt }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveMessage(conversationId: string, role: string, content: string, images: string[] | null, attachedDocs: AttachedDoc[] | null, webSearchResults: WebSearchResult[] | null) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_message", { conversationId, role, content, images, attachedDocs, webSearchResults }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async editMessage(messageId: string, newContent: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("edit_message", { messageId, newContent }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateConversationTitle(id: string, title: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversation_title", { id, title }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateConversationProject(id: string, projectId: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversation_project", { id, projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateConversationsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_conversations_order", { orders }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteAllHistory() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_all_history") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async uploadImage(imageBytes: number[]) : Promise<Result<ImageResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("upload_image", { imageBytes }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async loadImage(id: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("load_image", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getImagePath(id: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_image_path", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openImagesFolder() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_images_folder") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Main command to generate an image in Imagine mode
- */
-async imagineGenerate(params: ImagineParams) : Promise<Result<GeneratedImage, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_generate", { params }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * List all generated images for the gallery
- */
-async imagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null) : Promise<Result<GeneratedImage[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_list_images", { limit, offset, favoritesOnly }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Search generated images by prompt
- */
-async imagineSearchImages(query: string) : Promise<Result<GeneratedImage[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_search_images", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle favorite status for an image
- */
-async imagineToggleFavorite(imageId: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_toggle_favorite", { imageId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Delete a generated image
- */
-async imagineDeleteImage(imageId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_delete_image", { imageId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get image count and stats
- */
-async imagineGetStats() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("imagine_get_stats") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getSystemSpecs() : Promise<SystemSpecs> {
-    return await TAURI_INVOKE("get_system_specs");
-},
-async createProject(request: CreateProjectRequest) : Promise<Result<Project, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_project", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listProjects() : Promise<Result<Project[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_projects") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteProject(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_project", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateProject(id: string, name: string | null, description: string | null) : Promise<Result<Project, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_project", { id, name, description }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async updateProjectsOrder(orders: ([string, number])[]) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_projects_order", { orders }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getProjectDocuments(projectId: string) : Promise<Result<Document[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_project_documents", { projectId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async deleteDocument(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_document", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async rigCheckWebSearch(query: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("rig_check_web_search", { query }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async agentChat(request: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("agent_chat", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get OpenClaw status
- */
-async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Slack configuration
- */
-async openclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_anthropic_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get Anthropic API key
- */
-async openclawGetAnthropicKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_anthropic_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Brave Search API key
- */
-async openclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_brave_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get Brave Search API key
- */
-async openclawGetBraveKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_brave_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save OpenAI API key
- */
-async openclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openai_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get OpenAI API key
- */
-async openclawGetOpenaiKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openai_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save OpenRouter API key
- */
-async openclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openrouter_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get OpenRouter API key
- */
-async openclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openrouter_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Gemini API key
- */
-async openclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gemini_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get Gemini API key
- */
-async openclawGetGeminiKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_gemini_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Groq API key
- */
-async openclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_groq_key", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get Groq API key
- */
-async openclawGetGroqKey() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_groq_key") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save selected cloud model
- */
-async openclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_selected_cloud_model", { model }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Select the cloud brain to use for the agent
- */
-async selectOpenclawBrain(brain: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("select_openclaw_brain", { brain }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_cloud_config", { enabledProviders, enabledModels, customLlm }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle secret access for OpenClaw
- */
-async openclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_secret_access", { secret, granted }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_slack_config", { configInput }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Telegram configuration
- */
-async openclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_telegram_config", { configInput }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Gateway configuration
- */
-async openclawSaveGatewaySettings(mode: string, url: string | null, token: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gateway_settings", { mode, url, token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Add or update an agent profile
- */
-async openclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_add_agent_profile", { profile }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Remove an agent profile
- */
-async openclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_agent_profile", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Switch active gateway to a specific profile
- */
-async openclawSwitchToProfile(profileId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_switch_to_profile", { profileId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Test connection to a potential gateway
- */
-async openclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_test_connection", { url, token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_fleet_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_broadcast_command", { command }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Start OpenClaw gateway (spawns openclaw_engine binary and connects WS client)
- */
-async openclawStartGateway() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_start_gateway") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Stop OpenClaw gateway (stops WS client and openclaw_engine process)
- */
-async openclawStopGateway() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_stop_gateway") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get OpenClaw sessions list
- */
-async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_sessions") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<OpenClawHistoryResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_history", { sessionKey, limit, before }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Delete a OpenClaw session.
- * 
- * This command handles the full lifecycle: abort any active run, wait for it
- * to wind down, then delete. If the first delete attempt fails because the
- * session is still active, it resets the session (which creates a new
- * sessionId, breaking the active-run association) and retries the delete.
- */
-async openclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_delete_session", { sessionKey }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Reset a OpenClaw session (clear history)
- */
-async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_reset_session", { sessionKey }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Send a message to a OpenClaw session
- */
-async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_send_message", { sessionKey, text, deliver }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Subscribe to a OpenClaw session for live updates.
- * 
- * **Intentional no-op**: The OpenClaw gateway automatically broadcasts all events
- * to connected operators via the WebSocket connection established in `start_gateway`.
- * No explicit per-session subscription is required. This command is retained for
- * API stability but the frontend no longer calls it.
- */
-async openclawSubscribeSession(sessionKey: string) : Promise<Result<OpenClawRpcResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_subscribe_session", { sessionKey }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Abort a running chat
- */
-async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<OpenClawRpcResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_abort_chat", { sessionKey, runId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Resolve an approval request
- */
-async openclawResolveApproval(approvalId: string, approved: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_resolve_approval", { approvalId, approved }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get gateway diagnostic info
- */
-async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_diagnostics") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Clear OpenClaw memory (deletes memory directory or identity files)
- */
-async openclawClearMemory(target: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_clear_memory", { target }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get OpenClaw memory content (MEMORY.md)
- */
-async openclawGetMemory() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_memory") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get contents of a specific file in the OpenClaw workspace (e.g. SOUL.md)
- */
-async openclawGetFile(path: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_file", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Write content to a specific file in the OpenClaw workspace
- */
-async openclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_write_file", { path, content }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save OpenClaw memory content (MEMORY.md)
- */
-async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_memory", { content }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * List all markdown files in the OpenClaw workspace root and memory/ subdirectory
- */
-async openclawListWorkspaceFiles() : Promise<Result<string[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_list_workspace_files") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawCronList() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_list") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_run", { key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_history", { key, limit }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSkillsList() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_list") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSkillsStatus() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_toggle", { key, enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_repo", { repoUrl }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawInstallSkillDeps(name: string, installId: string | null) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_deps", { name, installId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawConfigSchema() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_schema") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawConfigGet() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_get") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_set", { key, value }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_patch", { patch }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSystemPresence() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_system_presence") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawLogsTail(limit: number) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_logs_tail", { limit }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawUpdateRun() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_update_run") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawWebLoginWhatsapp() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_whatsapp") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_telegram") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Add a custom secret
- */
-async openclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_add_custom_secret", { name, value, description }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Remove a custom secret
- */
-async openclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_custom_secret", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle custom secret access for OpenClaw
- */
-async openclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_custom_secret", { id, granted }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle node host (OS automation) for OpenClaw
- */
-async openclawToggleNodeHost(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_node_host", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle local inference (exposing local LLM) for OpenClaw
- */
-async openclawToggleLocalInference(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_local_inference", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_expose_inference", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSetSetupCompleted(completed: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_setup_completed", { completed }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_auto_start", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_dev_mode_wizard", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save HuggingFace token
- */
-async openclawSetHfToken(token: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_hf_token", { token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save an implicit cloud provider API key (generic)
- * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral, xiaomi
- */
-async openclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_implicit_provider_key", { provider, key }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get an implicit cloud provider API key (generic)
- */
-async openclawGetImplicitProviderKey(provider: string) : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_implicit_provider_key", { provider }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save Amazon Bedrock AWS credentials
- */
-async openclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get Amazon Bedrock credentials
- */
-async openclawGetBedrockCredentials() : Promise<Result<[string | null, string | null, string | null], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_bedrock_credentials") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Sync Local LLM config (llama-server) to OpenClaw config
- */
-async openclawSyncLocalLlm() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_sync_local_llm") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async openclawDeployRemote(ip: string, user: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_deploy_remote", { ip, user }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Spawn a new OpenClaw session for a specific agent
- */
-async openclawSpawnSession(agentId: string, task: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_spawn_session", { agentId, task }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * List available agents (Discovery)
- */
-async openclawAgentsList() : Promise<Result<AgentProfile[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_agents_list") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Push content to the Canvas UI
- */
-async openclawCanvasPush(content: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_push", { content }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Navigate the Canvas UI
- */
-async openclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_navigate", { url }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getPermissionStatus() : Promise<PermissionStatus> {
-    return await TAURI_INVOKE("get_permission_status");
-},
-async requestPermission(permission: string) : Promise<void> {
-    await TAURI_INVOKE("request_permission", { permission });
-},
-async toggleSpotlight() : Promise<void> {
-    await TAURI_INVOKE("toggle_spotlight");
-},
-async hideSpotlight() : Promise<void> {
-    await TAURI_INVOKE("hide_spotlight");
-},
-/**
- * Returns information about the single inference engine compiled into this build.
- * 
- * The frontend uses this to:
- * - Filter HF Hub search results by the correct tag
- * - Know whether to show single-file (GGUF quant picker) or directory download UI
- * - Display the engine name in the status bar
- */
-async getActiveEngineInfo() : Promise<EngineInfo> {
-    return await TAURI_INVOKE("get_active_engine_info");
-},
-/**
- * Returns whether the active engine needs first-launch setup.
- * 
- * - `llamacpp`: never needs setup (bundled sidecar)
- * - `ollama`: never needs setup (external daemon)
- * - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
- */
-async getEngineSetupStatus() : Promise<EngineSetupStatus> {
-    return await TAURI_INVOKE("get_engine_setup_status");
-},
-/**
- * Trigger first-launch bootstrap for the active engine (MLX/vLLM).
- * 
- * Emits `engine_setup_progress` events:
- * `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
- */
-async setupEngine() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("setup_engine") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Start the active engine with the given model.
- * 
- * This is the new engine-aware entry point. For llamacpp builds, the existing
- * `start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
- */
-async startEngine(modelPath: string, contextSize: number) : Promise<Result<EngineStartResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_engine", { modelPath, contextSize }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Stop the active engine.
- */
-async stopEngine() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("stop_engine") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Check if the active engine is ready (health check).
- */
-async isEngineReady() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("is_engine_ready") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Search HuggingFace Hub for models compatible with the active engine.
- * 
- * Uses the HF `/api/models` endpoint filtered by engine-specific tag,
- * sorted by download count (most popular first).
- * 
- * `pipeline_tags` accepts multiple HF pipeline tags (e.g.
- * `["text-generation", "image-text-to-text"]`) so a single search covers
- * both text-only and multimodal LLMs.  One API request is made per tag,
- * results are merged, deduplicated by repo ID, and re-sorted by downloads.
- */
-async discoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("discover_hf_models", { query, engine, limit, pipelineTags }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Fetch the file tree of an HF repo and parse it intelligently.
- * 
- * For GGUF repos (llama.cpp): extracts quantization type from filenames,
- * detects mmproj files, and sorts by size.
- * 
- * For MLX/vLLM repos: lists all model files (skipping README, images, etc.)
- * for a directory download.
- */
-async getModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_model_files", { repoId, engine }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Download one or more files from a HuggingFace repo.
- * 
- * Reuses the existing streaming download infrastructure from `model_manager.rs`.
- * For single-file (GGUF): downloads the selected quant + optional mmproj.
- * For multi-file (MLX/vLLM): downloads all files preserving directory structure.
- * 
- * `category` controls which subdirectory the model is saved under
- * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
- */
-async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-}
+    async greet(name: string): Promise<string> {
+        return await TAURI_INVOKE("greet", { name });
+    },
+    async chatStream(payload: ChatPayload, onEvent: TAURI_CHANNEL<StreamChunk>): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("chat_stream", { payload, onEvent }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async chatCompletion(payload: ChatPayload): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("chat_completion", { payload }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async countTokens(conversationId: string): Promise<Result<TokenUsage, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("count_tokens", { conversationId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async startChatServer(modelPath: string, contextSize: number, template: string | null, mmproj: string | null, exposeNetwork: boolean | null, mlock: boolean | null, quantizeKv: boolean | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_chat_server", { modelPath, contextSize, template, mmproj, exposeNetwork, mlock, quantizeKv }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async stopChatServer(modelPath: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("stop_chat_server", { modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async startEmbeddingServer(modelPath: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_embedding_server", { modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async startSummarizerServer(modelPath: string, contextSize: number): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_summarizer_server", { modelPath, contextSize }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getSidecarStatus(): Promise<SidecarStatus> {
+        return await TAURI_INVOKE("get_sidecar_status");
+    },
+    async getChatServerConfig(): Promise<ChatServerConfig | null> {
+        return await TAURI_INVOKE("get_chat_server_config");
+    },
+    async startSttServer(modelPath: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_stt_server", { modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async startImageServer(modelPath: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_image_server", { modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async startTtsServer(modelPath: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_tts_server", { modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async cancelGeneration(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("cancel_generation") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Synthesise `text` using the Piper TTS ONNX model at `model_path`.
+     * 
+     * Returns base64-encoded raw PCM (16-bit signed, mono, 22050 Hz by default)
+     * suitable for decoding with `AudioContext.decodeAudioData()` on the frontend.
+     * 
+     * The `model_path` should point to the `.onnx` file (Piper will automatically
+     * locate the companion `.onnx.json` config file in the same directory).
+     */
+    async ttsSynthesize(text: string, modelPath: string | null): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("tts_synthesize", { text, modelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async checkWebSearch(query: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async generateImage(params: ImageGenParams): Promise<Result<ImageResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("generate_image", { params }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async transcribeAudio(audioBytes: number[]): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("transcribe_audio", { audioBytes }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async ingestDocument(filePath: string, chatId: string | null, projectId: string | null, embeddingModelPath: string | null): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("ingest_document", { filePath, chatId, projectId, embeddingModelPath }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async uploadDocument(fileBytes: number[], filename: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("upload_document", { fileBytes, filename }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async retrieveContext(query: string, chatId: string | null, docIds: string[] | null, projectId: string | null): Promise<Result<string[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("retrieve_context", { query, chatId, docIds, projectId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async checkVectorIndexIntegrity(): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("check_vector_index_integrity") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async listModels(): Promise<Result<ModelFile[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("list_models") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async downloadModel(url: string, filename: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("download_model", { url, filename }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async cancelDownload(filename: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("cancel_download", { filename }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async checkModelPath(path: string): Promise<boolean> {
+        return await TAURI_INVOKE("check_model_path", { path });
+    },
+    async openModelsFolder(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("open_models_folder") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async deleteLocalModel(filename: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("delete_local_model", { filename }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openUrl(url: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("open_url", { url }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async checkMissingStandardAssets(): Promise<Result<StandardAsset[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("check_missing_standard_assets") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async downloadStandardAsset(filename: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("download_standard_asset", { filename }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openStandardModelsFolder(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("open_standard_models_folder") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getModelMetadata(path: string): Promise<Result<GGUFMetadata, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_model_metadata", { path }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateRemoteModelCatalog(entries: RemoteModelEntry[]): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_remote_model_catalog", { entries }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getRemoteModelCatalog(): Promise<Result<RemoteModelEntry[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_remote_model_catalog") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getConversations(): Promise<Result<Conversation[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_conversations") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openConfigFile(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("open_config_file") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getUserConfig(): Promise<UserConfig> {
+        return await TAURI_INVOKE("get_user_config");
+    },
+    async updateUserConfig(config: UserConfig): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getHfToken(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async createConversation(title: string, projectId: string | null): Promise<Result<Conversation, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("create_conversation", { title, projectId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async deleteConversation(id: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("delete_conversation", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getMessages(conversationId: string, limit: number | null, beforeCreatedAt: number | null): Promise<Result<FrontendMessage[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_messages", { conversationId, limit, beforeCreatedAt }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async saveMessage(conversationId: string, role: string, content: string, images: string[] | null, attachedDocs: AttachedDoc[] | null, webSearchResults: WebSearchResult[] | null): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("save_message", { conversationId, role, content, images, attachedDocs, webSearchResults }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async editMessage(messageId: string, newContent: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("edit_message", { messageId, newContent }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateConversationTitle(id: string, title: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_conversation_title", { id, title }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateConversationProject(id: string, projectId: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_conversation_project", { id, projectId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateConversationsOrder(orders: ([string, number])[]): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_conversations_order", { orders }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async deleteAllHistory(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("delete_all_history") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async uploadImage(imageBytes: number[]): Promise<Result<ImageResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("upload_image", { imageBytes }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async loadImage(id: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("load_image", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getImagePath(id: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_image_path", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openImagesFolder(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("open_images_folder") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Main command to generate an image in Imagine mode
+     */
+    async imagineGenerate(params: ImagineParams): Promise<Result<GeneratedImage, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_generate", { params }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * List all generated images for the gallery
+     */
+    async imagineListImages(limit: number | null, offset: number | null, favoritesOnly: boolean | null): Promise<Result<GeneratedImage[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_list_images", { limit, offset, favoritesOnly }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Search generated images by prompt
+     */
+    async imagineSearchImages(query: string): Promise<Result<GeneratedImage[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_search_images", { query }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Toggle favorite status for an image
+     */
+    async imagineToggleFavorite(imageId: string): Promise<Result<boolean, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_toggle_favorite", { imageId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Delete a generated image
+     */
+    async imagineDeleteImage(imageId: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_delete_image", { imageId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get image count and stats
+     */
+    async imagineGetStats(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("imagine_get_stats") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getSystemSpecs(): Promise<SystemSpecs> {
+        return await TAURI_INVOKE("get_system_specs");
+    },
+    async createProject(request: CreateProjectRequest): Promise<Result<Project, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("create_project", { request }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async listProjects(): Promise<Result<Project[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("list_projects") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async deleteProject(id: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("delete_project", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateProject(id: string, name: string | null, description: string | null): Promise<Result<Project, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_project", { id, name, description }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async updateProjectsOrder(orders: ([string, number])[]): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("update_projects_order", { orders }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getProjectDocuments(projectId: string): Promise<Result<Document[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_project_documents", { projectId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async deleteDocument(id: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("delete_document", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async rigCheckWebSearch(query: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("rig_check_web_search", { query }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async agentChat(request: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("agent_chat", { request }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get OpenClaw status
+     */
+    async openclawGetStatus(): Promise<Result<OpenClawStatus, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_status") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Slack configuration
+     */
+    async openclawSaveAnthropicKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_anthropic_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get Anthropic API key
+     */
+    async openclawGetAnthropicKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_anthropic_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Brave Search API key
+     */
+    async openclawSaveBraveKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_brave_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get Brave Search API key
+     */
+    async openclawGetBraveKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_brave_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save OpenAI API key
+     */
+    async openclawSaveOpenaiKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openai_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get OpenAI API key
+     */
+    async openclawGetOpenaiKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openai_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save OpenRouter API key
+     */
+    async openclawSaveOpenrouterKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openrouter_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get OpenRouter API key
+     */
+    async openclawGetOpenrouterKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openrouter_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Gemini API key
+     */
+    async openclawSaveGeminiKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gemini_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get Gemini API key
+     */
+    async openclawGetGeminiKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_gemini_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Groq API key
+     */
+    async openclawSaveGroqKey(key: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_groq_key", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get Groq API key
+     */
+    async openclawGetGroqKey(): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_groq_key") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save selected cloud model
+     */
+    async openclawSaveSelectedCloudModel(model: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_selected_cloud_model", { model }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Select the cloud brain to use for the agent
+     */
+    async selectOpenclawBrain(brain: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("select_openclaw_brain", { brain }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_cloud_config", { enabledProviders, enabledModels, customLlm }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Toggle secret access for OpenClaw
+     */
+    async openclawToggleSecretAccess(secret: string, granted: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_secret_access", { secret, granted }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSaveSlackConfig(configInput: SlackConfigInput): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_slack_config", { configInput }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Telegram configuration
+     */
+    async openclawSaveTelegramConfig(configInput: TelegramConfigInput): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_telegram_config", { configInput }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Gateway configuration
+     */
+    async openclawSaveGatewaySettings(mode: string, url: string | null, token: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gateway_settings", { mode, url, token }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Add or update an agent profile
+     */
+    async openclawAddAgentProfile(profile: AgentProfile): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_add_agent_profile", { profile }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Remove an agent profile
+     */
+    async openclawRemoveAgentProfile(id: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_agent_profile", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Switch active gateway to a specific profile
+     */
+    async openclawSwitchToProfile(profileId: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_switch_to_profile", { profileId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Test connection to a potential gateway
+     */
+    async openclawTestConnection(url: string, token: string | null): Promise<Result<boolean, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_test_connection", { url, token }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawGetFleetStatus(): Promise<Result<AgentStatusSummary[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_fleet_status") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawBroadcastCommand(command: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_broadcast_command", { command }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Start OpenClaw gateway (spawns openclaw_engine binary and connects WS client)
+     */
+    async openclawStartGateway(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_start_gateway") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Stop OpenClaw gateway (stops WS client and openclaw_engine process)
+     */
+    async openclawStopGateway(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_stop_gateway") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get OpenClaw sessions list
+     */
+    async openclawGetSessions(): Promise<Result<OpenClawSessionsResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_sessions") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawGetHistory(sessionKey: string, limit: number, before: string | null): Promise<Result<OpenClawHistoryResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_history", { sessionKey, limit, before }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Delete a OpenClaw session.
+     * 
+     * This command handles the full lifecycle: abort any active run, wait for it
+     * to wind down, then delete. If the first delete attempt fails because the
+     * session is still active, it resets the session (which creates a new
+     * sessionId, breaking the active-run association) and retries the delete.
+     */
+    async openclawDeleteSession(sessionKey: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_delete_session", { sessionKey }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Reset a OpenClaw session (clear history)
+     */
+    async openclawResetSession(sessionKey: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_reset_session", { sessionKey }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Send a message to a OpenClaw session
+     */
+    async openclawSendMessage(sessionKey: string, text: string, deliver: boolean): Promise<Result<OpenClawRpcResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_send_message", { sessionKey, text, deliver }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Subscribe to a OpenClaw session for live updates.
+     * 
+     * **Intentional no-op**: The OpenClaw gateway automatically broadcasts all events
+     * to connected operators via the WebSocket connection established in `start_gateway`.
+     * No explicit per-session subscription is required. This command is retained for
+     * API stability but the frontend no longer calls it.
+     */
+    async openclawSubscribeSession(sessionKey: string): Promise<Result<OpenClawRpcResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_subscribe_session", { sessionKey }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Abort a running chat
+     */
+    async openclawAbortChat(sessionKey: string, runId: string | null): Promise<Result<OpenClawRpcResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_abort_chat", { sessionKey, runId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Resolve an approval request
+     */
+    async openclawResolveApproval(approvalId: string, approved: boolean): Promise<Result<OpenClawRpcResponse, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_resolve_approval", { approvalId, approved }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get gateway diagnostic info
+     */
+    async openclawGetDiagnostics(): Promise<Result<OpenClawDiagnostics, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_diagnostics") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Clear OpenClaw memory (deletes memory directory or identity files)
+     */
+    async openclawClearMemory(target: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_clear_memory", { target }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get OpenClaw memory content (MEMORY.md)
+     */
+    async openclawGetMemory(): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_memory") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get contents of a specific file in the OpenClaw workspace (e.g. SOUL.md)
+     */
+    async openclawGetFile(path: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_file", { path }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Write content to a specific file in the OpenClaw workspace
+     */
+    async openclawWriteFile(path: string, content: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_write_file", { path, content }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save OpenClaw memory content (MEMORY.md)
+     */
+    async openclawSaveMemory(content: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_memory", { content }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * List all markdown files in the OpenClaw workspace root and memory/ subdirectory
+     */
+    async openclawListWorkspaceFiles(): Promise<Result<string[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_list_workspace_files") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawCronList(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_list") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawCronRun(key: string): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_run", { key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawCronHistory(key: string, limit: number): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_history", { key, limit }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSkillsList(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_list") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSkillsStatus(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_status") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSkillsToggle(key: string, enabled: boolean): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_toggle", { key, enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawInstallSkillRepo(repoUrl: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_repo", { repoUrl }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawInstallSkillDeps(name: string, installId: string | null): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_deps", { name, installId }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawConfigSchema(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_config_schema") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawConfigGet(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_config_get") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawConfigSet(key: string, value: JsonValue): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_config_set", { key, value }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawConfigPatch(patch: JsonValue): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_config_patch", { patch }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSystemPresence(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_system_presence") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawLogsTail(limit: number): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_logs_tail", { limit }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawUpdateRun(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_update_run") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawWebLoginWhatsapp(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_whatsapp") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawWebLoginTelegram(): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_telegram") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Add a custom secret
+     */
+    async openclawAddCustomSecret(name: string, value: string, description: string | null): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_add_custom_secret", { name, value, description }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Remove a custom secret
+     */
+    async openclawRemoveCustomSecret(id: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_custom_secret", { id }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Toggle custom secret access for OpenClaw
+     */
+    async openclawToggleCustomSecret(id: string, granted: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_custom_secret", { id, granted }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Toggle node host (OS automation) for OpenClaw
+     */
+    async openclawToggleNodeHost(enabled: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_node_host", { enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Toggle local inference (exposing local LLM) for OpenClaw
+     */
+    async openclawToggleLocalInference(enabled: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_local_inference", { enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawToggleExposeInference(enabled: boolean): Promise<Result<JsonValue, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_expose_inference", { enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSetSetupCompleted(completed: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_set_setup_completed", { completed }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawToggleAutoStart(enabled: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_auto_start", { enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawSetDevModeWizard(enabled: boolean): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_set_dev_mode_wizard", { enabled }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save HuggingFace token
+     */
+    async openclawSetHfToken(token: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_set_hf_token", { token }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save an implicit cloud provider API key (generic)
+     * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral, xiaomi
+     */
+    async openclawSaveImplicitProviderKey(provider: string, key: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_implicit_provider_key", { provider, key }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get an implicit cloud provider API key (generic)
+     */
+    async openclawGetImplicitProviderKey(provider: string): Promise<Result<string | null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_implicit_provider_key", { provider }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Save Amazon Bedrock AWS credentials
+     */
+    async openclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Get Amazon Bedrock credentials
+     */
+    async openclawGetBedrockCredentials(): Promise<Result<[string | null, string | null, string | null], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_get_bedrock_credentials") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Sync Local LLM config (llama-server) to OpenClaw config
+     */
+    async openclawSyncLocalLlm(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_sync_local_llm") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async openclawDeployRemote(ip: string, user: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_deploy_remote", { ip, user }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Spawn a new OpenClaw session for a specific agent
+     */
+    async openclawSpawnSession(agentId: string, task: string): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_spawn_session", { agentId, task }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * List available agents (Discovery)
+     */
+    async openclawAgentsList(): Promise<Result<AgentProfile[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_agents_list") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Push content to the Canvas UI
+     */
+    async openclawCanvasPush(content: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_push", { content }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Navigate the Canvas UI
+     */
+    async openclawCanvasNavigate(url: string): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_navigate", { url }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    async getPermissionStatus(): Promise<PermissionStatus> {
+        return await TAURI_INVOKE("get_permission_status");
+    },
+    async requestPermission(permission: string): Promise<void> {
+        await TAURI_INVOKE("request_permission", { permission });
+    },
+    async toggleSpotlight(): Promise<void> {
+        await TAURI_INVOKE("toggle_spotlight");
+    },
+    async hideSpotlight(): Promise<void> {
+        await TAURI_INVOKE("hide_spotlight");
+    },
+    /**
+     * Returns information about the single inference engine compiled into this build.
+     * 
+     * The frontend uses this to:
+     * - Filter HF Hub search results by the correct tag
+     * - Know whether to show single-file (GGUF quant picker) or directory download UI
+     * - Display the engine name in the status bar
+     */
+    async getActiveEngineInfo(): Promise<EngineInfo> {
+        return await TAURI_INVOKE("get_active_engine_info");
+    },
+    /**
+     * Returns whether the active engine needs first-launch setup.
+     * 
+     * - `llamacpp`: never needs setup (bundled sidecar)
+     * - `ollama`: never needs setup (external daemon)
+     * - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
+     */
+    async getEngineSetupStatus(): Promise<EngineSetupStatus> {
+        return await TAURI_INVOKE("get_engine_setup_status");
+    },
+    /**
+     * Trigger first-launch bootstrap for the active engine (MLX/vLLM).
+     * 
+     * Emits `engine_setup_progress` events:
+     * `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
+     */
+    async setupEngine(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("setup_engine") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Start the active engine with the given model.
+     * 
+     * This is the new engine-aware entry point. For llamacpp builds, the existing
+     * `start_chat_server` in sidecar.rs still works — this command is for MLX/vLLM/Ollama.
+     */
+    async startEngine(modelPath: string, contextSize: number): Promise<Result<EngineStartResult, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("start_engine", { modelPath, contextSize }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Stop the active engine.
+     */
+    async stopEngine(): Promise<Result<null, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("stop_engine") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Check if the active engine is ready (health check).
+     */
+    async isEngineReady(): Promise<Result<boolean, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("is_engine_ready") };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Search HuggingFace Hub for models compatible with the active engine.
+     * 
+     * Uses the HF `/api/models` endpoint filtered by engine-specific tag,
+     * sorted by download count (most popular first).
+     * 
+     * `pipeline_tags` accepts multiple HF pipeline tags (e.g.
+     * `["text-generation", "image-text-to-text"]`) so a single search covers
+     * both text-only and multimodal LLMs.  One API request is made per tag,
+     * results are merged, deduplicated by repo ID, and re-sorted by downloads.
+     */
+    async discoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null): Promise<Result<HfModelCard[], string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("discover_hf_models", { query, engine, limit, pipelineTags }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Fetch the file tree of an HF repo and parse it intelligently.
+     * 
+     * For GGUF repos (llama.cpp): extracts quantization type from filenames,
+     * detects mmproj files, and sorts by size.
+     * 
+     * For MLX/vLLM repos: lists all model files (skipping README, images, etc.)
+     * for a directory download.
+     */
+    async getModelFiles(repoId: string, engine: string): Promise<Result<ModelDownloadInfo, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("get_model_files", { repoId, engine }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    },
+    /**
+     * Download one or more files from a HuggingFace repo.
+     * 
+     * Reuses the existing streaming download infrastructure from `model_manager.rs`.
+     * For single-file (GGUF): downloads the selected quant + optional mmproj.
+     * For multi-file (MLX/vLLM): downloads all files preserving directory structure.
+     * 
+     * `category` controls which subdirectory the model is saved under
+     * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
+     */
+    async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null): Promise<Result<string, string>> {
+        try {
+            return { status: "ok", data: await TAURI_INVOKE("download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
+        } catch (e) {
+            if (e instanceof Error) throw e;
+            else return { status: "error", error: e as any };
+        }
+    }
 }
 
 /** user-defined events **/
@@ -1530,65 +1530,69 @@ export type Document = { id: string; path: string; status: string; created_at: n
 /**
  * Information about the active inference engine, exposed to the frontend.
  */
-export type EngineInfo = { 
-/**
- * Engine identifier: `"llamacpp"`, `"mlx"`, `"vllm"`, `"ollama"`, or `"none"`.
- */
-id: string; 
-/**
- * Human-readable name, e.g. `"llama.cpp (Metal)"`.
- */
-display_name: string; 
-/**
- * Whether this engine is currently available and functional.
- */
-available: boolean; 
-/**
- * Whether first-launch setup is needed (e.g. MLX venv bootstrap).
- */
-requires_setup: boolean; 
-/**
- * Short description.
- */
-description: string; 
-/**
- * HF tag used for model discovery filtering.
- */
-hf_tag: string; 
-/**
- * Whether this engine uses single-file models (true) or directories (false).
- */
-single_file_model: boolean }
+export type EngineInfo = {
+    /**
+     * Engine identifier: `"llamacpp"`, `"mlx"`, `"vllm"`, `"ollama"`, or `"none"`.
+     */
+    id: string;
+    /**
+     * Human-readable name, e.g. `"llama.cpp (Metal)"`.
+     */
+    display_name: string;
+    /**
+     * Whether this engine is currently available and functional.
+     */
+    available: boolean;
+    /**
+     * Whether first-launch setup is needed (e.g. MLX venv bootstrap).
+     */
+    requires_setup: boolean;
+    /**
+     * Short description.
+     */
+    description: string;
+    /**
+     * HF tag used for model discovery filtering.
+     */
+    hf_tag: string;
+    /**
+     * Whether this engine uses single-file models (true) or directories (false).
+     */
+    single_file_model: boolean
+}
 /**
  * Setup status returned to the frontend.
  */
-export type EngineSetupStatus = { 
-/**
- * Whether the engine needs first-launch setup (Python bootstrap).
- */
-needs_setup: boolean; 
-/**
- * Whether setup is currently in progress.
- */
-setup_in_progress: boolean; 
-/**
- * Human-readable status message.
- */
-message: string }
+export type EngineSetupStatus = {
+    /**
+     * Whether the engine needs first-launch setup (Python bootstrap).
+     */
+    needs_setup: boolean;
+    /**
+     * Whether setup is currently in progress.
+     */
+    setup_in_progress: boolean;
+    /**
+     * Human-readable status message.
+     */
+    message: string
+}
 /**
  * Result of starting an engine.
  */
 export type EngineStartResult = { port: number; token: string }
 export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
-export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number; 
-/**
- * Raw chat template string from tokenizer.chat_template (Jinja2)
- */
-chat_template: string | null; 
-/**
- * Detected model family based on architecture + template heuristics
- */
-model_family: string | null }
+export type GGUFMetadata = {
+    architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number;
+    /**
+     * Raw chat template string from tokenizer.chat_template (Jinja2)
+     */
+    chat_template: string | null;
+    /**
+     * Detected model family based on architecture + template heuristics
+     */
+    model_family: string | null
+}
 /**
  * Metadata for a generated image
  */
@@ -1660,90 +1664,92 @@ export type TAURI_CHANNEL<TSend> = null
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; disabled_providers?: string[]; 
-/**
- * MCP server base URL (e.g. "https://api.scrappy.dev")
- * Falls back to SCRAPPY_MCP_URL env var if not set in config.
- */
-mcp_base_url?: string | null; 
-/**
- * MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
- */
-mcp_auth_token?: string | null; 
-/**
- * Whether to use the Rhai sandbox (code-execution mode) instead of
- * legacy JSON <tool_code> parsing. Requires mcp_base_url to be set.
- */
-mcp_sandbox_enabled?: boolean; 
-/**
- * How long (in seconds) the ToolRegistryCache holds entries before
- * re-fetching from the MCP server. Default: 300 s (5 minutes).
- */
-mcp_cache_ttl_secs?: number; 
-/**
- * Maximum characters returned by a single tool call before truncation.
- * Larger values give the agent more context at the cost of token usage.
- * Default: 5000.
- */
-mcp_tool_result_max_chars?: number }
+export type UserConfig = {
+    search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; disabled_providers?: string[];
+    /**
+     * MCP server base URL (e.g. "https://api.scrappy.dev")
+     * Falls back to SCRAPPY_MCP_URL env var if not set in config.
+     */
+    mcp_base_url?: string | null;
+    /**
+     * MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
+     */
+    mcp_auth_token?: string | null;
+    /**
+     * Whether to use the Rhai sandbox (code-execution mode) instead of
+     * legacy JSON <tool_code> parsing. Requires mcp_base_url to be set.
+     */
+    mcp_sandbox_enabled?: boolean;
+    /**
+     * How long (in seconds) the ToolRegistryCache holds entries before
+     * re-fetching from the MCP server. Default: 300 s (5 minutes).
+     */
+    mcp_cache_ttl_secs?: number;
+    /**
+     * Maximum characters returned by a single tool call before truncation.
+     * Larger values give the agent more context at the cost of token usage.
+     * Default: 5000.
+     */
+    mcp_tool_result_max_chars?: number
+}
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/
 
 import {
-	invoke as TAURI_INVOKE,
-	Channel as TAURI_CHANNEL,
+    invoke as TAURI_INVOKE,
+    Channel as TAURI_CHANNEL,
 } from "@tauri-apps/api/core";
 import * as TAURI_API_EVENT from "@tauri-apps/api/event";
 import { type WebviewWindow as __WebviewWindow__ } from "@tauri-apps/api/webviewWindow";
 
 type __EventObj__<T> = {
-	listen: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
-	once: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
-	emit: null extends T
-		? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
-		: (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
+    listen: (
+        cb: TAURI_API_EVENT.EventCallback<T>,
+    ) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
+    once: (
+        cb: TAURI_API_EVENT.EventCallback<T>,
+    ) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
+    emit: null extends T
+    ? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
+    : (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
 };
 
 export type Result<T, E> =
-	| { status: "ok"; data: T }
-	| { status: "error"; error: E };
+    | { status: "ok"; data: T }
+    | { status: "error"; error: E };
 
 function __makeEvents__<T extends Record<string, any>>(
-	mappings: Record<keyof T, string>,
+    mappings: Record<keyof T, string>,
 ) {
-	return new Proxy(
-		{} as unknown as {
-			[K in keyof T]: __EventObj__<T[K]> & {
-				(handle: __WebviewWindow__): __EventObj__<T[K]>;
-			};
-		},
-		{
-			get: (_, event) => {
-				const name = mappings[event as keyof T];
+    return new Proxy(
+        {} as unknown as {
+            [K in keyof T]: __EventObj__<T[K]> & {
+                (handle: __WebviewWindow__): __EventObj__<T[K]>;
+            };
+        },
+        {
+            get: (_, event) => {
+                const name = mappings[event as keyof T];
 
-				return new Proxy((() => {}) as any, {
-					apply: (_, __, [window]: [__WebviewWindow__]) => ({
-						listen: (arg: any) => window.listen(name, arg),
-						once: (arg: any) => window.once(name, arg),
-						emit: (arg: any) => window.emit(name, arg),
-					}),
-					get: (_, command: keyof __EventObj__<any>) => {
-						switch (command) {
-							case "listen":
-								return (arg: any) => TAURI_API_EVENT.listen(name, arg);
-							case "once":
-								return (arg: any) => TAURI_API_EVENT.once(name, arg);
-							case "emit":
-								return (arg: any) => TAURI_API_EVENT.emit(name, arg);
-						}
-					},
-				});
-			},
-		},
-	);
+                return new Proxy((() => { }) as any, {
+                    apply: (_, __, [window]: [__WebviewWindow__]) => ({
+                        listen: (arg: any) => window.listen(name, arg),
+                        once: (arg: any) => window.once(name, arg),
+                        emit: (arg: any) => window.emit(name, arg),
+                    }),
+                    get: (_, command: keyof __EventObj__<any>) => {
+                        switch (command) {
+                            case "listen":
+                                return (arg: any) => TAURI_API_EVENT.listen(name, arg);
+                            case "once":
+                                return (arg: any) => TAURI_API_EVENT.once(name, arg);
+                            case "emit":
+                                return (arg: any) => TAURI_API_EVENT.emit(name, arg);
+                        }
+                    },
+                });
+            },
+        },
+    );
 }

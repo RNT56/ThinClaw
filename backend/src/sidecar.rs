@@ -1088,6 +1088,7 @@ pub enum SidecarEvent {
     Started { service: String },
     Stopped { service: String },
     Crashed { service: String, code: i32 },
+    Error { service: String, message: String },
     Progress { service: String, message: String, progress: f32, total: f32 },
 }
 
@@ -1238,24 +1239,20 @@ pub async fn start_chat_server(
     Ok(())
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn start_embedding_server(
-    app: AppHandle,
-    state: State<'_, SidecarManager>,
+/// Core logic for starting the embedding server.
+/// Extracted so `rag.rs` can call it for on-demand auto-start during ingestion.
+pub async fn start_embedding_server_core(
+    app: &AppHandle,
+    state: &SidecarManager,
+    vector_manager: &crate::vector_store::VectorStoreManager,
     model_path: String,
 ) -> Result<(), String> {
-    // ── Probe the actual embedding dimension from the model's config.json ──
-    // mlx-embeddings models store their output dimension in `hidden_size`.
-    // We need to know this BEFORE starting the server so we can:
-    //  (a) update the persisted vector_dimensions setting,
-    //  (b) wipe & reinitialize the VectorStoreManager if the dim changed.
+    // Probe the actual embedding dimension from the model's config.json
     let actual_dim: Option<usize> = (|| -> Option<usize> {
         let p = std::path::Path::new(&model_path);
         let cfg_path = if p.is_dir() { p.join("config.json") } else { return None; };
         let content = std::fs::read_to_string(&cfg_path).ok()?;
         let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-        // Check common keys: hidden_size (standard HF), d_model, embedding_dim
         v.get("hidden_size")
             .or_else(|| v.get("d_model"))
             .or_else(|| v.get("embedding_dim"))
@@ -1264,58 +1261,51 @@ pub async fn start_embedding_server(
     })();
 
     if let Some(dim) = actual_dim {
-        let vec_manager = app.state::<crate::vector_store::VectorStoreManager>();
-        let current_dim = vec_manager.dimensions();
-
+        let current_dim = vector_manager.dimensions();
         if dim != current_dim {
-            eprintln!(
-                "[embedding] Dimension changed: {} → {}. Purging stale vector indices.",
-                current_dim, dim
-            );
-
-            // Delete all .usearch files named with the old dimension
-            vec_manager.purge_by_dimension(current_dim);
-
-            // Reinitialize the manager in-place with the new dimension
-            vec_manager.reinit(dim)
-                .map_err(|e| format!("Failed to reinit vector store: {}", e))?;
-
-            // Persist the new dimension in user config
+            eprintln!("[embedding] Dimension changed: {} → {}. Purging stale vector indices.", current_dim, dim);
+            vector_manager.purge_by_dimension(current_dim);
+            vector_manager.reinit(dim).map_err(|e| format!("Failed to reinit vector store: {}", e))?;
             let config_mgr = app.state::<crate::config::ConfigManager>();
             let mut cfg = config_mgr.get_config();
             cfg.vector_dimensions = dim as u32;
             config_mgr.save_config(&cfg);
-
             println!("[embedding] Vector store reinitialized at dimension {}.", dim);
         }
     }
 
-    // Route to the correct embedding server implementation based on engine
     #[cfg(feature = "mlx")]
-    let res = state
-        .start_mlx_embedding_server(app.clone(), model_path)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string());
-
+    {
+        state
+            .start_mlx_embedding_server(app.clone(), model_path)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())?;
+    }
     #[cfg(not(feature = "mlx"))]
-    let res = state
-        .start_embedding_server(app.clone(), model_path)
-        .map(|_| ())
-        .map_err(|e| e.to_string());
-
-    if res.is_ok() {
-        app.emit(
-            "sidecar_event",
-            SidecarEvent::Started {
-                service: "embedding".into(),
-            },
-        )
-        .ok();
+    {
+        state
+            .start_embedding_server(app.clone(), model_path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())?;
     }
 
+    app.emit("sidecar_event", SidecarEvent::Started { service: "embedding".into() }).ok();
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn start_embedding_server(
+    app: AppHandle,
+    state: State<'_, SidecarManager>,
+    model_path: String,
+) -> Result<(), String> {
+    let vec_manager = app.state::<crate::vector_store::VectorStoreManager>();
+    let res = start_embedding_server_core(&app, &state, &vec_manager, model_path).await;
     res
 }
+
 
 #[tauri::command]
 #[specta::specta]

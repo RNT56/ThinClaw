@@ -67,32 +67,17 @@ export function ProjectSettingsDialog({
             const files = Array.from((e.target as HTMLInputElement).files || []);
             if (files.length === 0) return;
 
-            // Check embedding server
-            try {
-                const status = await commands.getSidecarStatus();
-                if (!status.embedding_running) {
-                    const loadingToast = toast.loading("Waking up Embedding Engine...");
-                    await commands.startEmbeddingServer(currentEmbeddingModelPath);
-                    await new Promise(r => setTimeout(r, 3000));
-                    toast.dismiss(loadingToast);
-                }
-            } catch (e) {
-                toast.error("Failed to start embedding server");
-                return;
-            }
-
             for (const file of files) {
                 const toastId = toast.loading(`Uploading ${file.name}...`);
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    // Upload raw
                     const upRes = await commands.uploadDocument(bytes, file.name);
                     const savedPath = unwrap(upRes);
 
                     toast.loading(`Indexing ${file.name}...`, { id: toastId });
-                    // Ingest with Project ID
-                    const ingestRes = await commands.ingestDocument(savedPath, null, projectId);
+                    // Pass embedding model path — backend auto-starts server if needed
+                    const ingestRes = await commands.ingestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
                     unwrap(ingestRes);
 
                     toast.success("Added to Knowledge Base", { id: toastId });
