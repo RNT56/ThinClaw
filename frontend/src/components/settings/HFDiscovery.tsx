@@ -299,18 +299,57 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         };
     }, [searchQuery]);
 
+    // Cache of auto-populated trending results per filter (avoid re-fetching)
+    const [trendingCache, setTrendingCache] = useState<Record<PipelineFilterId, HfModelCard[]>>({} as any);
+    const [isTrending, setIsTrending] = useState(false);
+
     // Trigger search when debounced query or pipeline filter changes
+    // When query is empty, auto-populate with trending models for the active filter
     useEffect(() => {
-        if (!debouncedQuery.trim() || !engineInfo) {
-            if (!debouncedQuery.trim()) {
-                setResults([]);
-                setHasSearched(false);
+        if (!engineInfo) return;
+
+        const pipelineTags: string[] = activeFilterDef.tags;
+
+        // Empty query → auto-populate with trending models
+        if (!debouncedQuery.trim()) {
+            // Check cache first
+            if (trendingCache[pipelineFilter] && trendingCache[pipelineFilter].length > 0) {
+                setResults(trendingCache[pipelineFilter]);
+                setHasSearched(true);
+                setIsTrending(true);
+                return;
             }
+
+            const fetchTrending = async () => {
+                setIsSearching(true);
+                setIsTrending(true);
+                try {
+                    const models = await invoke<HfModelCard[]>("discover_hf_models", {
+                        query: "",
+                        engine: engineInfo.id,
+                        limit: 15,
+                        pipelineTags,
+                    });
+                    setResults(models);
+                    setHasSearched(true);
+                    // Cache the results for this filter
+                    setTrendingCache(prev => ({ ...prev, [pipelineFilter]: models }));
+                } catch (err: any) {
+                    console.error("HF trending fetch failed:", err);
+                    // Don't toast for initial load failures — not critical
+                    setResults([]);
+                    setHasSearched(false);
+                } finally {
+                    setIsSearching(false);
+                }
+            };
+
+            fetchTrending();
             return;
         }
 
-        // Map filter selection to HF pipeline tags
-        const pipelineTags: string[] = activeFilterDef.tags;
+        // Non-empty query → regular search
+        setIsTrending(false);
 
         const doSearch = async () => {
             setIsSearching(true);
@@ -452,6 +491,14 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground animate-spin" />
                 )}
             </div>
+
+            {/* Trending header when showing auto-populated results */}
+            {isTrending && sortedResults.length > 0 && !isSearching && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mb-1">
+                    <Heart className="w-3 h-3" />
+                    <span>Popular {activeFilterDef.label} models</span>
+                </div>
+            )}
 
             {/* Results */}
             <div className="grid gap-3">
@@ -846,22 +893,31 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             </div>
 
             {/* Empty states */}
-            {hasSearched && !isSearching && results.length === 0 && (
+            {hasSearched && !isSearching && results.length === 0 && debouncedQuery.trim() && (
                 <div className="text-center py-8 text-muted-foreground text-sm">
                     No models found for &quot;{debouncedQuery}&quot;. Try a different search term.
                 </div>
             )}
 
-            {!hasSearched && (
+            {/* Loading state for initial trending fetch */}
+            {!hasSearched && isSearching && (
+                <div className="text-center py-12 text-muted-foreground/50 text-sm space-y-2">
+                    <Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin opacity-40" />
+                    <p>Loading popular {activeFilterDef.label} models...</p>
+                </div>
+            )}
+
+            {/* Fallback: no trending results loaded and not searching */}
+            {!hasSearched && !isSearching && results.length === 0 && (
                 <div className="text-center py-12 text-muted-foreground/50 text-sm space-y-2">
                     <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                    <p>Search HuggingFace for {activeFilterDef.label} models</p>
+                    <p>Search for {activeFilterDef.label} models</p>
                     <p className="text-xs opacity-60">
                         {pipelineFilter === 'embedding' ? 'Try "bge", "nomic", "gte", or "qwen-embedding"'
                             : pipelineFilter === 'diffusion' ? 'Try "flux", "stable-diffusion", or "sdxl"'
                                 : pipelineFilter === 'stt' ? 'Try "whisper", "parakeet", or "voxtral"'
                                     : pipelineFilter === 'video' ? 'Try "mochi", "ltx-video", or "cogvideo"'
-                                        : 'Try searching for model families like "llama", "qwen", "gemma", or "phi"'
+                                        : 'Try "llama", "qwen", "gemma", or "phi"'
                         }
                     </p>
                 </div>

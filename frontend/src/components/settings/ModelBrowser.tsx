@@ -50,8 +50,8 @@ export function ModelBrowser() {
     const [status, setStatus] = useState<any>(null);
     const { config, updateConfig } = useConfig();
 
-    // Top-level tab: Library (existing) vs Discover (HF Hub)
-    const [topTab, setTopTab] = useState<"library" | "discover">("library");
+    // Top-level tab: Discover (HF Hub, default) vs My Models (downloaded)
+    const [topTab, setTopTab] = useState<"discover" | "library">("discover");
 
     useEffect(() => {
         const load = async () => {
@@ -271,20 +271,8 @@ export function ModelBrowser() {
                 <ActiveEngineChip />
             </div>
 
-            {/* Top-level Tab Bar: Library | Discover */}
+            {/* Top-level Tab Bar: Discover | My Models */}
             <div className="flex gap-1 bg-muted/30 p-1 rounded-xl border border-border/30">
-                <button
-                    onClick={() => setTopTab("library")}
-                    className={cn(
-                        "flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2",
-                        topTab === "library"
-                            ? "bg-background text-foreground shadow-sm"
-                            : "text-muted-foreground hover:text-foreground"
-                    )}
-                    id="tab-library"
-                >
-                    Library
-                </button>
                 <button
                     onClick={() => setTopTab("discover")}
                     className={cn(
@@ -297,6 +285,23 @@ export function ModelBrowser() {
                 >
                     <Globe className="w-3.5 h-3.5" />
                     Discover
+                </button>
+                <button
+                    onClick={() => setTopTab("library")}
+                    className={cn(
+                        "flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2",
+                        topTab === "library"
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted-foreground hover:text-foreground"
+                    )}
+                    id="tab-library"
+                >
+                    My Models
+                    {localModels.length > 0 && (
+                        <span className="text-[10px] bg-muted/80 text-muted-foreground px-1.5 py-0.5 rounded-full font-mono">
+                            {localModels.length}
+                        </span>
+                    )}
                 </button>
             </div>
 
