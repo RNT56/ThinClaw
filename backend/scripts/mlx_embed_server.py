@@ -38,20 +38,40 @@ def load_model(model_name: str):
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """Generate embeddings for a list of texts."""
-    results = []
-    for text in texts:
-        input_ids = _tokenizer.encode(text, return_tensors="mlx")
+    # Use batch_encode_plus to get properly padded input_ids + attention_mask.
+    # Passing attention_mask explicitly avoids the dtype mismatch error in
+    # scaled_dot_product_attention when model weights are float16.
+    inputs = _tokenizer.batch_encode_plus(
+        texts,
+        return_tensors="mlx",
+        padding=True,
+        truncation=True,
+        max_length=512,
+    )
+
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs.get("attention_mask")
+
+    if attention_mask is not None:
+        outputs = _model(input_ids, attention_mask=attention_mask)
+    else:
         outputs = _model(input_ids)
-        # Use mean-pooled normalized embeddings if available, else CLS token
-        if hasattr(outputs, "text_embeds") and outputs.text_embeds is not None:
-            emb = outputs.text_embeds
-        else:
-            emb = outputs.last_hidden_state[:, 0, :]
-        # Flatten to 1D list
-        emb_list = emb.squeeze().tolist()
-        if isinstance(emb_list, float):
-            emb_list = [emb_list]
-        results.append(emb_list)
+
+    # Use mean-pooled normalized embeddings if available, else CLS token
+    if hasattr(outputs, "text_embeds") and outputs.text_embeds is not None:
+        emb = outputs.text_embeds
+    else:
+        emb = outputs.last_hidden_state[:, 0, :]
+
+    # Convert to list of lists
+    results = []
+    if len(emb.shape) == 1:
+        # Single embedding (shouldn't happen with batch, but be safe)
+        results.append(emb.tolist())
+    else:
+        for i in range(emb.shape[0]):
+            results.append(emb[i].tolist())
+
     return results
 
 

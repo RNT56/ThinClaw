@@ -80,7 +80,7 @@ class STTHandler(BaseHTTPRequestHandler):
 
             # Write to temp file for mlx_whisper
             suffix = ".wav"
-            with tempfile.NamedTempFile(suffix=suffix, delete=False) as f:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                 f.write(audio_data)
                 tmp_path = f.name
 
