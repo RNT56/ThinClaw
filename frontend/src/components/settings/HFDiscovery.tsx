@@ -29,6 +29,10 @@ import {
     Type,
     Eye,
     Layers,
+    Database,
+    Image,
+    Mic,
+    Video,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { invoke } from "@tauri-apps/api/core";
@@ -93,6 +97,29 @@ function sanitizeRepoId(repoId: string): string {
     return repoId.replace(/\//g, "_");
 }
 
+// Pipeline filter definitions — maps UI filter to HF pipeline_tag(s)
+type PipelineFilterId = 'all' | 'text' | 'vision' | 'embedding' | 'diffusion' | 'stt' | 'video';
+
+interface PipelineFilterDef {
+    id: PipelineFilterId;
+    label: string;
+    icon: typeof Layers;
+    tags: string[];
+    placeholder: string;
+    /** Download category folder name — null means default (LLM) */
+    downloadCategory: string | null;
+}
+
+const PIPELINE_FILTERS: PipelineFilterDef[] = [
+    { id: 'all', label: 'All LLMs', icon: Layers, tags: ['text-generation', 'image-text-to-text'], placeholder: 'Search LLMs... (e.g. llama, qwen, gemma)', downloadCategory: null },
+    { id: 'text', label: 'Text', icon: Type, tags: ['text-generation'], placeholder: 'Search text models... (e.g. llama, qwen, ministral)', downloadCategory: null },
+    { id: 'vision', label: 'Vision', icon: Eye, tags: ['image-text-to-text'], placeholder: 'Search vision models... (e.g. pixtral, llava, gemma)', downloadCategory: null },
+    { id: 'embedding', label: 'Embedding', icon: Database, tags: ['feature-extraction', 'sentence-similarity'], placeholder: 'Search embedding models... (e.g. bge, nomic, gte, qwen)', downloadCategory: 'Embedding' },
+    { id: 'diffusion', label: 'Diffusion', icon: Image, tags: ['text-to-image', 'image-to-image'], placeholder: 'Search diffusion models... (e.g. flux, stable-diffusion, sdxl)', downloadCategory: 'Diffusion' },
+    { id: 'stt', label: 'STT', icon: Mic, tags: ['automatic-speech-recognition'], placeholder: 'Search speech models... (e.g. whisper, parakeet, voxtral)', downloadCategory: 'STT' },
+    { id: 'video', label: 'Video', icon: Video, tags: ['text-to-video'], placeholder: 'Search video gen models... (e.g. mochi, ltx-video)', downloadCategory: 'Diffusion' },
+];
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -115,8 +142,9 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     const { searchQuery, results, hasSearched, expandedModel, downloadingFiles, repoProgress } =
         discoveryState;
 
-    // Pipeline type filter: 'all' | 'text' | 'vision'
-    const [pipelineFilter, setPipelineFilter] = useState<'all' | 'text' | 'vision'>('all');
+    // Pipeline type filter
+    const [pipelineFilter, setPipelineFilter] = useState<PipelineFilterId>('all');
+    const activeFilterDef = PIPELINE_FILTERS.find(f => f.id === pipelineFilter) ?? PIPELINE_FILTERS[0];
 
     // Local-only ephemeral state
     const [isSearching, setIsSearching] = useState(false);
@@ -282,12 +310,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         }
 
         // Map filter selection to HF pipeline tags
-        const pipelineTags: string[] =
-            pipelineFilter === 'text'
-                ? ['text-generation']
-                : pipelineFilter === 'vision'
-                    ? ['image-text-to-text']
-                    : ['text-generation', 'image-text-to-text'];
+        const pipelineTags: string[] = activeFilterDef.tags;
 
         const doSearch = async () => {
             setIsSearching(true);
@@ -336,7 +359,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             setDownloadingFiles((prev) => new Set([...prev, file.filename]));
 
             try {
-                await downloadHfFiles(repoId, files);
+                await downloadHfFiles(repoId, files, null, activeFilterDef.downloadCategory ?? undefined);
             } finally {
                 setDownloadingFiles((prev) => {
                     const next = new Set(prev);
@@ -345,7 +368,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                 });
             }
         },
-        [downloadHfFiles]
+        [downloadHfFiles, activeFilterDef]
     );
 
     // Download all files (MLX/vLLM directory) — track by repoId
@@ -355,12 +378,12 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             setDownloadingFiles((prev) => new Set([...prev, repoId]));
 
             try {
-                await downloadHfFiles(repoId, filenames);
+                await downloadHfFiles(repoId, filenames, null, activeFilterDef.downloadCategory ?? undefined);
             } finally {
                 // repoProgress listener handles cleanup after 100%
             }
         },
-        [downloadHfFiles]
+        [downloadHfFiles, activeFilterDef]
     );
 
     // Open external URL
@@ -393,23 +416,18 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     </div>
                 )}
 
-                {/* Pipeline Type Segmented Control */}
-                <div className="flex items-center bg-muted/40 rounded-lg p-0.5 border border-border/30 shrink-0" id="hf-pipeline-filter">
-                    {[
-                        { id: 'all' as const, label: 'All', icon: Layers },
-                        { id: 'text' as const, label: 'Text', icon: Type },
-                        { id: 'vision' as const, label: 'Vision', icon: Eye },
-                    ].map(({ id, label, icon: Icon }) => (
+                {/* Pipeline Type Scrollable Filter Bar */}
+                <div className="flex gap-1.5 overflow-x-auto no-scrollbar shrink-0" id="hf-pipeline-filter">
+                    {PIPELINE_FILTERS.map(({ id, label, icon: Icon }) => (
                         <button
                             key={id}
                             onClick={() => setPipelineFilter(id)}
                             className={cn(
-                                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-semibold uppercase tracking-wider transition-all duration-200",
+                                "flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all duration-200 whitespace-nowrap border shrink-0",
                                 pipelineFilter === id
-                                    ? "bg-background text-foreground shadow-sm border border-border/50"
-                                    : "text-muted-foreground hover:text-foreground"
+                                    ? "bg-foreground text-background border-foreground shadow-sm"
+                                    : "bg-muted/40 text-muted-foreground border-transparent hover:bg-muted hover:text-foreground"
                             )}
-                            title={id === 'all' ? 'Show all models' : id === 'text' ? 'Text-only LLMs' : 'Vision / Multimodal models'}
                             id={`hf-filter-${id}`}
                         >
                             <Icon className="w-3 h-3" />
@@ -424,13 +442,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <input
                     type="text"
-                    placeholder={
-                        pipelineFilter === 'vision'
-                            ? 'Search vision models... (e.g. pixtral, llava, gemma)'
-                            : pipelineFilter === 'text'
-                                ? 'Search text models... (e.g. llama, qwen, ministral)'
-                                : 'Search HuggingFace models... (e.g. llama, qwen, gemma)'
-                    }
+                    placeholder={activeFilterDef.placeholder}
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 text-sm bg-background border border-border/50 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-foreground placeholder:text-muted-foreground/50"
@@ -449,9 +461,16 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     const isDownloading = downloadingFiles.has(model.id);
                     const isDownloaded = isModelDownloaded(model.id);
                     const fileInfo = fileInfoCache[model.id] ?? null;
-                    const isVision = model.tags.some(
-                        (t) => t === "image-text-to-text"
-                    );
+                    const isVision = model.tags.some((t) => t === "image-text-to-text");
+                    const isEmbeddingModel = model.tags.some((t) => t === "feature-extraction" || t === "sentence-similarity");
+                    const isDiffusionModel = model.tags.some((t) => t === "text-to-image" || t === "image-to-image");
+                    const isSttModel = model.tags.some((t) => t === "automatic-speech-recognition");
+                    const isVideoModel = model.tags.some((t) => t === "text-to-video");
+                    const categoryBadge = isEmbeddingModel ? { label: 'Embedding', icon: Database, color: 'cyan' }
+                        : isDiffusionModel ? { label: 'Diffusion', icon: Image, color: 'pink' }
+                            : isSttModel ? { label: 'STT', icon: Mic, color: 'amber' }
+                                : isVideoModel ? { label: 'Video', icon: Video, color: 'rose' }
+                                    : null;
 
                     return (
                         <div
@@ -482,6 +501,20 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                                             <span className="text-[9px] uppercase tracking-wider font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 px-1.5 py-0.5 rounded border border-violet-500/20 flex items-center gap-1 shrink-0">
                                                 <Eye className="w-2.5 h-2.5" />
                                                 Vision
+                                            </span>
+                                        )}
+
+                                        {/* Category badge (non-LLM models) */}
+                                        {categoryBadge && (
+                                            <span className={cn(
+                                                "text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 shrink-0",
+                                                categoryBadge.color === 'cyan' && 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
+                                                categoryBadge.color === 'pink' && 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
+                                                categoryBadge.color === 'amber' && 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+                                                categoryBadge.color === 'rose' && 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20',
+                                            )}>
+                                                <categoryBadge.icon className="w-2.5 h-2.5" />
+                                                {categoryBadge.label}
                                             </span>
                                         )}
 
@@ -822,10 +855,14 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             {!hasSearched && (
                 <div className="text-center py-12 text-muted-foreground/50 text-sm space-y-2">
                     <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                    <p>Search HuggingFace for models</p>
+                    <p>Search HuggingFace for {activeFilterDef.label} models</p>
                     <p className="text-xs opacity-60">
-                        Try searching for model families like &quot;llama&quot;, &quot;qwen&quot;,
-                        &quot;gemma&quot;, or &quot;phi&quot;
+                        {pipelineFilter === 'embedding' ? 'Try "bge", "nomic", "gte", or "qwen-embedding"'
+                            : pipelineFilter === 'diffusion' ? 'Try "flux", "stable-diffusion", or "sdxl"'
+                                : pipelineFilter === 'stt' ? 'Try "whisper", "parakeet", or "voxtral"'
+                                    : pipelineFilter === 'video' ? 'Try "mochi", "ltx-video", or "cogvideo"'
+                                        : 'Try searching for model families like "llama", "qwen", "gemma", or "phi"'
+                        }
                     </p>
                 </div>
             )}
