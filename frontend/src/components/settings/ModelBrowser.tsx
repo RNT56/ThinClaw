@@ -176,24 +176,30 @@ export function ModelBrowser() {
 
         const localDisplay = localOnly.map(l => {
             const ext = l.path.split('.').pop()?.toLowerCase();
-            const pathLower = l.path.toLowerCase();
-            const nameLower = l.name.toLowerCase();
+            const pathLower = l.path.replace(/\\/g, '/').toLowerCase();
+            const nameLower = l.name.replace(/\\/g, '/').toLowerCase();
 
-            // Heuristic: If path or name contains diffusion-related terms, treat as Image Gen
-            // valid triggers: "diffusion", "flux", "sd", "image", "stable-diffusion"
-            const diffusionKeywords = ["diffusion", "flux", "sd", "image", "stable-diffusion", "stable diffusion", "sdxl", "sd3"];
-            const looksLikeDiffusion = diffusionKeywords.some(k => pathLower.includes(k) || nameLower.includes(k));
+            // --- Path-based category detection (most reliable) ---
+            // Models downloaded via HF discovery go into category subdirectories:
+            //   models/Embedding/..., models/STT/..., models/Diffusion/..., models/TTS/...
+            const inEmbeddingDir = nameLower.startsWith('embedding/') || pathLower.includes('/models/embedding/');
+            const inSttDir = nameLower.startsWith('stt/') || pathLower.includes('/models/stt/');
+            const inDiffusionDir = nameLower.startsWith('diffusion/') || pathLower.includes('/models/diffusion/');
+            const inTtsDir = nameLower.startsWith('tts/') || pathLower.includes('/models/tts/');
 
-            const isImageGen = (ext === "safetensors" || ext === "ckpt" || ext === "pt") ||
-                ((ext === "gguf" || ext === "bin") && looksLikeDiffusion);
+            // --- Keyword heuristics (fallback for models not in category dirs) ---
+            const diffusionKeywords = ["diffusion", "flux", "sd-", "stable-diffusion", "sdxl", "sd3"];
+            const looksLikeDiffusion = !inDiffusionDir && diffusionKeywords.some(k => pathLower.includes(k) || nameLower.includes(k));
+            const isImageGen = inDiffusionDir || looksLikeDiffusion ||
+                (ext === "safetensors" || ext === "ckpt" || ext === "pt") && diffusionKeywords.some(k => pathLower.includes(k));
 
-            // Heuristic for Embeddings
             const embeddingKeywords = ["embed", "nomic", "bge", "bert", "stella", "e5"];
-            const isEmbedding = embeddingKeywords.some(k => pathLower.includes(k) || nameLower.includes(k));
+            const isEmbedding = inEmbeddingDir || (!inSttDir && !inDiffusionDir && embeddingKeywords.some(k => pathLower.includes(k) || nameLower.includes(k)));
 
-            // Heuristic for STT
-            const sttKeywords = ["whisper"];
-            const isStt = sttKeywords.some(k => pathLower.includes(k) || nameLower.includes(k));
+            const sttKeywords = ["whisper", "parakeet", "voxtral"];
+            const isStt = inSttDir || (!inEmbeddingDir && !inDiffusionDir && sttKeywords.some(k => pathLower.includes(k) || nameLower.includes(k)));
+
+            const isTts = inTtsDir;
 
             let tags: string[] = ["Local"];
             let family = "Unknown";
@@ -211,6 +217,10 @@ export function ModelBrowser() {
                 tags.push("STT");
                 family = "Whisper";
                 description = "Local Speech-to-Text Model";
+            } else if (isTts) {
+                tags.push("TTS");
+                family = "TTS";
+                description = "Local Text-to-Speech Model";
             } else {
                 tags.push("Chat");
                 description = "Local Chat/LLM Model";

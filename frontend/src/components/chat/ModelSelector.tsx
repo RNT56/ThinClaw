@@ -25,10 +25,28 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
         loadStatus();
     }, [isOpen]);
 
-    // Filter out dedicated embedding models AND downloading models AND image gen models
+    // Filter out dedicated embedding/STT/diffusion/TTS models from the chat selector.
+    // Uses BOTH path-based category detection (models/{Category}/...) and filename heuristics.
     const filteredLocal = localModels.filter(m => {
         // Exclude if currently downloading
         if (downloading[m.name]) return false;
+
+        // --- Path-based category exclusion (most reliable) ---
+        // Models downloaded via HF discovery go into category subdirectories:
+        //   models/Embedding/..., models/STT/..., models/Diffusion/..., models/TTS/...
+        // The `name` field is the relative path from models/ (e.g. "STT/mlx-community_whisper-large-v3-turbo")
+        const namePath = m.name.replace(/\\/g, '/');
+        if (namePath.startsWith('Embedding/') || namePath.startsWith('embedding/')) return false;
+        if (namePath.startsWith('STT/') || namePath.startsWith('stt/')) return false;
+        if (namePath.startsWith('Diffusion/') || namePath.startsWith('diffusion/')) return false;
+        if (namePath.startsWith('TTS/') || namePath.startsWith('tts/')) return false;
+
+        // Also check the absolute path for category folders
+        const pathLower = m.path.replace(/\\/g, '/').toLowerCase();
+        if (pathLower.includes('/models/embedding/')) return false;
+        if (pathLower.includes('/models/stt/')) return false;
+        if (pathLower.includes('/models/diffusion/')) return false;
+        if (pathLower.includes('/models/tts/')) return false;
 
         const filename = m.name.split(/[\\/]/).pop() || m.name;
         const known = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename));
@@ -40,7 +58,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
             return true;
         }
 
-        // Fallback for non-curated or local models
+        // Fallback for non-curated or local models (filename heuristics)
         const nameLower = filename.toLowerCase();
 
         // Exclude embeddings
