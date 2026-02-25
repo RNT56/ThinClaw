@@ -36,7 +36,11 @@ export function ModelBrowser() {
         standardAssets,
         checkStandardAssets,
         downloadStandardAsset,
+        engineInfo,
     } = useModelContext();
+
+    // The curated model library is GGUF-only — only relevant for llama.cpp engine
+    const isLlamaCpp = engineInfo?.id === 'llamacpp' || engineInfo?.id === 'ollama';
 
     // Trigger standard asset check on mount
     useEffect(() => {
@@ -109,7 +113,8 @@ export function ModelBrowser() {
     );
 
     const unifiedModels = useMemo(() => {
-        const merged = [...models];
+        // Only include curated GGUF models for llama.cpp/ollama engines
+        const merged = isLlamaCpp ? [...models] : [];
 
         // Helper to get basename
         const getBasename = (path: string) => path.split(/[\\/]/).pop() || path;
@@ -255,7 +260,7 @@ export function ModelBrowser() {
             if (!a.isLocal && b.isLocal) return 1;
             return a.name.localeCompare(b.name);
         });
-    }, [localModels, searchQuery, activeCategory, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath, config, status]);
+    }, [models, localModels, searchQuery, activeCategory, isLlamaCpp, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath, config, status]);
 
     const isActive = (path: string | null) => path && currentModelPath && path === currentModelPath;
     const isEmbeddingActive = (path: string | null) => path && currentEmbeddingModelPath && path === currentEmbeddingModelPath;
@@ -336,7 +341,10 @@ export function ModelBrowser() {
                     </div>
 
                     <div className="flex gap-2 pb-1 overflow-x-auto w-full min-w-0 no-scrollbar mask-fade-right scroll-smooth snap-x">
-                        {["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Summarizer", "Diffusion", "STT", "Embedding", "Standard"].map((cat) => (
+                        {(isLlamaCpp
+                            ? ["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Summarizer", "Diffusion", "STT", "Embedding", "Standard"]
+                            : ["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Diffusion", "STT", "Embedding"]
+                        ).map((cat) => (
                             <button
                                 key={cat}
                                 onClick={() => {
@@ -357,8 +365,8 @@ export function ModelBrowser() {
                 </div>
 
                 <div className="grid gap-4">
-                    {/* Standard Assets Section */}
-                    {activeCategory === "Standard" && (
+                    {/* Standard Assets Section — llama.cpp only (GGUF components) */}
+                    {isLlamaCpp && activeCategory === "Standard" && (
                         <div className="space-y-4">
                             <div className="text-xs text-muted-foreground bg-muted/20 p-4 rounded-2xl border border-border/40 flex justify-between items-center">
                                 <span className="leading-relaxed">
@@ -843,8 +851,33 @@ export function ModelBrowser() {
                 </div>
 
                 {unifiedModels.length === 0 && !isRefreshing && (
-                    <div className="text-center py-8 text-muted-foreground text-sm">
-                        No models found. Check your connection or add local files.
+                    <div className="text-center py-12 space-y-3">
+                        {isLlamaCpp ? (
+                            <>
+                                <p className="text-muted-foreground text-sm">
+                                    No models found. Check your connection or add local files.
+                                </p>
+                            </>
+                        ) : (
+                            <>
+                                <div className="text-muted-foreground/50">
+                                    <Globe className="w-8 h-8 mx-auto mb-3 opacity-40" />
+                                </div>
+                                <p className="text-muted-foreground text-sm">
+                                    No downloaded models yet
+                                </p>
+                                <p className="text-muted-foreground/60 text-xs">
+                                    Head to the <strong>Discover</strong> tab to browse and download models from HuggingFace
+                                </p>
+                                <button
+                                    onClick={() => setTopTab("discover")}
+                                    className="mt-2 px-4 py-2 text-xs font-medium bg-primary/10 text-primary hover:bg-primary/20 rounded-xl transition-all border border-primary/20"
+                                >
+                                    <Globe className="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5" />
+                                    Browse Models
+                                </button>
+                            </>
+                        )}
                     </div>
                 )}
 
