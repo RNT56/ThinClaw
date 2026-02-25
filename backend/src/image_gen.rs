@@ -28,6 +28,7 @@ pub struct ImageGenParams {
     pub sampling_method: Option<String>,
 }
 
+#[cfg_attr(feature = "mlx", allow(dead_code))]
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum DiffusionArchitecture {
     Flux1,
@@ -42,6 +43,7 @@ enum DiffusionArchitecture {
     Unknown,
 }
 
+#[cfg_attr(feature = "mlx", allow(dead_code))]
 impl DiffusionArchitecture {
     fn detect(model_path: &str) -> Self {
         let lower = model_path.to_lowercase();
@@ -95,6 +97,199 @@ impl DiffusionArchitecture {
     }
 }
 
+/// MLX-native image generation using `mflux` Python package.
+/// Replaces `sd.cpp` sidecar when the MLX engine is active.
+#[cfg(feature = "mlx")]
+async fn run_mflux_inference(
+    app: &AppHandle,
+    model_path: &str,
+    params: &ImageGenParams,
+) -> Result<ImageResponse, String> {
+    use std::io::Write;
+
+    let output_temp =
+        NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let output_png = format!("{}.png", output_temp.path().to_string_lossy());
+
+    let width = params.width.unwrap_or(1024);
+    let height = params.height.unwrap_or(1024);
+    let steps = params.steps.unwrap_or(4);
+    let seed = params.seed.unwrap_or(-1);
+    let cfg_scale = params.cfg_scale.unwrap_or(1.0);
+
+    // Detect model type from path for mflux CLI command selection
+    let lower_model = model_path.to_lowercase();
+    let quantize_bits = if lower_model.contains("4bit") || lower_model.contains("q4") {
+        4
+    } else if lower_model.contains("8bit") || lower_model.contains("q8") {
+        8
+    } else {
+        0 // No quantization
+    };
+
+    // Create a temporary Python script to run mflux
+    // This is more reliable than CLI because we can pass the model path directly
+    let script_content = format!(
+        r#"
+import sys
+try:
+    from mflux import Flux1
+    model = Flux1(
+        model_config=Flux1.ModelConfig.from_alias("schnell"),
+        quantize={quantize},
+        local_path="{model_path}" if "{model_path}" != "" else None,
+    )
+    image = model.generate_image(
+        seed={seed},
+        prompt='''{prompt}''',
+        width={width},
+        height={height},
+        num_inference_steps={steps},
+        guidance={cfg_scale},
+    )
+    image.save("{output}")
+    print("mflux: generation complete", flush=True)
+except Exception as e:
+    print(f"mflux error: {{e}}", file=sys.stderr, flush=True)
+    sys.exit(1)
+"#,
+        quantize = if quantize_bits > 0 {
+            quantize_bits.to_string()
+        } else {
+            "None".to_string()
+        },
+        model_path = model_path.replace('\\', "\\\\").replace('"', "\\\""),
+        seed = seed,
+        prompt = params.prompt.replace('\'', "\\'").replace('\\', "\\\\"),
+        width = width,
+        height = height,
+        steps = steps,
+        cfg_scale = cfg_scale,
+        output = output_png.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+
+    // Write script to temp file
+    let mut script_file =
+        NamedTempFile::new().map_err(|e| format!("Failed to create script temp file: {}", e))?;
+    script_file
+        .write_all(script_content.as_bytes())
+        .map_err(|e| format!("Failed to write script: {}", e))?;
+    let script_path = script_file.path().to_string_lossy().to_string();
+
+    // Resolve MLX venv Python path directly
+    let python_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?
+        .join("mlx-venv")
+        .join("bin")
+        .join("python3");
+
+    if !python_path.exists() {
+        return Err(format!(
+            "MLX venv not bootstrapped — Python not found at {:?}",
+            python_path
+        ));
+    }
+
+    println!(
+        "[image_gen-mlx] Running mflux via: {} {}",
+        python_path.display(),
+        script_path
+    );
+
+    app.emit(
+        "image_gen_progress",
+        serde_json::json!({
+            "stage": "Initializing",
+            "progress": 0.05,
+            "text": "Loading mflux model..."
+        })
+        .to_string(),
+    )
+    .ok();
+
+    let (mut rx, child) = app
+        .shell()
+        .command(python_path.to_string_lossy().as_ref())
+        .args([&script_path])
+        .spawn()
+        .map_err(|e| format!("Failed to spawn mflux: {}", e))?;
+
+    let mut success = true;
+    let app_clone = app.clone();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            tauri_plugin_shell::process::CommandEvent::Stdout(line)
+            | tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
+                let text = String::from_utf8_lossy(&line);
+                println!("[mflux] {}", text);
+
+                if text.contains("generation complete") {
+                    app_clone
+                        .emit(
+                            "image_gen_progress",
+                            serde_json::json!({
+                                "stage": "Saving",
+                                "progress": 1.0,
+                                "text": "Generation finished!"
+                            })
+                            .to_string(),
+                        )
+                        .ok();
+                } else if text.contains("error") {
+                    success = false;
+                }
+            }
+            tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
+                if let Some(code) = payload.code {
+                    if code != 0 {
+                        success = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = child.kill();
+    if !success {
+        return Err("MLX image generation failed".to_string());
+    }
+
+    // Copy to permanent location
+    let images_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("images");
+    if !images_dir.exists() {
+        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let final_path = images_dir.join(format!("{}.png", id));
+
+    std::fs::copy(&output_png, &final_path).map_err(|e| format!("Failed to copy image: {}", e))?;
+    let _ = std::fs::remove_file(&output_png);
+
+    app.emit(
+        "image_gen_success",
+        serde_json::json!({
+            "original_id": "pending_generation",
+            "final_id": id
+        }),
+    )
+    .ok();
+
+    Ok(ImageResponse {
+        id,
+        path: final_path.to_string_lossy().to_string(),
+    })
+}
+
+#[cfg_attr(feature = "mlx", allow(dead_code))]
 async fn run_inference(
     app: &AppHandle,
     model_path: &str,
@@ -620,6 +815,7 @@ pub async fn generate_image(
     }
 
     config.reload();
+    #[allow(unused_variables)]
     let user_config = config.get_config();
     let final_params = params;
 
@@ -642,29 +838,38 @@ pub async fn generate_image(
 
     tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
-    println!("[image_gen] Attempt 1: Strict Mode...");
-    let result = match run_inference(
-        &app,
-        &model_path,
-        &final_params,
-        false,
-        user_config.sd_threads,
-    )
-    .await
-    {
-        Ok(res) => Ok(res),
-        Err(_) => {
-            println!("Attempt 2: Fallback Mode...");
-            // Use longer sleep before fallback retry
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            run_inference(
-                &app,
-                &model_path,
-                &final_params,
-                true,
-                user_config.sd_threads,
-            )
-            .await
+    // Route to the correct inference backend based on engine
+    #[cfg(feature = "mlx")]
+    let result = {
+        println!("[image_gen] Using MLX (mflux) backend...");
+        run_mflux_inference(&app, &model_path, &final_params).await
+    };
+
+    #[cfg(not(feature = "mlx"))]
+    let result = {
+        println!("[image_gen] Attempt 1: Strict Mode (sd.cpp)...");
+        match run_inference(
+            &app,
+            &model_path,
+            &final_params,
+            false,
+            user_config.sd_threads,
+        )
+        .await
+        {
+            Ok(res) => Ok(res),
+            Err(_) => {
+                println!("Attempt 2: Fallback Mode...");
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                run_inference(
+                    &app,
+                    &model_path,
+                    &final_params,
+                    true,
+                    user_config.sd_threads,
+                )
+                .await
+            }
         }
     };
 

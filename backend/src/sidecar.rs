@@ -515,6 +515,222 @@ impl SidecarManager {
         Ok((port, token))
     }
 
+    /// Start the MLX-native embedding server using `mlx-embeddings` Python package.
+    /// This replaces `llama-server --embedding` when the MLX engine is active.
+    #[cfg(feature = "mlx")]
+    pub fn start_mlx_embedding_server(
+        &self,
+        app: AppHandle,
+        model_path: String,
+    ) -> Result<(u16, String)> {
+        let tracker = app.state::<crate::process_tracker::ProcessTracker>();
+        tracker.cleanup_by_service("embedding");
+
+        let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(proc) = process_guard.take() {
+            let _ = proc.kill();
+        }
+
+        let (port, token) = Self::generate_config(Some(53756));
+
+        // Resolve the MLX venv Python path directly from app_data_dir
+        // (MlxEngine always creates the venv at {app_data_dir}/mlx-venv/)
+        let python_path = app.path().app_data_dir()
+            .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
+            .join("mlx-venv")
+            .join("bin")
+            .join("python3");
+
+        if !python_path.exists() {
+            return Err(anyhow!("MLX venv not bootstrapped — Python not found at {:?}", python_path));
+        }
+
+        // Locate the embedding server script
+        let script_path = Self::resolve_mlx_script(&app, "mlx_embed_server.py")?;
+
+        let mut args = vec![
+            script_path.to_string_lossy().to_string(),
+            "--model".to_string(),
+            model_path.clone(),
+            "--port".to_string(),
+            port.to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+        ];
+
+        if !token.is_empty() {
+            args.push("--api-key".to_string());
+            args.push(token.clone());
+        }
+
+        println!("[sidecar-embed-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
+
+        let command = app
+            .shell()
+            .command(python_path.to_string_lossy().as_ref())
+            .args(&args);
+
+        let (mut rx, child) = command
+            .spawn()
+            .map_err(|e| anyhow!("Failed to spawn MLX embedding server: {}", e))?;
+
+        let pid = child.pid();
+        tracker.add_pid(pid, "mlx-embed-server", "embedding");
+
+        let monitor_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(line) => {
+                        let msg = String::from_utf8_lossy(&line);
+                        eprintln!("[mlx-embed] {}", msg);
+                    }
+                    CommandEvent::Stdout(line) => {
+                        let msg = String::from_utf8_lossy(&line);
+                        println!("[mlx-embed] {}", msg);
+                    }
+                    _ => {}
+                }
+            }
+            monitor_app
+                .state::<crate::process_tracker::ProcessTracker>()
+                .remove_pid(pid);
+        });
+
+        *process_guard = Some(SidecarProcess {
+            child: Some(child),
+            port,
+            token: token.clone(),
+            context_size: 4096,
+            model_family: "mlx-embedding".into(),
+        });
+
+        Ok((port, token))
+    }
+
+    /// Start the MLX-native STT server using `mlx-whisper` Python package.
+    /// This replaces `whisper-server` / whisper.cpp when the MLX engine is active.
+    #[cfg(feature = "mlx")]
+    pub fn start_mlx_stt_server(
+        &self,
+        app: AppHandle,
+        model_path: String,
+    ) -> Result<(u16, String)> {
+        let tracker = app.state::<crate::process_tracker::ProcessTracker>();
+        tracker.cleanup_by_service("stt");
+
+        let mut process_guard = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(proc) = process_guard.take() {
+            let _ = proc.kill();
+        }
+
+        let (port, token) = Self::generate_config(Some(53757));
+
+        // Resolve the MLX venv Python path directly from app_data_dir
+        let python_path = app.path().app_data_dir()
+            .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
+            .join("mlx-venv")
+            .join("bin")
+            .join("python3");
+
+        if !python_path.exists() {
+            return Err(anyhow!("MLX venv not bootstrapped — Python not found at {:?}", python_path));
+        }
+
+        let script_path = Self::resolve_mlx_script(&app, "mlx_stt_server.py")?;
+
+        let mut args = vec![
+            script_path.to_string_lossy().to_string(),
+            "--model".to_string(),
+            model_path.clone(),
+            "--port".to_string(),
+            port.to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+        ];
+
+        if !token.is_empty() {
+            args.push("--api-key".to_string());
+            args.push(token.clone());
+        }
+
+        println!("[sidecar-stt-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
+
+        let command = app
+            .shell()
+            .command(python_path.to_string_lossy().as_ref())
+            .args(&args);
+
+        let (mut rx, child) = command
+            .spawn()
+            .map_err(|e| anyhow!("Failed to spawn MLX STT server: {}", e))?;
+
+        let pid = child.pid();
+        tracker.add_pid(pid, "mlx-stt-server", "stt");
+
+        let monitor_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(line) => {
+                        let msg = String::from_utf8_lossy(&line);
+                        eprintln!("[mlx-stt] {}", msg);
+                    }
+                    CommandEvent::Stdout(line) => {
+                        let msg = String::from_utf8_lossy(&line);
+                        println!("[mlx-stt] {}", msg);
+                    }
+                    _ => {}
+                }
+            }
+            monitor_app
+                .state::<crate::process_tracker::ProcessTracker>()
+                .remove_pid(pid);
+        });
+
+        *process_guard = Some(SidecarProcess {
+            child: Some(child),
+            port,
+            token: token.clone(),
+            context_size: 0,
+            model_family: "mlx-whisper".into(),
+        });
+
+        // Store the STT model path
+        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path);
+
+        Ok((port, token))
+    }
+
+    /// Resolve a Python script path from backend/scripts/
+    #[cfg(feature = "mlx")]
+    fn resolve_mlx_script(app: &AppHandle, script_name: &str) -> Result<std::path::PathBuf> {
+        // Check resource dir first (production bundle)
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let script = resource_dir.join("scripts").join(script_name);
+            if script.exists() {
+                return Ok(script);
+            }
+        }
+
+        // Dev mode: backend/scripts/
+        if let Ok(cwd) = std::env::current_dir() {
+            let script = cwd.join("backend/scripts").join(script_name);
+            if script.exists() {
+                return Ok(script);
+            }
+        }
+
+        // Fallback: check CARGO_MANIFEST_DIR (compile-time)
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let script = std::path::PathBuf::from(manifest_dir).join("scripts").join(script_name);
+        if script.exists() {
+            return Ok(script);
+        }
+
+        Err(anyhow!("Cannot find MLX script: {}", script_name))
+    }
+
     pub fn start_summarizer_server(
         &self,
         app: AppHandle,
@@ -971,6 +1187,14 @@ pub async fn start_embedding_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
+    // Route to the correct embedding server implementation based on engine
+    #[cfg(feature = "mlx")]
+    let res = state
+        .start_mlx_embedding_server(app.clone(), model_path)
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+
+    #[cfg(not(feature = "mlx"))]
     let res = state
         .start_embedding_server(app.clone(), model_path)
         .map(|_| ())

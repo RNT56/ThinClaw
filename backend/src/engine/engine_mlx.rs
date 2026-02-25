@@ -315,9 +315,13 @@ impl MlxEngine {
             }
         }
 
-        // Step 2: Install mlx-openai-server (unified server for text + vision + audio)
-        // Using --upgrade ensures we get the latest version even if upgrading from mlx_lm.
-        println!("[mlx] Installing mlx-openai-server...");
+        // Step 2: Install MLX service stack (unified venv for all MLX services)
+        //   - mlx-openai-server: Chat/VLM LLM server (text + vision + audio)
+        //   - mlx-embeddings:    Embedding model support (replaces llama-server --embedding)
+        //   - mflux:             Image generation (replaces sd-server / sd.cpp)
+        //   - mlx-whisper:       Speech-to-text (replaces whisper-server / whisper.cpp)
+        // Using --upgrade ensures we get the latest version even if upgrading.
+        println!("[mlx] Installing MLX service stack (mlx-openai-server, mlx-embeddings, mflux, mlx-whisper)...");
 
         let output = tokio::process::Command::new(&uv_bin)
             .args([
@@ -327,14 +331,17 @@ impl MlxEngine {
                 "--python",
                 &python.to_string_lossy(),
                 "mlx-openai-server",
+                "mlx-embeddings",
+                "mflux",
+                "mlx-whisper",
             ])
             .output()
             .await
-            .map_err(|e| format!("Failed to install mlx-openai-server: {}", e))?;
+            .map_err(|e| format!("Failed to install MLX service stack: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("mlx-openai-server install failed: {}", stderr));
+            return Err(format!("MLX service stack install failed: {}", stderr));
         }
 
         // Step 2b: Patch mlx-vlm handler for attention_mask→mask bug.

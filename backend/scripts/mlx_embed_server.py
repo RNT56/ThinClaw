@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+MLX Embedding Server — OpenAI-compatible /v1/embeddings endpoint.
+
+Wraps `mlx-embeddings` to serve embedding vectors over HTTP, matching
+the same API surface as llama-server --embedding or OpenAI's API.
+
+Usage:
+    python mlx_embed_server.py --model <hf-repo-or-path> --port 53756 [--host 127.0.0.1]
+"""
+
+import argparse
+import json
+import sys
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import List
+
+import mlx.core as mx
+from mlx_embeddings.utils import load
+
+
+# ---------------------------------------------------------------------------
+# Global model state (loaded once at startup)
+# ---------------------------------------------------------------------------
+_model = None
+_tokenizer = None
+_model_name = ""
+
+
+def load_model(model_name: str):
+    global _model, _tokenizer, _model_name
+    print(f"[mlx-embed] Loading model: {model_name}", flush=True)
+    _model, _tokenizer = load(model_name)
+    _model_name = model_name
+    print(f"[mlx-embed] Model loaded successfully", flush=True)
+
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """Generate embeddings for a list of texts."""
+    results = []
+    for text in texts:
+        input_ids = _tokenizer.encode(text, return_tensors="mlx")
+        outputs = _model(input_ids)
+        # Use mean-pooled normalized embeddings if available, else CLS token
+        if hasattr(outputs, "text_embeds") and outputs.text_embeds is not None:
+            emb = outputs.text_embeds
+        else:
+            emb = outputs.last_hidden_state[:, 0, :]
+        # Flatten to 1D list
+        emb_list = emb.squeeze().tolist()
+        if isinstance(emb_list, float):
+            emb_list = [emb_list]
+        results.append(emb_list)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# HTTP Handler — OpenAI /v1/embeddings compatible
+# ---------------------------------------------------------------------------
+class EmbeddingHandler(BaseHTTPRequestHandler):
+    api_key = None
+
+    def log_message(self, format, *args):
+        print(f"[mlx-embed] {args[0]}", flush=True)
+
+    def _check_auth(self) -> bool:
+        if not self.api_key:
+            return True
+        auth = self.headers.get("Authorization", "")
+        return auth == f"Bearer {self.api_key}"
+
+    def _send_json(self, data: dict, status: int = 200):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health" or self.path == "/":
+            self._send_json({"status": "ok", "model": _model_name})
+        else:
+            self._send_json({"error": "Not found"}, 404)
+
+    def do_POST(self):
+        if not self._check_auth():
+            self._send_json({"error": "Unauthorized"}, 401)
+            return
+
+        if self.path != "/v1/embeddings":
+            self._send_json({"error": "Not found"}, 404)
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length))
+
+            input_data = body.get("input", "")
+            if isinstance(input_data, str):
+                texts = [input_data]
+            elif isinstance(input_data, list):
+                texts = [str(t) for t in input_data]
+            else:
+                self._send_json({"error": "Invalid input"}, 400)
+                return
+
+            embeddings = embed_texts(texts)
+
+            response = {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "embedding": emb,
+                        "index": i,
+                    }
+                    for i, emb in enumerate(embeddings)
+                ],
+                "model": body.get("model", _model_name),
+                "usage": {
+                    "prompt_tokens": sum(len(t.split()) for t in texts),
+                    "total_tokens": sum(len(t.split()) for t in texts),
+                },
+            }
+            self._send_json(response)
+
+        except Exception as e:
+            print(f"[mlx-embed] Error: {e}", flush=True)
+            self._send_json({"error": str(e)}, 500)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MLX Embedding Server")
+    parser.add_argument("--model", required=True, help="HF repo ID or local path")
+    parser.add_argument("--port", type=int, default=53756, help="Server port")
+    parser.add_argument("--host", default="127.0.0.1", help="Server host")
+    parser.add_argument("--api-key", default=None, help="Optional API key")
+    args = parser.parse_args()
+
+    load_model(args.model)
+
+    EmbeddingHandler.api_key = args.api_key
+    server = HTTPServer((args.host, args.port), EmbeddingHandler)
+    print(f"[mlx-embed] Server listening on {args.host}:{args.port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("[mlx-embed] Shutting down", flush=True)
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
