@@ -426,10 +426,30 @@ impl SidecarManager {
 
         let (port, token) = Self::generate_config(Some(53756));
 
-        let command = app
+        let mut command = app
             .shell()
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
+
+        // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let bin_dir = resource_dir.join("bin");
+            #[cfg(target_os = "macos")]
+            {
+                let mut lib_path = bin_dir.to_string_lossy().to_string();
+
+                // Fallback for dev mode
+                if let Ok(cwd) = std::env::current_dir() {
+                    let dev_bin = cwd.join("backend/bin");
+                    if dev_bin.exists() {
+                        lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
+                    }
+                }
+
+                println!("[sidecar-embed] Setting DYLD_LIBRARY_PATH: {}", lib_path);
+                command = command.env("DYLD_LIBRARY_PATH", lib_path);
+            }
+        }
 
         let mut args = vec![
             "--model".to_string(),

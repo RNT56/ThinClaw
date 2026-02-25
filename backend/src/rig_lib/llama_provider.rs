@@ -662,15 +662,33 @@ impl LlamaProvider {
 
         let stream = response.bytes_stream().eventsource();
 
+        // Track how many events we've seen for debugging
+        let event_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let event_count_clone = event_count.clone();
+
         Ok(stream
-            .map(|event| match event {
+            .map(move |event| {
+                let ev_num = event_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match event {
                 Ok(evt) => {
                     if evt.data == "[DONE]" {
                         // End of stream
+                        eprintln!("[llama_provider] Stream completed after {} events", ev_num);
                         return Ok(ProviderEvent::Content("".into()));
+                    }
+                    // Log first few events for debugging
+                    if ev_num < 5 {
+                        eprintln!("[llama_provider] SSE event #{}: {}", ev_num, &evt.data[..evt.data.len().min(200)]);
                     }
                     match serde_json::from_str::<serde_json::Value>(&evt.data) {
                         Ok(json) => {
+                            // Check for server error objects (MLX/vLLM may return these)
+                            if let Some(err) = json.get("error").or(json.get("detail")) {
+                                let err_msg = err.as_str().unwrap_or(&err.to_string()).to_string();
+                                eprintln!("[llama_provider] Server error in stream: {}", err_msg);
+                                return Err(format!("Server error: {}", err_msg));
+                            }
+
                             // Check for usage
                             if let Some(usage) = json.get("usage") {
                                 if let (Some(p), Some(c), Some(t)) = (
@@ -693,14 +711,24 @@ impl LlamaProvider {
                                     Ok(ProviderEvent::Content("".to_string()))
                                 }
                             } else {
+                                // No content field — might be a role-only chunk or finish_reason
+                                if ev_num < 3 {
+                                    eprintln!("[llama_provider] No content in event #{} (may be role-only chunk)", ev_num);
+                                }
                                 Ok(ProviderEvent::Content("".to_string()))
                             }
                         }
-                        Err(_) => Ok(ProviderEvent::Content("".to_string())),
+                        Err(e) => {
+                            eprintln!("[llama_provider] JSON parse error: {} — data: {}", e, &evt.data[..evt.data.len().min(200)]);
+                            Ok(ProviderEvent::Content("".to_string()))
+                        }
                     }
                 }
-                Err(e) => Err(e.to_string()),
-            })
+                Err(e) => {
+                    eprintln!("[llama_provider] SSE stream error: {}", e);
+                    Err(e.to_string())
+                }
+            }})
             .boxed())
     }
 }

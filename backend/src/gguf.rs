@@ -280,3 +280,160 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // detect_model_family — architecture-based
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_family_llama() {
+        assert_eq!(detect_model_family("llama", None), "llama3");
+        assert_eq!(detect_model_family("LLaMA", None), "llama3");
+    }
+
+    #[test]
+    fn detect_family_mistral() {
+        assert_eq!(detect_model_family("mistral", None), "mistral");
+        assert_eq!(detect_model_family("Mixtral", None), "mistral");
+    }
+
+    #[test]
+    fn detect_family_deepseek() {
+        assert_eq!(detect_model_family("deepseek", None), "deepseek");
+    }
+
+    #[test]
+    fn detect_family_glm() {
+        assert_eq!(detect_model_family("chatglm", None), "glm");
+        assert_eq!(detect_model_family("GLM-4", None), "glm");
+    }
+
+    #[test]
+    fn detect_family_gemma() {
+        assert_eq!(detect_model_family("gemma", None), "gemma");
+        assert_eq!(detect_model_family("gemma2", None), "gemma");
+    }
+
+    #[test]
+    fn detect_family_qwen() {
+        assert_eq!(detect_model_family("qwen2", None), "qwen");
+    }
+
+    #[test]
+    fn detect_family_phi_is_chatml() {
+        assert_eq!(detect_model_family("phi3", None), "chatml");
+        assert_eq!(detect_model_family("Phi-4", None), "chatml");
+    }
+
+    #[test]
+    fn detect_family_starcoder_maps_to_llama3() {
+        assert_eq!(detect_model_family("starcoder", None), "llama3");
+        assert_eq!(detect_model_family("codellama", None), "llama3");
+    }
+
+    #[test]
+    fn detect_family_default_is_chatml() {
+        assert_eq!(detect_model_family("unknown_arch", None), "chatml");
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_model_family — template-based fallback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_family_from_llama3_template() {
+        assert_eq!(detect_model_family("unknown", Some("<|eot_id|>")), "llama3");
+        assert_eq!(
+            detect_model_family("unknown", Some("<|start_header_id|>assistant")),
+            "llama3"
+        );
+    }
+
+    #[test]
+    fn detect_family_from_mistral_template() {
+        assert_eq!(
+            detect_model_family("unknown", Some("[INST] Hello [/INST]")),
+            "mistral"
+        );
+    }
+
+    #[test]
+    fn detect_family_from_gemma_template() {
+        assert_eq!(
+            detect_model_family("unknown", Some("<start_of_turn>user\nHey<end_of_turn>")),
+            "gemma"
+        );
+    }
+
+    #[test]
+    fn detect_family_from_chatml_template() {
+        assert_eq!(
+            detect_model_family("unknown", Some("<|im_start|>user\nHello<|im_end|>")),
+            "qwen"
+        );
+    }
+
+    #[test]
+    fn detect_family_from_glm_template() {
+        assert_eq!(detect_model_family("unknown", Some("[gMASK]<sop>")), "glm");
+    }
+
+    #[test]
+    fn detect_family_arch_takes_priority_over_template() {
+        // If architecture is "llama" but template has Mistral tokens,
+        // architecture wins
+        assert_eq!(
+            detect_model_family("llama", Some("[INST] Hello [/INST]")),
+            "llama3"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // stop_tokens_for_family
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stop_tokens_known_families_non_empty() {
+        for family in &[
+            "llama3", "mistral", "deepseek", "glm", "gemma", "qwen", "chatml",
+        ] {
+            let tokens = stop_tokens_for_family(family);
+            assert!(
+                !tokens.is_empty(),
+                "Family '{}' should have stop tokens",
+                family
+            );
+        }
+    }
+
+    #[test]
+    fn stop_tokens_llama3_has_eot() {
+        let tokens = stop_tokens_for_family("llama3");
+        assert!(tokens.contains(&"<|eot_id|>".to_string()));
+    }
+
+    #[test]
+    fn stop_tokens_mistral_has_inst() {
+        let tokens = stop_tokens_for_family("mistral");
+        assert!(tokens.contains(&"[/INST]".to_string()));
+    }
+
+    #[test]
+    fn stop_tokens_qwen_and_chatml_are_same() {
+        assert_eq!(
+            stop_tokens_for_family("qwen"),
+            stop_tokens_for_family("chatml")
+        );
+    }
+
+    #[test]
+    fn stop_tokens_unknown_family_has_defaults() {
+        let tokens = stop_tokens_for_family("some_future_family");
+        assert!(!tokens.is_empty());
+        assert!(tokens.contains(&"Human:".to_string()));
+    }
+}

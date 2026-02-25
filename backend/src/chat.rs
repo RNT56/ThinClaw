@@ -312,41 +312,74 @@ pub async fn chat_stream(
         message: String,
     }
 
-    // Check if images are present (Rig doesn't support multimodal yet in our impl, so we hack it via content string)
-    for msg in processing_messages.iter_mut() {
-        // CRITICAL: Only send images for USER messages.
-        // Assistant-generated images should NOT be sent back as base64 in history,
-        // as they cause massive context bloat and tokenization errors.
+    // Build multimodal content for user messages that contain images.
+    // CRITICAL: Only embed actual base64 image data for the LAST user message.
+    // For older messages in the history, replace with a text placeholder to avoid
+    // context bloat — a single 1024×1024 JPEG is ~100KB base64 = ~25K tokens,
+    // which would fill a 32K context window on the second turn.
+    let last_user_idx = processing_messages.iter().rposition(|m| m.role == "user");
+
+    for (idx, msg) in processing_messages.iter_mut().enumerate() {
         if msg.role != "user" {
             continue;
         }
 
         if let Some(image_ids) = &msg.images {
             if !image_ids.is_empty() {
-                // Construct multimodal parts
-                let mut parts = Vec::new();
-                parts.push(serde_json::json!({
-                    "type": "text",
-                    "text": msg.content
-                }));
+                let is_current_turn = Some(idx) == last_user_idx;
 
-                for id in image_ids {
-                    match crate::images::load_image_as_base64(&app, id).await {
-                        Ok(b64) => {
-                            parts.push(serde_json::json!({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": format!("data:image/jpeg;base64,{}", b64)
-                                }
-                            }));
+                if is_current_turn {
+                    // Current turn: embed full base64 image data
+                    info!(
+                        "[chat] Building multimodal parts for {} image(s) (current turn)",
+                        image_ids.len()
+                    );
+                    let mut parts = Vec::new();
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": msg.content
+                    }));
+
+                    for id in image_ids {
+                        match crate::images::load_image_as_base64_with_mime(&app, id).await {
+                            Ok((b64, mime)) => {
+                                info!(
+                                    "[chat] Image {} loaded as {}, base64 length: {}",
+                                    id,
+                                    mime,
+                                    b64.len()
+                                );
+                                parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{};base64,{}", mime, b64)
+                                    }
+                                }));
+                            }
+                            Err(e) => eprintln!("Failed to load image {}: {}", id, e),
                         }
-                        Err(e) => eprintln!("Failed to load image {}: {}", id, e),
                     }
-                }
 
-                // Pack into content string
-                if let Ok(json_str) = serde_json::to_string(&parts) {
-                    msg.content = json_str;
+                    info!(
+                        "[chat] Multimodal parts: {} total ({} image_url parts)",
+                        parts.len(),
+                        parts.len() - 1
+                    );
+                    if let Ok(json_str) = serde_json::to_string(&parts) {
+                        msg.content = json_str;
+                    }
+                } else {
+                    // Older turn: replace with text placeholder to save context
+                    let n = image_ids.len();
+                    let original_text = msg.content.clone();
+                    msg.content = format!(
+                        "{}\n[User shared {} image(s) in this message]",
+                        original_text, n
+                    );
+                    info!(
+                        "[chat] Stripped {} image(s) from history message (turn {})",
+                        n, idx
+                    );
                 }
             }
         }

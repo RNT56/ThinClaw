@@ -481,7 +481,7 @@ pub async fn setup_engine(
 
             emit(
                 "installing",
-                "Installing mlx_lm (this may take 2-3 minutes)...",
+                "Installing mlx-openai-server (this may take 2-3 minutes)...",
             );
             engine.bootstrap().await?;
 
@@ -574,15 +574,23 @@ mod tests {
     #[test]
     fn get_active_engine_returns_valid_info() {
         let info = get_active_engine_info();
-        // With default features, llamacpp is the active engine
         assert!(!info.id.is_empty(), "engine id must not be empty");
         assert!(
             !info.display_name.is_empty(),
             "display_name must not be empty"
         );
+        assert!(!info.hf_tag.is_empty(), "hf_tag must not be empty");
 
-        // Since default feature is llamacpp:
-        #[cfg(feature = "llamacpp")]
+        // Feature-specific assertions. When multiple features are compiled
+        // together, the first one wins (mlx > llamacpp > vllm > ollama).
+        #[cfg(feature = "mlx")]
+        {
+            assert_eq!(info.id, "mlx");
+            assert_eq!(info.hf_tag, "mlx");
+            assert!(!info.single_file_model);
+        }
+
+        #[cfg(all(feature = "llamacpp", not(feature = "mlx")))]
         {
             assert_eq!(info.id, "llamacpp");
             assert_eq!(info.hf_tag, "gguf");
@@ -595,5 +603,46 @@ mod tests {
         let info = get_active_engine_info();
         let json = serde_json::to_string(&info).expect("EngineInfo should serialize");
         assert!(json.contains(&info.id));
+    }
+
+    #[test]
+    fn read_max_context_root_level() {
+        let dir = std::env::temp_dir().join("scrappy_test_ctx_root");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"max_position_embeddings": 131072}"#,
+        )
+        .unwrap();
+        assert_eq!(read_model_max_context(dir.to_str().unwrap()), Some(131072));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_max_context_nested_text_config() {
+        // Gemma 3 VLMs put max_position_embeddings inside text_config
+        let dir = std::env::temp_dir().join("scrappy_test_ctx_nested");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "gemma3", "text_config": {"max_position_embeddings": 8192}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_model_max_context(dir.to_str().unwrap()), Some(8192));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_max_context_alternate_field_names() {
+        let dir = std::env::temp_dir().join("scrappy_test_ctx_alt");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("config.json"), r#"{"n_ctx": 4096}"#).unwrap();
+        assert_eq!(read_model_max_context(dir.to_str().unwrap()), Some(4096));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_max_context_missing_config() {
+        assert_eq!(read_model_max_context("/nonexistent/path/to/model"), None);
     }
 }

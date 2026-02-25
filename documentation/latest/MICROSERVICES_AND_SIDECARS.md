@@ -1,6 +1,6 @@
 # Scrappy — Microservices & Sidecar Reference
 
-> **Last updated:** 2026-02-23  
+> **Last updated:** 2026-02-25  
 > **Scope:** All external processes spawned or managed by the Tauri host, the multi-engine inference system (`InferenceEngine` trait + `EngineManager`), the OpenClaw Node.js engine, the `scrappy-mcp-tools` Rust crate, and all build- and dev-time infrastructure scripts.
 
 ---
@@ -207,14 +207,15 @@ Registered as `app.manage(EngineManager::new(app_data_dir))` in `lib.rs`. The `c
 | Engine | File | Binary | Bootstrap | Model Format | HF Tag |
 |--------|------|--------|-----------|-------------|--------|
 | **LlamaCpp** | `engine_llamacpp.rs` | Bundled `llama-server` sidecar | None | Single GGUF file | `gguf` |
-| **MLX** | `engine_mlx.rs` | `uv` (bundled) → Python + `mlx_lm.server` | First-launch: creates `mlx-env/` venv, installs `mlx_lm` (~200MB, 2-3 min) | Safetensors directory | `mlx` |
+| **MLX** | `engine_mlx.rs` | `uv` (bundled) → Python + `mlx-openai-server` | First-launch: creates `mlx-env/` venv, installs `mlx-openai-server` + `mlx-vlm` (~200MB, 2-3 min) | Safetensors directory | `mlx` |
 | **vLLM** | `engine_vllm.rs` | `uv` (bundled) → Python + `vllm.entrypoints.openai.api_server` | First-launch: creates `vllm-env/` venv, installs `vllm` (~1GB, 5-10 min) | AWQ / HF directory | `awq` |
 | **Ollama** | `engine_ollama.rs` | External `ollama` daemon | None (user must install [ollama.ai](https://ollama.ai)) | GGUF (managed by Ollama) | `gguf` |
 
 **MLX/vLLM bootstrap flow:**
 1. `setup_engine` Tauri command invoked (via `EngineSetupBanner` frontend component)
 2. `engine.bootstrap()` creates a Python virtual environment via the bundled `uv` sidecar
-3. Installs the inference framework into the venv (`pip install mlx_lm` or `pip install vllm`)
+3. Installs the inference framework into the venv (`pip install mlx-openai-server mlx-vlm` or `pip install vllm`)
+4. **(MLX only)** Applies the VLM `attention_mask` → `mask` patch (see below)
 4. Progress emitted via `engine_setup_progress` Tauri events (`{ stage, message }`)
 5. Subsequent starts use the cached venv — no re-bootstrap needed
 
@@ -241,7 +242,15 @@ Registered as `app.manage(EngineManager::new(app_data_dir))` in `lib.rs`. The `c
 2. If `needs_setup = true`, an amber banner appears with a "Set Up Now" button
 3. Clicking it calls `setup_engine` and shows a 3-stage progress bar (Create Environment → Install Packages → Ready)
 4. `engine_setup_progress` events update the UI in real time
-5. On completion, banner turns green; on error, banner turns red with a "Retry" button
+6. On completion, banner turns green; on error, banner turns red with a "Retry" button
+
+**MLX VLM Patch (`apply_vlm_attention_mask_patch`):**
+
+After installing `mlx-openai-server`, the bootstrap automatically patches the `mlx-vlm` handler (`app/handler/mlx_vlm.py`) to rename `attention_mask` → `mask` in the `vision_inputs` dictionary. This fixes an upstream bug where `stream_generate()` expects a `mask` key but the HuggingFace processor returns `attention_mask`, causing a crash (`expand_dims(NoneType, int)`) when processing images with models like Gemma 3. The patch is idempotent and survives package upgrades.
+
+**MLX Multimodal Support:**
+
+When the loaded model is a vision-language model (VLM), the engine passes `--model-type multimodal` to `mlx-openai-server`. The model's `config.json` is inspected at startup to detect `model_type` values associated with vision capabilities (e.g. `gemma3`, `qwen2_vl`, `pixtral`, `llava`).
 
 **Tauri event `engine_setup_progress`:**
 ```json
@@ -365,6 +374,8 @@ Additional args vs. chat server:
 | `--n-gpu-layers` | `0` | CPU-only; prevents VRAM contention with chat |
 
 **Note:** Prompt caching, Flash Attention, and continuous batching are **not** enabled for the embedding server (not relevant/harmful for embedding mode).
+
+**Environment:** On macOS, `DYLD_LIBRARY_PATH` is set to `$RESOURCE_DIR/bin:$CWD/backend/bin` (same as the chat server) so that shared libraries like `libmtmd.0.dylib` are found at runtime.
 
 **Used by:** `rag.rs` — vector store ingestion (`POST /v1/embeddings`) and similarity retrieval. Passes text chunks; receives 768- or 1024-dimensional float vectors.
 

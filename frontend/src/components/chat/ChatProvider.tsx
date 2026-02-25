@@ -733,12 +733,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const handleImageUpload = useCallback(() => {
         const inp = document.createElement('input');
         inp.type = 'file';
-        inp.accept = 'image/*';
+        inp.accept = 'image/png,image/jpeg,image/webp,image/gif,image/*';
         inp.multiple = true;
+        inp.style.display = 'none';
         inp.onchange = async (e) => {
             const files = Array.from((e.target as HTMLInputElement).files || []);
             if (files.length > 0) onDrop(files);
+            inp.remove();
         };
+        // Attach to DOM so WebKit/macOS treats the click as a trusted gesture.
+        // Detached inputs can be silently ignored.
+        document.body.appendChild(inp);
         inp.click();
     }, [onDrop]);
 
@@ -747,10 +752,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         inp.type = 'file';
         inp.accept = '.pdf,.txt,.md,.json,.js,.ts,.rs,.py';
         inp.multiple = true;
+        inp.style.display = 'none';
         inp.onchange = async (e) => {
             const files = Array.from((e.target as HTMLInputElement).files || []);
             if (files.length > 0) onDrop(files);
+            inp.remove();
         };
+        document.body.appendChild(inp);
         inp.click();
     }, [onDrop]);
 

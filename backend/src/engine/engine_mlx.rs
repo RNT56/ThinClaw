@@ -108,17 +108,153 @@ impl MlxEngine {
     }
 
     /// Check if the MLX environment is already bootstrapped.
+    ///
+    /// Checks for a `.mlx-openai-server` marker file that is written after
+    /// a successful `mlx-openai-server` installation. This ensures venvs
+    /// bootstrapped with the old `mlx_lm` are re-bootstrapped correctly.
     pub fn is_bootstrapped(&self) -> bool {
-        self.get_python_path().map(|p| p.exists()).unwrap_or(false)
+        self.get_venv_path()
+            .map(|v| v.join(".mlx-openai-server").exists())
+            .unwrap_or(false)
+    }
+
+    /// Check if a model directory contains a vision-capable (VLM) model.
+    ///
+    /// Reads `config.json` for vision-related keys and verifies that vision
+    /// weights actually exist in the safetensors files. Both checks must pass.
+    ///
+    /// Config conventions checked:
+    /// - `vision_config` (LLaVA, Qwen-VL, Gemma 3)
+    /// - `vision_feature_layer` + `image_token_index` (Ministral 3 / Pixtral)
+    /// - Architecture name containing "ConditionalGeneration" (HF convention for VLMs)
+    ///
+    /// Weight verification prevents crashes when an MLX conversion carries a
+    /// multimodal config.json but stripped the vision encoder during conversion.
+    fn is_vision_model(model_path: &str) -> bool {
+        let base = std::path::Path::new(model_path);
+        let config = base.join("config.json");
+
+        let config_indicates_vision = std::fs::read_to_string(&config)
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .map(|j| {
+                // Standard VLM config key (LLaVA, Qwen-VL, Gemma 3, etc.)
+                if j.get("vision_config").is_some() {
+                    return true;
+                }
+                // Mistral 3 / Pixtral style: vision_feature_layer + image_token_index
+                if j.get("vision_feature_layer").is_some() || j.get("image_token_index").is_some() {
+                    return true;
+                }
+                // HuggingFace architecture convention: "ForConditionalGeneration" = multimodal
+                if let Some(archs) = j.get("architectures").and_then(|a| a.as_array()) {
+                    for arch in archs {
+                        if let Some(name) = arch.as_str() {
+                            if name.contains("ConditionalGeneration")
+                                || name.contains("VisionModel")
+                                || name.contains("ForCausalImageTextToText")
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            })
+            .unwrap_or(false);
+
+        if !config_indicates_vision {
+            return false;
+        }
+
+        // Config says vision — now verify that vision weights actually exist.
+        // Some MLX conversions strip the vision encoder during conversion
+        // (e.g. mlx-community text-only conversions of multimodal source models).
+        if Self::has_vision_weights(base) {
+            return true;
+        }
+
+        // Weights are missing — fall back to text-only mode.
+        println!(
+            "[mlx] config.json indicates a VLM but no vision_tower / vision_model weights \
+             found in safetensors — this MLX conversion appears text-only. \
+             Launching as type=lm instead of multimodal."
+        );
+        false
+    }
+
+    /// Check whether the model directory contains vision encoder weights.
+    /// Looks at `model.safetensors.index.json` (multi-shard) first, then
+    /// falls back to scanning `*.safetensors` file names for vision-related
+    /// patterns (for single-file models that lack an index).
+    fn has_vision_weights(model_dir: &std::path::Path) -> bool {
+        // 1. Multi-shard: check the weight_map in the index file
+        let index = model_dir.join("model.safetensors.index.json");
+        if let Ok(content) = std::fs::read_to_string(&index) {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(weight_map) = j.get("weight_map").and_then(|w| w.as_object()) {
+                    let has_vision = weight_map.keys().any(|k| {
+                        k.starts_with("vision_tower.")
+                            || k.starts_with("vision_model.")
+                            || k.starts_with("multi_modal_projector.")
+                    });
+                    return has_vision;
+                }
+            }
+        }
+
+        // 2. Single-file: if a file named *vision* or *mmproj* exists among safetensors
+        if let Ok(entries) = std::fs::read_dir(model_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.ends_with(".safetensors")
+                    && (name.contains("vision") || name.contains("mmproj"))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 3. Fallback: if there's no index and no vision-named files,
+        //    assume text-only (we can't cheaply inspect safetensors internals)
+        false
+    }
+
+    /// Check if a Python binary is version 3.11+.
+    ///
+    /// Runs `python3 --version` and parses the output. Returns `false` if the
+    /// version is below 3.11 or if the check fails for any reason.
+    async fn check_python_version(python_path: &std::path::Path) -> bool {
+        let output = tokio::process::Command::new(python_path)
+            .args(["--version"])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                // Output is like "Python 3.12.4"
+                let version_str = String::from_utf8_lossy(&out.stdout);
+                if let Some(ver) = version_str.strip_prefix("Python ") {
+                    let parts: Vec<&str> = ver.trim().split('.').collect();
+                    if parts.len() >= 2 {
+                        let minor: u32 = parts[1].parse().unwrap_or(0);
+                        return minor >= 11;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Bootstrap the MLX environment using `uv`.
     ///
     /// This is called on first launch. It:
     /// 1. Auto-downloads `uv` if not present
-    /// 2. Creates a venv with `uv venv <path>`
-    /// 3. Installs `mlx_lm` with `uv pip install --python <venv/bin/python> mlx_lm`
-    /// 4. Subsequent starts skip all steps
+    /// 2. Creates a venv with `uv venv <path>` (skipped if venv already exists)
+    /// 3. Installs `mlx-openai-server` (unified text+vision+audio server)
+    /// 4. Writes a `.mlx-openai-server` marker file
+    /// 5. Subsequent starts skip all steps
     pub async fn bootstrap(&self) -> Result<(), String> {
         let venv = self
             .get_venv_path()
@@ -141,45 +277,136 @@ impl MlxEngine {
             }
         };
 
-        println!("[mlx] Creating virtualenv at {:?}", venv);
+        // Step 1: Create venv with Python 3.12+
+        // mlx-openai-server requires Python >=3.11. We pin 3.12 so `uv` will
+        // auto-download it if the system Python is too old (e.g. 3.10).
+        let python = self.get_python_path().ok_or("Python path not available")?;
 
-        // Step 1: Create venv
-        let output = tokio::process::Command::new(&uv_bin)
-            .args(["venv", &venv.to_string_lossy()])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run uv venv: {}", e))?;
+        let needs_new_venv = if python.exists() {
+            // Check if existing venv has a compatible Python version
+            let version_ok = Self::check_python_version(&python).await;
+            if !version_ok {
+                println!("[mlx] Existing venv has Python <3.11, recreating with Python 3.12...");
+                // Remove old incompatible venv
+                let _ = std::fs::remove_dir_all(&venv);
+                true
+            } else {
+                println!(
+                    "[mlx] Reusing existing venv at {:?} (upgrading packages)",
+                    venv
+                );
+                false
+            }
+        } else {
+            true
+        };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("uv venv failed: {}", stderr));
+        if needs_new_venv {
+            println!("[mlx] Creating virtualenv at {:?} with Python 3.12", venv);
+            let output = tokio::process::Command::new(&uv_bin)
+                .args(["venv", "--python", "3.12", &venv.to_string_lossy()])
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run uv venv: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("uv venv failed: {}", stderr));
+            }
         }
 
-        // Step 2: Install mlx_lm
-        println!("[mlx] Installing mlx_lm...");
-        let python = self
-            .get_python_path()
-            .ok_or("Python path not available after venv creation")?;
+        // Step 2: Install mlx-openai-server (unified server for text + vision + audio)
+        // Using --upgrade ensures we get the latest version even if upgrading from mlx_lm.
+        println!("[mlx] Installing mlx-openai-server...");
 
         let output = tokio::process::Command::new(&uv_bin)
             .args([
                 "pip",
                 "install",
+                "--upgrade",
                 "--python",
                 &python.to_string_lossy(),
-                "mlx_lm",
+                "mlx-openai-server",
             ])
             .output()
             .await
-            .map_err(|e| format!("Failed to install mlx_lm: {}", e))?;
+            .map_err(|e| format!("Failed to install mlx-openai-server: {}", e))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("mlx_lm install failed: {}", stderr));
+            return Err(format!("mlx-openai-server install failed: {}", stderr));
         }
+
+        // Step 2b: Patch mlx-vlm handler for attention_mask→mask bug.
+        // mlx-vlm's stream_generate() expects a "mask" key but the HuggingFace
+        // processor returns "attention_mask".  Without this patch, Gemma 3 (and
+        // potentially other VLMs) crash with:
+        //   expand_dims(): incompatible function arguments … NoneType, int
+        // We insert a key-rename after the torch→mlx conversion block.
+        Self::apply_vlm_attention_mask_patch(&venv);
+
+        // Step 3: Write marker file so is_bootstrapped() returns true next time
+        let marker = venv.join(".mlx-openai-server");
+        std::fs::write(&marker, "installed")
+            .map_err(|e| format!("Failed to write marker file: {}", e))?;
 
         println!("[mlx] Bootstrap complete.");
         Ok(())
+    }
+
+    /// Patch `app/handler/mlx_vlm.py` inside the venv to fix the
+    /// `attention_mask` → `mask` key mismatch that causes VLMs to crash.
+    ///
+    /// This is a workaround for <https://github.com/Blaizzy/mlx-vlm/issues/XXX>.
+    /// The patch is idempotent — it does nothing if already applied.
+    fn apply_vlm_attention_mask_patch(venv: &std::path::Path) {
+        // The handler lives under site-packages/app/handler/mlx_vlm.py
+        let handler = venv
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("app")
+            .join("handler")
+            .join("mlx_vlm.py");
+
+        if !handler.exists() {
+            println!("[mlx] Patch: mlx_vlm.py handler not found, skipping");
+            return;
+        }
+
+        let Ok(source) = std::fs::read_to_string(&handler) else {
+            println!("[mlx] Patch: could not read mlx_vlm.py");
+            return;
+        };
+
+        // Already patched?
+        if source.contains("PATCH (scrappy)") {
+            println!("[mlx] Patch: attention_mask fix already applied");
+            return;
+        }
+
+        // The pattern we look for after the torch→mlx conversion block.
+        // We insert our rename right after it.
+        let needle = "                    vision_inputs[key] = mx.array(value)\n";
+        let patch = r#"                    vision_inputs[key] = mx.array(value)
+
+            # PATCH (scrappy): mlx-vlm's stream_generate expects "mask" but the
+            # HuggingFace processor returns "attention_mask". Without this
+            # rename, Gemma 3 crashes with expand_dims(NoneType, int).
+            if "attention_mask" in vision_inputs and "mask" not in vision_inputs:
+                vision_inputs["mask"] = vision_inputs.pop("attention_mask")
+"#;
+
+        let patched = source.replace(needle, patch);
+        if patched == source {
+            println!("[mlx] Patch: could not locate insertion point, skipping");
+            return;
+        }
+
+        match std::fs::write(&handler, patched) {
+            Ok(_) => println!("[mlx] Patch: applied attention_mask→mask fix to mlx_vlm.py"),
+            Err(e) => println!("[mlx] Patch: failed to write: {}", e),
+        }
     }
 
     /// Find a free port to use.
@@ -327,6 +554,9 @@ impl InferenceEngine for MlxEngine {
         context_size: u32,
         _options: EngineStartOptions,
     ) -> Result<(u16, String), String> {
+        let venv = self
+            .get_venv_path()
+            .ok_or("MLX venv path not set — call set_app_data_dir first")?;
         let python = self
             .get_python_path()
             .ok_or("MLX environment not bootstrapped. Run bootstrap() first.")?;
@@ -357,37 +587,46 @@ impl InferenceEngine for MlxEngine {
 
         let port = Self::find_free_port()?;
 
-        // Max output tokens: default is 512 in mlx_lm.server which is too low
-        // for chat. Set it to half the effective context, capped at 8192.
-        let max_output_tokens = (effective / 2).min(8192);
+        // Detect vision models to select the correct model type for mlx-openai-server.
+        // Checks both config.json and actual safetensors weights to ensure the vision
+        // encoder was included in this conversion (some MLX conversions strip it).
+        let is_vlm = Self::is_vision_model(model_path);
+        let model_type = if is_vlm { "multimodal" } else { "lm" };
 
         println!(
-            "[mlx] Starting mlx_lm.server on port {} with model {} (max_tokens={})",
-            port, model_path, max_output_tokens
+            "[mlx] Starting mlx-openai-server on port {} with model {} (type={})",
+            port, model_path, model_type
         );
 
-        let max_output_str = max_output_tokens.to_string();
         let port_str = port.to_string();
 
-        let child = tokio::process::Command::new(&python)
+        // mlx-openai-server installs a CLI entry point in the venv's bin/ dir.
+        // We invoke it directly rather than using `python -m`.
+        let server_bin = venv.join("bin").join("mlx-openai-server");
+        if !server_bin.exists() {
+            return Err(format!(
+                "mlx-openai-server binary not found at {:?} — try re-bootstrapping",
+                server_bin
+            ));
+        }
+
+        let child = tokio::process::Command::new(&server_bin)
             .args([
-                "-m",
-                "mlx_lm.server",
-                "--model",
+                "launch",
+                "--model-path",
                 model_path,
+                "--model-type",
+                model_type,
                 "--port",
                 &port_str,
                 "--host",
                 "127.0.0.1",
-                "--max-tokens",
-                &max_output_str,
-                "--use-default-chat-template",
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("Failed to spawn mlx_lm.server: {}", e))?;
+            .map_err(|e| format!("Failed to spawn mlx-openai-server: {}", e))?;
 
         *self.port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
         *self.process.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
@@ -577,5 +816,185 @@ mod tests {
             engine.get_python_path(),
             Some(PathBuf::from("/tmp/test_scrappy/mlx-env/bin/python3"))
         );
+    }
+
+    #[test]
+    fn is_vision_model_with_vision_config() {
+        let dir = std::env::temp_dir().join("scrappy_test_vision");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "mistral3", "vision_config": {"image_size": 512}}"#,
+        )
+        .unwrap();
+        // Need vision weights too
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"vision_tower.layer.weight": "model.safetensors", "language_model.layer.weight": "model.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_text_only() {
+        let dir = std::env::temp_dir().join("scrappy_test_text");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "llama", "max_position_embeddings": 4096}"#,
+        )
+        .unwrap();
+        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_missing_config() {
+        assert!(!MlxEngine::is_vision_model("/nonexistent/path/to/model"));
+    }
+
+    #[test]
+    fn is_vision_model_empty_vision_config() {
+        // Some VLMs have an empty vision_config object — should detect if weights present
+        let dir = std::env::temp_dir().join("scrappy_test_empty_vc");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "gemma3", "vision_config": {}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"vision_model.encoder.weight": "model.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_nested_text_config() {
+        // Gemma 3 VLMs wrap text_config + vision_config at root level
+        let dir = std::env::temp_dir().join("scrappy_test_nested");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "gemma3", "text_config": {"max_position_embeddings": 8192}, "vision_config": {"image_size": 896}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"vision_tower.encoder.weight": "model.safetensors", "multi_modal_projector.linear.weight": "model.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_malformed_json() {
+        let dir = std::env::temp_dir().join("scrappy_test_malformed");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("config.json"), "not valid json {{").unwrap();
+        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_ministral3_style() {
+        // Ministral-3 with BOTH config + vision weights → true
+        let dir = std::env::temp_dir().join("scrappy_test_ministral3");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "mistral3", "architectures": ["Mistral3ForConditionalGeneration"], "vision_feature_layer": -1, "image_token_index": 10, "text_config": {"max_position_embeddings": 262144}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"vision_tower.vision_model.transformer.layers.0.attention.k_proj.weight": "model.safetensors", "language_model.model.layers.0.mlp.gate_proj.weight": "model.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_config_vlm_but_weights_text_only() {
+        // mlx-community/Ministral-3-3B-Instruct-2512: config says VLM but weights
+        // only contain language_model.* — should return false to prevent crash
+        let dir = std::env::temp_dir().join("scrappy_test_vlm_no_weights");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type": "mistral3", "architectures": ["Mistral3ForConditionalGeneration"], "vision_feature_layer": -1, "image_token_index": 10}"#,
+        )
+        .unwrap();
+        // Weights only have language_model — NO vision_tower
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"language_model.model.embed_tokens.weight": "model-00001.safetensors", "language_model.model.layers.0.mlp.gate_proj.weight": "model-00001.safetensors", "language_model.model.norm.weight": "model-00002.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_vision_model_conditional_generation_arch() {
+        // HF convention: "ForConditionalGeneration" suffix means multimodal
+        let dir = std::env::temp_dir().join("scrappy_test_condgen");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"architectures": ["LlavaForConditionalGeneration"], "model_type": "llava"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map": {"vision_tower.encoder.weight": "model.safetensors", "multi_modal_projector.linear.weight": "model.safetensors"}}"#,
+        )
+        .unwrap();
+        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn base_url_with_port() {
+        let engine = MlxEngine::new();
+        assert!(engine.base_url().is_none());
+
+        // Manually set a port to test base_url formatting
+        *engine.port.lock().unwrap() = Some(8765);
+        assert_eq!(engine.base_url(), Some("http://127.0.0.1:8765/v1".into()));
+    }
+
+    #[test]
+    fn not_bootstrapped_without_app_dir() {
+        let engine = MlxEngine::new();
+        assert!(!engine.is_bootstrapped());
+        assert!(engine.get_venv_path().is_none());
+        assert!(engine.get_python_path().is_none());
+    }
+
+    #[test]
+    fn bootstrapped_requires_marker_file() {
+        let dir = std::env::temp_dir().join("scrappy_test_bootstrap_marker");
+        let venv = dir.join("mlx-env");
+        let _ = std::fs::create_dir_all(&venv);
+
+        let engine = MlxEngine::new();
+        engine.set_app_data_dir(dir.clone());
+
+        // Venv dir exists but no marker → not bootstrapped
+        assert!(!engine.is_bootstrapped());
+
+        // Write marker → bootstrapped
+        std::fs::write(venv.join(".mlx-openai-server"), "installed").unwrap();
+        assert!(engine.is_bootstrapped());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

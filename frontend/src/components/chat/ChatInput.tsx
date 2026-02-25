@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect } from 'react';
+import { memo, useRef, useEffect, useState } from 'react';
 import { cn } from '../../lib/utils';
 import { Paperclip, X, Sparkles, Globe, Mic, Square, Palette, Send, Server, Terminal, Layers, ChevronRight, ImageIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -83,6 +83,20 @@ export const ChatInput = memo(function ChatInput({
 
     const slashCommandContainerRef = useRef<HTMLDivElement>(null);
     const mentionsContainerRef = useRef<HTMLDivElement>(null);
+    const [showAttachMenu, setShowAttachMenu] = useState(false);
+    const attachMenuRef = useRef<HTMLDivElement>(null);
+
+    // Close attach menu on outside click
+    useEffect(() => {
+        if (!showAttachMenu) return;
+        const handleClick = (e: MouseEvent) => {
+            if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+                setShowAttachMenu(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClick);
+        return () => document.removeEventListener('mousedown', handleClick);
+    }, [showAttachMenu]);
 
     // Auto-scroll slash command suggestions
     useEffect(() => {
@@ -116,24 +130,40 @@ export const ChatInput = memo(function ChatInput({
     return (
         <div className="relative flex items-end gap-2 bg-background/60 backdrop-blur-xl border border-input/50 p-2 rounded-2xl shadow-lg transition-all">
             {(canSee || isRagCapable || isImageMode) && !isWebSearchEnabled && (
-                <div className="relative group flex flex-col justify-end">
-                    <div className="absolute bottom-full left-0 mb-0 flex flex-col gap-1 p-1 bg-background/80 backdrop-blur-md border rounded-xl shadow-xl opacity-0 translate-y-2 invisible group-hover:visible group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 ease-out z-20 min-w-[120px]">
-                        {(canSee || isImageMode) && (
-                            <button onClick={handleImageUpload} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors">
-                                <div className="p-1.5 bg-blue-500/10 rounded-md"><ImageIcon className="w-4 h-4 text-blue-500" /></div>
-                                <span>Image</span>
-                            </button>
+                <div ref={attachMenuRef} className="relative flex flex-col justify-end">
+                    <AnimatePresence>
+                        {showAttachMenu && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 4, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 4, scale: 0.95 }}
+                                transition={{ duration: 0.15 }}
+                                className="absolute bottom-full left-0 mb-1 flex flex-col gap-1 p-1 bg-background/90 backdrop-blur-xl border border-border/50 rounded-xl shadow-2xl z-20 min-w-[120px]"
+                            >
+                                {(canSee || isImageMode) && (
+                                    <button onClick={() => { handleImageUpload(); requestAnimationFrame(() => setShowAttachMenu(false)); }} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors">
+                                        <div className="p-1.5 bg-blue-500/10 rounded-md"><ImageIcon className="w-4 h-4 text-blue-500" /></div>
+                                        <span>Image</span>
+                                    </button>
+                                )}
+                                {!isImageMode && (
+                                    <button onClick={() => { handleFileUpload(); requestAnimationFrame(() => setShowAttachMenu(false)); }} disabled={!isRagCapable} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors disabled:opacity-50">
+                                        <div className="p-1.5 bg-orange-500/10 rounded-md"><Paperclip className="w-4 h-4 text-orange-500" /></div>
+                                        <span>Document</span>
+                                    </button>
+                                )}
+                            </motion.div>
                         )}
-                        {!isImageMode && (
-                            <button onClick={handleFileUpload} disabled={!isRagCapable} className="flex items-center gap-2 p-2 hover:bg-accent rounded-lg text-xs font-medium transition-colors disabled:opacity-50">
-                                <div className="p-1.5 bg-orange-500/10 rounded-md"><Paperclip className="w-4 h-4 text-orange-500" /></div>
-                                <span>Document</span>
-                            </button>
+                    </AnimatePresence>
+                    <button
+                        onClick={() => setShowAttachMenu(prev => !prev)}
+                        className={cn(
+                            "p-2 rounded-lg transition-colors cursor-pointer",
+                            showAttachMenu ? "text-primary bg-primary/10" : "text-muted-foreground hover:text-foreground hover:bg-background/50"
                         )}
-                    </div>
-                    <div className="p-2 text-muted-foreground hover:text-foreground hover:bg-background/50 rounded-lg transition-colors cursor-pointer">
+                    >
                         <Paperclip className="w-5 h-5" />
-                    </div>
+                    </button>
                 </div>
             )}
             <div className="flex-1 relative flex flex-col">

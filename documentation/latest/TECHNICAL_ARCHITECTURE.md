@@ -320,7 +320,7 @@ All state is registered via `app.manage(...)` before `run()`:
 | `process_tracker.rs` | 131 | PID registry (persisted to JSON) for orphan cleanup on restart |
 | `engine/mod.rs` | ~460 | `InferenceEngine` trait, `EngineManager` state, engine Tauri commands (`setup_engine`, `start_engine`, `stop_engine`, `is_engine_ready`, `get_active_engine_info`, `get_engine_setup_status`). Compile-time feature flags select the active engine. |
 | `engine/engine_llamacpp.rs` | ~ | LlamaCpp engine: wraps `llama-server` sidecar via existing `SidecarManager` |
-| `engine/engine_mlx.rs` | ~ | MLX engine: `uv` (bundled sidecar) bootstraps Python + `mlx_lm.server` at runtime |
+| `engine/engine_mlx.rs` | ~ | MLX engine: `uv` (bundled sidecar) bootstraps Python + `mlx-openai-server` (unified text+vision+audio server) at runtime |
 | `engine/engine_vllm.rs` | ~ | vLLM engine: `uv` bootstraps Python + `vllm.entrypoints.openai.api_server` (Linux CUDA only) |
 | `engine/engine_ollama.rs` | ~ | Ollama engine: detects/connects to existing Ollama daemon |
 | `hf_hub.rs` | ~ | HuggingFace Hub model discovery: `discover_hf_models`, `get_model_files`, `download_hf_model_files` — live HF API search with engine-aware tag filtering |
@@ -847,6 +847,30 @@ All sidecars are pre-compiled and listed in `tauri.conf.json: bundle.externalBin
 | `bin/node` | Bundled Node.js runtime for OpenClaw engine |
 
 Dynamic libraries (`.dylib`) and Metal shaders (`.metal`) are bundled as resources. The `openclaw-engine/` directory (Node.js code) is also bundled as a resource.
+
+### 11.3 MLX Multimedia Stack (Apple Silicon)
+
+On macOS Apple Silicon builds (feature `mlx`), a single Python-based server — `mlx-openai-server` —
+provides all local AI capabilities through standard OpenAI-compatible `/v1` endpoints. It runs inside
+a `uv`-managed venv at `~/.scrappy/mlx-env/` and is spawned as a subprocess by `engine_mlx.rs`.
+
+| Capability | `--model-type` | Underlying Library | `.cpp` Equivalent | Status |
+|---|---|---|---|---|
+| Text LLM | `lm` | `mlx-lm` | `llama.cpp` (llama-server) | ✅ Implemented |
+| Vision / Multimodal | `multimodal` | `mlx-vlm` | `llama.cpp` + `--mmproj` | ✅ Implemented |
+| Speech-to-Text (STT) | `whisper` | `mlx-whisper` (~10× faster than whisper.cpp) | `whisper.cpp` / whisper-server | 📋 Planned |
+| Text-to-Speech (TTS) | *(via mlx-audio)* | `mlx-audio` (Kokoro, Qwen3-TTS) | Piper TTS sidecar | 📋 Planned |
+| Embeddings | `embeddings` | `mlx-embeddings` | `llama.cpp --embedding` | 📋 Planned |
+| Image Generation | `image-generation` | `mflux` (Flux, SD, Qwen Image) | `sd.cpp` | 📋 Planned |
+| Image Editing | `image-edit` | `mflux` (Flux Kontext) | — | 📋 Planned |
+
+**Vision model detection:** `engine_mlx.rs::is_vision_model()` reads the model's `config.json` and
+checks for a `vision_config` key (present in all VLMs: Ministral 3, Pixtral, Gemma 3, Qwen-VL, etc.).
+If detected, `--model-type multimodal` is passed; otherwise `--model-type lm`.
+
+**Multi-model mode:** `mlx-openai-server` supports a YAML config file for running multiple models
+behind one endpoint (e.g., small text model + vision model + whisper), routed by `model_id` in the
+API request. This is the path for future multi-capability local inference.
 
 ---
 

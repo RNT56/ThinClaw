@@ -26,6 +26,9 @@ import {
     Info,
     CheckCircle2,
     Pin,
+    Type,
+    Eye,
+    Layers,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { invoke } from "@tauri-apps/api/core";
@@ -111,6 +114,9 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     // Use persistent state from context
     const { searchQuery, results, hasSearched, expandedModel, downloadingFiles, repoProgress } =
         discoveryState;
+
+    // Pipeline type filter: 'all' | 'text' | 'vision'
+    const [pipelineFilter, setPipelineFilter] = useState<'all' | 'text' | 'vision'>('all');
 
     // Local-only ephemeral state
     const [isSearching, setIsSearching] = useState(false);
@@ -265,7 +271,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         };
     }, [searchQuery]);
 
-    // Trigger search when debounced query changes
+    // Trigger search when debounced query or pipeline filter changes
     useEffect(() => {
         if (!debouncedQuery.trim() || !engineInfo) {
             if (!debouncedQuery.trim()) {
@@ -275,6 +281,14 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             return;
         }
 
+        // Map filter selection to HF pipeline tags
+        const pipelineTags: string[] =
+            pipelineFilter === 'text'
+                ? ['text-generation']
+                : pipelineFilter === 'vision'
+                    ? ['image-text-to-text']
+                    : ['text-generation', 'image-text-to-text'];
+
         const doSearch = async () => {
             setIsSearching(true);
             setHasSearched(true);
@@ -283,7 +297,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     query: debouncedQuery,
                     engine: engineInfo.id,
                     limit: 20,
-                    pipelineTags: ["text-generation", "image-text-to-text"],
+                    pipelineTags,
                 });
                 setResults(models);
             } catch (err: any) {
@@ -296,7 +310,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         };
 
         doSearch();
-    }, [debouncedQuery, engineInfo]);
+    }, [debouncedQuery, engineInfo, pipelineFilter]);
 
     // Toggle expand
     const handleExpand = useCallback(
@@ -361,29 +375,62 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     // -----------------------------------------------------------------------
     return (
         <div className="space-y-4">
-            {/* Engine Badge */}
-            {engineInfo && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 px-3 py-2 rounded-xl border border-border/30">
-                    <Info className="w-3.5 h-3.5 text-primary/60 shrink-0" />
-                    <span>
-                        Searching for{" "}
-                        <span className="font-semibold text-foreground">
-                            {engineInfo.hf_tag.toUpperCase()}
-                        </span>{" "}
-                        models compatible with{" "}
-                        <span className="font-semibold text-foreground">
-                            {engineInfo.display_name}
+            {/* Engine Badge + Model Type Filter */}
+            <div className="flex items-center justify-between gap-3">
+                {engineInfo && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 px-3 py-2 rounded-xl border border-border/30 flex-1 min-w-0">
+                        <Info className="w-3.5 h-3.5 text-primary/60 shrink-0" />
+                        <span className="truncate">
+                            Searching for{" "}
+                            <span className="font-semibold text-foreground">
+                                {engineInfo.hf_tag.toUpperCase()}
+                            </span>{" "}
+                            models compatible with{" "}
+                            <span className="font-semibold text-foreground">
+                                {engineInfo.display_name}
+                            </span>
                         </span>
-                    </span>
+                    </div>
+                )}
+
+                {/* Pipeline Type Segmented Control */}
+                <div className="flex items-center bg-muted/40 rounded-lg p-0.5 border border-border/30 shrink-0" id="hf-pipeline-filter">
+                    {[
+                        { id: 'all' as const, label: 'All', icon: Layers },
+                        { id: 'text' as const, label: 'Text', icon: Type },
+                        { id: 'vision' as const, label: 'Vision', icon: Eye },
+                    ].map(({ id, label, icon: Icon }) => (
+                        <button
+                            key={id}
+                            onClick={() => setPipelineFilter(id)}
+                            className={cn(
+                                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-semibold uppercase tracking-wider transition-all duration-200",
+                                pipelineFilter === id
+                                    ? "bg-background text-foreground shadow-sm border border-border/50"
+                                    : "text-muted-foreground hover:text-foreground"
+                            )}
+                            title={id === 'all' ? 'Show all models' : id === 'text' ? 'Text-only LLMs' : 'Vision / Multimodal models'}
+                            id={`hf-filter-${id}`}
+                        >
+                            <Icon className="w-3 h-3" />
+                            <span>{label}</span>
+                        </button>
+                    ))}
                 </div>
-            )}
+            </div>
 
             {/* Search Input */}
             <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <input
                     type="text"
-                    placeholder='Search HuggingFace models... (e.g. llama, qwen, gemma)'
+                    placeholder={
+                        pipelineFilter === 'vision'
+                            ? 'Search vision models... (e.g. pixtral, llava, gemma)'
+                            : pipelineFilter === 'text'
+                                ? 'Search text models... (e.g. llama, qwen, ministral)'
+                                : 'Search HuggingFace models... (e.g. llama, qwen, gemma)'
+                    }
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 text-sm bg-background border border-border/50 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-foreground placeholder:text-muted-foreground/50"
@@ -402,6 +449,9 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     const isDownloading = downloadingFiles.has(model.id);
                     const isDownloaded = isModelDownloaded(model.id);
                     const fileInfo = fileInfoCache[model.id] ?? null;
+                    const isVision = model.tags.some(
+                        (t) => t === "image-text-to-text"
+                    );
 
                     return (
                         <div
@@ -426,6 +476,14 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                                         <span className="truncate max-w-[300px]">
                                             {model.name}
                                         </span>
+
+                                        {/* Vision badge */}
+                                        {isVision && (
+                                            <span className="text-[9px] uppercase tracking-wider font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 px-1.5 py-0.5 rounded border border-violet-500/20 flex items-center gap-1 shrink-0">
+                                                <Eye className="w-2.5 h-2.5" />
+                                                Vision
+                                            </span>
+                                        )}
 
                                         {/* Downloaded badge */}
                                         {isDownloaded && !isDownloading && (

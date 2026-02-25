@@ -6,6 +6,39 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+/// Extract the text-only portion from a message content string.
+///
+/// When images are present, `content` is a JSON array like:
+/// ```json
+/// [{"type":"text","text":"What is this?"},{"type":"image_url","image_url":{...}}]
+/// ```
+///
+/// This function extracts and concatenates just the text parts for use in
+/// RAG queries and tool routing, where base64 image data would be harmful.
+/// For plain text content, returns the string unchanged.
+pub(crate) fn extract_text_from_content(content: &str) -> String {
+    if content.trim().starts_with('[') {
+        serde_json::from_str::<Vec<serde_json::Value>>(content)
+            .ok()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| {
+                        if p["type"].as_str() == Some("text") {
+                            p["text"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| content.to_string())
+    } else {
+        content.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tool Permissions
 // ---------------------------------------------------------------------------
@@ -190,8 +223,13 @@ impl Orchestrator {
 
         // Extract current turn
         let last_msg = messages.pop().ok_or("No messages provided")?;
-        let query = last_msg.content.clone();
+        let raw_content = last_msg.content.clone();
         let history_clone = messages; // Remaining are history
+
+        // When images are present, content is a JSON array with base64 data.
+        // Extract just the text for RAG queries and tool routing.
+        // The raw_content (with images) is passed to the actual LLM message.
+        let query = extract_text_from_content(&raw_content);
 
         let project_id_clone = project_id.clone();
         let perms = permissions.clone();
@@ -487,10 +525,11 @@ impl Orchestrator {
                     conversation.push(vmsg);
                 }
 
-                // Final Prompt
+                // Final Prompt — use raw_content so multimodal images are preserved.
+                // The llama_provider will re-parse JSON array content strings.
                 conversation.push(json!({
                     "role": "user",
-                    "content": query.clone()
+                    "content": raw_content.clone()
                 }));
 
                 // Stream directly using raw completion
@@ -540,6 +579,7 @@ impl Orchestrator {
                 &conversation_id_clone,
                 &persona_instructions,
                 &query,
+                &raw_content,
             )
             .await;
         });
@@ -565,80 +605,137 @@ impl Orchestrator {
         _conversation_id: &Option<String>,
         persona_instructions: &str,
         query: &str,
+        raw_content: &str,
     ) {
         use crate::rig_lib::unified_provider::ProviderEvent;
+
+        // Detect if the current message contains images (multimodal).
+        // When images are present the raw_content is a JSON array like:
+        //   [{"type":"text","text":"..."}, {"type":"image_url","image_url":{...}}]
+        let has_images = raw_content.trim().starts_with('[') && raw_content.contains("image_url");
 
         // In force_web_search mode the LLM must call web_search ONCE and then synthesise.
         // Giving it more turns causes it to keep refining / re-searching rather than answering.
         // In auto/optional mode we allow more turns for legitimate multi-step reasoning.
-        let max_turns = if perms.force_web_search { 2 } else { 5 };
+        // For vision (image) queries, limit to 1 turn — no tool loop needed.
+        let max_turns = if has_images {
+            1
+        } else if perms.force_web_search {
+            2
+        } else {
+            5
+        };
         let mut current_turn = 0;
         let mut conversation: Vec<serde_json::Value> = Vec::new();
 
-        // Build available tools description for the system prompt
-        let mut tools_desc = String::from("AVAILABLE TOOLS (callable as Rhai functions):\n");
-
-        // Remote MCP tool discovery/dispatch — only advertise when a server is configured.
-        if has_mcp {
-            tools_desc.push_str("- search_tools(query): Discover all available tools, including Host tools, Skills, and Remote MCP tools. Returns JSON with names, descriptions, and input schemas.\n");
-            tools_desc.push_str("- mcp_call(tool_name, args_json): Call any discovered tool (Remote or Skill) by name. Args must be a JSON string. Returns JSON result.\n");
-        }
-
-        if perms.allow_web_search {
-            tools_desc.push_str(
-                "- web_search(query): Direct internet search. Returns markdown string.\n",
-            );
-        }
-        if perms.allow_file_search {
-            tools_desc.push_str("- rag_search(query): Search codebase/docs. Returns string.\n");
-            tools_desc.push_str("- read_file(path): Read file content.\n");
-        }
-        if perms.allow_image_gen {
-            tools_desc
-                .push_str("- generate_image(prompt): Generate an image from a text description.\n");
-        }
-
-        // Skills — always available
-        tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
-        tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
-
-        // Calculator — always available (no permissions gate needed)
-        tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision and show work step-by-step. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, asin, acos, atan, min, max, pow, exp), constants (pi, e, tau). Supports inline variables: 'x = 3; y = 5; 2*x^2 + y'. Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");
-        tools_desc.push_str("- calculator_with_vars(expression, vars_json): Same as calculator but accepts named variables as JSON, e.g. calculator_with_vars(\"2*x + 1\", `{\"x\": 5}`) → 11.\n");
-
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-        // Build search rules. MCP-specific guidance is only included when a server is wired up,
-        // so the LLM never reasons about tools that will always return an error.
-        let search_rules = if perms.force_web_search {
+        if has_images {
+            // ── VISION MODE ──────────────────────────────────────────────
+            // Use a compact system prompt without tool instructions.
+            // The full tool prompt is ~800+ tokens of Rhai examples and
+            // tool descriptions, which overwhelms small VLMs (4B) and
+            // confuses them into thinking about tools instead of analyzing
+            // the image.
+            let system_prompt = format!(
+                "{}.\nCurrent Date: {}\n\n\
+                 You have vision capabilities. When the user shares images, analyze them \
+                 thoroughly and respond to the user's request based on what you see. \
+                 Provide detailed, helpful descriptions and observations. \
+                 Be direct — describe what you observe, answer questions about the image, \
+                 and do not ask the user questions unless you genuinely need clarification.",
+                persona_instructions, date
+            );
+
+            conversation.push(json!({ "role": "system", "content": system_prompt }));
+
+            // History
+            for msg in final_history {
+                conversation.push(json!({ "role": msg.role, "content": msg.content }));
+            }
+
+            // User message — pass raw multimodal content directly (no tool wrapping)
+            if let Ok(parts) = serde_json::from_str::<Vec<serde_json::Value>>(raw_content) {
+                info!(
+                    "[orchestrator] Vision mode: passing {} multimodal parts directly",
+                    parts.len()
+                );
+                conversation.push(json!({ "role": "user", "content": parts }));
+            } else {
+                conversation.push(json!({ "role": "user", "content": raw_content }));
+            }
+
+            info!(
+                "[orchestrator] Vision mode — using simplified prompt, {} turn(s)",
+                max_turns
+            );
+        } else {
+            // ── TOOL / AUTO MODE ─────────────────────────────────────────
+
+            // Build available tools description for the system prompt
+            let mut tools_desc = String::from("AVAILABLE TOOLS (callable as Rhai functions):\n");
+
+            // Remote MCP tool discovery/dispatch — only advertise when a server is configured.
             if has_mcp {
-                "CORE RULES:\n\
+                tools_desc.push_str("- search_tools(query): Discover all available tools, including Host tools, Skills, and Remote MCP tools. Returns JSON with names, descriptions, and input schemas.\n");
+                tools_desc.push_str("- mcp_call(tool_name, args_json): Call any discovered tool (Remote or Skill) by name. Args must be a JSON string. Returns JSON result.\n");
+            }
+
+            if perms.allow_web_search {
+                tools_desc.push_str(
+                    "- web_search(query): Direct internet search. Returns markdown string.\n",
+                );
+            }
+            if perms.allow_file_search {
+                tools_desc.push_str("- rag_search(query): Search codebase/docs. Returns string.\n");
+                tools_desc.push_str("- read_file(path): Read file content.\n");
+            }
+            if perms.allow_image_gen {
+                tools_desc.push_str(
+                    "- generate_image(prompt): Generate an image from a text description.\n",
+                );
+            }
+
+            // Skills — always available
+            tools_desc.push_str("- run_skill(skill_id, args_json): Execute a skill/workflow by ID. Args must be a JSON string.\n");
+            tools_desc.push_str("- save_skill(id, script, description): Save a new skill. Script must be valid Rhai code.\n");
+
+            // Calculator — always available (no permissions gate needed)
+            tools_desc.push_str("- calculator(expression): Evaluate mathematical expressions with full precision and show work step-by-step. Supports arithmetic (+, -, *, /, ^, %), parentheses, functions (sqrt, abs, round, ceil, floor, log, ln, log2, sin, cos, tan, asin, acos, atan, min, max, pow, exp), constants (pi, e, tau). Supports inline variables: 'x = 3; y = 5; 2*x^2 + y'. Use for ANY numbers — currency conversions, percentages, tips, compound interest.\n");
+            tools_desc.push_str("- calculator_with_vars(expression, vars_json): Same as calculator but accepts named variables as JSON, e.g. calculator_with_vars(\"2*x + 1\", `{\"x\": 5}`) → 11.\n");
+
+            // Build search rules. MCP-specific guidance is only included when a server is wired up,
+            // so the LLM never reasons about tools that will always return an error.
+            let search_rules = if perms.force_web_search {
+                if has_mcp {
+                    "CORE RULES:\n\
                  1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
                  2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`.\n\
                  3. For financial data, model info, or domain-specific queries, you may also use `mcp_call` with the appropriate tool after searching.\n\
                  4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them."
-            } else {
-                "CORE RULES:\n\
+                } else {
+                    "CORE RULES:\n\
                  1. **ALWAYS SEARCH**: The user has explicitly enabled web search. You MUST use `web_search` for every query that could benefit from external information. Only skip search for pure greetings like 'Hello' or 'Hi'.\n\
                  2. **FORMALIZE QUERIES**: Transform vague user prompts into precise, professional search queries before calling `web_search`."
-            }
-        } else if has_mcp {
-            "CORE RULES:\n\
+                }
+            } else if has_mcp {
+                "CORE RULES:\n\
              1. **REPLY DIRECTLY** for greetings, code, creative writing, general knowledge, opinions, or follow-up chat.\n\
              2. **USE TOOLS ONLY** when the user needs real-time information (today's news, live prices, current events), or explicitly asks you to search/look something up.\n\
-             3. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
-             4. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them.\n\
-             5. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
-        } else {
-            "CORE RULES:\n\
+             3. **IMAGE ANALYSIS**: If the user's message includes images, analyze and describe them directly. Do NOT use tools unless the user explicitly asks for additional external information (e.g. 'search the web for more info about this').\n\
+             4. For financial data, model info, or domain-specific queries, use `mcp_call` with the appropriate tool.\n\
+             5. If unsure which MCP tools exist, call `search_tools(\"\")` first to discover them.\n\
+             6. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
+            } else {
+                "CORE RULES:\n\
              1. **REPLY DIRECTLY** for greetings, code, creative writing, general knowledge, opinions, or follow-up chat.\n\
              2. **USE TOOLS ONLY** when the user needs real-time information (today's news, live prices, current events), or explicitly asks you to search/look something up.\n\
-             3. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
-        };
+             3. **IMAGE ANALYSIS**: If the user's message includes images, analyze and describe them directly. Do NOT use tools unless the user explicitly asks for additional external information (e.g. 'search the web for more info about this').\n\
+             4. When in doubt, reply directly. Only call a tool if you are confident the answer requires fresh external data."
+            };
 
-        let system_prompt = format!(
-            r#"{}.
-Current Date: {}
+            let system_prompt = format!(
+                r#"{}.\nCurrent Date: {}
 
 {}
 
@@ -672,36 +769,69 @@ After receiving <tool_result>, write your final answer to the user immediately.
 If a script fails, the error message will appear in <tool_result>. Fix your script and try again ONE time only.
 
 {}"#,
-            persona_instructions, date, search_rules, tools_desc
-        );
+                persona_instructions, date, search_rules, tools_desc
+            );
 
-        conversation.push(json!({ "role": "system", "content": system_prompt }));
+            conversation.push(json!({ "role": "system", "content": system_prompt }));
 
-        // History
-        for msg in final_history {
-            conversation.push(json!({ "role": msg.role, "content": msg.content }));
-        }
+            // History
+            for msg in final_history {
+                conversation.push(json!({ "role": msg.role, "content": msg.content }));
+            }
+        } // end else (tool mode)
 
-        // User query
-        let effective_query = if perms.force_web_search {
-            format!(
-                "**SEARCH MODE ACTIVE**: Call `web_search` ONCE with a well-formed query, \
+        // User query (only for non-vision mode — vision already pushed its message above)
+        if !has_images {
+            let effective_query = if perms.force_web_search {
+                format!(
+                    "**SEARCH MODE ACTIVE**: Call `web_search` ONCE with a well-formed query, \
                  then write your complete answer using the results. \
                  Do NOT call web_search more than once.\n\nRequest: {}",
-                query
-            )
-        } else if perms.allow_web_search {
-            format!(
-                "Respond to this request. Only use tools if the request genuinely requires \
+                    query
+                )
+            } else if perms.allow_web_search {
+                format!(
+                    "Respond to this request. Only use tools if the request genuinely requires \
                  real-time or external data you don't have. Otherwise reply directly.\n\n\
                  Request: {}",
-                query
-            )
-        } else {
-            query.to_string()
-        };
+                    query
+                )
+            } else {
+                query.to_string()
+            };
 
-        conversation.push(json!({ "role": "user", "content": effective_query }));
+            // Build the final user message. If the original content was multimodal
+            // (images), combine effective_query text with the image parts so the VLM
+            // can see both the instructions and the image data.
+            let has_images_in_content = raw_content.trim().starts_with('[');
+            if has_images_in_content {
+                if let Ok(parts) = serde_json::from_str::<Vec<serde_json::Value>>(raw_content) {
+                    let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                    // Tool instructions text first
+                    content_parts.push(json!({ "type": "text", "text": effective_query }));
+                    // Then all image parts from the original message
+                    let mut img_count = 0;
+                    for part in &parts {
+                        if part["type"].as_str() == Some("image_url") {
+                            content_parts.push(part.clone());
+                            img_count += 1;
+                        }
+                    }
+                    info!(
+                        "[orchestrator] Built multimodal user message with {} image part(s)",
+                        img_count
+                    );
+                    conversation.push(json!({ "role": "user", "content": content_parts }));
+                } else {
+                    info!(
+                        "[orchestrator] Image content detected but failed to parse as JSON array"
+                    );
+                    conversation.push(json!({ "role": "user", "content": effective_query }));
+                }
+            } else {
+                conversation.push(json!({ "role": "user", "content": effective_query }));
+            }
+        } // end if !has_images
 
         // Thinking status
         let _ = tx
@@ -934,5 +1064,111 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                 break;
             }
         } // End sandbox loop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // extract_text_from_content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_text_plain_string() {
+        assert_eq!(
+            extract_text_from_content("Hello, how are you?"),
+            "Hello, how are you?"
+        );
+    }
+
+    #[test]
+    fn extract_text_from_multimodal_content() {
+        let content = r#"[{"type":"text","text":"What is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]"#;
+        assert_eq!(extract_text_from_content(content), "What is this?");
+    }
+
+    #[test]
+    fn extract_text_multiple_text_parts() {
+        let content = r#"[{"type":"text","text":"First part"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}},{"type":"text","text":"Second part"}]"#;
+        assert_eq!(extract_text_from_content(content), "First part Second part");
+    }
+
+    #[test]
+    fn extract_text_image_only_no_text() {
+        let content =
+            r#"[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]"#;
+        // No text parts → empty string
+        assert_eq!(extract_text_from_content(content), "");
+    }
+
+    #[test]
+    fn extract_text_malformed_json_fallback() {
+        // Starts with '[' but isn't valid JSON → returns original string
+        let content = "[not valid json";
+        assert_eq!(extract_text_from_content(content), "[not valid json");
+    }
+
+    #[test]
+    fn extract_text_non_json_bracket_string() {
+        // A string starting with '[' that is a valid JSON array but not
+        // multimodal content format
+        let content = "[1, 2, 3]";
+        // Valid JSON array of numbers — no "type":"text" parts → empty
+        assert_eq!(extract_text_from_content(content), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Multimodal message construction (auto mode)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_mode_builds_multimodal_user_message() {
+        // Simulate what run_sandbox_loop does when images are present
+        let raw_content = r#"[{"type":"text","text":"Describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]"#;
+        let effective_query = "Respond to this request. Only use tools if genuinely needed.\n\nRequest: Describe this";
+
+        let has_images = raw_content.trim().starts_with('[');
+        assert!(has_images);
+
+        let parts: Vec<serde_json::Value> =
+            serde_json::from_str(raw_content).expect("should parse");
+        let mut content_parts: Vec<serde_json::Value> = Vec::new();
+        content_parts.push(json!({ "type": "text", "text": effective_query }));
+        for part in &parts {
+            if part["type"].as_str() == Some("image_url") {
+                content_parts.push(part.clone());
+            }
+        }
+
+        let msg = json!({ "role": "user", "content": content_parts });
+
+        // Verify structure
+        let content = msg["content"].as_array().expect("should be array");
+        assert_eq!(content.len(), 2); // text + image
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Respond to this request"));
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image"));
+    }
+
+    #[test]
+    fn auto_mode_text_only_is_plain_string() {
+        // When no images, the message should be a plain string
+        let raw_content = "What is the weather today?";
+        let effective_query = "Respond to this request.\n\nRequest: What is the weather today?";
+
+        let has_images = raw_content.trim().starts_with('[');
+        assert!(!has_images);
+
+        let msg = json!({ "role": "user", "content": effective_query });
+        assert!(msg["content"].is_string());
     }
 }

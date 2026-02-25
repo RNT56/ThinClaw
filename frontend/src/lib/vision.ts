@@ -12,7 +12,7 @@ export const VISION_KEYWORDS = [
     "bakllava",
     "yi-vl",
     "glm-4",
-    "ministral"
+    "ministral",
 ];
 
 export function isVisionCapable(modelPath: string): boolean {

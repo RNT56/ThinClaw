@@ -438,6 +438,8 @@ Status XML emitted: `<scrappy_status type="thinking" />`
 
 ### 7.6 Auto/Tool Mode — Sandbox ReAct loop
 
+**Image detection:** If `raw_content` is a JSON array containing `image_url` parts, the Orchestrator enters **Vision Mode** (see §7.8). Otherwise, it proceeds with the full tool pipeline.
+
 **Sandbox creation:**
 ```rust
 let sandbox = self.build_sandbox(&tx)
@@ -459,7 +461,7 @@ results
 </rhai_code>
 ```
 
-**ReAct loop (max 5 turns; 2 turns when `force_web_search`):**
+**ReAct loop (max 5 turns; 2 turns when `force_web_search`; 1 turn when images present):**
 
 ```
 Turn N:
@@ -488,6 +490,23 @@ Status XML tags emitted to frontend:
 <scrappy_status type="summarizing" />
 <scrappy_status type="rag_search" query="..." />
 ```
+
+### 7.8 Vision Mode (Image Analysis)
+
+When the user's current message contains images (detected by `raw_content.starts_with('[') && raw_content.contains("image_url")`), the Orchestrator uses a **simplified code path** optimised for vision-language models:
+
+1. **Compact system prompt** — Only the persona instructions + date + a concise "analyze images directly" instruction (~50 tokens). The full tool prompt (~800+ tokens of Rhai examples, tool descriptions, search rules) is omitted. This is critical for small VLMs (4B) where the tool prompt alone would consume 20%+ of the context window.
+
+2. **Direct multimodal content** — The user's message is passed as a JSON array of `text` + `image_url` parts directly, without wrapping in tool instruction prefixes (e.g. no "Respond to this request. Only use tools if...").
+
+3. **Single turn** — `max_turns = 1` (no ReAct loop). Image analysis doesn't need multi-step tool reasoning.
+
+**Image history context bloat prevention** (`chat.rs`):
+
+Base64 image data (~100KB per 1024×1024 JPEG = ~25K tokens) would fill a 32K context window by the second turn. To prevent this:
+- Only the **last/current** user message embeds full base64 image data
+- Older messages in history that contained images are replaced with a text placeholder: `"[User shared N image(s) in this message]"`
+- This reduces per-turn history overhead from ~25K tokens to ~10 tokens
 
 ### 7.7 Summarisation pipeline
 
@@ -806,7 +825,8 @@ API keys are fetched from `OpenClawManager::get_config()` (stored in macOS Keych
    ├── acquire generation_lock (queuing concurrent requests)
    ├── reset cancellation_token
    ├── preprocess messages:
-   │     ├── load base64 images for user messages
+   │     ├── load base64 images for LAST user message only
+   │     ├── replace older image messages with text placeholders
    │     └── filter image-generation history turns
    ├── resolve_provider() → ProviderConfig
    ├── collect gk_content (enabled knowledge bits) → preamble injection
@@ -826,6 +846,7 @@ API keys are fetched from `OpenClawManager::get_config()` (stored in macOS Keych
    │     ├── visual PDF previews injection
    │     └── provider.stream_raw_completion() → ProviderEvent stream
    └── Auto/Tool Mode:
+         ├── if images: Vision Mode (simplified prompt, 1 turn, direct analysis)
          ├── create_sandbox(rig, mcp_config, reporter)
          └── run_sandbox_loop():
                ├── build system prompt (persona + date + rules + tools list)
