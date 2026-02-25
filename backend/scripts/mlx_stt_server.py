@@ -64,6 +64,8 @@ try:
         wf = model_path / "weights.safetensors"
         if not wf.exists():
             wf = model_path / "weights.npz"
+        if not wf.exists():
+            wf = model_path / "model.safetensors"  # mlx-community 4-bit models use this name
         weights = mx.load(str(wf))
 
         if dtype is None:
@@ -135,10 +137,16 @@ def validate_whisper_model(model_path: str) -> str:
                 "Please use a Whisper-architecture model."
             )
 
-        # Check for weights file
-        if not (p / "weights.safetensors").exists() and not (p / "weights.npz").exists():
+        # Check for weights file — mlx-community uses different naming conventions:
+        #   weights.safetensors (older exports), model.safetensors (4-bit), weights.npz (legacy)
+        has_weights = (
+            (p / "weights.safetensors").exists() or
+            (p / "weights.npz").exists() or
+            (p / "model.safetensors").exists()
+        )
+        if not has_weights:
             return (
-                f"No weights.safetensors or weights.npz found in {model_path}. "
+                f"No weights.safetensors, model.safetensors, or weights.npz found in {model_path}. "
                 "The model may be incomplete — try re-downloading it."
             )
 
