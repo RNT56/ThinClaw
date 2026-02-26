@@ -11,7 +11,7 @@ interface ChatJob {
     isThinking: boolean;
     fullMessage: string;
     searchResults: WebSearchResult[] | null;
-    searchStatus?: 'idle' | 'searching' | 'scraping' | 'analyzing' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
+    searchStatus?: 'idle' | 'searching' | 'scraping' | 'analyzing' | 'summarizing' | 'generating' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
     searchMessage?: string;
     usage?: TokenUsage | null;
     replacedHistory?: Message[] | null;
@@ -173,6 +173,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             isStreaming: false,
                             fullMessage: fullText,
                         };
+
+                        // Finalize search status to 'done' if it's still in an active state
+                        const currentJob = activeJobsRef.current[id];
+                        if (currentJob && currentJob.searchStatus && currentJob.searchStatus !== 'done' && currentJob.searchStatus !== 'error') {
+                            finalUpdates.searchStatus = 'done';
+                            finalUpdates.searchMessage = "";
+                        }
                         pendingUpdates = {};
                         updateJob(id, finalUpdates);
 
@@ -202,13 +209,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     if (chunk.content) {
                         fullText += chunk.content;
                         pendingUpdates.fullMessage = fullText;
-
-                        // Force search status to done if we have content and it's not already done
-                        const currentJob = activeJobsRef.current[id];
-                        if (currentJob && currentJob.searchStatus && currentJob.searchStatus !== 'done' && currentJob.searchStatus !== 'error') {
-                            pendingUpdates.searchStatus = 'done';
-                            pendingUpdates.searchMessage = "";
-                        }
                     }
                     if (chunk.usage) {
                         pendingUpdates.usage = chunk.usage;

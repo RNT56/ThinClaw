@@ -12,7 +12,7 @@ export type ExtendedMessage = Message & {
     // Persistent DB ID for actions (edit/copy) while `id` remains stable stream ID
     realId?: string;
     web_search_results?: import("../lib/bindings").WebSearchResult[] | null;
-    searchStatus?: 'idle' | 'searching' | 'scraping' | 'analyzing' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
+    searchStatus?: 'idle' | 'searching' | 'scraping' | 'analyzing' | 'summarizing' | 'generating' | 'done' | 'error' | 'rag_searching' | 'rag_reading';
     searchMessage?: string;
     is_summary?: boolean | null;
     original_messages?: Message[] | null;

@@ -525,6 +525,15 @@ pub async fn chat_stream(
                     message: "Auto Mode Active...".into(),
                 },
             );
+        } else if payload.web_search_enabled {
+            let _ = app.emit(
+                "web_search_status",
+                WebSearchStatus {
+                    id: id.clone(),
+                    step: "searching".into(),
+                    message: "Web Search Active...".into(),
+                },
+            );
         } else if has_context {
             let _ = app.emit(
                 "web_search_status",
