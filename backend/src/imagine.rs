@@ -69,16 +69,10 @@ async fn generate_with_gemini(
     params: &ImagineParams,
     is_pro: bool,
 ) -> Result<ImageResponse, String> {
-    // Get Gemini API key from openclaw config
-    let openclaw_mgr = app.state::<crate::openclaw::OpenClawManager>();
-    let config = openclaw_mgr
-        .get_config()
-        .await
-        .ok_or("Failed to get OpenClaw config")?;
-
-    let api_key = config
-        .gemini_api_key
-        .clone()
+    // Get Gemini API key from SecretStore (app-level key store, NOT OpenClawConfig)
+    let api_key = app
+        .try_state::<crate::secret_store::SecretStore>()
+        .and_then(|store| store.get("gemini"))
         .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
 
     // Build the full prompt with style

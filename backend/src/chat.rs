@@ -64,6 +64,7 @@ pub struct ProviderConfig {
 
 pub async fn resolve_provider(
     user_config: &crate::config::UserConfig,
+    secret_store: &crate::secret_store::SecretStore,
     openclaw: &State<'_, crate::openclaw::commands::OpenClawManager>,
     sidecar_manager: &State<'_, SidecarManager>,
     engine_manager: &State<'_, crate::engine::EngineManager>,
@@ -71,21 +72,20 @@ pub async fn resolve_provider(
     match user_config.selected_chat_provider.as_deref() {
         Some("anthropic") => {
             info!("[resolve_provider] Routing to Anthropic");
-            let claw_cfg = openclaw
+            let key = secret_store
+                .get("anthropic")
+                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
+            // selected_cloud_model is a non-secret preference on OpenClawIdentity.
+            // Reading it from OpenClawConfig is fine — it's not an API key.
+            let model_name = openclaw
                 .get_config()
                 .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .anthropic_api_key
-                .clone()
-                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
+                .and_then(|cfg| cfg.selected_cloud_model.clone())
+                .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string());
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::Anthropic,
                 base_url: "https://api.anthropic.com/v1".to_string(),
-                model_name: claw_cfg
-                    .selected_cloud_model
-                    .clone()
-                    .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string()),
+                model_name,
                 port: 0,
                 token: key,
                 context_size: 200000,
@@ -94,21 +94,18 @@ pub async fn resolve_provider(
         }
         Some("openai") => {
             info!("[resolve_provider] Routing to OpenAI");
-            let claw_cfg = openclaw
+            let key = secret_store
+                .get("openai")
+                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
+            let model_name = openclaw
                 .get_config()
                 .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .openai_api_key
-                .clone()
-                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
+                .and_then(|cfg| cfg.selected_cloud_model.clone())
+                .unwrap_or_else(|| "gpt-4o".to_string());
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 base_url: "https://api.openai.com/v1".to_string(),
-                model_name: claw_cfg
-                    .selected_cloud_model
-                    .clone()
-                    .unwrap_or_else(|| "gpt-4o".to_string()),
+                model_name,
                 port: 0,
                 token: key,
                 context_size: 128000,
@@ -117,21 +114,18 @@ pub async fn resolve_provider(
         }
         Some("openrouter") => {
             info!("[resolve_provider] Routing to OpenRouter");
-            let claw_cfg = openclaw
+            let key = secret_store
+                .get("openrouter")
+                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
+            let model_name = openclaw
                 .get_config()
                 .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .openrouter_api_key
-                .clone()
-                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
+                .and_then(|cfg| cfg.selected_cloud_model.clone())
+                .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string());
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
                 base_url: "https://openrouter.ai/api/v1".to_string(),
-                model_name: claw_cfg
-                    .selected_cloud_model
-                    .clone()
-                    .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string()),
+                model_name,
                 port: 0,
                 token: key,
                 context_size: 128000,
@@ -140,21 +134,18 @@ pub async fn resolve_provider(
         }
         Some("gemini") => {
             info!("[resolve_provider] Routing to Gemini");
-            let claw_cfg = openclaw
+            let key = secret_store
+                .get("gemini")
+                .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
+            let model_name = openclaw
                 .get_config()
                 .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .gemini_api_key
-                .clone()
-                .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
+                .and_then(|cfg| cfg.selected_cloud_model.clone())
+                .unwrap_or_else(|| "gemini-2.0-flash".to_string());
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::Gemini,
                 base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
-                model_name: claw_cfg
-                    .selected_cloud_model
-                    .clone()
-                    .unwrap_or_else(|| "gemini-2.0-flash".to_string()),
+                model_name,
                 port: 0,
                 token: key,
                 context_size: 128000,
@@ -163,21 +154,18 @@ pub async fn resolve_provider(
         }
         Some("groq") => {
             info!("[resolve_provider] Routing to Groq");
-            let claw_cfg = openclaw
+            let key = secret_store
+                .get("groq")
+                .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
+            let model_name = openclaw
                 .get_config()
                 .await
-                .ok_or("OpenClaw config not found")?;
-            let key = claw_cfg
-                .groq_api_key
-                .clone()
-                .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
+                .and_then(|cfg| cfg.selected_cloud_model.clone())
+                .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string());
             Ok(ProviderConfig {
                 kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
                 base_url: "https://api.groq.com/openai/v1".to_string(),
-                model_name: claw_cfg
-                    .selected_cloud_model
-                    .clone()
-                    .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string()),
+                model_name,
                 port: 0,
                 token: key,
                 context_size: 128000,
@@ -247,6 +235,7 @@ pub async fn chat_stream(
     app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     rig_cache: State<'_, crate::rig_cache::RigManagerCache>,
@@ -270,8 +259,15 @@ pub async fn chat_stream(
     // General Knowledge Injection
     let user_config = config.get_config();
 
-    // Provider Routing Logic
-    let provider_cfg = resolve_provider(&user_config, &openclaw, &state, &engine_manager).await?;
+    // Provider Routing Logic — keys from SecretStore, model selection from OpenClawConfig
+    let provider_cfg = resolve_provider(
+        &user_config,
+        &secret_store,
+        &openclaw,
+        &state,
+        &engine_manager,
+    )
+    .await?;
     let kind = provider_cfg.kind;
     let base_url = provider_cfg.base_url;
     let model_name = provider_cfg.model_name;
@@ -809,6 +805,7 @@ pub async fn chat_completion(
     _app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
@@ -817,8 +814,15 @@ pub async fn chat_completion(
 
     let user_config = config.get_config();
 
-    // Resolve provider via the shared function
-    let provider_cfg = resolve_provider(&user_config, &openclaw, &state, &engine_manager).await?;
+    // Resolve provider — keys from SecretStore, model selection from OpenClawConfig
+    let provider_cfg = resolve_provider(
+        &user_config,
+        &secret_store,
+        &openclaw,
+        &state,
+        &engine_manager,
+    )
+    .await?;
 
     let provider = crate::rig_lib::unified_provider::UnifiedProvider::new(
         provider_cfg.kind,
