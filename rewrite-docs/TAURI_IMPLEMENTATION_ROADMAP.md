@@ -1,10 +1,13 @@
 # ThinClaw Tauri Integration — Implementation Roadmap
 
+> **Status:** ✅ **COMPLETE** — All phases finished 2026-02-28 (~1 day actual, vs 7-10 day estimate)
 > **Derived from:** `TAURI_INTEGRATION.md` (v2, 2026-02-27)
-> **Total estimated effort:** 7–10 working days
+> **Total estimated effort:** 7–10 working days · **Actual:** ~1 day (parallel agent execution)
 > **Tracks:** IronClaw (library prep) → Scrappy (integration) → Joint (verification)
 > **Ordering rule:** Each step lists its dependencies. Never start a step before
 > its dependencies are checked off.
+>
+> _This document is now historical. For completion details see `TAURI_INTEGRATION.md` § Implementation Progress._
 
 ---
 
