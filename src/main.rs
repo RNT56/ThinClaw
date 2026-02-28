@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
-        WebhookServerConfig,
+        ChannelManager, GatewayChannel, HttpChannel, NostrChannel, ReplChannel, SignalChannel,
+        WebhookServer, WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
@@ -387,6 +387,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Add Nostr channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref nostr_config) = config.channels.nostr
+    {
+        match NostrChannel::new(nostr_config.clone()) {
+            Ok(nostr_channel) => {
+                channel_names.push("nostr".to_string());
+                channels.add(Box::new(nostr_channel)).await;
+                tracing::info!(relays = nostr_config.relays.len(), "Nostr channel enabled");
+                if nostr_config.allow_from.is_empty() {
+                    tracing::warn!(
+                        "Nostr channel has empty allow_from list - ALL messages will be DENIED."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Nostr channel");
+            }
+        }
+    }
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
     if !cli.cli_only

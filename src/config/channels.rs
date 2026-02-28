@@ -13,6 +13,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub nostr: Option<NostrConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -85,6 +86,18 @@ pub struct SignalConfig {
     pub ignore_attachments: bool,
     /// Skip story messages.
     pub ignore_stories: bool,
+}
+
+/// Nostr channel configuration (NIP-04 encrypted DMs via nostr-sdk).
+#[derive(Debug, Clone)]
+pub struct NostrConfig {
+    /// Nostr private key in hex or bech32 (nsec) format.
+    pub private_key: secrecy::SecretString,
+    /// Relay URLs to connect to.
+    pub relays: Vec<String>,
+    /// Public keys (hex or npub) allowed to interact with the bot.
+    /// Empty list denies all senders. `*` allows everyone.
+    pub allow_from: Vec<String>,
 }
 
 impl ChannelsConfig {
@@ -175,6 +188,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            nostr: Self::resolve_nostr()?,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
@@ -188,6 +202,43 @@ impl ChannelsConfig {
                 })?
                 .or(settings.channels.telegram_owner_id),
         })
+    }
+
+    fn resolve_nostr() -> Result<Option<NostrConfig>, ConfigError> {
+        let private_key = match optional_env("NOSTR_PRIVATE_KEY")? {
+            Some(k) => secrecy::SecretString::from(k),
+            None => return Ok(None),
+        };
+
+        let relays = optional_env("NOSTR_RELAYS")?
+            .map(|s| {
+                s.split(',')
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "wss://relay.damus.io".to_string(),
+                    "wss://nos.lol".to_string(),
+                    "wss://relay.nostr.band".to_string(),
+                ]
+            });
+
+        let allow_from = optional_env("NOSTR_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(NostrConfig {
+            private_key,
+            relays,
+            allow_from,
+        }))
     }
 }
 

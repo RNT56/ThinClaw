@@ -136,6 +136,12 @@ pub enum ChannelError {
 
     #[error("Channel health check failed: {name}")]
     HealthCheckFailed { name: String },
+
+    #[error("Channel not connected: {0}")]
+    NotConnected(String),
+
+    #[error("Channel configuration error: {0}")]
+    Configuration(String),
 }
 
 /// LLM provider errors.

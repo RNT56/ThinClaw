@@ -37,7 +37,7 @@ The core orchestrator that brings it all together.
 | **Sub-Agent Orchestration**| Multi-agent spawning: run/session modes, depth limits, result announcement, thread binding.               | ~25 files (TS)| `SessionManager` + `tokio::spawn`         | ✅ Complete          |
 | **Security Auditor**       | Boot-time config scanner: dangerous flags, channel security, exec policy, filesystem perms.               | ~28 files (TS)| `safety/` — `SecurityGuard`, policy engine| ✅ Complete          |
 | **Daemon Service**         | OS-level service installation: launchd (macOS), systemd (Linux), auto-restart, service audit.             | ~40 files (TS)| `service.rs` — launchd/systemd support    | ✅ Complete          |
-| **TTS Pipeline**           | Text-to-Speech: Edge TTS, ElevenLabs, OpenAI TTS, auto-modes, per-agent voices.                          | ~66KB (TS)    | Not yet ported                            | ⬜ Not Started       |
+| **TTS Pipeline**           | Text-to-Speech: OpenAI TTS, speed/voice control, cost estimation.                                     | ~66KB (TS)    | `tools/builtin/tts.rs` — OpenAI TTS       | ✅ Complete          |
 | **Canvas / a2UI**          | Agent-generated interactive UIs: local HTTP server, bridge script injection, live reload, Tauri WebView.  | ~6 files (TS) | Not yet ported                            | ⬜ Not Started       |
 
 ## 📡 Channels (Messaging Integrations)
@@ -52,8 +52,8 @@ IronClaw already has the `Channel` trait and `ChannelManager`. Adding channels m
 | **Web**      | ✅ Done    | New           | `channels/web/`            | WebSocket-based browser channel                                          | ✅ Complete     |
 | **REPL**     | ✅ Done    | New           | `channels/repl.rs`         | Terminal stdin/stdout channel                                            | ✅ Complete     |
 | **WASM**     | ✅ Done    | New           | `channels/wasm/`           | Browser WASM channel                                                     | ✅ Complete     |
-| **Signal**   | 🟢 Low     | ~3K lines     | `signal-cli-api`           | Need `signal-cli` daemon. Receive messages, send text/images, groups.    | ⬜ Not Started |
-| **Nostr**    | 🟢 Low     | ~3K lines     | `nostr-sdk`                | NIP-04 Encrypted DMs, reply events, profile init.                        | ⬜ Not Started |
+| **Signal**   | ✅ Done    | ~3K lines     | `channels/signal.rs`       | 2,454 LOC — SSE + JSON-RPC, groups, pairing, allowlists                  | ✅ Complete     |
+| **Nostr**    | ✅ Done    | ~3K lines     | `channels/nostr.rs`        | NIP-04 encrypted DMs, multi-relay, allowlist, deterministic threads       | ✅ Complete     |
 | **iMessage** | 🟢 Low-Med | ~2K lines     | `imessage-rs` / `rusqlite` | Poll `chat.db`, send via `osascript`, group support (macOS only).        | ⬜ Not Started |
 | **Telegram** | 🟡 Medium  | ~11K lines    | `teloxide`                 | Bot API, long polling, text/media, chunking (4096 limit), commands.      | ⬜ Not Started |
 | **Slack**    | 🟡 Medium  | ~8K lines     | `slack-morphism`           | Socket Mode (no public IP needed), Block Kit, threads, mentions.         | ⬜ Not Started |
@@ -74,7 +74,7 @@ Features previously handled by the macOS/iOS Swift apps that need to be ported t
 | **Screen Recording**       | 🟡 Medium  | `ScreenCommands.swift`   | `scrap` or platform-specific capture APIs            | ⬜ Not Started |
 | **Camera Capture**         | 🟡 Medium  | `CameraCommands.swift`   | `nokhwa` for cross-platform camera access            | ⬜ Not Started |
 | **Location (GPS)**         | 🟡 Medium  | `LocationCommands.swift` | CoreLocation FFI (macOS), standard libs              | ⬜ Not Started |
-| **Device Status**          | 🟢 Low     | `DeviceCommands.swift`   | `sysinfo` for battery, memory, uptime, etc.          | ⬜ Not Started |
+| **Device Status**          | 🟢 Low     | `DeviceCommands.swift`   | `tools/builtin/device_info.rs` — `sysinfo` crate      | ✅ Complete    |
 
 _Note: Mobile-specific capabilities (Contacts, Calendar, Walk/Activity, Watch, SMS) are excluded for now assuming a desktop-first Rust application._
 
@@ -111,7 +111,7 @@ OpenClaw's TypeScript agent has a robust built-in toolkit. To replace the TS age
 | Tool             | Description                                | OpenClaw TS Source | Target Rust Approach                      | Status |
 | :--------------- | :----------------------------------------- | :----------------- | :---------------------------------------- | :----- |
 | **`image-tool`** | Generate images (DALL-E, Midjourney, etc). | `image-tool.ts`    | `tools/imagine.rs` — DALL-E / OpenAI API  | ✅ Done |
-| **`tts-tool`**   | Text-to-speech string generation.          | `tts-tool.ts`      | OpenAI TTS / ElevenLabs API via `reqwest` | ⬜ Not Started |
+| **`tts-tool`**   | Text-to-speech string generation.          | `tts-tool.ts`      | `tools/builtin/tts.rs` — OpenAI TTS API   | ✅ Done |
 
 ### 💬 Channel Moderation & Admin
 

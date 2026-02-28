@@ -155,6 +155,7 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
+nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04"] }
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
