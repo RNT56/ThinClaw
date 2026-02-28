@@ -88,7 +88,7 @@ OpenClaw's TypeScript agent has a robust built-in toolkit. To replace the TS age
 | :----------------- | :--------------------------------------------------- | :----------------- | :---------------------------------------- | :------ |
 | **`web-search`**   | Search the web for current information.              | `web-search.ts`    | `tools/web_search.rs` — multi-engine      | ✅ Done  |
 | **`web-fetch`**    | Read raw text content from URLs.                     | `web-fetch.ts`     | `tools/web_fetch.rs` — HTML→text          | ✅ Done  |
-| **`browser-tool`** | Full browser automation: CDP, accessibility tree snapshots, profiles. | 101 files  | `chromiumoxide` — see `BROWSER_TOOL_RS.md` | ⬜ Not Started |
+| **`browser-tool`** | Full browser automation: CDP, accessibility tree snapshots, profiles. | 101 files  | `tools/builtin/browser.rs` — `chromiumoxide` | ✅ Done |
 
 ### 📱 Device Control (Companion Bridge)
 

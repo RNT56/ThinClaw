@@ -1,5 +1,6 @@
 //! Built-in tools that come with the agent.
 
+mod browser;
 mod device_info;
 mod echo;
 pub mod extension_tools;
@@ -14,6 +15,7 @@ pub mod skill_tools;
 mod time;
 mod tts;
 
+pub use browser::BrowserTool;
 pub use device_info::DeviceInfoTool;
 pub use echo::EchoTool;
 pub use extension_tools::{
