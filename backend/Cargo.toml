@@ -81,6 +81,10 @@ rhai = { version = "1", features = ["sync", "serde"] }
 async-trait = "0.1"
 clawscan = "1.0.0"
 zeroize = { version = "1", features = ["derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# IronClaw agent engine (local path during development, desktop feature = libsql + html-to-markdown)
+ironclaw = { path = "../../ironclaw/ironclaw", features = ["desktop"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -105,3 +109,9 @@ lto = "thin"
 codegen-units = 1
 # Strip debug symbols from the final binary
 strip = "symbols"
+
+# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
+# sqlx-sqlite calls sqlite3_config() first; the stock libsql asserts on the
+# duplicate call. Our patch checks sqlite3_threadsafe() instead of panicking.
+[patch.crates-io]
+libsql = { path = "../patches/libsql-0.6.0" }

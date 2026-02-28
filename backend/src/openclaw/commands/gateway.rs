@@ -1,21 +1,32 @@
 //! Gateway lifecycle commands: start, stop, status, diagnostics, sync
+//!
+//! **Phase 3 migration**: `openclaw_get_status` / `openclaw_get_diagnostics` now
+//! report IronClaw engine status (always running, in-process). `start_gateway`
+//! and `stop_gateway` are now no-ops (IronClaw is in-process, always running).
+//! Config reads still come from `OpenClawConfig` (Scrappy's identity.json).
 
-use tauri::{Emitter, State};
-use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tauri::State;
+use tracing::info;
 
-use super::super::ws_client::OpenClawWsClient;
 use super::types::*;
 use super::OpenClawManager;
-use std::sync::atomic::Ordering;
+use crate::openclaw::ironclaw_bridge::IronClawState;
 
-/// Get OpenClaw status
+/// Get OpenClaw status.
+///
+/// Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
+/// Engine status fields (`gateway_running`, `ws_connected`) reflect IronClaw's
+/// in-process state.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_status(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<OpenClawStatus, String> {
     let config = state.get_config().await;
+
+    // IronClaw is in-process — "running" means the agent was initialized
+    let engine_running = ironclaw.is_initialized();
 
     Ok(OpenClawStatus {
         gateway_mode: config
@@ -81,8 +92,9 @@ pub async fn openclaw_get_status(
             .and_then(|c| c.groq_api_key.clone())
             .is_some(),
         groq_granted: config.as_ref().map(|c| c.groq_granted).unwrap_or(false),
-        gateway_running: state.is_gateway_running().await,
-        ws_connected: state.ws_handle.read().await.is_some(),
+        // IronClaw engine status
+        gateway_running: engine_running,
+        ws_connected: engine_running, // In-process = always connected
         slack_enabled: config
             .as_ref()
             .map(|c| {
@@ -202,7 +214,10 @@ pub async fn openclaw_get_status(
     })
 }
 
-/// Sync Local LLM config (llama-server) to OpenClaw config
+/// Sync Local LLM config (llama-server) to OpenClaw config.
+///
+/// Still needed: Scrappy manages the local llama-server sidecar and needs to
+/// sync its port/model info to the config that IronClaw reads on restart.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_sync_local_llm(
@@ -225,10 +240,7 @@ pub async fn openclaw_sync_local_llm(
         local_llm.as_ref().map(|(p, _, _, _)| *p)
     );
 
-    // Regenerate config with new local_llm details
-    // We preserve existing channels from disk/config
     let existing_openclaw_engine = cfg.load_config().ok();
-
     let openclaw_engine = cfg.generate_config(
         existing_openclaw_engine
             .as_ref()
@@ -243,264 +255,76 @@ pub async fn openclaw_sync_local_llm(
         .map_err(|e| e.to_string())?;
 
     *state.config.write().await = Some(cfg);
-
     Ok(())
 }
 
-/// Start OpenClaw gateway (spawns openclaw_engine binary and connects WS client)
+/// Start the IronClaw engine.
+///
+/// Initializes the agent, starts background tasks, emits Connected event.
+/// If already running, this is a no-op (returns Ok).
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_start_gateway(
-    state: State<'_, OpenClawManager>,
-    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    _state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+    _sidecar: State<'_, crate::sidecar::SidecarManager>,
 ) -> Result<(), String> {
-    start_gateway_core(&state, &sidecar).await
+    info!("[ironclaw] Start gateway requested");
+
+    // Create secrets adapter (bridges macOS Keychain to IronClaw)
+    let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
+        Some(std::sync::Arc::new(
+            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+        ));
+
+    match ironclaw.start(secrets_store).await {
+        Ok(true) => {
+            info!("[ironclaw] Engine started successfully");
+            Ok(())
+        }
+        Ok(false) => {
+            info!("[ironclaw] Engine was already running");
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("Failed to start IronClaw engine: {}", e);
+            tracing::error!("{}", msg);
+            Err(msg)
+        }
+    }
 }
 
-/// Core logic for starting the gateway, reusable for auto-start
-pub async fn start_gateway_core(
-    state: &OpenClawManager,
-    sidecar: &crate::sidecar::SidecarManager,
-) -> Result<(), String> {
-    // Get or initialize config
-    let cfg = if let Some(c) = state.get_config().await {
-        c
-    } else {
-        state.init_config().await?
-    };
-
-    // Attempt to get local_llm config, retrying briefly if not yet available
-    let mut local_llm = sidecar.get_chat_config();
-    if local_llm.is_none() {
-        // Check if we suspect it should be running
-        info!("[openclaw] Local LLM config not found immediately, waiting for sidecar...");
-        for _ in 0..10 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            local_llm = sidecar.get_chat_config();
-            if local_llm.is_some() {
-                info!(
-                    "[openclaw] Local LLM config detected: {:?}",
-                    local_llm.as_ref().map(|(p, _, _, _)| *p)
-                );
-                break;
-            }
-        }
-    }
-
-    // Pass local_llm to generate_config so it builds the correct models config
-    // Inject detected model family for Layer 2 stop token hardening
-    let mut cfg = cfg;
-    cfg.local_model_family = sidecar
-        .detected_model_family
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let openclaw_engine = cfg.generate_config(None, None, local_llm.clone());
-
-    cfg.write_config(&openclaw_engine, local_llm)
-        .map_err(|e| e.to_string())?;
-
-    // Perform deep migration of sessions/data paths
-    if let Err(e) = cfg.deep_migrate() {
-        warn!("[openclaw] Deep migration encountered issues: {}", e);
-    }
-
-    let is_local = cfg.gateway_mode == "local";
-    let gateway_url = cfg.gateway_url();
-    let gateway_token = cfg.gateway_token();
-
-    info!("[openclaw] Using Base Dir: {:?}", cfg.base_dir);
-    info!("[openclaw] Starting gateway with URL: {}", gateway_url);
-    info!("[openclaw] Gateway token length: {}", gateway_token.len());
-
-    // Step 1: Start openclaw_engine processes based on mode
-    if is_local {
-        // Stop any currently running gateway process first
-        if let Some(proc) = state.gateway_process.lock().await.take() {
-            info!("[openclaw] Stopping existing gateway process...");
-            let _ = proc.kill();
-            // forceful wait for port release
-            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        }
-
-        // Double check if port is actually free
-        let port = cfg.port;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
-            warn!(
-                "[openclaw] Port {} seems to be in use, waiting longer...",
-                port
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
-        }
-
-        state.start_openclaw_engine_process(&cfg, "gateway").await?;
-
-        // Step 2: Wait for gateway to be ready
-        // We poll the /health HTTP endpoint instead of using a fixed sleep,
-        // so we react quickly when the engine is ready AND abort immediately
-        // if the engine exits with code 1 before becoming ready.
-        let port = cfg.port;
-        let is_alive_check = {
-            state
-                .gateway_process
-                .lock()
-                .await
-                .as_ref()
-                .map(|p| p.is_alive.clone())
-        };
-
-        let health_url = format!("http://127.0.0.1:{}/health", port);
-        let poll_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(1))
-            .build()
-            .unwrap_or_default();
-
-        let poll_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(20);
-        let mut engine_ready = false;
-
-        loop {
-            if tokio::time::Instant::now() >= poll_deadline {
-                warn!("[openclaw] Gateway health poll timed out after 20s, proceeding anyway");
-                break;
-            }
-
-            // If the engine process died, abort immediately
-            let alive = is_alive_check
-                .as_ref()
-                .map(|f| f.load(Ordering::Relaxed))
-                .unwrap_or(true);
-            if !alive {
-                return Err("[openclaw] Gateway engine process exited before becoming ready. Check logs for details.".to_string());
-            }
-
-            // Poll /health
-            match poll_client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    info!("[openclaw] Gateway is ready (health OK on port {})", port);
-                    engine_ready = true;
-                    break;
-                }
-                _ => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                }
-            }
-        }
-
-        if engine_ready {
-            info!("[openclaw] Gateway health confirmed, connecting WS client");
-        }
-    } else {
-        // Stop any local gateway that might be running from a previous switch
-        if let Some(proc) = state.gateway_process.lock().await.take() {
-            let _ = proc.kill();
-        }
-
-        // In Remote mode, if Node Host is enabled, start it as a standalone process
-        if cfg.node_host_enabled {
-            state.start_openclaw_engine_process(&cfg, "node").await?;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        }
-    }
-
-    // Step 3: Connect WS client to the gateway (local or remote)
-    let (event_tx, mut event_rx) = mpsc::channel(256);
-
-    let mcp_handler =
-        std::sync::Arc::new(super::super::ipc::McpRequestHandler::new(state.app.clone()));
-
-    // Pass is_alive flag so WS client can stop retrying when engine is dead
-    let gateway_alive_flag = if is_local {
-        state
-            .gateway_process
-            .lock()
-            .await
-            .as_ref()
-            .map(|p| p.is_alive.clone())
-    } else {
-        None
-    };
-
-    let (client, handle) = OpenClawWsClient::new(
-        gateway_url.clone(),
-        gateway_token,
-        cfg.device_id.clone(),
-        cfg.private_key.clone(),
-        cfg.public_key.clone(),
-        event_tx,
-        mcp_handler,
-        gateway_alive_flag,
-    );
-
-    *state.ws_handle.write().await = Some(handle);
-    *state.running.write().await = true;
-
-    // Run the client in the background
-    tauri::async_runtime::spawn(async move {
-        client.run_forever().await;
-    });
-
-    // Step 4: Start event listener task to emit to UI
-    let app_handle = state.app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            info!("[openclaw] Emitting UI event: {:?}", event);
-            let _ = app_handle.emit("openclaw-event", event);
-        }
-    });
-
-    info!(
-        "Started OpenClaw gateway context. Mode: {}, URL: {}",
-        cfg.gateway_mode, gateway_url
-    );
-
-    Ok(())
-}
-
-/// Stop OpenClaw gateway (stops WS client and openclaw_engine process)
+/// Stop the IronClaw engine gracefully.
+///
+/// Shuts down background tasks, channels, and emits Disconnected event.
+/// If already stopped, this is a no-op (returns Ok).
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_stop_gateway(state: State<'_, OpenClawManager>) -> Result<(), String> {
-    // Stop WS client first
-    if let Some(handle) = state.ws_handle.write().await.take() {
-        handle.shutdown().await.map_err(|e| e.to_string())?;
+pub async fn openclaw_stop_gateway(
+    _state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+) -> Result<(), String> {
+    info!("[ironclaw] Stop gateway requested");
+
+    let was_running = ironclaw.stop().await;
+    if was_running {
+        info!("[ironclaw] Engine stopped successfully");
+    } else {
+        info!("[ironclaw] Engine was already stopped");
     }
-
-    // Stop openclaw_engine process
-    state.stop_openclaw_engine_process().await?;
-
-    // Clean up auth-profiles.json (contains plaintext API keys)
-    // It is fully regenerated on every gateway start from SecretStore.
-    if let Some(cfg) = state.get_config().await {
-        let auth_path = cfg
-            .state_dir()
-            .join("agents")
-            .join("main")
-            .join("agent")
-            .join("auth-profiles.json");
-        if auth_path.exists() {
-            if let Err(e) = std::fs::remove_file(&auth_path) {
-                warn!("[openclaw] Failed to clean up auth-profiles.json: {}", e);
-            } else {
-                info!("[openclaw] Cleaned up auth-profiles.json");
-            }
-        }
-    }
-
-    *state.running.write().await = false;
-    info!("Stopped OpenClaw gateway and openclaw_engine process");
 
     Ok(())
 }
 
-/// Get gateway diagnostic info
+/// Get gateway diagnostic info.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_diagnostics(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<OpenClawDiagnostics, String> {
     let cfg = state.get_config().await;
-    let running = state.is_running().await;
-    let ws_connected = state.ws_handle.read().await.is_some();
+    let engine_running = ironclaw.is_initialized();
 
     let (port, state_dir, slack_enabled, telegram_enabled) = if let Some(ref cfg) = cfg {
         let (slack, telegram) = if let Ok(openclaw_engine) = cfg.load_config() {
@@ -523,8 +347,8 @@ pub async fn openclaw_get_diagnostics(
 
     Ok(OpenClawDiagnostics {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        gateway_running: running,
-        ws_connected,
+        gateway_running: engine_running,
+        ws_connected: engine_running,
         version: env!("CARGO_PKG_VERSION").to_string(),
         platform: std::env::consts::OS.to_string(),
         port,

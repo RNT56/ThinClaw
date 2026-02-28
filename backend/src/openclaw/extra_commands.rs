@@ -8,7 +8,7 @@ use tungstenite::client::IntoClientRequest;
 #[specta::specta]
 pub async fn openclaw_switch_to_profile(
     state: State<'_, OpenClawManager>,
-    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    _sidecar: State<'_, crate::sidecar::SidecarManager>,
     profile_id: String,
 ) -> Result<(), String> {
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -38,8 +38,8 @@ pub async fn openclaw_switch_to_profile(
     cfg.save_identity().map_err(|e| e.to_string())?;
     *state.config.write().await = Some(cfg);
 
-    // Restart gateway to apply changes
-    crate::openclaw::commands::start_gateway_core(&state, &sidecar).await
+    // IronClaw is in-process — no gateway restart needed
+    Ok(())
 }
 
 /// Test connection to a potential gateway

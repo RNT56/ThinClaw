@@ -5,11 +5,11 @@
 //! agent profiles, and cloud provider config.
 
 use tauri::State;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::super::config::*;
 use super::types::*;
-use super::ws_rpc;
+// ws_rpc removed — IronClaw is in-process, no remote WS gateway
 use super::OpenClawManager;
 use crate::sidecar::SidecarManager;
 
@@ -237,15 +237,7 @@ pub async fn openclaw_save_anthropic_key(
         state.init_config().await?
     };
 
-    if cfg.gateway_mode == "remote" {
-        let val = key.unwrap_or_else(|| "".to_string());
-        let _ = ws_rpc(state, |h| async move {
-            h.config_patch(serde_json::json!({ "anthropicApiKey": val }))
-                .await
-        })
-        .await?;
-        return Ok(());
-    }
+    // Remote WS gateway path removed — IronClaw is in-process
 
     println!(
         "[openclaw] save_anthropic_key called with: {:?}",
@@ -294,15 +286,7 @@ pub async fn openclaw_save_brave_key(
         state.init_config().await?
     };
 
-    if cfg.gateway_mode == "remote" {
-        let val = key.unwrap_or_else(|| "".to_string());
-        let _ = ws_rpc(state, |h| async move {
-            h.config_patch(serde_json::json!({ "braveSearchApiKey": val }))
-                .await
-        })
-        .await?;
-        return Ok(());
-    }
+    // Remote WS gateway path removed — IronClaw is in-process
 
     println!(
         "[openclaw] save_brave_key called with: {:?}",
@@ -348,50 +332,11 @@ pub async fn openclaw_toggle_secret_access(
         state.init_config().await?
     };
 
-    if cfg.gateway_mode == "remote" {
-        // Map secret IDs to config fields if possible
-        let patch_key = match secret.as_str() {
-            "anthropic" => Some("anthropicGranted"),
-            "openai" => Some("openaiGranted"),
-            "openrouter" => Some("openrouterGranted"),
-            "gemini" => Some("geminiGranted"),
-            "groq" => Some("groqGranted"),
-            "huggingface" => Some("huggingfaceGranted"),
-            "brave" => Some("braveGranted"),
-            "xai" => Some("xaiGranted"),
-            "venice" => Some("veniceGranted"),
-            "together" => Some("togetherGranted"),
-            "moonshot" => Some("moonshotGranted"),
-            "minimax" => Some("minimaxGranted"),
-            "nvidia" => Some("nvidiaGranted"),
-            "qianfan" => Some("qianfanGranted"),
-            "mistral" => Some("mistralGranted"),
-            "xiaomi" => Some("xiaomiGranted"),
-            "amazon-bedrock" | "bedrock" => Some("bedrockGranted"),
-            _ => None, // Custom secrets or unknown
-        };
-
-        if let Some(key) = patch_key {
-            let _ = ws_rpc(state, |h| async move {
-                h.config_patch(serde_json::json!({ key: granted })).await
-            })
-            .await?;
-            return Ok(());
-        } else if secret.starts_with("custom-") {
-            // For custom secrets, we might need a specialized RPC or a complex patch
-            // For now, let's assume specific RPC support or just fail gracefully warning
-            warn!(
-                "Remote toggling of custom secret '{}' not yet supported via simple patch",
-                secret
-            );
-            // Alternatively, if the backend supports "customSecrets" array patch, we could send that, but it's race-condition prone.
-            return Err("Remote toggling of custom secrets not yet supported".into());
-        }
-    }
+    // Remote WS gateway path removed — IronClaw is in-process
 
     let result = cfg.toggle_secret_access(&secret, granted);
 
-    // Regenerate config to reflect access change in auth-profiles.json
+    // Regenerate config to reflect access change
     let existing_openclaw_engine = cfg.load_config().ok();
     let local_llm = existing_openclaw_engine
         .as_ref()
@@ -697,7 +642,7 @@ pub async fn openclaw_add_custom_secret(
 
     cfg.save_identity().map_err(|e| e.to_string())?;
 
-    // Regenerate config to reflect changes in auth-profiles.json
+    // Regenerate config to reflect changes
     let existing_openclaw_engine = cfg.load_config().ok();
     let local_llm = existing_openclaw_engine
         .as_ref()
@@ -732,7 +677,7 @@ pub async fn openclaw_remove_custom_secret(
 
     cfg.save_identity().map_err(|e| e.to_string())?;
 
-    // Regenerate config to reflect changes in auth-profiles.json
+    // Regenerate config to reflect changes
     let existing_openclaw_engine = cfg.load_config().ok();
     let local_llm = existing_openclaw_engine
         .as_ref()
@@ -769,7 +714,7 @@ pub async fn openclaw_toggle_custom_secret(
 
     cfg.save_identity().map_err(|e| e.to_string())?;
 
-    // Regenerate config to reflect access change in auth-profiles.json
+    // Regenerate config to reflect access change
     let existing_openclaw_engine = cfg.load_config().ok();
     let local_llm = existing_openclaw_engine
         .as_ref()
@@ -826,14 +771,7 @@ pub async fn openclaw_toggle_node_host(
         err
     })?;
 
-    // If already running in remote mode, start/stop the node host immediately
-    if *state.running.read().await && cfg.gateway_mode == "remote" {
-        if enabled {
-            state.start_openclaw_engine_process(&cfg, "node").await?;
-        } else if let Some(proc) = state.node_host_process.lock().await.take() {
-            let _ = proc.kill();
-        }
-    }
+    // IronClaw is in-process — no separate node host process to manage
 
     *state.config.write().await = Some(cfg);
 

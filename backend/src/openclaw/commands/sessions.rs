@@ -1,56 +1,165 @@
-//! Session management, chat history, messaging, memory, and workspace file commands
+//! Session management, chat, memory, and workspace file commands.
 //!
-//! Contains all commands related to session CRUD, chat history retrieval,
-//! message sending, memory management (MEMORY.md), workspace file access,
-//! and factory reset.
+//! **Phase 3 migration**: Commands now call IronClaw's API directly instead of
+//! routing through the WebSocket RPC bridge. `IronClawState` is the primary
+//! data source; `OpenClawManager` is retained for workspace path resolution
+//! until Phase 4 cleanup.
 
-use serde::Deserialize;
 use tauri::State;
 use tracing::{error, info, warn};
 
 use super::types::*;
 use super::OpenClawManager;
+use crate::openclaw::ironclaw_bridge::IronClawState;
 
-/// Get OpenClaw sessions list
+// ============================================================================
+// Batch 1: Chat Hot-Path (send, abort, approval)
+// ============================================================================
+
+/// Send a message to the IronClaw agent.
+///
+/// Returns immediately — the actual response streams back via `openclaw-event`
+/// Tauri events (AssistantDelta, ToolUpdate, etc.).
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_send_message(
+    ironclaw: State<'_, IronClawState>,
+    session_key: String,
+    text: String,
+    deliver: bool,
+) -> Result<OpenClawRpcResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let result = ironclaw::api::chat::send_message(agent, &session_key, &text, deliver)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(OpenClawRpcResponse {
+        ok: true,
+        message: Some(format!("{}:{}", result.status, result.message_id)),
+    })
+}
+
+/// Abort a running chat turn.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_abort_chat(
+    ironclaw: State<'_, IronClawState>,
+    session_key: String,
+    _run_id: Option<String>,
+) -> Result<OpenClawRpcResponse, String> {
+    let agent = ironclaw.agent().await?;
+    ironclaw::api::chat::abort(&agent, &session_key)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(OpenClawRpcResponse {
+        ok: true,
+        message: Some("Abort requested".into()),
+    })
+}
+
+/// Resolve a pending tool-execution approval.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_resolve_approval(
+    ironclaw: State<'_, IronClawState>,
+    approval_id: String,
+    approved: bool,
+) -> Result<OpenClawRpcResponse, String> {
+    // Use the assistant thread as default session for approval routing.
+    // The agent internally correlates the approval_id to the correct turn.
+    let session_key = "agent:main";
+
+    let agent = ironclaw.agent().await?;
+    ironclaw::api::chat::resolve_approval(
+        agent,
+        session_key,
+        &approval_id,
+        approved,
+        false, // always = false (don't auto-approve in future)
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(OpenClawRpcResponse {
+        ok: true,
+        message: Some(if approved { "Approved" } else { "Denied" }.into()),
+    })
+}
+
+// ============================================================================
+// Batch 2: Session CRUD
+// ============================================================================
+
+/// Get sessions list from IronClaw.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_sessions(
-    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<OpenClawSessionsResponse, String> {
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
+    let agent = ironclaw.agent().await?;
+    let thread_list = ironclaw::api::sessions::list_threads(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        "tauri",
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    let result = handle.sessions_list().await.map_err(|e| e.to_string())?;
+    let mut session_list: Vec<OpenClawSession> = Vec::new();
 
-    // Parse sessions from response
-    let mut session_list: Vec<OpenClawSession> =
-        if let Some(arr) = result.get("sessions").and_then(|v| v.as_array()) {
-            arr.iter()
-                .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                .collect()
-        } else {
-            vec![]
-        };
+    // Map assistant thread → agent:main
+    if let Some(assistant) = thread_list.assistant_thread {
+        let updated_ms: f64 = chrono::DateTime::parse_from_rfc3339(&assistant.updated_at)
+            .map(|dt| dt.timestamp_millis() as f64)
+            .unwrap_or_else(|_| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    * 1000.0
+            });
 
-    // Check if agent:main exists, if not add it
-    let has_main = session_list.iter().any(|s| s.session_key == "agent:main");
-    if !has_main {
+        session_list.push(OpenClawSession {
+            session_key: "agent:main".to_string(),
+            title: assistant.title.or(Some("OpenClaw Core".to_string())),
+            updated_at_ms: Some(updated_ms),
+            source: Some("system".to_string()),
+        });
+    }
+
+    // Map other threads
+    for thread in thread_list.threads {
+        let updated_ms: f64 = chrono::DateTime::parse_from_rfc3339(&thread.updated_at)
+            .map(|dt| dt.timestamp_millis() as f64)
+            .unwrap_or(0.0);
+
+        session_list.push(OpenClawSession {
+            session_key: thread.id.to_string(),
+            title: thread.title,
+            updated_at_ms: Some(updated_ms),
+            source: thread.thread_type,
+        });
+    }
+
+    // Ensure agent:main exists
+    if !session_list.iter().any(|s| s.session_key == "agent:main") {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64()
             * 1000.0;
 
-        session_list.push(OpenClawSession {
-            session_key: "agent:main".to_string(),
-            title: Some("OpenClaw Core".to_string()),
-            updated_at_ms: Some(now),
-            source: Some("system".to_string()),
-        });
+        session_list.insert(
+            0,
+            OpenClawSession {
+                session_key: "agent:main".to_string(),
+                title: Some("OpenClaw Core".to_string()),
+                updated_at_ms: Some(now),
+                source: Some("system".to_string()),
+            },
+        );
     }
 
     // Sort: agent:main first, then by updated_at desc
@@ -60,7 +169,6 @@ pub async fn openclaw_get_sessions(
         } else if b.session_key == "agent:main" {
             std::cmp::Ordering::Greater
         } else {
-            // Descending order by timestamp
             b.updated_at_ms
                 .partial_cmp(&a.updated_at_ms)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -72,572 +180,181 @@ pub async fn openclaw_get_sessions(
     })
 }
 
-/// Delete a OpenClaw session.
-///
-/// This command handles the full lifecycle: abort any active run, wait for it
-/// to wind down, then delete. If the first delete attempt fails because the
-/// session is still active, it resets the session (which creates a new
-/// sessionId, breaking the active-run association) and retries the delete.
+/// Delete a session.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_delete_session(
-    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     session_key: String,
 ) -> Result<(), String> {
     if session_key == "agent:main" {
         return Err("Cannot delete the core agent:main session.".to_string());
     }
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
 
-    info!("[openclaw] Deleting session: {}", session_key);
+    info!("[ironclaw] Deleting session: {}", session_key);
 
-    // Step 1: Abort any active chat run (best-effort, ignore errors)
-    if let Err(e) = handle.chat_abort(&session_key, None).await {
-        info!(
-            "[openclaw] Abort before delete returned error (OK to ignore): {}",
-            e
-        );
-    }
+    // Abort any active run first (best-effort)
+    let agent = ironclaw.agent().await?;
+    let _ = ironclaw::api::chat::abort(&agent, &session_key).await;
 
-    // Step 2: Brief delay to let the run wind down after abort signal
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    ironclaw::api::sessions::delete_thread(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        &session_key,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    // Step 3: First delete attempt
-    match handle.session_delete(&session_key).await {
-        Ok(_) => {
-            info!("[openclaw] Successfully deleted session: {}", session_key);
-            return Ok(());
-        }
-        Err(e) => {
-            let err_msg = e.to_string();
-            let is_still_active =
-                err_msg.contains("still active") || err_msg.contains("UNAVAILABLE");
-
-            if !is_still_active {
-                error!(
-                    "[openclaw] Failed to delete session {}: {}",
-                    session_key, err_msg
-                );
-                return Err(err_msg);
-            }
-
-            // Step 4: Session is still active — reset it to break the run association,
-            // then retry the delete.
-            warn!(
-                "[openclaw] Session {} still active, resetting then retrying delete",
-                session_key
-            );
-
-            handle.session_reset(&session_key).await.map_err(|e2| {
-                error!(
-                    "[openclaw] Failed to reset session {} before retry: {}",
-                    session_key, e2
-                );
-                format!("Reset before retry failed: {}", e2)
-            })?;
-
-            // Wait a bit longer after reset for the gateway to finish cleanup
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-
-            // Step 5: Final delete attempt
-            handle.session_delete(&session_key).await.map_err(|e3| {
-                error!(
-                    "[openclaw] Retry delete also failed for session {}: {}",
-                    session_key, e3
-                );
-                format!("Delete failed after reset: {}", e3)
-            })?;
-
-            info!(
-                "[openclaw] Successfully deleted session (after reset): {}",
-                session_key
-            );
-            Ok(())
-        }
-    }
-}
-
-/// Reset a OpenClaw session (clear history)
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_reset_session(
-    state: State<'_, OpenClawManager>,
-    session_key: String,
-) -> Result<(), String> {
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
-
-    info!("[openclaw] Resetting session: {}", session_key);
-
-    handle.session_reset(&session_key).await.map_err(|e| {
-        error!("[openclaw] Failed to reset session {}: {}", session_key, e);
-        e.to_string()
-    })?;
-
-    info!("[openclaw] Successfully reset session: {}", session_key);
+    info!("[ironclaw] Successfully deleted session: {}", session_key);
     Ok(())
 }
 
-/// Get chat history for a session
-#[derive(Deserialize, Debug)]
-struct RawOpenClawEngineMessage {
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(alias = "content")]
-    content: Option<serde_json::Value>,
-    #[serde(alias = "text")]
-    text: Option<String>,
-    #[serde(alias = "timestamp")]
-    timestamp: Option<f64>,
-    #[serde(alias = "uuid")]
-    id: Option<String>,
-    #[serde(alias = "channel")]
-    source: Option<String>,
+/// Reset a session (clear history).
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_reset_session(
+    ironclaw: State<'_, IronClawState>,
+    session_key: String,
+) -> Result<(), String> {
+    info!("[ironclaw] Resetting session: {}", session_key);
+
+    let agent = ironclaw.agent().await?;
+    ironclaw::api::sessions::clear_thread(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        &session_key,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!("[ironclaw] Successfully reset session: {}", session_key);
+    Ok(())
 }
 
+/// Get chat history for a session.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_history(
-    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     session_key: String,
     limit: u32,
     _before: Option<String>,
 ) -> Result<OpenClawHistoryResponse, String> {
-    let handle = state.ws_handle.read().await;
-    if let Some(client) = handle.as_ref() {
-        // Note: 'before' is not currently supported by OpenClawEngine's chat.history RPC
-        // preventing INVALID_REQUEST by filtering it out in ws_client.rs
-        let result = client
-            .chat_history(&session_key, limit, None)
-            .await
-            .map_err(|e| e.to_string())?;
+    let agent = ironclaw.agent().await?;
+    let history = ironclaw::api::sessions::get_history(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        Some(&session_key),
+        Some(limit as usize),
+        _before.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-        let messages = if let Some(arr) = result.get("messages").and_then(|v| v.as_array()) {
-            arr.iter()
-                .filter(|v| !v.is_null())
-                .map(|v| {
-                    // Try to parse as raw message first to handle dynamic content types
-                    match serde_json::from_value::<RawOpenClawEngineMessage>(v.clone()) {
-                        Ok(raw) => {
-                            // Extract text from content (string or array)
-                            let mut metadata: Option<serde_json::Value> = None;
-                            let text = if let Some(t) = raw.text {
-                                t
-                            } else if let Some(content) = raw.content {
-                                match content {
-                                    serde_json::Value::String(s) => s,
-                                    serde_json::Value::Array(items) => {
-                                        let mut parts = Vec::new();
-                                        for item in items {
-                                            if let Some(s) =
-                                                item.get("text").and_then(|t| t.as_str())
-                                            {
-                                                parts.push(s.to_string());
-                                            } else if let Some(obj) = item.as_object() {
-                                                if let Some(kind) =
-                                                    obj.get("type").and_then(|t| t.as_str())
-                                                {
-                                                    match kind {
-                                                        "text" => {
-                                                            if let Some(s) = obj
-                                                                .get("text")
-                                                                .and_then(|t| t.as_str())
-                                                            {
-                                                                parts.push(s.to_string());
-                                                            }
-                                                        }
-                                                        "toolCall" | "tool_call" => {
-                                                            let name = obj
-                                                                .get("name")
-                                                                .and_then(|s| s.as_str())
-                                                                .unwrap_or("tool");
-                                                            let input = obj
-                                                                .get("input")
-                                                                .or_else(|| obj.get("arguments"))
-                                                                .unwrap_or(
-                                                                    &serde_json::Value::Null,
-                                                                );
+    // Map IronClaw TurnInfo → OpenClawMessage for the frontend
+    let mut messages: Vec<OpenClawMessage> = Vec::new();
 
-                                                            parts.push(format!(
-                                                                "[Tool Call: {}] Input: {}",
-                                                                name, input
-                                                            ));
+    for turn in &history.turns {
+        let ts_ms: f64 = chrono::DateTime::parse_from_rfc3339(&turn.started_at)
+            .map(|dt| dt.timestamp_millis() as f64)
+            .unwrap_or(0.0);
 
-                                                            // Populate metadata for the first tool call found
-                                                            if metadata.is_none() {
-                                                                metadata =
-                                                                    Some(serde_json::json!({
-                                                                        "type": "tool",
-                                                                        "name": name,
-                                                                        "status": "completed",
-                                                                        "input": input
-                                                                    }));
-                                                            }
-                                                        }
-                                                        "toolResult" | "tool_result" => {
-                                                            let name = obj
-                                                                .get("toolName")
-                                                                .and_then(|s| s.as_str())
-                                                                .unwrap_or("tool");
+        // User message
+        messages.push(OpenClawMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: "user".to_string(),
+            ts_ms,
+            text: turn.user_input.clone(),
+            source: Some("tauri".to_string()),
+            metadata: None,
+        });
 
-                                                            parts.push(format!(
-                                                                "[Tool Result: {}]",
-                                                                name
-                                                            ));
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        parts.join("\n")
-                                    }
-                                    _ => String::new(),
-                                }
-                            } else {
-                                String::new()
-                            };
+        // Tool calls (as individual messages)
+        for tc in &turn.tool_calls {
+            messages.push(OpenClawMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: "tool".to_string(),
+                ts_ms: ts_ms + 0.1,
+                text: format!("[Tool Call: {}]", tc.name),
+                source: Some("system".to_string()),
+                metadata: Some(serde_json::json!({
+                    "type": "tool",
+                    "name": tc.name,
+                    "status": if tc.has_error { "error" } else { "completed" },
+                })),
+            });
+        }
 
-                            let now_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs_f64()
-                                * 1000.0;
+        // Assistant response
+        if let Some(ref response) = turn.response {
+            let completed_ts = turn
+                .completed_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp_millis() as f64)
+                .unwrap_or(ts_ms + 1.0);
 
-                            OpenClawMessage {
-                                id: raw.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                                role: raw.role.unwrap_or_else(|| "unknown".to_string()),
-                                ts_ms: raw.timestamp.unwrap_or(now_ms),
-                                text,
-                                source: raw.source,
-                                metadata,
-                            }
-                        }
-                        Err(_) => OpenClawMessage {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            role: "unknown".to_string(),
-                            ts_ms: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs_f64()
-                                * 1000.0,
-                            text: "Failed to parse message".to_string(),
-                            source: None,
-                            metadata: None,
-                        },
-                    }
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        Ok(OpenClawHistoryResponse {
-            messages,
-            has_more: result
-                .get("has_more")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        })
-    } else {
-        Err("Not connected".to_string())
-    }
-}
-
-/// Save OpenClaw memory content (MEMORY.md)
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_save_memory(
-    state: State<'_, OpenClawManager>,
-    content: String,
-) -> Result<(), String> {
-    let cfg_guard = state.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let workspace = cfg.workspace_dir();
-    let path = workspace.join("MEMORY.md");
-
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| e.to_string())?;
+            messages.push(OpenClawMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: "assistant".to_string(),
+                ts_ms: completed_ts,
+                text: response.clone(),
+                source: Some("tauri".to_string()),
+                metadata: None,
+            });
+        }
     }
 
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Send a message to a OpenClaw session
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_send_message(
-    state: State<'_, OpenClawManager>,
-    session_key: String,
-    text: String,
-    deliver: bool,
-) -> Result<OpenClawRpcResponse, String> {
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
-
-    let idempotency_key = format!(
-        "scrappy:{}:{}:{}",
-        session_key,
-        uuid::Uuid::new_v4(),
-        chrono::Utc::now().timestamp_millis()
-    );
-
-    handle
-        .chat_send(&session_key, &idempotency_key, &text, deliver)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(OpenClawRpcResponse {
-        ok: true,
-        message: None,
+    Ok(OpenClawHistoryResponse {
+        messages,
+        has_more: history.has_more,
     })
 }
 
-/// Subscribe to a OpenClaw session for live updates.
+/// Subscribe to a session for live updates.
 ///
-/// **Intentional no-op**: The OpenClaw gateway automatically broadcasts all events
-/// to connected operators via the WebSocket connection established in `start_gateway`.
-/// No explicit per-session subscription is required. This command is retained for
-/// API stability but the frontend no longer calls it.
+/// **Intentional no-op**: IronClaw sends events directly via TauriChannel.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_subscribe_session(
-    state: State<'_, OpenClawManager>,
+    _ironclaw: State<'_, IronClawState>,
     _session_key: String,
 ) -> Result<OpenClawRpcResponse, String> {
-    let _handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
-
-    // Events flow automatically to all connected operators.
-    // No per-session subscription RPC is needed.
-
     Ok(OpenClawRpcResponse {
         ok: true,
         message: None,
     })
 }
 
-/// Abort a running chat
+// ============================================================================
+// Batch 3: Memory / Workspace
+// ============================================================================
+
+/// Get MEMORY.md content.
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_abort_chat(
-    state: State<'_, OpenClawManager>,
-    session_key: String,
-    run_id: Option<String>,
-) -> Result<OpenClawRpcResponse, String> {
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
-
-    handle
-        .chat_abort(&session_key, run_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(OpenClawRpcResponse {
-        ok: true,
-        message: Some("Abort requested".into()),
-    })
-}
-
-/// Resolve an approval request
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_resolve_approval(
-    state: State<'_, OpenClawManager>,
-    approval_id: String,
-    approved: bool,
-) -> Result<OpenClawRpcResponse, String> {
-    let handle = state
-        .ws_handle
-        .read()
-        .await
-        .clone()
-        .ok_or("Not connected")?;
-
-    handle
-        .approval_resolve(&approval_id, approved)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(OpenClawRpcResponse {
-        ok: true,
-        message: Some(if approved { "Approved" } else { "Denied" }.into()),
-    })
-}
-
-/// Clear OpenClaw memory (deletes memory directory or identity files)
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_clear_memory(
-    state: State<'_, OpenClawManager>,
-    target: String, // "memory", "identity", "all"
-) -> Result<(), String> {
-    let cfg = if let Some(c) = state.get_config().await {
-        c
-    } else {
-        state.init_config().await?
-    };
-
-    let workspace = cfg.workspace_dir();
-
-    let memory_dir = workspace.join("memory");
-    let soul_file = workspace.join("SOUL.md");
-    let user_file = workspace.join("USER.md");
-    // let _memory_file = workspace.join("MEMORY.md");
-    // let _tools_file = workspace.join("TOOLS.md");
-
-    match target.as_str() {
-        "memory" => {
-            if memory_dir.exists() {
-                std::fs::remove_dir_all(&memory_dir)
-                    .map_err(|e| format!("Failed to remove memory dir: {}", e))?;
-                std::fs::create_dir_all(&memory_dir)
-                    .map_err(|e| format!("Failed to recreate memory dir: {}", e))?;
-            }
-            info!("[openclaw] Cleared memory directory");
+pub async fn openclaw_get_memory(
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
+) -> Result<String, String> {
+    // Try IronClaw workspace API first
+    let agent = ironclaw.agent().await?;
+    if let Some(workspace) = agent.workspace() {
+        match ironclaw::api::memory::get_file(workspace, "MEMORY.md").await {
+            Ok(resp) => return Ok(resp.content),
+            Err(_) => return Ok("No memory file found.".to_string()),
         }
-        "identity" => {
-            if soul_file.exists() {
-                std::fs::remove_file(soul_file)
-                    .map_err(|e| format!("Failed to delete SOUL.md: {}", e))?;
-            }
-            if user_file.exists() {
-                std::fs::remove_file(user_file)
-                    .map_err(|e| format!("Failed to delete USER.md: {}", e))?;
-            }
-            info!("[openclaw] Cleared identity files");
-        }
-
-        "all" => {
-            // 0. STOP THE OPENCLAW PROCESS first to release locks
-            info!("[openclaw] Stopping gateway for factory reset...");
-
-            if let Some(handle) = state.ws_handle.write().await.take() {
-                let _ = handle.shutdown().await;
-            }
-            let _ = state.stop_openclaw_engine_process().await;
-            *state.running.write().await = false;
-
-            // FORCE KILL: Cleanup zombie processes on the port
-            let port = cfg.port;
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("lsof -t -i:{} -sTCP:LISTEN | xargs kill -9", port))
-                    .output();
-                let _ = std::process::Command::new("pkill")
-                    .arg("-f")
-                    .arg("node.*openclaw_engine/main.js")
-                    .output();
-            }
-
-            // Wait for file handles to release
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-            // 1. Nuclear Workspace Clear (The Agent's Mind)
-            if workspace.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&workspace) {
-                    error!("[openclaw] Failed to wipe workspace: {}", e);
-                    return Err(format!(
-                        "Failed to wipe workspace: {}. Check permissions or open files.",
-                        e
-                    ));
-                }
-                std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
-                info!("[openclaw] Wiped workspace directory: {:?}", workspace);
-            }
-
-            // 2. Clear Chat History (The Agent's Memory of Speech)
-            // Sessions live under $OPENCLAW_STATE_DIR/agents/main/sessions/
-            // OPENCLAW_STATE_DIR = base_dir/state, so we must use state_dir() here.
-            let sessions_dir = cfg.state_dir().join("agents").join("main").join("sessions");
-            if sessions_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&sessions_dir) {
-                    error!("[openclaw] Failed to wipe sessions: {}", e);
-                    return Err(format!(
-                        "Failed to wipe sessions: {}. Check permissions or open files.",
-                        e
-                    ));
-                }
-                std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
-                info!("[openclaw] Wiped sessions directory: {:?}", sessions_dir);
-            }
-
-            // 3. Clear Logs (both app-level and engine-level)
-            let logs_dir = cfg.base_dir.join("logs");
-            if logs_dir.exists() {
-                let _ = std::fs::remove_dir_all(&logs_dir);
-                let _ = std::fs::create_dir_all(&logs_dir);
-            }
-            // Engine logs live under $OPENCLAW_STATE_DIR/logs/
-            let engine_logs_dir = cfg.state_dir().join("logs");
-            if engine_logs_dir.exists() {
-                let _ = std::fs::remove_dir_all(&engine_logs_dir);
-                let _ = std::fs::create_dir_all(&engine_logs_dir);
-            }
-
-            // 4. Clear Agent-Specific Instructions (The Agent's Prompt)
-            // Agent config lives under $OPENCLAW_STATE_DIR/agents/main/agent/
-            let agent_dir = cfg.state_dir().join("agents").join("main").join("agent");
-            if agent_dir.exists() {
-                let agent_json = agent_dir.join("agent.json");
-                if agent_json.exists() {
-                    let _ = std::fs::remove_file(agent_json);
-                }
-            }
-
-            // 5. Note: We PRESERVE state/identity.json and state/openclaw_engine.json
-            // to keep API Keys, Remote settings, and Messenger (Slack/Telegram) configs
-            // as requested by the user.
-
-            info!("[openclaw] Factory reset complete (Workspace & Sessions cleared)");
-        }
-        _ => return Err("Invalid target".to_string()),
     }
 
-    Ok(())
-}
-
-/// Get OpenClaw memory content (MEMORY.md)
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_get_memory(state: State<'_, OpenClawManager>) -> Result<String, String> {
-    let cfg_guard = state.config.read().await;
+    // Fallback: direct filesystem (legacy path)
+    let cfg_guard = legacy.config.read().await;
     let cfg = cfg_guard
         .as_ref()
         .ok_or("OpenClaw config not initialized")?;
-    let workspace = cfg.workspace_dir();
-    // MEMORY.md is in workspace root, not workspace/memory/
-    let memory_file = workspace.join("MEMORY.md");
-
+    let memory_file = cfg.workspace_dir().join("MEMORY.md");
     if memory_file.exists() {
         std::fs::read_to_string(memory_file).map_err(|e| e.to_string())
     } else {
@@ -645,13 +362,138 @@ pub async fn openclaw_get_memory(state: State<'_, OpenClawManager>) -> Result<St
     }
 }
 
-/// List all markdown files in the OpenClaw workspace root and memory/ subdirectory
+/// Save MEMORY.md content.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_save_memory(
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
+    content: String,
+) -> Result<(), String> {
+    // Try IronClaw workspace API first
+    let agent = ironclaw.agent().await?;
+    if let Some(workspace) = agent.workspace() {
+        return ironclaw::api::memory::write_file(workspace, "MEMORY.md", &content)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    // Fallback: direct filesystem
+    let cfg_guard = legacy.config.read().await;
+    let cfg = cfg_guard
+        .as_ref()
+        .ok_or("OpenClaw config not initialized")?;
+    let path = cfg.workspace_dir().join("MEMORY.md");
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Get contents of a workspace file (e.g. SOUL.md).
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_get_file(
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
+    path: String,
+) -> Result<String, String> {
+    // Sanitize
+    if path.contains("..") || path.starts_with("/") || path.contains("\\") {
+        return Err("Invalid file path".to_string());
+    }
+
+    // Try IronClaw workspace API
+    let agent = ironclaw.agent().await?;
+    if let Some(workspace) = agent.workspace() {
+        match ironclaw::api::memory::get_file(workspace, &path).await {
+            Ok(resp) => return Ok(resp.content),
+            Err(_) => return Ok(format!("File {} not found.", path)),
+        }
+    }
+
+    // Fallback: direct filesystem
+    let cfg_guard = legacy.config.read().await;
+    let cfg = cfg_guard
+        .as_ref()
+        .ok_or("OpenClaw config not initialized")?;
+    let file_path = cfg.workspace_dir().join(&path);
+    if !file_path.starts_with(cfg.workspace_dir()) {
+        return Err("Path traversal detected".to_string());
+    }
+    if file_path.exists() {
+        std::fs::read_to_string(file_path).map_err(|e| e.to_string())
+    } else {
+        warn!("File not found at: {:?}", file_path);
+        Ok(format!("File {} not found.", path))
+    }
+}
+
+/// Write content to a workspace file.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_write_file(
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    // Sanitize
+    if path.contains("..") || path.starts_with("/") || path.contains("\\") {
+        return Err("Invalid file path".to_string());
+    }
+
+    // Try IronClaw workspace API
+    let agent = ironclaw.agent().await?;
+    if let Some(workspace) = agent.workspace() {
+        return ironclaw::api::memory::write_file(workspace, &path, &content)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    // Fallback: direct filesystem
+    let cfg_guard = legacy.config.read().await;
+    let cfg = cfg_guard
+        .as_ref()
+        .ok_or("OpenClaw config not initialized")?;
+    let file_path = cfg.workspace_dir().join(&path);
+    if !file_path.starts_with(cfg.workspace_dir()) {
+        return Err("Path traversal detected".to_string());
+    }
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    info!("Writing file at: {:?}", file_path);
+    std::fs::write(file_path, content).map_err(|e| e.to_string())
+}
+
+/// List all markdown files in the workspace.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_list_workspace_files(
-    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
 ) -> Result<Vec<String>, String> {
-    let cfg_guard = state.config.read().await;
+    // Try IronClaw workspace API
+    let agent = ironclaw.agent().await?;
+    if let Some(workspace) = agent.workspace() {
+        match ironclaw::api::memory::list_files(workspace, None).await {
+            Ok(resp) => return Ok(resp.entries.iter().map(|e| e.path.clone()).collect()),
+            Err(e) => {
+                warn!(
+                    "[ironclaw] list_files failed, falling back to filesystem: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    // Fallback: direct filesystem scan
+    let cfg_guard = legacy.config.read().await;
     let cfg = cfg_guard
         .as_ref()
         .ok_or("OpenClaw config not initialized")?;
@@ -694,72 +536,106 @@ pub async fn openclaw_list_workspace_files(
     Ok(files)
 }
 
-/// Write content to a specific file in the OpenClaw workspace
+/// Clear memory (deletes memory directory or identity files).
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_write_file(
-    state: State<'_, OpenClawManager>,
-    path: String,
-    content: String,
+pub async fn openclaw_clear_memory(
+    ironclaw: State<'_, IronClawState>,
+    legacy: State<'_, OpenClawManager>,
+    target: String,
 ) -> Result<(), String> {
-    let cfg_guard = state.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let workspace = cfg.workspace_dir();
-
-    // Simple sanitization
-    if path.contains("..") || path.starts_with("/") || path.contains("\\") {
-        return Err("Invalid file path".to_string());
+    // For "memory" and "identity", try IronClaw workspace API
+    let agent_opt = ironclaw.agent().await.ok();
+    if let Some(workspace) = agent_opt.as_ref().and_then(|a| a.workspace()) {
+        match target.as_str() {
+            "memory" => {
+                // Clear memory directory contents via workspace API
+                let _ = ironclaw::api::memory::write_file(workspace, "MEMORY.md", "").await;
+                info!("[ironclaw] Cleared MEMORY.md");
+                return Ok(());
+            }
+            "identity" => {
+                let _ = ironclaw::api::memory::write_file(workspace, "SOUL.md", "").await;
+                let _ = ironclaw::api::memory::write_file(workspace, "USER.md", "").await;
+                info!("[ironclaw] Cleared identity files");
+                return Ok(());
+            }
+            "all" => {
+                // Factory reset — fall through to legacy code which handles
+                // process cleanup, filesystem wipe, etc.
+            }
+            _ => return Err("Invalid target".to_string()),
+        }
     }
 
-    let file_path = workspace.join(&path);
-
-    // Ensure path is within workspace
-    if !file_path.starts_with(&workspace) {
-        return Err("Path traversal detected".to_string());
-    }
-
-    // Ensure target directory exists (for memory/ logs)
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    info!("Writing file at: {:?}", file_path);
-    std::fs::write(file_path, content).map_err(|e| e.to_string())
-}
-
-/// Get contents of a specific file in the OpenClaw workspace (e.g. SOUL.md)
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_get_file(
-    state: State<'_, OpenClawManager>,
-    path: String,
-) -> Result<String, String> {
-    let cfg_guard = state.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let workspace = cfg.workspace_dir();
-
-    // Simple sanitization
-    if path.contains("..") || path.starts_with("/") || path.contains("\\") {
-        return Err("Invalid file path".to_string());
-    }
-
-    let file_path = workspace.join(&path);
-
-    // Ensure path is within workspace
-    if !file_path.starts_with(&workspace) {
-        return Err("Path traversal detected".to_string());
-    }
-
-    info!("Attempting to read file at: {:?}", file_path);
-
-    if file_path.exists() {
-        std::fs::read_to_string(file_path).map_err(|e| e.to_string())
+    // Legacy filesystem code for "all" (factory reset) and fallback
+    let cfg = if let Some(c) = legacy.get_config().await {
+        c
     } else {
-        warn!("File not found at: {:?}", file_path);
-        Ok(format!("File {} not found.", path))
+        legacy.init_config().await?
+    };
+
+    let workspace_path = cfg.workspace_dir();
+
+    match target.as_str() {
+        "memory" => {
+            let memory_dir = workspace_path.join("memory");
+            if memory_dir.exists() {
+                std::fs::remove_dir_all(&memory_dir)
+                    .map_err(|e| format!("Failed to remove memory dir: {}", e))?;
+                std::fs::create_dir_all(&memory_dir)
+                    .map_err(|e| format!("Failed to recreate memory dir: {}", e))?;
+            }
+            info!("[openclaw] Cleared memory directory");
+        }
+        "identity" => {
+            let soul_file = workspace_path.join("SOUL.md");
+            let user_file = workspace_path.join("USER.md");
+            if soul_file.exists() {
+                std::fs::remove_file(soul_file)
+                    .map_err(|e| format!("Failed to delete SOUL.md: {}", e))?;
+            }
+            if user_file.exists() {
+                std::fs::remove_file(user_file)
+                    .map_err(|e| format!("Failed to delete USER.md: {}", e))?;
+            }
+            info!("[openclaw] Cleared identity files");
+        }
+        "all" => {
+            // Shutdown IronClaw background tasks before wiping
+            ironclaw.stop().await;
+
+            // Wipe workspace
+            if workspace_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&workspace_path) {
+                    error!("[openclaw] Failed to wipe workspace: {}", e);
+                    return Err(format!("Failed to wipe workspace: {}", e));
+                }
+                std::fs::create_dir_all(&workspace_path).map_err(|e| e.to_string())?;
+                info!("[openclaw] Wiped workspace directory: {:?}", workspace_path);
+            }
+
+            // Clear sessions
+            let sessions_dir = cfg.state_dir().join("agents").join("main").join("sessions");
+            if sessions_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&sessions_dir) {
+                    error!("[openclaw] Failed to wipe sessions: {}", e);
+                    return Err(format!("Failed to wipe sessions: {}", e));
+                }
+                std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
+            }
+
+            // Clear logs
+            let logs_dir = cfg.base_dir.join("logs");
+            if logs_dir.exists() {
+                let _ = std::fs::remove_dir_all(&logs_dir);
+                let _ = std::fs::create_dir_all(&logs_dir);
+            }
+
+            info!("[openclaw] Factory reset complete");
+        }
+        _ => return Err("Invalid target".to_string()),
     }
+
+    Ok(())
 }

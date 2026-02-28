@@ -4,7 +4,7 @@
 //! for the application.  It is NOT part of the OpenClaw subsystem — it is an
 //! app-wide concern consumed by:
 //!
-//!   - **OpenClaw engine** — reads keys to generate `auth-profiles.json`
+//!   - **IronClaw engine** — reads keys via `SecretsStore` trait adapter
 //!   - **HF Hub**          — reads the HuggingFace token for API calls
 //!   - **Rig agent**       — reads provider keys for inference
 //!   - **Model downloader** — reads HF token for gated model downloads

@@ -403,28 +403,41 @@ pub fn run() {
             if let Err(e) = openclaw_state.init_config().await {
                 eprintln!("[main] Failed to init OpenClaw config: {}", e);
             } else {
-                // Check if we should auto-start the gateway
-                if let Some(cfg) = openclaw_state.get_config().await {
-                    if cfg.auto_start_gateway {
-                        println!("[main] Auto-starting OpenClaw gateway...");
-                        let handle_clone = handle.clone();
+                // IronClaw is in-process — no separate gateway to auto-start
+            }
 
-                        tauri::async_runtime::spawn(async move {
-                            let openclaw_mgr = handle_clone.state::<openclaw::OpenClawManager>();
-                            let sidecar_mgr = handle_clone.state::<SidecarManager>();
+            // ── IronClaw Engine Init (async — safe now that libsql bootstrap ran) ──
+            // Pre-register the state container in "stopped" mode so all Tauri
+            // commands can access it immediately. Then auto-start the engine.
+            let ironclaw_state_dir = app_data_dir.clone();
+            let ironclaw_state = openclaw::ironclaw_bridge::IronClawState::new_stopped(
+                handle.clone(),
+                ironclaw_state_dir,
+            );
+            handle.manage(ironclaw_state);
 
-                            if let Err(e) =
-                                openclaw::commands::start_gateway_core(&openclaw_mgr, &sidecar_mgr)
-                                    .await
-                            {
-                                eprintln!("[main] Failed to auto-start OpenClaw gateway: {}", e);
-                            } else {
-                                println!("[main] OpenClaw gateway auto-started successfully.");
-                            }
-                        });
+            let ironclaw_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                // Bridge Scrappy's macOS Keychain to IronClaw's SecretsStore trait.
+                let secrets_store: Option<
+                    std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>,
+                > = Some(std::sync::Arc::new(
+                    openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+                ));
+
+                let state = ironclaw_handle.state::<openclaw::ironclaw_bridge::IronClawState>();
+                match state.start(secrets_store).await {
+                    Ok(true) => {
+                        println!("[main] IronClaw engine initialized successfully.");
+                    }
+                    Ok(false) => {
+                        println!("[main] IronClaw engine was already running.");
+                    }
+                    Err(e) => {
+                        eprintln!("[main] IronClaw init failed (non-fatal): {}", e);
                     }
                 }
-            }
+            });
         });
 
         // 2. Tray Icon
@@ -484,15 +497,25 @@ pub fn run() {
     }
 
     app.run(|_app_handle, _event| {
-        if let tauri::RunEvent::WindowEvent {
-            event: WindowEvent::CloseRequested { api, .. },
-            ..
-        } = _event
-        {
-            if let Some(window) = _app_handle.get_webview_window("main") {
-                let _ = window.hide();
+        match _event {
+            tauri::RunEvent::WindowEvent {
+                event: WindowEvent::CloseRequested { api, .. },
+                ..
+            } => {
+                if let Some(window) = _app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                api.prevent_close();
             }
-            api.prevent_close();
+            tauri::RunEvent::Exit => {
+                // Shutdown IronClaw engine gracefully
+                if let Some(state) =
+                    _app_handle.try_state::<openclaw::ironclaw_bridge::IronClawState>()
+                {
+                    tauri::async_runtime::block_on(state.shutdown());
+                }
+            }
+            _ => {}
         }
     });
 }

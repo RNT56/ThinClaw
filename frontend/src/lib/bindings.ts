@@ -555,7 +555,11 @@ async agentChat(request: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Get OpenClaw status
+ * Get OpenClaw status.
+ * 
+ * Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
+ * Engine status fields (`gateway_running`, `ws_connected`) reflect IronClaw's
+ * in-process state.
  */
 async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
     try {
@@ -829,7 +833,10 @@ async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
 }
 },
 /**
- * Start OpenClaw gateway (spawns openclaw_engine binary and connects WS client)
+ * Start the IronClaw engine.
+ * 
+ * Initializes the agent, starts background tasks, emits Connected event.
+ * If already running, this is a no-op (returns Ok).
  */
 async openclawStartGateway() : Promise<Result<null, string>> {
     try {
@@ -840,7 +847,10 @@ async openclawStartGateway() : Promise<Result<null, string>> {
 }
 },
 /**
- * Stop OpenClaw gateway (stops WS client and openclaw_engine process)
+ * Stop the IronClaw engine gracefully.
+ * 
+ * Shuts down background tasks, channels, and emits Disconnected event.
+ * If already stopped, this is a no-op (returns Ok).
  */
 async openclawStopGateway() : Promise<Result<null, string>> {
     try {
@@ -851,7 +861,7 @@ async openclawStopGateway() : Promise<Result<null, string>> {
 }
 },
 /**
- * Get OpenClaw sessions list
+ * Get sessions list from IronClaw.
  */
 async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> {
     try {
@@ -861,6 +871,9 @@ async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Get chat history for a session.
+ */
 async openclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<OpenClawHistoryResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_get_history", { sessionKey, limit, before }) };
@@ -870,12 +883,7 @@ async openclawGetHistory(sessionKey: string, limit: number, before: string | nul
 }
 },
 /**
- * Delete a OpenClaw session.
- * 
- * This command handles the full lifecycle: abort any active run, wait for it
- * to wind down, then delete. If the first delete attempt fails because the
- * session is still active, it resets the session (which creates a new
- * sessionId, breaking the active-run association) and retries the delete.
+ * Delete a session.
  */
 async openclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> {
     try {
@@ -886,7 +894,7 @@ async openclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> 
 }
 },
 /**
- * Reset a OpenClaw session (clear history)
+ * Reset a session (clear history).
  */
 async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
     try {
@@ -897,7 +905,10 @@ async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Send a message to a OpenClaw session
+ * Send a message to the IronClaw agent.
+ * 
+ * Returns immediately — the actual response streams back via `openclaw-event`
+ * Tauri events (AssistantDelta, ToolUpdate, etc.).
  */
 async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -908,12 +919,9 @@ async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
 }
 },
 /**
- * Subscribe to a OpenClaw session for live updates.
+ * Subscribe to a session for live updates.
  * 
- * **Intentional no-op**: The OpenClaw gateway automatically broadcasts all events
- * to connected operators via the WebSocket connection established in `start_gateway`.
- * No explicit per-session subscription is required. This command is retained for
- * API stability but the frontend no longer calls it.
+ * **Intentional no-op**: IronClaw sends events directly via TauriChannel.
  */
 async openclawSubscribeSession(sessionKey: string) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -924,7 +932,7 @@ async openclawSubscribeSession(sessionKey: string) : Promise<Result<OpenClawRpcR
 }
 },
 /**
- * Abort a running chat
+ * Abort a running chat turn.
  */
 async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -935,7 +943,7 @@ async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Resu
 }
 },
 /**
- * Resolve an approval request
+ * Resolve a pending tool-execution approval.
  */
 async openclawResolveApproval(approvalId: string, approved: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -946,7 +954,7 @@ async openclawResolveApproval(approvalId: string, approved: boolean) : Promise<R
 }
 },
 /**
- * Get gateway diagnostic info
+ * Get gateway diagnostic info.
  */
 async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
     try {
@@ -957,7 +965,7 @@ async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
 }
 },
 /**
- * Clear OpenClaw memory (deletes memory directory or identity files)
+ * Clear memory (deletes memory directory or identity files).
  */
 async openclawClearMemory(target: string) : Promise<Result<null, string>> {
     try {
@@ -968,7 +976,7 @@ async openclawClearMemory(target: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Get OpenClaw memory content (MEMORY.md)
+ * Get MEMORY.md content.
  */
 async openclawGetMemory() : Promise<Result<string, string>> {
     try {
@@ -979,7 +987,7 @@ async openclawGetMemory() : Promise<Result<string, string>> {
 }
 },
 /**
- * Get contents of a specific file in the OpenClaw workspace (e.g. SOUL.md)
+ * Get contents of a workspace file (e.g. SOUL.md).
  */
 async openclawGetFile(path: string) : Promise<Result<string, string>> {
     try {
@@ -990,7 +998,7 @@ async openclawGetFile(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Write content to a specific file in the OpenClaw workspace
+ * Write content to a workspace file.
  */
 async openclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
     try {
@@ -1001,7 +1009,7 @@ async openclawWriteFile(path: string, content: string) : Promise<Result<null, st
 }
 },
 /**
- * Save OpenClaw memory content (MEMORY.md)
+ * Save MEMORY.md content.
  */
 async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
     try {
@@ -1012,7 +1020,7 @@ async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * List all markdown files in the OpenClaw workspace root and memory/ subdirectory
+ * List all markdown files in the workspace.
  */
 async openclawListWorkspaceFiles() : Promise<Result<string[], string>> {
     try {
@@ -1302,7 +1310,10 @@ async openclawGetBedrockCredentials() : Promise<Result<[string | null, string | 
 }
 },
 /**
- * Sync Local LLM config (llama-server) to OpenClaw config
+ * Sync Local LLM config (llama-server) to OpenClaw config.
+ * 
+ * Still needed: Scrappy manages the local llama-server sidecar and needs to
+ * sync its port/model info to the config that IronClaw reads on restart.
  */
 async openclawSyncLocalLlm() : Promise<Result<null, string>> {
     try {
@@ -1321,7 +1332,7 @@ async openclawDeployRemote(ip: string, user: string) : Promise<Result<null, stri
 }
 },
 /**
- * Spawn a new OpenClaw session for a specific agent
+ * Spawn a new session for a specific agent
  */
 async openclawSpawnSession(agentId: string, task: string) : Promise<Result<string, string>> {
     try {

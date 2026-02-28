@@ -273,3 +273,32 @@
 
 - [x] **Reorganise project into `backend/` + `frontend/` top-level folders** *(done 2026-02-22)*  
   `src-tauri/` → `backend/`, root `src/` → `frontend/src/`. All path references in `tauri.conf.json`, `vite.config.ts`, `tsconfig.json`, `.gitignore`, root `package.json` scripts, and CI updated accordingly.
+
+---
+
+## 🟢 IronClaw Integration *(done 2026-02-28)*
+
+> Replaced Node.js OpenClaw Engine (WS gateway) with in-process Rust IronClaw agent.
+> See `tauri_dropin_spec.md` for full 8-phase spec.
+
+- [x] **Phase 1: IronClaw library extraction** — `ironclaw::api` module with public Agent methods
+- [x] **Phase 2: Scrappy bridge** — `ironclaw_bridge.rs`, `ironclaw_channel.rs`, `ironclaw_secrets.rs`
+- [x] **Phase 3: libsql/sqlx conflict** — Patched `libsql-0.6.0` to coexist with `sqlx`
+- [x] **Phase 4: Command migration** — 66 Tauri commands migrated from WS RPC to direct API calls
+- [x] **Phase 5: Dead code cleanup** — Removed `ws_client.rs`, `ipc.rs`, 2,166 lines of dead code
+- [x] **Phase 6: Smoke test** — `cargo tauri dev` zero errors, zero project warnings
+- [x] **Phase 7: Stub wiring** — `logs_tail`, `cron_run` wired to real IronClaw APIs
+- [x] **Phase 8: Sidecar cleanup** — Deleted `openclaw-engine/node_modules/` (625 MB), dead JS files
+
+- [x] **Start/Stop gateway** — Real start/stop lifecycle for IronClaw agent *(done 2026-02-28)*  
+  `IronClawState` now uses `RwLock<Option<IronClawInner>>` to support stop/restart.
+  `openclaw_start_gateway` re-initializes the agent. `openclaw_stop_gateway` shuts it down.
+  All 25+ command callsites migrated to async `agent()` accessor.  
+  → `backend/src/openclaw/ironclaw_bridge.rs`, `commands/gateway.rs`, `commands/sessions.rs`, `commands/rpc.rs`, `fleet.rs`
+
+### Remaining (Low Priority)
+
+- [ ] **`openclaw_install_skill_deps`** stub — Not called by frontend; IronClaw handles deps internally
+- [x] **`auth-profiles.json` cleanup** *(done 2026-02-28)* — Removed ~292 LOC from `write_config()`
+- [x] **Boot sequence** *(already built-in)* — IronClaw's `Workspace::system_prompt_for_context()` auto-loads identity files
+

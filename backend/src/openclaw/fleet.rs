@@ -1,9 +1,16 @@
+//! Fleet status and orchestration commands.
+//!
+//! **Phase 4 migration**: Uses IronClawState for local core status instead of
+//! WS handle polling. Fleet broadcast uses IronClaw's chat API.
+
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use crate::openclaw::ironclaw_bridge::IronClawState;
 use crate::openclaw::OpenClawManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
@@ -35,7 +42,7 @@ async fn check_agent(profile: crate::openclaw::config::AgentProfile) -> AgentSta
     let timeout_duration = Duration::from_secs(3);
 
     // Basic URL validation
-    if profile.url.trim().is_empty() {
+    if profile.url.trim().is_empty() || profile.url.starts_with("embedded://") {
         return AgentStatusSummary {
             id: profile.id,
             name: profile.name,
@@ -102,7 +109,7 @@ async fn check_agent(profile: crate::openclaw::config::AgentProfile) -> AgentSta
                 url: profile.url,
                 online: true,
                 latency_ms: Some(latency),
-                version: None, // Populated by session/RPC matching later
+                version: None,
                 stats: None,
                 current_task: Some("Idle".to_string()),
                 progress: None,
@@ -138,47 +145,19 @@ async fn check_agent(profile: crate::openclaw::config::AgentProfile) -> AgentSta
     }
 }
 
-/// Read the OpenClaw engine version from the installed package
-fn get_engine_version() -> Option<String> {
-    // Try to read from the openclaw engine's package.json
-    let possible_paths = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("openclaw-engine")
-        .join("node_modules")
-        .join("openclaw")
-        .join("package.json")];
-
-    for path in possible_paths {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(version) = pkg.get("version").and_then(|v| v.as_str()) {
-                    return Some(version.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Derive capabilities from the tools config
 fn get_capabilities(cfg: &crate::openclaw::config::OpenClawConfig) -> Vec<String> {
     let mut caps = vec!["inference".to_string(), "chat".to_string()];
 
-    // Derive from node_host_enabled (implies UI/automation tools)
     if cfg.node_host_enabled {
         caps.push("ui_automation".to_string());
     }
-
-    // Check for browsing capability
     if cfg.brave_granted {
         caps.push("web_search".to_string());
     }
-
-    // Local inference
     if cfg.local_inference_enabled {
         caps.push("local_inference".to_string());
     }
-
-    // Check which cloud providers are active
     if cfg.anthropic_granted {
         caps.push("cloud:anthropic".to_string());
     }
@@ -195,10 +174,8 @@ fn get_capabilities(cfg: &crate::openclaw::config::OpenClawConfig) -> Vec<String
         caps.push("cloud:openrouter".to_string());
     }
 
-    // File system and runtime are always available
     caps.push("filesystem".to_string());
     caps.push("tool_use".to_string());
-
     caps
 }
 
@@ -221,6 +198,7 @@ fn get_active_model(cfg: &crate::openclaw::config::OpenClawConfig) -> String {
 #[specta::specta]
 pub async fn openclaw_get_fleet_status(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Vec<AgentStatusSummary>, String> {
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -230,121 +208,40 @@ pub async fn openclaw_get_fleet_status(
 
     let profiles = cfg.profiles.clone();
 
-    // Run checks in parallel
+    // Run checks in parallel for remote agents
     let futures = profiles.into_iter().map(|p| check_agent(p));
     let mut results = futures::future::join_all(futures).await;
 
-    // Fetch active sessions from the gateway to augment the status
-    let session_map = if let Some(handle) = state.ws_handle.read().await.as_ref() {
-        if let Ok(response) = handle.sessions_list().await {
-            if let Some(arr) = response.get("sessions").and_then(|v| v.as_array()) {
-                Some(arr.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Read engine version once
-    let engine_version = get_engine_version();
     let local_capabilities = get_capabilities(&cfg);
     let active_model = get_active_model(&cfg);
 
-    // Check for Local Core
-    if state.is_gateway_running().await {
-        let is_local = cfg.gateway_mode == "local";
-        if is_local {
-            let mut current_task = Some("Gateway Orchestration".to_string());
-            let mut active_session_id = None;
-            let mut run_status = "idle".to_string();
+    // Add Local Core status from IronClawState
+    if ironclaw.is_initialized() {
+        let local_summary = AgentStatusSummary {
+            id: "main".to_string(),
+            name: "Local Core".to_string(),
+            url: "embedded://ironclaw".to_string(),
+            online: true,
+            latency_ms: Some(0),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            stats: None,
+            current_task: Some("Gateway Orchestration".to_string()),
+            progress: None,
+            logs: None,
+            parent_id: None,
+            children_ids: Some(results.iter().map(|r| r.id.clone()).collect()),
+            active_session_id: None,
+            active: true,
+            capabilities: Some(local_capabilities),
+            run_status: Some("idle".to_string()),
+            model: Some(active_model),
+        };
 
-            if let Some(sessions) = &session_map {
-                // Find latest session for agent:main
-                if let Some(latest) = sessions.iter().find(|s| {
-                    s.get("key")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .starts_with("agent:main")
-                }) {
-                    active_session_id = latest
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    if let Some(title) = latest.get("displayName").and_then(|v| v.as_str()) {
-                        current_task = Some(title.to_string());
-                    }
-                    // Check if this session has an active run
-                    if let Some(status) = latest.get("status").and_then(|v| v.as_str()) {
-                        run_status = match status {
-                            "in_flight" | "started" => "processing".to_string(),
-                            "waiting_approval" => "waiting_approval".to_string(),
-                            _ => "idle".to_string(),
-                        };
-                    }
-                }
-            }
-
-            let local_summary = AgentStatusSummary {
-                id: "main".to_string(),
-                name: "Local Core".to_string(),
-                url: format!("127.0.0.1:{}", cfg.port),
-                online: true,
-                latency_ms: Some(0),
-                version: engine_version.clone(),
-                stats: None,
-                current_task,
-                progress: None,
-                logs: None,
-                parent_id: None,
-                children_ids: Some(results.iter().map(|r| r.id.clone()).collect()),
-                active_session_id,
-                active: true,
-                capabilities: Some(local_capabilities.clone()),
-                run_status: Some(run_status),
-                model: Some(active_model.clone()),
-            };
-
-            // Set parent_id for other agents to local-core to visualize hierarchy
-            for agent in &mut results {
-                agent.parent_id = Some("main".to_string());
-
-                // Try to find task for this agent
-                if let Some(sessions) = &session_map {
-                    let prefix = format!("agent:{}:", agent.id);
-                    if let Some(latest) = sessions.iter().find(|s| {
-                        s.get("key")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .starts_with(&prefix)
-                    }) {
-                        agent.active_session_id = latest
-                            .get("key")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if let Some(title) = latest.get("displayName").and_then(|v| v.as_str()) {
-                            agent.current_task = Some(title.to_string());
-                            agent.active = true;
-                        }
-                        // Check run status from session
-                        if let Some(status) = latest.get("status").and_then(|v| v.as_str()) {
-                            agent.run_status = Some(
-                                match status {
-                                    "in_flight" | "started" => "processing",
-                                    "waiting_approval" => "waiting_approval",
-                                    _ => "idle",
-                                }
-                                .to_string(),
-                            );
-                        }
-                    }
-                }
-            }
-            results.insert(0, local_summary);
+        // Set parent_id for other agents
+        for agent in &mut results {
+            agent.parent_id = Some("main".to_string());
         }
+        results.insert(0, local_summary);
     }
 
     Ok(results)
@@ -353,42 +250,42 @@ pub async fn openclaw_get_fleet_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_broadcast_command(
-    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     command: String,
 ) -> Result<(), String> {
     tracing::info!("Broadcasting fleet command: {}", command);
 
-    // Send the command to all active sessions
-    let handle = state
-        .ws_handle
-        .read()
+    // Get sessions from IronClaw
+    let agent = ironclaw.agent().await?;
+    let thread_list = ironclaw::api::sessions::list_threads(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        "tauri",
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let broadcast_msg = format!("[FLEET BROADCAST] {}", command);
+
+    // Send to all threads
+    for thread in &thread_list.threads {
+        let session_key = thread.id.to_string();
+        if let Err(e) = ironclaw::api::chat::send_message(
+            Arc::clone(&agent),
+            &session_key,
+            &broadcast_msg,
+            true,
+        )
         .await
-        .clone()
-        .ok_or("Gateway not connected")?;
-
-    // Get all sessions
-    let response = handle.sessions_list().await.map_err(|e| e.to_string())?;
-
-    if let Some(sessions) = response.get("sessions").and_then(|v| v.as_array()) {
-        for session in sessions {
-            if let Some(key) = session.get("key").and_then(|v| v.as_str()) {
-                let idempotency_key = format!(
-                    "broadcast:{}:{}",
-                    key,
-                    chrono::Utc::now().timestamp_millis()
-                );
-
-                let broadcast_msg = format!("[FLEET BROADCAST] {}", command);
-
-                if let Err(e) = handle
-                    .chat_send(key, &idempotency_key, &broadcast_msg, true)
-                    .await
-                {
-                    tracing::warn!("[fleet] Failed to broadcast to session {}: {}", key, e);
-                } else {
-                    tracing::info!("[fleet] Broadcast sent to session: {}", key);
-                }
-            }
+        {
+            tracing::warn!(
+                "[fleet] Failed to broadcast to session {}: {}",
+                session_key,
+                e
+            );
+        } else {
+            tracing::info!("[fleet] Broadcast sent to session: {}", session_key);
         }
     }
 

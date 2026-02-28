@@ -29,8 +29,7 @@
     "setup:node": "node backend/scripts/download_node.js",
     "setup:chromium": "bash backend/scripts/setup_chromium.sh",
     "setup:ai": "node backend/scripts/download_ai_binaries.js",
-    "setup:openclaw-engine": "cd backend/openclaw-engine && npm install --ignore-scripts",
-    "setup:all": "npm run setup:node && npm run setup:chromium && npm run setup:ai && npm run setup:openclaw-engine"
+    "setup:all": "npm run setup:node && npm run setup:chromium && npm run setup:ai"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

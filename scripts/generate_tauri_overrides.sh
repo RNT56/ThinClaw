@@ -35,8 +35,7 @@ case "$ENGINE" in
     "resources": [
       "bin/*.dylib",
       "bin/*.metal",
-      "resources/chromium",
-      "openclaw-engine/**/*"
+      "resources/chromium"
     ]
   }
 }
@@ -44,7 +43,7 @@ EOF
     ;;
 
   mlx|vllm)
-    # Python-based engines — no llama-server needed, but bundle uv + node for OpenClaw
+    # Python-based engines — no llama-server needed, but bundle uv + node
     cat > backend/tauri.override.json <<'EOF'
 {
   "bundle": {
@@ -57,8 +56,7 @@ EOF
     ],
     "resources": [
       "bin/libwhisper*.dylib",
-      "resources/chromium",
-      "openclaw-engine/**/*"
+      "resources/chromium"
     ]
   }
 }
@@ -78,8 +76,7 @@ EOF
     ],
     "resources": [
       "bin/libwhisper*.dylib",
-      "resources/chromium",
-      "openclaw-engine/**/*"
+      "resources/chromium"
     ]
   }
 }
@@ -95,8 +92,7 @@ EOF
       "bin/node"
     ],
     "resources": [
-      "resources/chromium",
-      "openclaw-engine/**/*"
+      "resources/chromium"
     ]
   }
 }

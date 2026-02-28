@@ -22,7 +22,7 @@ Scrappy is a cross-platform desktop AI application built with Tauri (Rust + Reac
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **Node.js (v22+)**: Frontend tooling. The setup scripts download a **separate** Node.js v24 runtime for the OpenClaw sidecar — your system Node only needs to be v22+.
+- **Node.js (v22+)**: Frontend tooling.
   - [Download Node.js](https://nodejs.org/)
 
 ### macOS
@@ -75,7 +75,6 @@ This does everything in one go:
 | `download_node.js` | `npm run setup:node` | Downloads Node.js v24 runtime (platform-native) for the OpenClaw agent engine |
 | `setup_chromium.sh` | `npm run setup:chromium` | Downloads Chromium for local web scraping |
 | `download_ai_binaries.js` | `npm run setup:ai` | Downloads llama-server, whisper-server, sd (Stable Diffusion) binaries + shared libraries |
-| openclaw npm install | `npm run setup:openclaw-engine` | Installs OpenClaw engine Node.js packages |
 
 All scripts are **idempotent** — they skip binaries that already exist in `backend/bin/`.
 
@@ -197,10 +196,10 @@ The `scripts/generate_tauri_overrides.sh` script generates `backend/tauri.overri
 
 | Engine | `externalBin` included | `resources` included |
 |--------|----------------------|---------------------|
-| llamacpp | llama-server, whisper, whisper-server, sd, tts, node | `*.dylib`, `*.metal`, chromium, openclaw-engine |
-| mlx / vllm | uv, whisper, whisper-server, tts, node | `libwhisper*.dylib`, chromium, openclaw-engine |
-| ollama | whisper, whisper-server, tts, node | `libwhisper*.dylib`, chromium, openclaw-engine |
-| none (cloud) | node | chromium, openclaw-engine |
+| llamacpp | llama-server, whisper, whisper-server, sd, tts, node | `*.dylib`, `*.metal`, chromium |
+| mlx / vllm | uv, whisper, whisper-server, tts, node | `libwhisper*.dylib`, chromium |
+| ollama | whisper, whisper-server, tts, node | `libwhisper*.dylib`, chromium |
+| none (cloud) | node | chromium |
 
 ---
 
@@ -319,7 +318,6 @@ scrappy/
 │   │   └── ...
 │   ├── bin/                # Sidecar binaries (downloaded)
 │   ├── scripts/            # download_node.js, download_ai_binaries.js, setup_chromium.sh
-│   ├── openclaw-engine/    # Node.js OpenClaw engine wrapper
 │   ├── scrappy-mcp-tools/  # MCP crate (sandbox, tools, skills)
 │   ├── Cargo.toml          # Features: llamacpp, mlx, vllm, ollama
 │   └── tauri.conf.json     # Tauri configuration

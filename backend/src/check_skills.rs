@@ -1,16 +1,4 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use scrappy::openclaw::ipc::McpRequestHandler;
-    use serde_json::json;
-    use std::collections::HashMap;
-    use tauri::{test::mock_builder, AppHandle, Manager};
-
-    // NOTE: This test requires a full Tauri mock environment which is hard to setup in isolation
-    // So we will simulate the logic by calling the inner functions if we could access them.
-    // Instead, we will write a small integration test that verifies the SkillManager logic
-    // which is the core part of Phase D.
-}
+// Test module removed — the old McpRequestHandler import (ipc.rs) was deleted in Phase 4.
 
 #[cfg(test)]
 mod skill_tests {
