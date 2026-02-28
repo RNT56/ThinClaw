@@ -150,7 +150,8 @@ impl Agent {
 
     // Convenience accessors
 
-    pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
+    /// Get the database store (public for Tauri/API integration).
+    pub fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
 
@@ -171,7 +172,8 @@ impl Agent {
         &self.deps.tools
     }
 
-    pub(super) fn workspace(&self) -> Option<&Arc<Workspace>> {
+    /// Get the workspace (public for Tauri/API integration).
+    pub fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
     }
 
@@ -183,11 +185,13 @@ impl Agent {
         &self.deps.cost_guard
     }
 
-    pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
+    /// Get the skill registry (public for Tauri/API integration).
+    pub fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
     }
 
-    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+    /// Get the skill catalog (public for Tauri/API integration).
+    pub fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
         self.deps.skill_catalog.as_ref()
     }
 
@@ -242,6 +246,13 @@ pub struct BackgroundTasksHandle {
     pruning_handle: tokio::task::JoinHandle<()>,
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
+}
+
+impl BackgroundTasksHandle {
+    /// Get a reference to the routine engine, if routines are enabled.
+    pub fn routine_engine(&self) -> Option<&Arc<RoutineEngine>> {
+        self.routine_handle.as_ref().map(|(_, engine)| engine)
+    }
 }
 
 impl Agent {
