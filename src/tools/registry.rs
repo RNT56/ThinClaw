@@ -20,7 +20,7 @@ use crate::tools::builtin::{
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
     MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -67,6 +67,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "tts",
 ];
 
 /// Registry of available tools.
@@ -397,6 +398,19 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register the TTS tool.
+    ///
+    /// Requires a secrets store (for API key retrieval) and an output directory
+    /// for saving generated audio files.
+    pub fn register_tts_tool(
+        &self,
+        secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+        output_dir: std::path::PathBuf,
+    ) {
+        self.register_sync(Arc::new(TtsTool::new(secrets, output_dir)));
+        tracing::info!("Registered TTS tool");
     }
 
     /// Register the software builder tool.
