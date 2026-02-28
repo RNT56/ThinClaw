@@ -58,6 +58,7 @@ pub mod hooks;
 pub mod llm;
 pub mod observability;
 pub mod tui;
+pub mod wizard;
 // NOTE: `orchestrator` and `worker` are not feature-gated because
 // `tools/registry.rs`, `tools/builtin/job.rs`, and `channels/web/mod.rs`
 // have hard dependencies on `orchestrator::job_manager`. Gating them

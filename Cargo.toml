@@ -160,6 +160,7 @@ chromiumoxide = "0.9.1"
 ratatui = "0.30.0"
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
+inquire = "0.9.4"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
