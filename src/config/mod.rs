@@ -32,7 +32,7 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, NostrConfig, SignalConfig,
+    ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, NostrConfig, SignalConfig, TelegramConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;

@@ -14,6 +14,7 @@ pub struct ChannelsConfig {
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
     pub nostr: Option<NostrConfig>,
+    pub telegram: Option<TelegramConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -201,6 +202,7 @@ impl ChannelsConfig {
                     message: format!("must be an integer: {e}"),
                 })?
                 .or(settings.channels.telegram_owner_id),
+            telegram: Self::resolve_telegram(settings)?,
         })
     }
 
@@ -240,6 +242,37 @@ impl ChannelsConfig {
             allow_from,
         }))
     }
+
+    fn resolve_telegram(settings: &Settings) -> Result<Option<TelegramConfig>, ConfigError> {
+        let bot_token = match optional_env("TELEGRAM_BOT_TOKEN")? {
+            Some(t) => SecretString::from(t),
+            None => return Ok(None),
+        };
+
+        let owner_id = optional_env("TELEGRAM_OWNER_ID")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "TELEGRAM_OWNER_ID".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .or(settings.channels.telegram_owner_id);
+
+        let allow_from = optional_env("TELEGRAM_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(TelegramConfig {
+            bot_token,
+            owner_id,
+            allow_from,
+        }))
+    }
 }
 
 /// Get the default channels directory (~/.ironclaw/channels/).
@@ -248,4 +281,15 @@ fn default_channels_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw")
         .join("channels")
+}
+
+/// Telegram bot configuration.
+#[derive(Debug, Clone)]
+pub struct TelegramConfig {
+    /// Bot token from BotFather.
+    pub bot_token: SecretString,
+    /// Owner user ID (only respond to this user if set).
+    pub owner_id: Option<i64>,
+    /// Allowed user IDs (empty = allow all; "*" = allow all).
+    pub allow_from: Vec<String>,
 }
