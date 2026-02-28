@@ -39,7 +39,9 @@
 //! - **Continuous learning** - Improve estimates from historical data
 
 pub mod agent;
+pub mod api;
 pub mod app;
+#[cfg(feature = "repl")]
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod channels;
@@ -55,18 +57,27 @@ pub mod history;
 pub mod hooks;
 pub mod llm;
 pub mod observability;
+// NOTE: `orchestrator` and `worker` are not feature-gated because
+// `tools/registry.rs`, `tools/builtin/job.rs`, and `channels/web/mod.rs`
+// have hard dependencies on `orchestrator::job_manager`. Gating them
+// would cascade into conditional tool registration — deferred to a
+// future pass.
 pub mod orchestrator;
 pub mod pairing;
 pub mod registry;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;
+#[cfg(feature = "repl")]
 pub mod service;
 pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod tools;
 pub mod tracing_fmt;
+// NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`
+// has a hard dependency on `crate::tunnel::TunnelProviderConfig`. Gating
+// requires first extracting tunnel data types into `config/` — deferred.
 pub mod tunnel;
 pub mod util;
 pub mod worker;
@@ -80,7 +91,11 @@ pub use error::{Error, Result};
 
 /// Re-export commonly used types.
 pub mod prelude {
-    pub use crate::channels::{Channel, IncomingMessage, MessageStream};
+    pub use crate::agent::{Agent, BackgroundTasksHandle};
+    pub use crate::app::{AppBuilder, AppComponents};
+    pub use crate::channels::{
+        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    };
     pub use crate::config::Config;
     pub use crate::context::{JobContext, JobState};
     pub use crate::error::{Error, Result};

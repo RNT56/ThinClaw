@@ -19,6 +19,7 @@ pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+#[cfg(feature = "repl")]
 mod service;
 pub mod status;
 mod tool;
@@ -33,6 +34,7 @@ pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+#[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
@@ -111,6 +113,7 @@ pub enum Command {
     Pairing(PairingCommand),
 
     /// Manage OS service (launchd / systemd)
+    #[cfg(feature = "repl")]
     #[command(subcommand)]
     Service(ServiceCommand),
 

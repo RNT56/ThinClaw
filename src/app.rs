@@ -106,6 +106,16 @@ impl AppBuilder {
         }
     }
 
+    /// Inject a pre-built secrets store (e.g. from Scrappy's Keychain backend).
+    ///
+    /// When set, [`init_secrets()`] will use this store directly instead of
+    /// creating one from the master key + database handles. Keys will still
+    /// be injected into the config overlay.
+    pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+        self.secrets_store = Some(store);
+        self
+    }
+
     /// Phase 1: Initialize database backend.
     ///
     /// Creates the database connection, runs migrations, reloads config
@@ -221,6 +231,32 @@ impl AppBuilder {
     /// the store, injects any encrypted LLM API keys into the config overlay
     /// and re-resolves config.
     pub async fn init_secrets(&mut self) -> Result<(), anyhow::Error> {
+        // If a secrets store was pre-injected (e.g. Scrappy's Keychain backend),
+        // skip creation but still inject keys and re-resolve config.
+        if self.secrets_store.is_some() {
+            if let Some(ref secrets) = self.secrets_store {
+                crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+                if let Some(ref db) = self.db {
+                    let toml_path = self.toml_path.as_deref();
+                    match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
+                        Ok(refreshed) => {
+                            self.config = refreshed;
+                            tracing::debug!(
+                                "LlmConfig re-resolved after external secret injection"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to re-resolve config after secret injection: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         let master_key = match self.config.secrets.master_key() {
             Some(k) => k,
             None => {

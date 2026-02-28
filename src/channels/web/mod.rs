@@ -356,6 +356,14 @@ impl Channel for GatewayChannel {
                 success,
                 message,
             },
+            StatusUpdate::Error { message, code } => SseEvent::Status {
+                message: format!(
+                    "[error{}] {}",
+                    code.as_ref().map(|c| format!(": {c}")).unwrap_or_default(),
+                    message
+                ),
+                thread_id: thread_id.clone(),
+            },
         };
 
         self.state.sse.broadcast(event);

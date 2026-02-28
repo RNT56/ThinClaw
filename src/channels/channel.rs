@@ -140,6 +140,14 @@ pub enum StatusUpdate {
         success: bool,
         message: String,
     },
+    /// Turn-level error surfaced to the UI (e.g., LLM unreachable, safety rejection).
+    ///
+    /// Emitted by the API layer when a spawned agent turn fails. Without this,
+    /// turn errors are only logged and the UI shows an infinite spinner.
+    Error {
+        message: String,
+        code: Option<String>,
+    },
 }
 
 /// Trait for message channels.

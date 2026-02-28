@@ -218,13 +218,28 @@ impl Agent {
             vec![]
         }
     }
+}
 
-    /// Run the agent main loop.
-    pub async fn run(self) -> Result<(), Error> {
-        // Start channels
-        let mut message_stream = self.channels.start_all().await?;
+/// Handle to all spawned background tasks.
+///
+/// Returned by [`Agent::start_background_tasks()`] and consumed by
+/// [`Agent::shutdown_background()`]. In desktop mode (Tauri), the
+/// handle is stored in managed state and taken on app quit.
+pub struct BackgroundTasksHandle {
+    repair_handle: tokio::task::JoinHandle<()>,
+    pruning_handle: tokio::task::JoinHandle<()>,
+    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
+}
 
-        // Start self-repair task with notification forwarding
+impl Agent {
+    /// Spawn background tasks (self-repair, session pruning, heartbeat, routines).
+    ///
+    /// This is separate from `run()` so that Tauri/API callers can start
+    /// background tasks without entering the message-receive loop.
+    /// The returned handle must be passed to `shutdown_background()` on exit.
+    pub async fn start_background_tasks(&self) -> BackgroundTasksHandle {
+        // ── Self-repair ─────────────────────────────────────────────────
         let repair = Arc::new(DefaultSelfRepair::new(
             self.context_manager.clone(),
             self.config.stuck_threshold,
@@ -306,7 +321,7 @@ impl Agent {
             }
         });
 
-        // Spawn session pruning task
+        // ── Session pruning ─────────────────────────────────────────────
         let session_mgr = self.session_manager.clone();
         let session_idle_timeout = self.config.session_idle_timeout;
         let pruning_handle = tokio::spawn(async move {
@@ -318,7 +333,7 @@ impl Agent {
             }
         });
 
-        // Spawn heartbeat if enabled
+        // ── Heartbeat ───────────────────────────────────────────────────
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
                 if let Some(workspace) = self.workspace() {
@@ -388,7 +403,7 @@ impl Agent {
             None
         };
 
-        // Spawn routine engine if enabled
+        // ── Routine engine ──────────────────────────────────────────────
         let routine_handle = if let Some(ref rt_config) = self.routine_config {
             if rt_config.enabled {
                 if let (Some(store), Some(workspace)) = (self.store(), self.workspace()) {
@@ -441,19 +456,13 @@ impl Agent {
                         std::time::Duration::from_secs(rt_config.cron_check_interval_secs);
                     let cron_handle = spawn_cron_ticker(Arc::clone(&engine), cron_interval);
 
-                    // Store engine reference for event trigger checking
-                    // Safety: we're in run() which takes self, no other reference exists
-                    let engine_ref = Arc::clone(&engine);
-                    // SAFETY: self is consumed by run(), we can smuggle the engine in
-                    // via a local to use in the message loop below.
-
                     tracing::info!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
                         rt_config.cron_check_interval_secs,
                         rt_config.max_concurrent_routines
                     );
 
-                    Some((cron_handle, engine_ref))
+                    Some((cron_handle, engine))
                 } else {
                     tracing::warn!("Routines enabled but store/workspace not available");
                     None
@@ -465,8 +474,47 @@ impl Agent {
             None
         };
 
+        BackgroundTasksHandle {
+            repair_handle,
+            pruning_handle,
+            heartbeat_handle,
+            routine_handle,
+        }
+    }
+
+    /// Stop background tasks and shut down channels.
+    ///
+    /// Consumes the handle returned by [`start_background_tasks()`].
+    /// Safe to call if the handle has already been taken (e.g. via
+    /// `Mutex<Option<BackgroundTasksHandle>>.take()`).
+    pub async fn shutdown_background(&self, handle: BackgroundTasksHandle) {
+        tracing::info!("Agent shutting down...");
+        handle.repair_handle.abort();
+        handle.pruning_handle.abort();
+        if let Some(h) = handle.heartbeat_handle {
+            h.abort();
+        }
+        if let Some((cron_handle, _)) = handle.routine_handle {
+            cron_handle.abort();
+        }
+        self.scheduler.stop_all().await;
+    }
+
+    /// Run the agent main loop.
+    ///
+    /// This is the standard entry point for CLI/REPL mode. It starts
+    /// channels, spawns background tasks, enters the message loop, and
+    /// shuts everything down on exit. For Tauri/API mode, use
+    /// [`start_background_tasks()`] and [`shutdown_background()`] directly.
+    pub async fn run(self) -> Result<(), Error> {
+        // Start channels
+        let mut message_stream = self.channels.start_all().await?;
+
+        // Start background tasks
+        let bg = self.start_background_tasks().await;
+
         // Extract engine ref for use in message loop
-        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
+        let routine_engine_for_loop = bg.routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
@@ -572,16 +620,7 @@ impl Agent {
         }
 
         // Cleanup
-        tracing::info!("Agent shutting down...");
-        repair_handle.abort();
-        pruning_handle.abort();
-        if let Some(handle) = heartbeat_handle {
-            handle.abort();
-        }
-        if let Some((cron_handle, _)) = routine_handle {
-            cron_handle.abort();
-        }
-        self.scheduler.stop_all().await;
+        self.shutdown_background(bg).await;
         self.channels.shutdown_all().await?;
 
         Ok(())
@@ -753,6 +792,53 @@ impl Agent {
                 Ok(Some(String::new()))
             }
         }
+    }
+
+    // ─── Public API for external callers (Tauri, API module) ─────────
+
+    /// Process a message from an external caller (Tauri command, API endpoint).
+    ///
+    /// This is the public entry point for `handle_message()`, which remains
+    /// `pub(super)` for internal use. Delegates directly — same hooks,
+    /// safety checks, and session resolution as the internal path.
+    pub async fn handle_message_external(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<String>, Error> {
+        self.handle_message(message).await
+    }
+
+    /// Inject a message into session history without triggering a turn.
+    ///
+    /// Used for boot sequences, date context injection, silent memory updates,
+    /// and any case where the caller wants `deliver=false` semantics.
+    /// The message is persisted to the DB but no LLM call is made.
+    pub async fn inject_context(&self, message: &IncomingMessage) -> Result<(), Error> {
+        let (_, thread_id) = self
+            .session_manager
+            .resolve_thread(
+                &message.user_id,
+                &message.channel,
+                message.thread_id.as_deref(),
+            )
+            .await;
+        self.persist_user_message(thread_id, &message.user_id, &message.content)
+            .await;
+        Ok(())
+    }
+
+    /// Cancel a running turn directly — bypasses the full message pipeline.
+    ///
+    /// Faster than routing `/interrupt` through `handle_message_external()`
+    /// because it skips hook chains, submission parsing, and hydration.
+    /// Directly locks the session and sets the thread's cancellation flag.
+    pub async fn cancel_turn(&self, session_key: &str) -> Result<(), Error> {
+        let (session, thread_id) = self
+            .session_manager
+            .resolve_thread("local_user", "tauri", Some(session_key))
+            .await;
+        self.process_interrupt(session, thread_id).await?;
+        Ok(())
     }
 }
 

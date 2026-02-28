@@ -172,7 +172,24 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown"]
+default = ["full"]
+# Desktop embedding (Tauri) — minimal footprint, no heavy runtime modules
+desktop = ["libsql", "html-to-markdown"]
+# Individual runtime modules
+web-gateway = []
+repl = []
+tunnel = []
+docker-sandbox = []
+# Everything — equivalent to pre-feature-flag behavior
+full = [
+    "postgres",
+    "libsql",
+    "html-to-markdown",
+    "web-gateway",
+    "repl",
+    "tunnel",
+    "docker-sandbox",
+]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",

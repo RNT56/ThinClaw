@@ -587,6 +587,10 @@ impl Channel for ReplChannel {
                     eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
                 }
             }
+            StatusUpdate::Error { message, code } => {
+                let code_str = code.as_deref().unwrap_or("error");
+                eprintln!("\x1b[31m  \u{2717} [{code_str}] {message}\x1b[0m");
+            }
         }
         Ok(())
     }
