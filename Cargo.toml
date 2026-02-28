@@ -157,6 +157,9 @@ readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04"] }
 chromiumoxide = "0.9.1"
+ratatui = "0.30.0"
+unicode-width = "0.2.2"
+textwrap = "0.16.2"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

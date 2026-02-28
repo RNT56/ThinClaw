@@ -147,7 +147,7 @@ Built from scratch in Rust — not ports of the Node.js versions, but functional
 | Component | Description | Crate(s) | Doc | Status |
 |---|---|---|---|---|
 | **CLI** | Full management CLI: 25+ commands (config, models, agents, sessions, memory, cron, channels, hooks, plugins, security, daemon) | `clap` + `clap_complete` | `CLI_RS.md` | ✅ Complete |
-| **TUI** | Interactive terminal chat: full-screen layout, streaming tokens, slash commands, overlay selectors, tool call display, local shell | `ratatui` + `crossterm` | `TUI_RS.md` | ⏳ Pending |
+| **TUI** | Interactive terminal chat: full-screen layout, streaming tokens, slash commands, overlay selectors, tool call display, local shell | `ratatui` + `crossterm` | `src/tui/mod.rs` | ✅ Done |
 | **Setup Wizard** | 8-step onboarding: security ack, provider/key, model selection, identity, channels, networking, review. Both Tauri UI and terminal (`inquire`) variants | `inquire` + Tauri IPC | `SETUP_WIZARD_RS.md` | ⏳ Pending |
 
 All three are feature-gated:
