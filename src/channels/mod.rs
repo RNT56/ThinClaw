@@ -29,6 +29,8 @@
 
 mod channel;
 mod http;
+#[cfg(target_os = "macos")]
+mod imessage;
 mod manager;
 mod nostr;
 mod repl;
@@ -40,6 +42,8 @@ mod webhook_server;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 pub use http::HttpChannel;
+#[cfg(target_os = "macos")]
+pub use imessage::IMessageChannel;
 pub use manager::ChannelManager;
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;

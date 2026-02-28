@@ -54,7 +54,7 @@ IronClaw already has the `Channel` trait and `ChannelManager`. Adding channels m
 | **WASM**     | ✅ Done    | New           | `channels/wasm/`           | Browser WASM channel                                                     | ✅ Complete     |
 | **Signal**   | ✅ Done    | ~3K lines     | `channels/signal.rs`       | 2,454 LOC — SSE + JSON-RPC, groups, pairing, allowlists                  | ✅ Complete     |
 | **Nostr**    | ✅ Done    | ~3K lines     | `channels/nostr.rs`        | NIP-04 encrypted DMs, multi-relay, allowlist, deterministic threads       | ✅ Complete     |
-| **iMessage** | 🟢 Low-Med | ~2K lines     | `imessage-rs` / `rusqlite` | Poll `chat.db`, send via `osascript`, group support (macOS only).        | ⬜ Not Started |
+| **iMessage** | ✅ Done    | ~2K lines     | `sqlite3` CLI + `osascript`| Poll `chat.db` via sqlite3 CLI, send via AppleScript (macOS only).       | ✅ Complete     |
 | **Telegram** | ✅ Done    | ~11K lines    | `reqwest` (raw Bot API)    | Long polling, text/media, chunking (4096 limit), owner mode, allowlist.  | ✅ Complete     |
 | **Slack**    | 🟡 Medium  | ~8K lines     | `slack-morphism`           | Socket Mode (no public IP needed), Block Kit, threads, mentions.         | ⬜ Not Started |
 | **Discord**  | 🔴 High    | ~20K lines    | `serenity` + `poise`       | Guild monitoring, thread replies, chunking (2000 limit), slash commands. | ⬜ Not Started |
