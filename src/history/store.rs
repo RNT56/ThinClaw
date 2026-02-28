@@ -139,6 +139,30 @@ impl Store {
         Ok(id)
     }
 
+    /// Delete a conversation and all its messages (cascading via FK).
+    pub async fn delete_conversation(&self, id: Uuid) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .execute("DELETE FROM conversations WHERE id = $1", &[&id])
+            .await?;
+        Ok(rows > 0)
+    }
+
+    /// Delete all messages from a conversation without deleting the conversation.
+    pub async fn delete_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        Ok(rows)
+    }
+
     // ==================== Jobs ====================
 
     /// Save a job context to the database.

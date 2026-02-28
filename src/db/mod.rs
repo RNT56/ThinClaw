@@ -158,6 +158,19 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+
+    /// Delete a conversation and all its messages (cascading).
+    ///
+    /// Returns `true` if the conversation existed and was deleted.
+    async fn delete_conversation(&self, id: Uuid) -> Result<bool, DatabaseError>;
+
+    /// Delete all messages from a conversation without deleting the conversation itself.
+    ///
+    /// Returns the number of messages deleted.
+    async fn delete_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<u64, DatabaseError>;
 }
 
 #[async_trait]

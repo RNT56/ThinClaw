@@ -291,9 +291,19 @@ pub async fn delete_thread(
     }
 
     // Remove from DB
-    // TODO: Wire to actual DB delete conversation method when available.
-    if let Some(_store) = store {
-        tracing::debug!(thread_id = %tid, "Thread deletion from DB not yet wired");
+    if let Some(store) = store {
+        match store.delete_conversation(tid).await {
+            Ok(deleted) => {
+                if deleted {
+                    tracing::info!(thread_id = %tid, "Thread deleted from DB");
+                } else {
+                    tracing::debug!(thread_id = %tid, "Thread not found in DB (memory-only)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(thread_id = %tid, error = %e, "Failed to delete thread from DB");
+            }
+        }
     }
 
     Ok(())
@@ -316,9 +326,15 @@ pub async fn clear_thread(
     }
 
     // Clear DB messages
-    // TODO: Wire to actual DB clear messages method when available.
-    if let Some(_store) = store {
-        tracing::debug!(thread_id = %tid, "Thread message clearing from DB not yet wired");
+    if let Some(store) = store {
+        match store.delete_conversation_messages(tid).await {
+            Ok(count) => {
+                tracing::info!(thread_id = %tid, count, "Cleared messages from DB");
+            }
+            Err(e) => {
+                tracing::warn!(thread_id = %tid, error = %e, "Failed to clear messages from DB");
+            }
+        }
     }
 
     Ok(())
