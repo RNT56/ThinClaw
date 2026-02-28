@@ -136,6 +136,18 @@ impl Agent {
         }
     }
 
+    // ── Public accessors (used by `api::*` modules) ─────────────────
+
+    /// Get a reference to the channel manager.
+    pub fn channels(&self) -> &Arc<ChannelManager> {
+        &self.channels
+    }
+
+    /// Get a reference to the session manager.
+    pub fn session_manager(&self) -> &Arc<SessionManager> {
+        &self.session_manager
+    }
+
     // Convenience accessors
 
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {

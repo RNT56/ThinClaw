@@ -1,20 +1,31 @@
 //! Framework-agnostic API surface for IronClaw.
 //!
-//! This module provides callable Rust functions that expose all agent
-//! capabilities without framework dependencies (no Axum, no Tauri).
-//! Each submodule maps to a domain:
+//! These modules contain the business logic that both the web gateway
+//! and the Tauri integration call into. Each function takes explicit
+//! dependencies (`&Agent`, `&Arc<Workspace>`, etc.) and returns typed
+//! `ApiResult<T>` values — no Axum, no Tauri, no framework specifics.
 //!
-//! - `chat` — send messages, resolve approvals, abort turns
-//! - `sessions` — list, create, delete, rename sessions
-//! - `memory` — read/write workspace files (SOUL.md, MEMORY.md)
-//! - `config` — get/set agent configuration
-//! - `skills` — list, toggle, install skills
-//! - `extensions` — list, toggle extensions
-//! - `routines` — list, trigger scheduled routines
-//! - `system` — health, status, diagnostics, model list
+//! ## Module overview
 //!
-//! These functions are the target for both:
-//! - Tauri `#[tauri::command]` wrappers (Scrappy desktop app)
-//! - Any future REST/gRPC gateway
+//! | Module | Purpose |
+//! |---|---|
+//! | [`chat`] | Send messages, resolve approvals, abort turns |
+//! | [`sessions`] | Thread CRUD, history pagination |
+//! | [`memory`] | Workspace file CRUD, tree, vector search |
+//! | [`config`] | User settings CRUD, import/export |
+//! | [`extensions`] | Extension lifecycle (install/activate/remove) |
+//! | [`skills`] | Skill registry + catalog operations |
+//! | [`routines`] | Routine CRUD + manual trigger |
+//! | [`system`] | Engine status, model info |
 
-// Submodules will be added in Phase 2 (Steps 2.1–2.10)
+pub mod chat;
+pub mod config;
+pub mod extensions;
+pub mod memory;
+pub mod routines;
+pub mod sessions;
+pub mod skills;
+pub mod system;
+
+mod error;
+pub use error::{ApiError, ApiResult};
