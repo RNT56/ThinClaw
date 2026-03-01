@@ -114,7 +114,7 @@ pub struct DiscoveryResult {
     /// Per-provider results.
     pub providers: Vec<ProviderDiscoveryResult>,
     /// Total number of models discovered.
-    pub total_models: usize,
+    pub total_models: u32,
     /// Providers that had errors.
     pub errors: Vec<String>,
 }

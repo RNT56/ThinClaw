@@ -93,7 +93,7 @@ impl CloudModelRegistry {
         };
 
         let mut results = Vec::new();
-        let mut total_models = 0;
+        let mut total_models: u32 = 0;
         let mut errors = Vec::new();
 
         // Discover in parallel
@@ -113,7 +113,7 @@ impl CloudModelRegistry {
                             from_cache: true,
                             error: entry.error.clone(),
                         });
-                        total_models += entry.models.len();
+                        total_models += entry.models.len() as u32;
                         continue;
                     }
                 }
@@ -129,7 +129,7 @@ impl CloudModelRegistry {
         for handle in handles {
             match handle.await {
                 Ok(result) => {
-                    total_models += result.models.len();
+                    total_models += result.models.len() as u32;
                     if let Some(ref err) = result.error {
                         errors.push(format!("{}: {}", result.provider, err));
                     }
