@@ -130,6 +130,17 @@ impl IronClawState {
                 tracing::warn!("[ironclaw] Failed to emit Disconnected event: {}", e);
             }
 
+            // Clear LLM env vars so the next start() re-detects the backend
+            // (the local server may have started on a different port, or the
+            // user may have switched from local to cloud inference).
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::remove_var("LLM_BACKEND");
+                std::env::remove_var("LLM_BASE_URL");
+                std::env::remove_var("LLM_API_KEY");
+                std::env::remove_var("LLM_MODEL");
+            }
+
             tracing::info!("[ironclaw] Engine stopped");
             true
         } else {
@@ -359,7 +370,7 @@ impl IronClawState {
                     if let Some((port, token, _ctx, _family)) = sidecar.get_chat_config() {
                         let base_url = format!("http://127.0.0.1:{}/v1", port);
                         tracing::info!(
-                            "[ironclaw] Local inference: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                            "[ironclaw] Local inference (sidecar): LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
                             base_url
                         );
                         #[allow(unused_unsafe)]
@@ -374,17 +385,32 @@ impl IronClawState {
                         // Sidecar not running yet — try engine manager (MLX/vLLM)
                         let engine_mgr = app_handle.state::<crate::engine::EngineManager>();
                         let guard = engine_mgr.engine.lock().await;
-                        if let Some(engine) = guard.as_ref() {
-                            if let Some(url) = engine.base_url() {
-                                tracing::info!(
-                                    "[ironclaw] Engine manager: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
-                                    url
-                                );
-                                #[allow(unused_unsafe)]
-                                unsafe {
-                                    std::env::set_var("LLM_BACKEND", "openai_compatible");
-                                    std::env::set_var("LLM_BASE_URL", &url);
-                                }
+                        let engine_url = guard.as_ref().and_then(|e| e.base_url());
+
+                        if let Some(url) = engine_url {
+                            tracing::info!(
+                                "[ironclaw] Local inference (engine): LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                                url
+                            );
+                            #[allow(unused_unsafe)]
+                            unsafe {
+                                std::env::set_var("LLM_BACKEND", "openai_compatible");
+                                std::env::set_var("LLM_BASE_URL", &url);
+                            }
+                        } else {
+                            // Neither sidecar nor engine running yet (MLX starts after
+                            // IronClaw init). Use ollama backend as a safe placeholder —
+                            // it defaults to localhost:11434 and doesn't require an API
+                            // key, so config resolution succeeds. When the user starts
+                            // the gateway later (after MLX is up), build_inner() will
+                            // be called again and pick up the real server.
+                            tracing::info!(
+                                "[ironclaw] Local inference selected but server not ready yet, \
+                                 using LLM_BACKEND=ollama as placeholder"
+                            );
+                            #[allow(unused_unsafe)]
+                            unsafe {
+                                std::env::set_var("LLM_BACKEND", "ollama");
                             }
                         }
                     }
@@ -421,24 +447,29 @@ impl IronClawState {
                                 }
                             } else {
                                 tracing::warn!(
-                                    "[ironclaw] Unknown cloud brain '{}', defaulting to openai_compatible",
+                                    "[ironclaw] Unknown cloud brain '{}', defaulting to ollama",
                                     other
                                 );
+                                #[allow(unused_unsafe)]
+                                unsafe {
+                                    std::env::set_var("LLM_BACKEND", "ollama");
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Final safety net: if still no LLM_BACKEND is set, default to
-            // anthropic (most common) so IronClaw doesn't crash requiring LLM_BASE_URL.
+            // Final safety net: if still no LLM_BACKEND is set (no OpenClaw config
+            // loaded), use ollama — it needs no API key or base URL, so config
+            // resolution always succeeds.
             if std::env::var("LLM_BACKEND").is_err() {
                 tracing::info!(
-                    "[ironclaw] No provider config found, defaulting LLM_BACKEND=anthropic"
+                    "[ironclaw] No provider config found, defaulting LLM_BACKEND=ollama"
                 );
                 #[allow(unused_unsafe)]
                 unsafe {
-                    std::env::set_var("LLM_BACKEND", "anthropic");
+                    std::env::set_var("LLM_BACKEND", "ollama");
                 }
             }
         }
