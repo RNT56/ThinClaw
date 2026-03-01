@@ -1,6 +1,7 @@
 //! Built-in tools that come with the agent.
 
 mod browser;
+mod canvas;
 mod device_info;
 mod echo;
 pub mod extension_tools;
@@ -12,10 +13,12 @@ mod memory;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
+mod telegram_actions;
 mod time;
 mod tts;
 
 pub use browser::BrowserTool;
+pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use device_info::DeviceInfoTool;
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -34,6 +37,7 @@ pub use routine::{
 };
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
+pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use tts::TtsTool;
 

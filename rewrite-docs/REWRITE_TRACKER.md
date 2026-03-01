@@ -94,8 +94,8 @@ OpenClaw's TypeScript agent has a robust built-in toolkit. To replace the TS age
 
 | Tool               | Description                                    | OpenClaw TS Source | Target Rust Approach                         | Status |
 | :----------------- | :--------------------------------------------- | :----------------- | :------------------------------------------- | :----- |
-| **`nodes.invoke`** | Execute system-level tasks (shell, files, UI). | `nodes-tool.ts`    | `std::process::Command` + your Tauri backend | ⬜ Not Started |
-| **`canvas.a2ui`**  | Push interactive UI components to the screen.  | `canvas-tool.ts`   | Send Tauri IPC events to the frontend        | ⬜ Not Started |
+| **`nodes.invoke`** | Execute system-level tasks (shell, files, UI). | `nodes-tool.ts`    | `ShellTool` + `ReadFileTool` + `WriteFileTool` etc. | ✅ Covered |
+| **`canvas.a2ui`**  | Push interactive UI components to the screen.  | `canvas-tool.ts`   | `tools/builtin/canvas.rs` — structured JSON | ✅ Done |
 
 ### 🧠 Memory & Swarm
 
@@ -119,7 +119,7 @@ OpenClaw's TypeScript agent has a robust built-in toolkit. To replace the TS age
 | :--------------------- | :------------------------------------------------ | :-------------------- | :------------------------------------------------- | :----- |
 | **`discord.actions`**  | Kick, ban, manage roles, adjust presence.         | `discord-actions.ts`  | Specific functions on your `serenity` client       | ⬜ Not Started |
 | **`slack.actions`**    | Slack-specific moderation and channel management. | `slack-actions.ts`    | Specific functions on your `slack-morphism` client | ⬜ Not Started |
-| **`telegram.actions`** | Telegram specific tools and API interactions.     | `telegram-actions.ts` | Specific functions on your `teloxide` client       | ⬜ Not Started |
+| **`telegram.actions`** | Telegram specific tools and API interactions.     | `telegram-actions.ts` | `tools/builtin/telegram_actions.rs` — Bot API | ✅ Done |
 
 ## 📻 Client ↔ Orchestrator Protocol (Remote Mode Infrastructure)
 
