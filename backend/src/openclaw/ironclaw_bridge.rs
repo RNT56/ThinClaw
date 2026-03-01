@@ -13,7 +13,6 @@ use ironclaw::agent::{Agent, AgentDeps, BackgroundTasksHandle};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::ChannelManager;
-use ironclaw::llm::SessionManager as LlmSessionManager;
 
 use super::ironclaw_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
@@ -365,11 +364,6 @@ impl IronClawState {
         let tool_bridge = TauriToolBridge::new(app_handle.clone());
 
         // ── 4. Build engine components ──────────────────────────────────
-        let session_config = ironclaw::llm::session::SessionConfig {
-            session_path: state_dir.join("ironclaw_session.json"),
-            ..Default::default()
-        };
-        let session = Arc::new(LlmSessionManager::new(session_config));
         let log_broadcaster = Arc::new(LogBroadcaster::new());
 
         let toml_path_opt = if state_dir.join("ironclaw.toml").exists() {
@@ -382,7 +376,6 @@ impl IronClawState {
             config,
             AppBuilderFlags::default(),
             toml_path_opt,
-            session.clone(),
             log_broadcaster.clone(),
         );
 

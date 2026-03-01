@@ -37,7 +37,6 @@ fn map_key_name(ironclaw_name: &str) -> &str {
         "llm_anthropic_api_key" | "anthropic" => "anthropic",
         "llm_openai_api_key" | "openai" => "openai",
         "llm_compatible_api_key" | "openrouter" => "openrouter",
-        "llm_nearai_api_key" => "nearai",
         "llm_gemini_api_key" | "gemini" => "gemini",
         "llm_groq_api_key" | "groq" => "groq",
 
