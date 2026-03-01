@@ -28,6 +28,7 @@
 //! See the [`wasm`] module for details.
 
 mod channel;
+mod discord;
 mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
@@ -42,6 +43,7 @@ pub mod web;
 mod webhook_server;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+pub use discord::DiscordChannel;
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::IMessageChannel;

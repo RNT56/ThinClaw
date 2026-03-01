@@ -57,7 +57,7 @@ IronClaw already has the `Channel` trait and `ChannelManager`. Adding channels m
 | **iMessage** | ✅ Done    | ~2K lines     | `sqlite3` CLI + `osascript`| Poll `chat.db` via sqlite3 CLI, send via AppleScript (macOS only).       | ✅ Complete     |
 | **Telegram** | ✅ Done    | ~11K lines    | `reqwest` (raw Bot API)    | Long polling, text/media, chunking (4096 limit), owner mode, allowlist.  | ✅ Complete     |
 | **Slack**    | ✅ Done    | ~8K lines     | `tokio-tungstenite` + Socket Mode | Socket Mode WS, Web API, threading, message chunking (4000 limit).      | ✅ Complete     |
-| **Discord**  | 🔴 High    | ~20K lines    | `serenity` + `poise`       | Guild monitoring, thread replies, chunking (2000 limit), slash commands. | ⬜ Not Started |
+| **Discord**  | ✅ Done    | ~20K lines    | `tokio-tungstenite` (raw Gateway) | Gateway WS, REST API, heartbeat, chunking (2000 limit), guild filter.   | ✅ Complete     |
 
 _Note: OpenClaw supports 23+ channels. These 6 are the prioritized starting point based on the previous plan._
 
