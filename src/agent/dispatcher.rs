@@ -126,6 +126,15 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+
+        // Stuck loop detection: track consecutive identical tool calls.
+        // If the LLM calls the same tool with the same arguments repeatedly,
+        // it's stuck. After STUCK_WARN_THRESHOLD consecutive identical calls we
+        // inject a system nudge; after STUCK_FORCE_THRESHOLD we force text-only.
+        const STUCK_WARN_THRESHOLD: u32 = 3;
+        const STUCK_FORCE_THRESHOLD: u32 = 5;
+        let mut last_call_signature: Option<u64> = None;
+        let mut consecutive_same_calls: u32 = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -288,6 +297,69 @@ impl Agent {
                     tool_calls,
                     content,
                 } => {
+                    // ── Stuck loop detection ──────────────────────────────────
+                    // Compute a signature from the tool call names + arguments.
+                    // If the same set of calls repeats consecutively, the LLM is
+                    // likely stuck in a loop.
+                    {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        for tc in &tool_calls {
+                            tc.name.hash(&mut hasher);
+                            tc.arguments.to_string().hash(&mut hasher);
+                        }
+                        let sig = hasher.finish();
+
+                        if last_call_signature == Some(sig) {
+                            consecutive_same_calls += 1;
+                        } else {
+                            consecutive_same_calls = 1;
+                            last_call_signature = Some(sig);
+                        }
+                    }
+
+                    if consecutive_same_calls >= STUCK_FORCE_THRESHOLD {
+                        tracing::warn!(
+                            iteration,
+                            consecutive = consecutive_same_calls,
+                            tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
+                            "Stuck loop detected — forcing text-only response"
+                        );
+                        // Give the LLM one last chance with a strong nudge and no tools
+                        context_messages.push(ChatMessage::system(
+                            "STOP. You have called the same tool repeatedly without making progress. \
+                             Do NOT call any more tools. Summarize what you have done so far and \
+                             provide your best answer with the information you already have.",
+                        ));
+                        let mut final_context = ReasoningContext::new()
+                            .with_messages(context_messages.clone())
+                            .with_tools(Vec::new()); // No tools available
+                        final_context.force_text = true;
+                        let final_output = reasoning.respond_with_tools(&final_context).await?;
+                        if let RespondResult::Text(text) = final_output.result {
+                            return Ok(AgenticLoopResult::Response(text));
+                        }
+                        // If it still somehow returns tool_calls (shouldn't happen with
+                        // empty tools + force_text), return an error message.
+                        return Ok(AgenticLoopResult::Response(
+                            "I was unable to make further progress. Please try rephrasing your request.".to_string()
+                        ));
+                    }
+
+                    if consecutive_same_calls == STUCK_WARN_THRESHOLD {
+                        tracing::info!(
+                            iteration,
+                            consecutive = consecutive_same_calls,
+                            tool = %tool_calls.first().map(|t| t.name.as_str()).unwrap_or("?"),
+                            "Possible stuck loop detected — injecting nudge"
+                        );
+                        context_messages.push(ChatMessage::system(
+                            "You appear to be calling the same tool repeatedly. \
+                             Try a different approach, use different parameters, or \
+                             provide your answer based on what you already know.",
+                        ));
+                    }
+
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(

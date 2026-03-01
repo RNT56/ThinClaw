@@ -42,16 +42,16 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Gateway lock (PID-based) | ✅ | ❌ | |
 | launchd/systemd integration | ✅ | ❌ | |
 | Bonjour/mDNS discovery | ✅ | ❌ | |
-| Tailscale integration | ✅ | ❌ | |
+| Tailscale integration | ✅ | ✅ | Full tunnel module (`tunnel/tailscale.rs`) with serve + funnel |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
-| `doctor` diagnostics | ✅ | ❌ | |
+| `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | 🚧 | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap |
-| Pre-prompt context diagnostics | ✅ | ❌ | Context size logging before prompt |
+| Pre-prompt context diagnostics | ✅ | ✅ | `tracing::debug` logs message count, est. chars, tool count before each LLM call |
 
 ### Owner: _Unassigned_
 
@@ -68,7 +68,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
-| Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
+| Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
@@ -81,7 +81,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MS Teams | ✅ | ❌ | P3 | |
 | Twitch | ✅ | ❌ | P3 | |
 | Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
-| Nostr | ✅ | ❌ | P3 | |
+| Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`) |
 
 ### Telegram-Specific Features (since Feb 2025)
 
@@ -155,7 +155,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
-| `doctor` | ✅ | ❌ | P2 | Diagnostics |
+| `doctor` | ✅ | ✅ | - | Diagnostics (DB, binaries, LLM credentials, Tailscale) |
 | `logs` | ✅ | ❌ | P3 | Query logs |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
@@ -196,7 +196,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
 | Auth profiles | ✅ | ❌ | Multiple auth strategies |
 | Generic API key rotation | ✅ | ❌ | Rotate keys across providers |
-| Stuck loop detection | ✅ | ❌ | Exponential backoff on stuck agent loops |
+| Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ❌ | Single tool call, multiple images |
 | URL allowlist (web_search/fetch) | ✅ | ❌ | Restrict web tool targets |
@@ -212,17 +212,16 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Provider | OpenClaw | IronClaw | Priority | Notes |
 |----------|----------|----------|----------|-------|
-| NEAR AI | ✅ | ✅ | - | Primary provider |
-| Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
-| OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
-| AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
-| NVIDIA API | ✅ | ❌ | P3 | New provider |
-| OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
+| Anthropic (Claude) | ✅ | ✅ | - | Direct API via RigAdapter (Sonnet 4, etc.) |
+| OpenAI (GPT) | ✅ | ✅ | - | Direct API via RigAdapter (GPT-4o, etc.) |
+| OpenAI-compatible | ❌ | ✅ | - | **Default backend** — works with OpenRouter, vLLM, LiteLLM, Together, Fireworks |
+| OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider |
+| Ollama (local) | ✅ | ✅ | - | Via `rig::providers::ollama` (full support) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
-| OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
-| Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
-| Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
+| AWS Bedrock | ✅ | ❌ | P3 | Could use OpenAI-compatible with adapter |
+| Google Gemini | ✅ | ❌ | P3 | Could use OpenAI-compatible via AI Studio |
+| NVIDIA API | ✅ | ❌ | P3 | Could use OpenAI-compatible |
+| Perplexity | ✅ | ❌ | P3 | Could use OpenAI-compatible |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
 | GLM-5 | ✅ | ❌ | P3 | |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
@@ -440,7 +439,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
+| OAuth flows | ✅ | 🚧 | Generic OAuth (provider-specific flows) |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |
@@ -460,7 +459,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | LD*/DYLD* validation | ✅ | ❌ | |
 | Path traversal prevention | ✅ | ✅ | Including config includes (OC-06) |
 | Credential theft via env injection | ✅ | 🚧 | Shell env scrubbing + command injection detection; no full OC-09 defense |
-| Session file permissions (0o600) | ✅ | ✅ | Session token file set to 0o600 in llm/session.rs |
+| Session file permissions (0o600) | ✅ | ✅ | Handled by OS keychain + filesystem perms |
 | Skill download path restriction | ✅ | ❌ | Prevent arbitrary write targets |
 | Webhook signature verification | ✅ | ✅ | |
 | Media URL validation | ✅ | ❌ | |
@@ -549,7 +548,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Streaming (block/tool/Z.AI tool_stream)
 - ❌ Memory: temporal decay, MMR re-ranking, query expansion
 - ❌ Control UI i18n
-- ❌ Stuck loop detection
+- ✅ Stuck loop detection (consecutive same-tool detection + forced text response)
 
 ---
 
@@ -575,11 +574,12 @@ IronClaw intentionally differs from OpenClaw in these ways:
 1. **Rust vs TypeScript**: Native performance, memory safety, single binary distribution
 2. **WASM sandbox vs Docker**: Lighter weight, faster startup, capability-based security
 3. **PostgreSQL + libSQL vs SQLite**: Dual-backend (production PG + embedded libSQL for zero-dep local mode)
-4. **NEAR AI focus**: Primary provider with session-based auth
-5. **No mobile/desktop apps**: Focus on server-side and CLI initially
+4. **Provider agnostic**: No vendor lock-in — works with any OpenAI-compatible endpoint (default), Anthropic, OpenAI, Ollama, Tinfoil, or OpenRouter
+5. **No mobile/desktop apps**: Focus on server-side and CLI; Scrappy (Tauri) provides the desktop experience
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
 7. **Tinfoil private inference**: IronClaw-only provider for private/encrypted inference
 8. **GitHub WASM tool**: Native GitHub integration as WASM tool
 9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
+10. **OS Keychain secrets**: API keys stored in macOS Keychain / Linux Secret Service rather than encrypted file
 
 These are intentional architectural choices, not gaps to be filled.

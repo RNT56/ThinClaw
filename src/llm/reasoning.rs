@@ -448,6 +448,27 @@ Respond in JSON format:
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(context.messages.clone());
 
+        // ── Pre-prompt context diagnostics ────────────────────────────
+        // Log the context size before sending to the LLM. Helps debug
+        // token limit errors and optimize prompt engineering.
+        {
+            let msg_count = messages.len();
+            let char_count: usize = messages.iter().map(|m| m.estimated_chars()).sum();
+            let tool_count = context.available_tools.len();
+            let tool_def_chars: usize = context
+                .available_tools
+                .iter()
+                .map(|t| t.name.len() + t.description.len() + 100) // ~100 chars overhead per tool schema
+                .sum();
+            tracing::debug!(
+                messages = msg_count,
+                est_prompt_chars = char_count + tool_def_chars,
+                tools = tool_count,
+                force_text = context.force_text,
+                "Pre-prompt context diagnostics"
+            );
+        }
+
         let effective_tools = if context.force_text {
             Vec::new()
         } else {

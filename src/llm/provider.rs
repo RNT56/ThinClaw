@@ -99,6 +99,21 @@ impl ChatMessage {
             tool_calls: None,
         }
     }
+
+    /// Estimate character count for context size diagnostics.
+    ///
+    /// Returns a rough count of characters in this message, including content
+    /// and any serialized tool calls. Not an exact token count, but useful for
+    /// order-of-magnitude context window monitoring.
+    pub fn estimated_chars(&self) -> usize {
+        let mut chars = self.content.len();
+        if let Some(ref calls) = self.tool_calls {
+            for tc in calls {
+                chars += tc.name.len() + tc.arguments.to_string().len() + 20; // ~20 for JSON overhead
+            }
+        }
+        chars
+    }
 }
 
 /// Request for a chat completion.
