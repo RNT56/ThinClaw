@@ -56,6 +56,10 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         provider: "openai".to_string(),
     })?;
 
+    let api_key = oai.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "openai (OPENAI_API_KEY not set)".to_string(),
+    })?;
+
     use rig::providers::openai;
 
     // Use CompletionsClient (Chat Completions API) instead of the default Client
@@ -70,14 +74,14 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         );
         openai::Client::builder()
             .base_url(base_url)
-            .api_key(oai.api_key.expose_secret())
+            .api_key(api_key.expose_secret())
             .build()
     } else {
         tracing::info!(
             "Using OpenAI direct API (chat completions, model: {}, base_url: default)",
             oai.model,
         );
-        openai::Client::new(oai.api_key.expose_secret())
+        openai::Client::new(api_key.expose_secret())
     }
     .map_err(|e| LlmError::RequestFailed {
         provider: "openai".to_string(),
@@ -97,15 +101,19 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
             provider: "anthropic".to_string(),
         })?;
 
+    let api_key = anth.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "anthropic (ANTHROPIC_API_KEY not set)".to_string(),
+    })?;
+
     use rig::providers::anthropic;
 
     let client: anthropic::Client = if let Some(ref base_url) = anth.base_url {
         anthropic::Client::builder()
-            .api_key(anth.api_key.expose_secret())
+            .api_key(api_key.expose_secret())
             .base_url(base_url)
             .build()
     } else {
-        anthropic::Client::new(anth.api_key.expose_secret())
+        anthropic::Client::new(api_key.expose_secret())
     }
     .map_err(|e| LlmError::RequestFailed {
         provider: "anthropic".to_string(),
@@ -157,11 +165,15 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             provider: "tinfoil".to_string(),
         })?;
 
+    let api_key = tf.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "tinfoil (TINFOIL_API_KEY not set)".to_string(),
+    })?;
+
     use rig::providers::openai;
 
     let client: openai::Client = openai::Client::builder()
         .base_url(TINFOIL_BASE_URL)
-        .api_key(tf.api_key.expose_secret())
+        .api_key(api_key.expose_secret())
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "tinfoil".to_string(),

@@ -57,7 +57,9 @@ impl std::fmt::Display for LlmBackend {
 /// Configuration for direct OpenAI API access.
 #[derive(Debug, Clone)]
 pub struct OpenAiDirectConfig {
-    pub api_key: SecretString,
+    /// API key. Initially `None` during early config resolution; populated
+    /// after secret injection. Provider construction will fail if still `None`.
+    pub api_key: Option<SecretString>,
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
@@ -66,7 +68,9 @@ pub struct OpenAiDirectConfig {
 /// Configuration for direct Anthropic API access.
 #[derive(Debug, Clone)]
 pub struct AnthropicDirectConfig {
-    pub api_key: SecretString,
+    /// API key. Initially `None` during early config resolution; populated
+    /// after secret injection. Provider construction will fail if still `None`.
+    pub api_key: Option<SecretString>,
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
@@ -93,7 +97,9 @@ pub struct OpenAiCompatibleConfig {
 /// Configuration for Tinfoil private inference.
 #[derive(Debug, Clone)]
 pub struct TinfoilConfig {
-    pub api_key: SecretString,
+    /// API key. Initially `None` during early config resolution; populated
+    /// after secret injection. Provider construction will fail if still `None`.
+    pub api_key: Option<SecretString>,
     pub model: String,
 }
 
@@ -218,12 +224,7 @@ impl LlmConfig {
 
         // Resolve provider-specific configs based on backend
         let openai = if backend == LlmBackend::OpenAi {
-            let api_key = optional_env("OPENAI_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
-                })?;
+            let api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
             let base_url = optional_env("OPENAI_BASE_URL")?;
             Some(OpenAiDirectConfig {
@@ -236,12 +237,7 @@ impl LlmConfig {
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
-                })?;
+            let api_key = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
@@ -290,12 +286,7 @@ impl LlmConfig {
         };
 
         let tinfoil = if backend == LlmBackend::Tinfoil {
-            let api_key = optional_env("TINFOIL_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "TINFOIL_API_KEY".to_string(),
-                    hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
-                })?;
+            let api_key = optional_env("TINFOIL_API_KEY")?.map(SecretString::from);
             let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
             Some(TinfoilConfig { api_key, model })
         } else {
