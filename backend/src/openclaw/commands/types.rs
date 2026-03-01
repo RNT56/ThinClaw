@@ -185,7 +185,7 @@ pub struct ChildSessionInfo {
     /// Current status: "running", "completed", or "failed".
     pub status: String,
     /// UNIX timestamp (ms) when the child was spawned.
-    pub spawned_at: u64,
+    pub spawned_at: f64,
     /// Summary of the result (set on completion/failure).
     pub result_summary: Option<String>,
 }

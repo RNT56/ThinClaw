@@ -602,7 +602,7 @@ pub async fn openclaw_spawn_session(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64;
+        .as_millis() as f64;
 
     // Activate the new session for event routing
     ironclaw.activate_session(&new_session_id).await?;
