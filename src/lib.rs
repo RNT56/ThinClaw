@@ -76,6 +76,7 @@ pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod tailscale;
+pub mod talk_mode;
 pub mod tools;
 pub mod tracing_fmt;
 // NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`
@@ -84,6 +85,7 @@ pub mod tracing_fmt;
 pub mod tunnel;
 pub mod update_checker;
 pub mod util;
+pub mod voice_wake;
 pub mod worker;
 pub mod workspace;
 

@@ -69,8 +69,8 @@ Features previously handled by the macOS/iOS Swift apps that need to be ported t
 | :------------------------- | :--------- | :----------------------- | :--------------------------------------------------- | :------------- |
 | **System Commands**        | ✅ Done    | `SystemCommands.swift`   | `ShellTool` + file tools (sandbox, injection detection) | ✅ Complete    |
 | **Canvas / A2UI**          | ✅ Done    | `CanvasCommands.swift`   | `tools/builtin/canvas.rs` — structured JSON payload  | ✅ Complete    |
-| **Voice Wake (Hey Molty)** | 🔴 High    | `VoiceWakeRuntime.swift` | `sherpa-rs` (Sherpa-ONNX) for keyword detection      | ⬜ Not Started |
-| **Talk Mode (PTT)**        | 🟡 Medium  | `TalkCommands.swift`     | Standard audio capture traits (`cpal`), `whisper-rs` | ⬜ Not Started |
+| **Voice Wake (Hey Molty)** | ✅ Scaffold | `VoiceWakeRuntime.swift` | `src/voice_wake.rs` — event-driven runtime, energy/sherpa backends | ✅ Scaffold |
+| **Talk Mode (PTT)**        | ✅ Scaffold | `TalkCommands.swift`     | `src/talk_mode.rs` — CLI audio capture, Whisper API transcription | ✅ Scaffold |
 | **Screen Recording**       | ✅ Done    | `ScreenCommands.swift` | `tools/builtin/screen_capture.rs` — CLI (`screencapture`, `scrot`) | ✅ Complete    |
 | **Camera Capture**         | ✅ Done    | `CameraCommands.swift`   | `tools/builtin/camera_capture.rs` — CLI (`imagesnap`, `ffmpeg`) | ✅ Complete    |
 | **Location (GPS)**         | ✅ Done    | `LocationCommands.swift` | `tools/builtin/location.rs` — CoreLocation via Swift, IP fallback | ✅ Complete    |
