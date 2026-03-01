@@ -295,6 +295,69 @@ async fn handle_client_message(
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
         }
+        WsClientMessage::Version {
+            protocol_version,
+            client_name,
+        } => {
+            let server_version = env!("CARGO_PKG_VERSION").to_string();
+            // Simple compatibility: major version must match
+            let client_major = protocol_version
+                .split('.')
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            let compatible = client_major == 1; // Protocol v1.x
+
+            tracing::info!(
+                "WS version handshake: client={} ({}), server={}",
+                protocol_version,
+                client_name.as_deref().unwrap_or("unknown"),
+                server_version
+            );
+
+            let _ = direct_tx
+                .send(WsServerMessage::VersionInfo {
+                    protocol_version: "1.0.0".to_string(),
+                    server_name: "ironclaw".to_string(),
+                    server_version,
+                    compatible,
+                })
+                .await;
+        }
+        WsClientMessage::ConfigSet { key, .. } => {
+            // TODO: Implement runtime config updates
+            let _ = direct_tx
+                .send(WsServerMessage::ConfigResult {
+                    key,
+                    success: false,
+                    error: Some("Runtime config updates not yet supported".to_string()),
+                })
+                .await;
+        }
+        WsClientMessage::SecretSet { key, .. } => {
+            // TODO: Implement remote secret storage
+            let _ = direct_tx
+                .send(WsServerMessage::SecretResult {
+                    key,
+                    success: false,
+                    error: Some("Remote secret storage not yet supported".to_string()),
+                })
+                .await;
+        }
+        WsClientMessage::ModelList => {
+            // Return list of available models from LLM provider
+            let models = if let Some(ref llm) = state.llm_provider {
+                vec![crate::api::system::ModelInfo {
+                    name: llm.model_name().to_string(),
+                    is_primary: true,
+                }]
+            } else {
+                vec![]
+            };
+            let _ = direct_tx
+                .send(WsServerMessage::ModelListResult { models })
+                .await;
+        }
     }
 }
 

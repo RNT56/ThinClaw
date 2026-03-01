@@ -127,15 +127,15 @@ The WebSocket protocol that connects the Tauri Thin Client to the headless Remot
 
 | Component | Description | Implementation | Status |
 |---|---|---|---|
-| **WebSocket Server (axum)** | Persistent WS endpoint on headless Orchestrator | `axum` + `tokio-tungstenite` | ⏳ Pending |
-| **WS Auth (session token)** | Query-param token validation on connect | Custom middleware in `axum` | ⏳ Pending |
-| **Version Handshake** | Protocol version exchange on connect; mismatch = 4002 close + UI warning | Typed message dispatch | ⏳ Pending |
-| **Message Envelope** | Shared JSON envelope (`id`, `type`, `payload`) for all WS messages | `serde` structs | ⏳ Pending |
-| **Chat Streaming** | `message.delta` / `message.done` events for token streaming to UI | `tokio::mpsc` + WS send | ⏳ Pending |
-| **Config RPC** | `config.set` messages to change model/settings from Tauri UI | Typed handler dispatch | ⏳ Pending |
-| **Secret Transmission** | `secret.set` to relay API keys from Tauri UI to remote Keychain | Encrypted at Tailscale layer | ⏳ Pending |
+| **WebSocket Server (axum)** | Persistent WS endpoint on headless Orchestrator | `channels/web/server.rs` — 2.7K LOC axum server | ✅ Done |
+| **WS Auth (session token)** | Bearer token validation on connect | Custom middleware in `channels/web/server.rs` | ✅ Done |
+| **Version Handshake** | Protocol version exchange on connect; mismatch = 4002 close + UI warning | `WsClientMessage::Version` + `WsServerMessage::VersionInfo` | ✅ Done |
+| **Message Envelope** | Shared JSON envelope (`type`, `payload`) for all WS messages | `WsClientMessage`/`WsServerMessage` in `channels/web/types.rs` | ✅ Done |
+| **Chat Streaming** | `message.delta` / `message.done` events for token streaming to UI | SSE events forwarded over WS (`WsServerMessage::Event`) | ✅ Done |
+| **Config RPC** | `config.set` messages to change model/settings from Tauri UI | `WsClientMessage::ConfigSet` + handler scaffold | ✅ Scaffold |
+| **Secret Transmission** | `secret.set` to relay API keys from Tauri UI to remote Keychain | `WsClientMessage::SecretSet` + handler scaffold | ✅ Scaffold |
 | **Hardware Bridge RPC** | `tool.rpc.request` / `tool.rpc.response` for cam/mic/screen | See `HARDWARE_BRIDGE_RS.md` | ⏳ Pending |
-| **Model Discovery RPC** | `model.list.request` / `model.list.response` | Fetch on demand | ⏳ Pending |
+| **Model Discovery RPC** | `model.list.request` / `model.list.response` | `WsClientMessage::ModelList` + `WsServerMessage::ModelListResult` | ✅ Done |
 | **Auto-Update Check** | Orchestrator polls GitHub Releases every 24h, self-updates via `self_update` crate | Background `tokio` task | ⏳ Pending |
 | **Tailscale Discovery** | Tauri app queries Tailscale local API to auto-find Orchestrator | `reqwest` to `localhost:41112` | ⏳ Pending |
 | **QR Code Pairing** | Fallback pairing for non-Tailscale setups, cert-pinned TLS | `rcgen` + QR display | ⏳ Pending |
