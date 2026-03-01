@@ -662,9 +662,9 @@ impl SignalChannel {
             // DM message - apply DM policy
             match self.config.dm_policy.as_str() {
                 "open" => {}
-                "pairing" => {
+                "pairing"
                     // Pairing policy: check allow_from + pairing store
-                    if !self.is_sender_allowed_with_pairing(&sender) {
+                    if !self.is_sender_allowed_with_pairing(&sender) => {
                         // Handle pairing request - this will create a request and send reply if new
                         match self.handle_pairing_request(&sender, envelope.source_name.as_deref())
                         {
@@ -678,14 +678,12 @@ impl SignalChannel {
                             }
                         }
                     }
-                }
-                "allowlist" => {
+                "allowlist"
                     // Default: check allow_from list
-                    if !self.is_sender_allowed(&sender) {
+                    if !self.is_sender_allowed(&sender) => {
                         tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
                         return None;
                     }
-                }
                 _ => {}
             }
         }

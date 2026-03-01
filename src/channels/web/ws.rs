@@ -324,25 +324,84 @@ async fn handle_client_message(
                 })
                 .await;
         }
-        WsClientMessage::ConfigSet { key, .. } => {
-            // TODO: Implement runtime config updates
-            let _ = direct_tx
-                .send(WsServerMessage::ConfigResult {
-                    key,
-                    success: false,
-                    error: Some("Runtime config updates not yet supported".to_string()),
-                })
-                .await;
+        WsClientMessage::ConfigSet { key, value } => {
+            // Write the setting to the DB-backed settings store
+            if let Some(ref store) = state.store {
+                match crate::api::config::set_setting(store, &state.user_id, &key, &value).await {
+                    Ok(()) => {
+                        tracing::info!("WS config.set: key={} updated", key);
+                        let _ = direct_tx
+                            .send(WsServerMessage::ConfigResult {
+                                key,
+                                success: true,
+                                error: None,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = direct_tx
+                            .send(WsServerMessage::ConfigResult {
+                                key,
+                                success: false,
+                                error: Some(e.to_string()),
+                            })
+                            .await;
+                    }
+                }
+            } else {
+                let _ = direct_tx
+                    .send(WsServerMessage::ConfigResult {
+                        key,
+                        success: false,
+                        error: Some("No database configured for settings storage".to_string()),
+                    })
+                    .await;
+            }
         }
-        WsClientMessage::SecretSet { key, .. } => {
-            // TODO: Implement remote secret storage
-            let _ = direct_tx
-                .send(WsServerMessage::SecretResult {
-                    key,
-                    success: false,
-                    error: Some("Remote secret storage not yet supported".to_string()),
-                })
-                .await;
+        WsClientMessage::SecretSet { key, value } => {
+            // Store the API key as a setting in the DB, prefixed with "secret."
+            // In Remote Mode, the thin client transmits API keys to the orchestrator
+            // which stores them in its local DB for use by the agent.
+            if let Some(ref store) = state.store {
+                let setting_key = format!("secret.{}", key);
+                let setting_value = serde_json::Value::String(value);
+                match crate::api::config::set_setting(
+                    store,
+                    &state.user_id,
+                    &setting_key,
+                    &setting_value,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!("WS secret.set: key={} stored", key);
+                        let _ = direct_tx
+                            .send(WsServerMessage::SecretResult {
+                                key,
+                                success: true,
+                                error: None,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = direct_tx
+                            .send(WsServerMessage::SecretResult {
+                                key,
+                                success: false,
+                                error: Some(e.to_string()),
+                            })
+                            .await;
+                    }
+                }
+            } else {
+                let _ = direct_tx
+                    .send(WsServerMessage::SecretResult {
+                        key,
+                        success: false,
+                        error: Some("No database configured for secret storage".to_string()),
+                    })
+                    .await;
+            }
         }
         WsClientMessage::ModelList => {
             // Return list of available models from LLM provider

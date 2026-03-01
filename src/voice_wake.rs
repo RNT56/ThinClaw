@@ -5,17 +5,15 @@
 //! to enter listening mode.
 //!
 //! Architecture:
-//! - Audio capture: `cpal` crate (or macOS `say`/`rec` CLI fallback)
+//! - Audio capture: `cpal` crate (behind `voice` feature flag)
 //! - Wake detection: configurable backends:
-//!   - Sherpa-ONNX (`sherpa-rs`) — offline keyword spotting
-//!   - Whisper-based — transcribe and match
-//!   - Simple energy detector — just detect voice activity
+//!   - Energy detector — RMS energy-based voice activity detection (implemented)
+//!   - Sherpa-ONNX (`sherpa-rs`) — offline keyword spotting (scaffold)
 //!
-//! This replaces `VoiceWakeRuntime.swift` from the companion app.
-//!
-//! **Status: Scaffold** — Full API surface defined. Audio capture and
-//! wake word detection require `cpal` and `sherpa-rs` dependencies
-//! which are not yet added to Cargo.toml.
+//! **Feature flag:** Enable `voice` in Cargo.toml for real audio capture.
+//! Without it, the detection loop runs as a polling placeholder.
+//! The `voice` feature is intended for headless/remote mode only;
+//! in desktop mode (Tauri), Scrappy owns the microphone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,37 +166,160 @@ impl VoiceWakeRuntime {
     }
 
     /// Main detection loop.
+    ///
+    /// When the `voice` feature is enabled, captures audio via `cpal` and
+    /// performs RMS energy detection. Otherwise, runs as a polling placeholder.
     async fn detection_loop(
         running: Arc<AtomicBool>,
         event_tx: mpsc::Sender<VoiceWakeEvent>,
         config: VoiceWakeConfig,
     ) {
-        // NOTE: Full audio capture implementation requires `cpal` crate.
-        // This scaffold uses a polling loop that demonstrates the event
-        // flow and can be connected to real audio capture later.
-        //
-        // Integration steps when adding `cpal`:
-        // 1. Add `cpal = "0.15"` to Cargo.toml
-        // 2. Open default audio input device
-        // 3. Create input stream with config.sample_rate
-        // 4. Process audio chunks through the wake detector
-        // 5. Emit VoiceWakeEvent::WakeWordDetected on match
-
         tracing::debug!(
             "Detection loop started (backend: {:?}, wake_word: {})",
             config.backend,
             config.wake_word,
         );
 
-        while running.load(Ordering::Relaxed) {
-            // Placeholder: sleep and wait for real audio capture integration
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // When cpal is integrated, this is where audio frames would be
-            // processed through the wake word detector. The energy detector
-            // would check RMS energy against config.energy_threshold, while
-            // Sherpa-ONNX would run keyword spotting on the audio frames.
+        #[cfg(feature = "voice")]
+        {
+            Self::detection_loop_cpal(running, event_tx, config).await;
         }
+
+        #[cfg(not(feature = "voice"))]
+        {
+            // Placeholder: sleep and wait for real audio capture integration.
+            // Enable the `voice` feature flag to use cpal-based audio capture.
+            tracing::info!(
+                "Voice wake running in placeholder mode (enable 'voice' feature for real audio)"
+            );
+            while running.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
+        }
+    }
+
+    /// Real audio capture and energy detection using cpal.
+    ///
+    /// The cpal `Stream` type is `!Send`, so audio capture runs on a
+    /// dedicated OS thread (`std::thread::spawn`). RMS energy values are
+    /// sent to the async tokio task via an mpsc channel for processing.
+    #[cfg(feature = "voice")]
+    async fn detection_loop_cpal(
+        running: Arc<AtomicBool>,
+        event_tx: mpsc::Sender<VoiceWakeEvent>,
+        config: VoiceWakeConfig,
+    ) {
+        // Channel for RMS energy values from the audio thread
+        let (energy_tx, mut energy_rx) = mpsc::channel::<f32>(256);
+
+        // Spawn a dedicated OS thread for cpal audio capture.
+        // cpal::Stream is !Send so it must live on a single OS thread.
+        let audio_running = running.clone();
+        let audio_event_tx = event_tx.clone();
+        let audio_handle = std::thread::spawn(move || {
+            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+            let host = cpal::default_host();
+            let device = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                        message: "No audio input device found".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+            tracing::info!(device = %device_name, "Audio input device selected");
+
+            let stream_config = cpal::StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(config.sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            };
+
+            let err_tx = audio_event_tx.clone();
+            let stream = match device.build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if data.is_empty() {
+                        return;
+                    }
+                    let sum_sq: f32 = data.iter().map(|s| s * s).sum();
+                    let rms = (sum_sq / data.len() as f32).sqrt();
+                    let _ = energy_tx.try_send(rms);
+                },
+                move |err| {
+                    tracing::error!("Audio stream error: {}", err);
+                    let _ = err_tx.try_send(VoiceWakeEvent::Error {
+                        message: format!("Audio stream error: {}", err),
+                    });
+                },
+                None,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                        message: format!("Failed to build audio stream: {}", e),
+                    });
+                    return;
+                }
+            };
+
+            if let Err(e) = stream.play() {
+                let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                    message: format!("Failed to start audio stream: {}", e),
+                });
+                return;
+            }
+
+            // Keep the stream alive until told to stop
+            while audio_running.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            drop(stream);
+        });
+
+        // Process energy values in the async context (Send-safe)
+        let threshold = config.energy_threshold;
+        let mut voice_active = false;
+        let mut silence_frames: u32 = 0;
+        let silence_debounce: u32 = 3; // ~300ms at ~10 readings/sec
+
+        while running.load(Ordering::Relaxed) {
+            match tokio::time::timeout(Duration::from_millis(200), energy_rx.recv()).await {
+                Ok(Some(rms)) => {
+                    if rms > threshold {
+                        silence_frames = 0;
+                        if !voice_active {
+                            voice_active = true;
+                            let _ = event_tx.send(VoiceWakeEvent::VoiceActivityStart).await;
+                            tracing::trace!(
+                                rms = rms,
+                                threshold = threshold,
+                                "Voice activity started"
+                            );
+                        }
+                    } else if voice_active {
+                        silence_frames += 1;
+                        if silence_frames >= silence_debounce {
+                            voice_active = false;
+                            let _ = event_tx.send(VoiceWakeEvent::VoiceActivityEnd).await;
+                            tracing::trace!(rms = rms, "Voice activity ended");
+                        }
+                    }
+                }
+                Ok(None) => break,  // Channel closed (audio thread exited)
+                Err(_) => continue, // Timeout, keep polling
+            }
+        }
+
+        // Signal the audio thread to stop and wait for it
+        running.store(false, Ordering::Relaxed);
+        let _ = audio_handle.join();
 
         let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
     }

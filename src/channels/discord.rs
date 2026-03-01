@@ -81,6 +81,7 @@ struct HelloData {
 
 /// Message Create event.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct MessageCreate {
     id: String,
     content: String,
@@ -433,11 +434,10 @@ impl Channel for DiscordChannel {
                             }
 
                             // Guild filter
-                            if let Some(ref target_guild) = guild_id {
-                                if msg.guild_id.as_deref() != Some(target_guild.as_str()) {
+                            if let Some(ref target_guild) = guild_id
+                                && msg.guild_id.as_deref() != Some(target_guild.as_str()) {
                                     continue;
                                 }
-                            }
 
                             // Channel allow-list
                             if !allow_from.is_empty()

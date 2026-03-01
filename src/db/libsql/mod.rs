@@ -53,6 +53,8 @@ pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
 /// create their own connections per-operation.
 pub struct LibSqlBackend {
     db: Arc<LibSqlDatabase>,
+    /// Path to the database file (None for in-memory databases).
+    file_path: Option<std::path::PathBuf>,
 }
 
 impl LibSqlBackend {
@@ -70,7 +72,10 @@ impl LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open libSQL database: {}", e)))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            file_path: Some(path.to_path_buf()),
+        })
     }
 
     /// Create a new in-memory database (for testing).
@@ -82,7 +87,10 @@ impl LibSqlBackend {
                 DatabaseError::Pool(format!("Failed to create in-memory database: {}", e))
             })?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            file_path: None,
+        })
     }
 
     /// Create with Turso cloud sync (embedded replica).
@@ -102,7 +110,10 @@ impl LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open remote replica: {}", e)))?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            file_path: Some(path.to_path_buf()),
+        })
     }
 
     /// Get a shared reference to the underlying database handle.
@@ -294,6 +305,52 @@ impl Database for LibSqlBackend {
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
         Ok(())
     }
+
+    async fn snapshot(&self, dest: &std::path::Path) -> Result<u64, DatabaseError> {
+        let db_path = self.file_path.as_ref().ok_or_else(|| {
+            DatabaseError::Pool("Cannot snapshot an in-memory database".to_string())
+        })?;
+
+        // Flush WAL to main database file so the copy is self-contained.
+        let conn = self.connect().await?;
+        conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("WAL checkpoint failed: {}", e)))?;
+
+        // Ensure destination parent directory exists
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                DatabaseError::Pool(format!(
+                    "Failed to create snapshot directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+
+        // Copy the database file
+        let bytes = tokio::fs::copy(db_path, dest).await.map_err(|e| {
+            DatabaseError::Pool(format!(
+                "Failed to copy database {} → {}: {}",
+                db_path.display(),
+                dest.display(),
+                e
+            ))
+        })?;
+
+        tracing::info!(
+            src = %db_path.display(),
+            dest = %dest.display(),
+            bytes = bytes,
+            "Database snapshot created"
+        );
+
+        Ok(bytes)
+    }
+
+    fn db_path(&self) -> Option<&std::path::Path> {
+        self.file_path.as_deref()
+    }
 }
 
 // ==================== Row conversion helpers ====================
@@ -456,5 +513,64 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_creates_valid_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_snapshot.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Insert some data
+        let conn = backend.connect().await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id) VALUES (?1, ?2, ?3)",
+            libsql::params![id, "test_ch", "snapshot_user"],
+        )
+        .await
+        .unwrap();
+
+        // Take a snapshot
+        let snap_path = dir.path().join("snapshot.db");
+        let bytes = backend.snapshot(&snap_path).await.unwrap();
+        assert!(bytes > 0, "Snapshot should have non-zero size");
+        assert!(snap_path.exists(), "Snapshot file should exist");
+
+        // Open the snapshot and verify data survived
+        let snap_backend = LibSqlBackend::new_local(&snap_path).await.unwrap();
+        let snap_conn = snap_backend.connect().await.unwrap();
+        let mut rows = snap_conn
+            .query(
+                "SELECT COUNT(*) FROM conversations WHERE user_id = ?1",
+                libsql::params!["snapshot_user"],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let count: i64 = row.get(0).unwrap();
+        assert_eq!(count, 1, "Snapshot should contain the inserted row");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_in_memory_returns_error() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let snap_path = std::path::Path::new("/tmp/should_not_exist.db");
+        let result = backend.snapshot(snap_path).await;
+        assert!(result.is_err(), "In-memory DB snapshot should fail");
+    }
+
+    #[tokio::test]
+    async fn test_db_path_returns_correct_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_path.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        assert_eq!(backend.db_path(), Some(db_path.as_path()));
+
+        let mem_backend = LibSqlBackend::new_memory().await.unwrap();
+        assert_eq!(mem_backend.db_path(), None);
     }
 }

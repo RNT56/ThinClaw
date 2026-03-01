@@ -97,3 +97,19 @@ pub async fn import_settings(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(())
 }
+
+/// Reload secrets from the store into the config overlay.
+///
+/// Zero-downtime secret refresh: when a user updates an API key in Scrappy's
+/// UI, call this instead of stop→start. Re-reads all secrets from the store,
+/// updates the injected vars overlay, and the next LLM call picks up the new
+/// keys automatically.
+///
+/// Returns the number of secrets loaded.
+pub async fn refresh_secrets(
+    secrets: &dyn crate::secrets::SecretsStore,
+    user_id: &str,
+) -> ApiResult<usize> {
+    let count = crate::config::refresh_secrets(secrets, user_id).await;
+    Ok(count)
+}

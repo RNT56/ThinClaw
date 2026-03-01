@@ -25,9 +25,10 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     }
 
     // Fall back to thread-safe overlay (secrets injected from DB)
-    if let Some(val) = INJECTED_VARS.get().and_then(|map| map.get(key)) {
-        return Ok(Some(val.clone()));
-    }
+    if let Ok(guard) = INJECTED_VARS.read()
+        && let Some(val) = guard.get(key) {
+            return Ok(Some(val.clone()));
+        }
 
     Ok(None)
 }

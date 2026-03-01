@@ -19,6 +19,12 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolO
 /// Location/GPS tool.
 pub struct LocationTool;
 
+impl Default for LocationTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocationTool {
     pub fn new() -> Self {
         Self

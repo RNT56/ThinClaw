@@ -10,4 +10,4 @@ mod metrics;
 mod success;
 
 pub use metrics::{MetricsCollector, QualityMetrics};
-pub use success::{EvaluationResult, SuccessEvaluator};
+pub use success::{EvaluationResult, LlmEvaluator, RuleBasedEvaluator, SuccessEvaluator};

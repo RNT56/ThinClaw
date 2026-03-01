@@ -132,8 +132,8 @@ pub async fn get_history(
     };
 
     // Verify ownership
-    if thread_id.is_some() {
-        if let Some(store) = store {
+    if thread_id.is_some()
+        && let Some(store) = store {
             let owned = store
                 .conversation_belongs_to_user(tid, user_id)
                 .await
@@ -142,11 +142,10 @@ pub async fn get_history(
                 return Err(ApiError::SessionNotFound("Thread not found".into()));
             }
         }
-    }
 
     // Paginated DB query
-    if before_cursor.is_some() {
-        if let Some(store) = store {
+    if before_cursor.is_some()
+        && let Some(store) = store {
             let (messages, has_more) = store
                 .list_conversation_messages_paginated(tid, before_cursor, limit as i64)
                 .await
@@ -162,11 +161,10 @@ pub async fn get_history(
                 oldest_timestamp,
             });
         }
-    }
 
     // Try in-memory first
-    if let Some(thread) = sess.threads.get(&tid) {
-        if !thread.turns.is_empty() {
+    if let Some(thread) = sess.threads.get(&tid)
+        && !thread.turns.is_empty() {
             let turns: Vec<TurnInfo> = thread
                 .turns
                 .iter()
@@ -196,7 +194,6 @@ pub async fn get_history(
                 oldest_timestamp: None,
             });
         }
-    }
 
     // Fall back to DB
     if let Some(store) = store {

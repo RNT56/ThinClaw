@@ -58,11 +58,10 @@ fn is_url_allowed(raw_url: &str) -> Result<(), String> {
         }
     }
 
-    if let Some(port) = parsed.port() {
-        if BLOCKED_PORTS.contains(&port) {
+    if let Some(port) = parsed.port()
+        && BLOCKED_PORTS.contains(&port) {
             return Err(format!("Blocked port: {port}"));
         }
-    }
 
     Ok(())
 }
@@ -342,7 +341,7 @@ impl BrowserTool {
                 refs.insert(
                     label.clone(),
                     AXNodeRef {
-                        backend_node_id: node.backend_dom_node_id.clone(),
+                        backend_node_id: node.backend_dom_node_id,
                         role: role.to_string(),
                         name: name.to_string(),
                     },
@@ -455,7 +454,7 @@ impl BrowserTool {
 
         // Focus the element
         let focus_params = FocusParams::builder()
-            .backend_node_id(backend_node_id.clone())
+            .backend_node_id(backend_node_id)
             .build();
 
         state

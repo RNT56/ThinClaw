@@ -4,17 +4,17 @@
 //! speech-to-text, and sends the result to the agent as a chat message.
 //!
 //! Architecture:
-//! - Audio capture: `cpal` crate (or macOS `rec` CLI fallback)
+//! - Audio capture: `rec` (SoX) / `ffmpeg` CLI, or `cpal` (via `voice` feature)
 //! - Transcription backends:
-//!   - Whisper API (OpenAI) — cloud-based, high quality
-//!   - whisper-rs — local Whisper inference via whisper.cpp
-//!   - macOS Dictation — system speech recognition
+//!   - **WhisperApi** — OpenAI cloud API (requires OPENAI_API_KEY)
+//!   - **WhisperHttp** — local whisper sidecar (Scrappy's MLX whisper or whisper.cpp).
+//!     Default endpoint: `http://127.0.0.1:53757/v1/audio/transcriptions`
+//!   - **WhisperLocal** — whisper-rs via whisper.cpp (scaffold, requires model)
+//!   - **MacOsDictation** — system speech recognition (scaffold)
 //!
-//! This replaces `TalkCommands.swift` from the companion app.
-//!
-//! **Status: Scaffold** — Full API surface defined. Uses macOS `say`/`rec`
-//! CLI for audio and OpenAI Whisper API for transcription as a practical
-//! first implementation. Local whisper-rs integration deferred.
+//! In desktop mode (inside Scrappy), use `WhisperHttp` to call the local
+//! sidecar. In headless/cloud mode, use `WhisperApi`. The sidecar endpoint
+//! is OpenAI-compatible, so both backends use the same response format.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +84,14 @@ impl AudioFormat {
 pub enum TranscriptionBackend {
     /// OpenAI Whisper API (cloud).
     WhisperApi,
+    /// Local whisper sidecar via HTTP (Scrappy's MLX whisper or whisper.cpp).
+    /// Used in desktop mode when running inside Scrappy.
+    WhisperHttp {
+        /// Endpoint URL. Default: `http://127.0.0.1:53757/v1/audio/transcriptions`
+        endpoint: String,
+        /// Bearer token for authentication.
+        token: Option<String>,
+    },
     /// Local whisper.cpp via whisper-rs (requires model file).
     #[allow(dead_code)]
     WhisperLocal { model_path: String },
@@ -91,6 +99,24 @@ pub enum TranscriptionBackend {
     #[cfg(target_os = "macos")]
     #[allow(dead_code)]
     MacOsDictation,
+}
+
+impl TranscriptionBackend {
+    /// Create a WhisperHttp backend with the default Scrappy sidecar endpoint.
+    pub fn whisper_http_default() -> Self {
+        Self::WhisperHttp {
+            endpoint: "http://127.0.0.1:53757/v1/audio/transcriptions".to_string(),
+            token: None,
+        }
+    }
+
+    /// Create a WhisperHttp backend with a custom endpoint and optional token.
+    pub fn whisper_http(endpoint: impl Into<String>, token: Option<String>) -> Self {
+        Self::WhisperHttp {
+            endpoint: endpoint.into(),
+            token,
+        }
+    }
 }
 
 /// Events emitted by talk mode.
@@ -232,11 +258,10 @@ async fn record_audio(
         .output()
         .await;
 
-    if let Ok(output) = sox {
-        if output.status.success() {
+    if let Ok(output) = sox
+        && output.status.success() {
             return Ok(());
         }
-    }
 
     // Fallback to ffmpeg
     let ffmpeg = Command::new("ffmpeg")
@@ -406,8 +431,83 @@ async fn transcribe_whisper_api(
     Ok(text)
 }
 
+/// Transcribe audio via a local whisper HTTP sidecar.
+///
+/// Calls the OpenAI-compatible endpoint exposed by Scrappy's whisper
+/// sidecar (MLX whisper or whisper.cpp). The endpoint format is:
+/// - MLX: `http://127.0.0.1:53757/v1/audio/transcriptions`
+/// - whisper.cpp: `http://127.0.0.1:53757/inference`
+///
+/// Both return `{ "text": "..." }` in the response.
+async fn transcribe_whisper_http(
+    path: &std::path::Path,
+    endpoint: &str,
+    token: Option<&str>,
+    language: &str,
+) -> Result<String, ToolError> {
+    let client = reqwest::Client::new();
+
+    let file_bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Read audio file: {e}")))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio.wav")
+        .to_string();
+
+    let part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name(file_name)
+        .mime_str("audio/wav")
+        .unwrap();
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", "whisper-1")
+        .text("language", language.to_string());
+
+    let mut request = client.post(endpoint).multipart(form);
+
+    if let Some(tok) = token {
+        request = request.bearer_auth(tok);
+    }
+
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("Whisper HTTP sidecar: {e}")))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ToolError::ExternalService(format!(
+            "Whisper HTTP sidecar error ({}): {}",
+            endpoint, body
+        )));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ToolError::ExternalService(format!("Parse whisper response: {e}")))?;
+
+    let text = body
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(text)
+}
+
 /// Talk mode tool — record and transcribe voice input.
 pub struct TalkModeTool;
+
+impl Default for TalkModeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TalkModeTool {
     pub fn new() -> Self {
@@ -481,16 +581,23 @@ impl Tool for TalkModeTool {
         // Record audio
         record_audio(&path, duration, 16000).await?;
 
-        // Get API key from environment
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            ToolError::ExecutionFailed(
-                "No OpenAI API key found. Set OPENAI_API_KEY for Whisper transcription."
-                    .to_string(),
-            )
-        })?;
-
-        // Transcribe
-        let text = transcribe_whisper_api(&path, &api_key, language).await?;
+        // Transcribe using the configured backend
+        let text = if let Ok(whisper_url) = std::env::var("WHISPER_HTTP_ENDPOINT") {
+            // Desktop mode: use local whisper sidecar
+            let token = std::env::var("WHISPER_HTTP_TOKEN").ok();
+            transcribe_whisper_http(&path, &whisper_url, token.as_deref(), language).await?
+        } else {
+            // Cloud mode: use OpenAI Whisper API
+            let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+                ToolError::ExecutionFailed(
+                    "No OpenAI API key or WHISPER_HTTP_ENDPOINT found. \
+                     Set OPENAI_API_KEY for cloud Whisper or WHISPER_HTTP_ENDPOINT \
+                     for local sidecar transcription."
+                        .to_string(),
+                )
+            })?;
+            transcribe_whisper_api(&path, &api_key, language).await?
+        };
 
         // Clean up audio file
         let _ = tokio::fs::remove_file(&path).await;

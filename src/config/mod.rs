@@ -23,7 +23,7 @@ mod tunnel;
 mod wasm;
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, RwLock};
 
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -53,10 +53,14 @@ pub use self::wasm::WasmConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///
-/// Used by `inject_llm_keys_from_secrets()` to make API keys available to
-/// `optional_env()` without unsafe `set_var` calls. `optional_env()` checks
-/// real env vars first, then falls back to this overlay.
-static INJECTED_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// Used by `inject_llm_keys_from_secrets()` and `refresh_secrets()` to make
+/// API keys available to `optional_env()` without unsafe `set_var` calls.
+/// `optional_env()` checks real env vars first, then falls back to this overlay.
+///
+/// Uses `RwLock` (not `OnceLock`) so secrets can be updated at runtime via
+/// `refresh_secrets()` without requiring a full restart.
+static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
@@ -243,5 +247,63 @@ pub async fn inject_llm_keys_from_secrets(
         }
     }
 
-    let _ = INJECTED_VARS.set(injected);
+    update_injected_vars(injected);
+}
+
+/// Replace the injected vars overlay atomically.
+///
+/// Used by both initial injection and runtime refresh.
+fn update_injected_vars(new_vars: HashMap<String, String>) {
+    match INJECTED_VARS.write() {
+        Ok(mut guard) => {
+            *guard = new_vars;
+        }
+        Err(poisoned) => {
+            // Recover from a poisoned lock
+            let mut guard = poisoned.into_inner();
+            *guard = new_vars;
+        }
+    }
+}
+
+/// Reload secrets from the store and update the overlay.
+///
+/// This is the zero-downtime secret refresh API. When a user updates an API
+/// key in Scrappy's UI, Scrappy writes it to the SecretsStore and then calls
+/// this function. IronClaw re-reads all secrets, updates the injected vars
+/// overlay, and the next config resolution picks up the new keys.
+///
+/// Returns the number of secrets that were (re)loaded.
+pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id: &str) -> usize {
+    let mappings = [
+        ("llm_openai_api_key", "OPENAI_API_KEY"),
+        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_compatible_api_key", "LLM_API_KEY"),
+        ("llm_nearai_api_key", "NEARAI_API_KEY"),
+    ];
+
+    let mut injected = HashMap::new();
+
+    for (secret_name, env_var) in mappings {
+        // Skip if a real env var is set (env always wins)
+        match std::env::var(env_var) {
+            Ok(val) if !val.is_empty() => continue,
+            _ => {}
+        }
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
+            injected.insert(env_var.to_string(), decrypted.expose().to_string());
+            tracing::debug!(
+                "Refreshed secret '{}' for env var '{}'",
+                secret_name,
+                env_var
+            );
+        }
+    }
+
+    let count = injected.len();
+    update_injected_vars(injected);
+
+    tracing::info!("Secrets refreshed: {} key(s) updated in overlay", count);
+
+    count
 }

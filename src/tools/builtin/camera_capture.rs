@@ -20,6 +20,12 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolO
 /// Camera capture tool.
 pub struct CameraCaptureTool;
 
+impl Default for CameraCaptureTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CameraCaptureTool {
     pub fn new() -> Self {
         Self
@@ -61,11 +67,10 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
         .output()
         .await;
 
-    if let Ok(output) = imagesnap {
-        if output.status.success() && path.exists() {
+    if let Ok(output) = imagesnap
+        && output.status.success() && path.exists() {
             return Ok("imagesnap".to_string());
         }
-    }
 
     // Fallback to ffmpeg
     let ffmpeg = Command::new("ffmpeg")
@@ -86,11 +91,10 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
         .output()
         .await;
 
-    if let Ok(output) = ffmpeg {
-        if output.status.success() && path.exists() {
+    if let Ok(output) = ffmpeg
+        && output.status.success() && path.exists() {
             return Ok("ffmpeg".to_string());
         }
-    }
 
     Err(ToolError::ExecutionFailed(
         "No camera tool found. Install imagesnap (brew install imagesnap) or ffmpeg.".to_string(),

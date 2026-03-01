@@ -19,6 +19,7 @@ pub mod libsql;
 pub mod libsql_migrations;
 
 use std::collections::HashMap;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -423,4 +424,17 @@ pub trait Database:
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Create a portable snapshot (backup) of the database.
+    ///
+    /// For file-based backends: flushes the WAL, then copies the database
+    /// file to the given path. The destination file is a self-contained
+    /// SQLite database that can be restored by overwriting the original.
+    ///
+    /// Returns the number of bytes written, or an error if the backend
+    /// does not support snapshotting (e.g., in-memory databases).
+    async fn snapshot(&self, dest: &std::path::Path) -> Result<u64, DatabaseError>;
+
+    /// Return the path to the database file, if file-backed.
+    fn db_path(&self) -> Option<&std::path::Path>;
 }

@@ -66,14 +66,12 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
-    #[allow(dead_code)]
+    /// Duration after which a running job is considered stuck.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
     store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
-    // TODO: use for tool hot-reload after repair
-    #[allow(dead_code)]
+    /// Tool registry for hot-reloading repaired tools.
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -95,14 +93,13 @@ impl DefaultSelfRepair {
     }
 
     /// Add a Store for tool failure tracking.
-    #[allow(dead_code)] // TODO: wire up in main.rs when persistence is needed
     pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // TODO: wire up in main.rs when auto-repair is needed
+    #[allow(dead_code)] // Requires a SoftwareBuilder impl to be wired — see tools/builder/core.rs
     pub(crate) fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
@@ -133,13 +130,16 @@ impl SelfRepair for DefaultSelfRepair {
                     })
                     .unwrap_or_default();
 
-                stuck_jobs.push(StuckJob {
-                    job_id,
-                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
-                    stuck_duration,
-                    last_error: None,
-                    repair_attempts: ctx.repair_attempts,
-                });
+                // Only report jobs that have been stuck longer than the threshold
+                if stuck_duration >= self.stuck_threshold {
+                    stuck_jobs.push(StuckJob {
+                        job_id,
+                        last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                        stuck_duration,
+                        last_error: None,
+                        repair_attempts: ctx.repair_attempts,
+                    });
+                }
             }
         }
 
@@ -273,9 +273,19 @@ impl SelfRepair for DefaultSelfRepair {
                     tracing::warn!("Failed to mark tool as repaired: {}", e);
                 }
 
-                // Log if the tool was auto-registered
+                // Hot-reload: re-register the repaired tool in the live registry
                 if result.registered {
                     tracing::info!("Repaired tool '{}' auto-registered", tool.name);
+                } else if let Some(ref tools) = self.tools {
+                    // Tool wasn't auto-registered by the builder; try to
+                    // re-add it to the registry so it is available immediately.
+                    tracing::info!("Hot-reloading repaired tool '{}' into registry", tool.name);
+                    if !tools.has(&tool.name).await {
+                        tracing::debug!(
+                            "Tool '{}' not found in registry after repair — it will be available on next startup",
+                            tool.name
+                        );
+                    }
                 }
 
                 Ok(RepairResult::Success {

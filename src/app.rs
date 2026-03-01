@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::hardware_bridge::{SessionApprovals, ToolBridge};
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, SessionManager};
 use crate::safety::SafetyLayer;
@@ -51,6 +52,11 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    /// Hardware bridge for sensor access (camera, mic, screen).
+    /// Present when running inside a host (Scrappy) that provides sensor capture.
+    pub tool_bridge: Option<Arc<dyn ToolBridge>>,
+    /// Session-level sensor approvals (cleared on restart).
+    pub session_approvals: Arc<SessionApprovals>,
 }
 
 /// Options that control optional init phases.
@@ -70,6 +76,9 @@ pub struct AppBuilder {
     // Accumulated state
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+
+    // Hardware bridge for sensor access (injected by Scrappy)
+    tool_bridge: Option<Arc<dyn ToolBridge>>,
 
     // Backend-specific handles needed by secrets store
     #[cfg(feature = "postgres")]
@@ -99,6 +108,7 @@ impl AppBuilder {
             log_broadcaster,
             db: None,
             secrets_store: None,
+            tool_bridge: None,
             #[cfg(feature = "postgres")]
             pg_pool: None,
             #[cfg(feature = "libsql")]
@@ -113,6 +123,16 @@ impl AppBuilder {
     /// be injected into the config overlay.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Inject a hardware bridge for sensor access (camera, mic, screen).
+    ///
+    /// When set, `build_all()` will register bridged sensor tools in the
+    /// `ToolRegistry`. In desktop mode, Scrappy implements the `ToolBridge`
+    /// trait and passes it here at startup.
+    pub fn with_tool_bridge(mut self, bridge: Arc<dyn ToolBridge>) -> Self {
+        self.tool_bridge = Some(bridge);
         self
     }
 
@@ -758,6 +778,25 @@ impl AppBuilder {
             },
         ));
 
+        // Register hardware bridge tools if a bridge was injected
+        let session_approvals = Arc::new(SessionApprovals::new());
+        if let Some(ref bridge) = self.tool_bridge {
+            let bridged = crate::hardware_bridge::create_bridged_tools(
+                Arc::clone(bridge),
+                Arc::clone(&session_approvals),
+            );
+            let count = bridged.len();
+            for bt in bridged {
+                tracing::debug!(
+                    sensor = %bt.sensor(),
+                    action = %bt.action(),
+                    "Registering bridged sensor tool"
+                );
+                tools.register_sync(Arc::new(bt));
+            }
+            tracing::info!("Hardware bridge active: {} sensor tools registered", count);
+        }
+
         tracing::info!(
             "Tool registry initialized with {} total tools",
             tools.count()
@@ -785,6 +824,8 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            tool_bridge: self.tool_bridge,
+            session_approvals,
         })
     }
 }

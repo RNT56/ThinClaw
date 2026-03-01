@@ -242,7 +242,7 @@ impl TuiApp {
                     });
                 } else if self
                     .last_ctrl_c
-                    .map_or(false, |t| t.elapsed() < Duration::from_millis(1000))
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(1000))
                 {
                     return KeyAction::Exit;
                 } else {

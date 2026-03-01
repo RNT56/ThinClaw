@@ -968,13 +968,65 @@ pub async fn setup_wasm_channel(
         print_success(&format!("{} saved to database", secret_config.name));
     }
 
-    // TODO: Substitute secrets into the validation URL and make a
-    // GET request to verify the configured credentials actually work.
+    // Validate configured credentials by substituting secrets into the
+    // validation URL and making a GET request to verify they work.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        print_info(&format!(
-            "Validation endpoint configured: {} (validation not yet implemented)",
-            validation_endpoint
-        ));
+        let mut url = validation_endpoint.clone();
+
+        // Substitute secret placeholders: {{secret_name}} → actual value
+        for secret_config in &setup.required_secrets {
+            let placeholder = format!("{{{{{}}}}}", secret_config.name);
+            if url.contains(&placeholder) {
+                match secrets.get_secret(&secret_config.name).await {
+                    Ok(value) => {
+                        url = url.replace(&placeholder, value.expose_secret());
+                    }
+                    Err(_) => {
+                        // Secret not found — skip validation
+                        print_info(&format!(
+                            "Skipping validation: secret '{}' not available",
+                            secret_config.name
+                        ));
+                        url.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !url.is_empty() {
+            print_info("Validating credentials...");
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok();
+
+            if let Some(client) = client {
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        print_success("Credentials validated successfully");
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        print_error(&format!(
+                            "Credential validation failed (HTTP {}): {}",
+                            status,
+                            body.chars().take(200).collect::<String>()
+                        ));
+                        print_info(
+                            "The channel will still be configured, but credentials may be invalid.",
+                        );
+                    }
+                    Err(e) => {
+                        print_info(&format!(
+                            "Could not reach validation endpoint: {} (channel configured anyway)",
+                            e
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     print_success(&format!("{} channel configured", channel_name));

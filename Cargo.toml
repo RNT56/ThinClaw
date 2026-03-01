@@ -163,6 +163,12 @@ textwrap = "0.16.2"
 inquire = "0.9.4"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
+# QR code rendering for terminal pairing
+qrcode = "0.14"
+
+# Audio capture for voice wake word detection (headless mode only)
+cpal = { version = "0.15", optional = true }
+
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -209,6 +215,9 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+# Voice wake word detection — adds cpal for audio capture.
+# Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
+voice = ["dep:cpal"]
 
 [[test]]
 name = "html_to_markdown"

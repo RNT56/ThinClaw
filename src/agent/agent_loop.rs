@@ -263,11 +263,16 @@ impl Agent {
     /// The returned handle must be passed to `shutdown_background()` on exit.
     pub async fn start_background_tasks(&self) -> BackgroundTasksHandle {
         // ── Self-repair ─────────────────────────────────────────────────
-        let repair = Arc::new(DefaultSelfRepair::new(
+        let mut repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
-        ));
+        );
+        // Wire persistence for failure tracking when a database is available.
+        if let Some(ref store) = self.deps.store {
+            repair = repair.with_store(Arc::clone(store));
+        }
+        let repair = Arc::new(repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
         let repair_handle = tokio::spawn(async move {

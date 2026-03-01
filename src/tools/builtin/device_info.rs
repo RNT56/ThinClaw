@@ -16,6 +16,12 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput};
 /// Gathers system metrics without any external API calls or side effects.
 pub struct DeviceInfoTool;
 
+impl Default for DeviceInfoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeviceInfoTool {
     pub fn new() -> Self {
         Self

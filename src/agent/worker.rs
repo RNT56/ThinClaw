@@ -917,6 +917,52 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             JobState::Completed,
             Some("Job completed successfully".to_string()),
         );
+
+        // ── Post-completion evaluation (fire-and-forget) ────────────
+        let job_id = self.job_id;
+        let context_manager = self.context_manager().clone();
+        let store = self.store().cloned();
+        tokio::spawn(async move {
+            use crate::evaluation::SuccessEvaluator;
+            let eval_result: Result<_, Box<dyn std::error::Error + Send + Sync>> = async {
+                let job_ctx = context_manager.get_context(job_id).await?;
+                let memory = context_manager.get_memory(job_id).await?;
+                let evaluator = crate::evaluation::RuleBasedEvaluator::new();
+                Ok(evaluator.evaluate(&job_ctx, &memory.actions, None).await?)
+            }
+            .await;
+
+            match eval_result {
+                Ok(result) => {
+                    tracing::info!(
+                        job_id = %job_id,
+                        success = result.success,
+                        quality = result.quality_score,
+                        "Post-completion evaluation: {}",
+                        result.reasoning
+                    );
+
+                    // Persist evaluation result to DB if available
+                    if let Some(store) = store {
+                        let result_json = serde_json::to_value(&result).unwrap_or_default();
+                        if let Err(e) = store
+                            .set_setting("system", &format!("eval.job.{}", job_id), &result_json)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist evaluation for job {}: {}",
+                                job_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(job_id = %job_id, "Evaluation skipped: {}", e);
+                }
+            }
+        });
+
         Ok(())
     }
 

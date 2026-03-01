@@ -413,15 +413,15 @@ async fn webhook_handler(
 /// OAuth callback handler for extension authentication.
 ///
 /// Handles OAuth redirect callbacks at /oauth/callback?code=xxx&state=yyy.
-/// This is used when authenticating MCP servers or WASM tool OAuth flows
-/// via a tunnel URL (remote callback).
+/// Validates the `state` nonce against pending auth entries in the extension
+/// manager, then renders a success or error page for the user to close.
 #[allow(dead_code)]
 async fn oauth_callback_handler(
-    State(_state): State<RouterState>,
+    State(state): State<RouterState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let code = params.get("code").cloned().unwrap_or_default();
-    let _state = params.get("state").cloned().unwrap_or_default();
+    let oauth_state = params.get("state").cloned().unwrap_or_default();
 
     if code.is_empty() {
         let error = params
@@ -443,9 +443,33 @@ async fn oauth_callback_handler(
         );
     }
 
-    // TODO: In a future iteration, use the state nonce to look up the pending auth
-    // and complete the token exchange. For now, the OAuth flow uses local callbacks
-    // via authorize_mcp_server() which handles the full flow synchronously.
+    // Validate the state nonce against pending authentications
+    if !oauth_state.is_empty() {
+        if let Some(ref ext_mgr) = state.extension_manager {
+            let is_valid = ext_mgr.validate_pending_auth_nonce(&oauth_state).await;
+            if !is_valid {
+                tracing::warn!("OAuth callback: invalid or expired state nonce");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::response::Html(
+                        "<!DOCTYPE html><html><body style=\"font-family: sans-serif; \
+                         display: flex; justify-content: center; align-items: center; \
+                         height: 100vh; margin: 0; background: #191919; color: white;\">\
+                         <div style=\"text-align: center;\">\
+                         <h1>Authorization Failed</h1>\
+                         <p>Invalid or expired state nonce. Please retry authentication.</p>\
+                         </div></body></html>"
+                            .to_string(),
+                    ),
+                );
+            }
+            tracing::info!("OAuth callback: state nonce validated");
+        } else {
+            tracing::debug!(
+                "OAuth callback: extension manager not available, skipping nonce validation"
+            );
+        }
+    }
 
     (
         StatusCode::OK,

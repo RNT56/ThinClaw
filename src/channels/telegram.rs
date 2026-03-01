@@ -49,6 +49,7 @@ struct Update {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields populated by serde deserialization
 struct TgMessage {
     message_id: i64,
     from: Option<TgUser>,

@@ -3,6 +3,20 @@
 //! Documents are split into overlapping chunks for better search recall.
 //! The overlap ensures context is preserved across chunk boundaries.
 
+/// Chunking strategy to use when splitting documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+pub enum ChunkingStrategy {
+    /// Fixed-size word-count chunks with overlap (original algorithm).
+    #[default]
+    Fixed,
+    /// Paragraph-aware chunking that preserves semantic boundaries.
+    /// Paragraphs separated by double-newlines are kept together when
+    /// they fit within the chunk size limit.
+    Paragraph,
+}
+
+
 /// Configuration for document chunking.
 #[derive(Debug, Clone)]
 pub struct ChunkConfig {
@@ -15,6 +29,9 @@ pub struct ChunkConfig {
     /// Minimum chunk size (don't create tiny trailing chunks).
     /// Default: 50 words.
     pub min_chunk_size: usize,
+    /// Chunking strategy.
+    /// Default: Fixed (word-count-based splitting).
+    pub strategy: ChunkingStrategy,
 }
 
 impl Default for ChunkConfig {
@@ -23,6 +40,7 @@ impl Default for ChunkConfig {
             chunk_size: 800,
             overlap_percent: 0.15,
             min_chunk_size: 50,
+            strategy: ChunkingStrategy::default(),
         }
     }
 }
@@ -37,6 +55,12 @@ impl ChunkConfig {
     /// Create a config with a specific overlap percentage.
     pub fn with_overlap(mut self, percent: f32) -> Self {
         self.overlap_percent = percent.clamp(0.0, 0.5);
+        self
+    }
+
+    /// Set the chunking strategy.
+    pub fn with_strategy(mut self, strategy: ChunkingStrategy) -> Self {
+        self.strategy = strategy;
         self
     }
 
@@ -113,10 +137,20 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
     chunks
 }
 
+/// Chunk content using the configured strategy.
+///
+/// Dispatches to `chunk_document` (Fixed) or `chunk_by_paragraphs` (Paragraph)
+/// based on `config.strategy`.
+pub fn chunk(content: &str, config: ChunkConfig) -> Vec<String> {
+    match config.strategy {
+        ChunkingStrategy::Fixed => chunk_document(content, config),
+        ChunkingStrategy::Paragraph => chunk_by_paragraphs(content, config),
+    }
+}
+
 /// Split content by paragraphs first, then chunk.
 ///
 /// This is better for preserving semantic boundaries.
-#[allow(dead_code)] // Alternative chunking strategy for paragraph-aware indexing
 pub fn chunk_by_paragraphs(content: &str, config: ChunkConfig) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -223,6 +257,7 @@ mod tests {
             chunk_size: 10,
             overlap_percent: 0.2, // 2 word overlap
             min_chunk_size: 3,    // Low threshold for test
+            ..Default::default()
         };
 
         // 20 words
@@ -275,6 +310,7 @@ mod tests {
             chunk_size: 10,
             overlap_percent: 0.15,
             min_chunk_size: 3, // Low threshold for test
+            ..Default::default()
         };
 
         // Create a paragraph with 30 words
@@ -302,6 +338,7 @@ mod tests {
             chunk_size: 10,
             overlap_percent: 0.0,
             min_chunk_size: 5,
+            ..Default::default()
         };
 
         // 12 words: should create one chunk of 10, and merge the remaining 2 with it

@@ -61,6 +61,17 @@ impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
     }
+
+    async fn snapshot(&self, _dest: &std::path::Path) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "Snapshotting is not supported for PostgreSQL backends. Use pg_dump instead."
+                .to_string(),
+        ))
+    }
+
+    fn db_path(&self) -> Option<&std::path::Path> {
+        None // PostgreSQL is not file-backed
+    }
 }
 
 // ==================== ConversationStore ====================

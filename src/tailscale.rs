@@ -128,7 +128,7 @@ impl TailscaleDiscovery {
         let peers = status.peer.unwrap_or_default();
         let mut orchestrators = Vec::new();
 
-        for (_key, peer) in &peers {
+        for peer in peers.values() {
             let online = peer.online.unwrap_or(false);
             if !online {
                 continue;

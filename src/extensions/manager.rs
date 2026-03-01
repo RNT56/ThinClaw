@@ -37,6 +37,8 @@ use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 struct PendingAuth {
     _name: String,
     _kind: ExtensionKind,
+    /// Random state nonce included in the OAuth authorization URL.
+    state_nonce: String,
     created_at: std::time::Instant,
 }
 
@@ -993,7 +995,7 @@ impl ExtensionManager {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used by upcoming hot-activation flow
+    #[allow(dead_code)] // Reserved: install bundled channels via ExtensionManager (currently done via SetupWizard)
     async fn install_bundled_channel_from_artifacts(
         &self,
         name: &str,
@@ -1253,12 +1255,16 @@ impl ExtensionManager {
             &std::collections::HashMap::new(),
         );
 
+        // Generate a state nonce for CSRF protection
+        let state_nonce = uuid::Uuid::new_v4().to_string();
+
         // Store pending auth for later callback handling
         self.pending_auth.write().await.insert(
             name.to_string(),
             PendingAuth {
                 _name: name.to_string(),
                 _kind: ExtensionKind::McpServer,
+                state_nonce: state_nonce.clone(),
                 created_at: std::time::Instant::now(),
             },
         );
@@ -2082,6 +2088,16 @@ impl ExtensionManager {
     async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
         pending.retain(|_, auth| auth.created_at.elapsed() < std::time::Duration::from_secs(300));
+    }
+
+    /// Validate an OAuth state nonce against pending authentications.
+    ///
+    /// Returns true if the nonce matches any pending auth entry (and the entry
+    /// hasn't expired). This prevents CSRF attacks on the OAuth callback.
+    pub async fn validate_pending_auth_nonce(&self, nonce: &str) -> bool {
+        self.cleanup_expired_auths().await;
+        let pending = self.pending_auth.read().await;
+        pending.values().any(|auth| auth.state_nonce == nonce)
     }
 
     /// Get the setup schema for an extension (secret fields and their status).

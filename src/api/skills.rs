@@ -75,6 +75,10 @@ pub async fn search_skills(
 }
 
 /// Install a skill from content.
+///
+/// The write lock is held across `.await` because `SkillRegistry::install_skill`
+/// requires `&mut self`. This is acceptable for an infrequent admin operation.
+#[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
 pub async fn install_skill(
     skill_registry: &std::sync::RwLock<SkillRegistry>,
     content: &str,
@@ -87,6 +91,7 @@ pub async fn install_skill(
 }
 
 /// Remove a skill by name.
+#[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
 pub async fn remove_skill(
     skill_registry: &std::sync::RwLock<SkillRegistry>,
     name: &str,

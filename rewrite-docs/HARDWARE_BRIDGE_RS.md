@@ -4,7 +4,7 @@ When the Rust Orchestrator is deployed remotely (headless VPS or Mac Mini), it d
 
 The Hardware Bridge is an opt-in system that allows the Remote Orchestrator to request local sensor data via the existing WebSocket connection, with explicit user approval for every request type.
 
-> **Implementation Status (2026-03-01):** Local tools for all three sensors are **complete** (`tools/builtin/screen_capture.rs`, `tools/builtin/camera_capture.rs`, `src/talk_mode.rs`). The remote RPC forwarding bridge (sending requests over WebSocket to the Tauri client) is **scaffolded** in the WS message types but not yet wired end-to-end. For local-mode usage, the tools work directly without the bridge.
+> **Implementation Status (2026-03-01):** The WS RPC design below is the **original specification** for remote-mode usage. For **desktop mode** (IronClaw running in-process inside Scrappy), the architecture has been simplified to an internal Rust trait — see `src/hardware_bridge.rs` which implements `ToolBridge`, `BridgedTool`, and `SessionApprovals`. The WS RPC approach remains valid for future remote orchestrator scenarios but is not currently wired.
 
 ---
 

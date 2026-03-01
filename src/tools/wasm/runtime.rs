@@ -264,27 +264,80 @@ impl WasmToolRuntime {
 
 /// Extract tool description from a compiled component.
 ///
-/// In a full implementation, this would use WIT bindgen to call the description() export.
-/// For now, we return a placeholder since we can't easily introspect without more setup.
+/// Uses component type introspection to detect the `near:agent/tool` export
+/// interface and its `description` function. The actual value cannot be
+/// extracted without full instantiation (which requires host function bindings),
+/// so we return a placeholder. The real description is sourced from:
+/// 1. The capabilities file's `description` field (first priority)
+/// 2. The `WasmToolWrapper::with_description()` override
+/// 3. The bindgen-generated instance during execution
 fn extract_tool_description(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
+    engine: &Engine,
+    component: &wasmtime::component::Component,
 ) -> Result<String, WasmError> {
-    // TODO: Use WIT bindgen to properly extract description
-    // This requires instantiating with a linker, which needs host functions.
-    // For now, tools should have their description set externally.
-    Ok("WASM sandboxed tool".to_string())
+    let component_type = component.component_type();
+    let exports: Vec<(String, String)> = component_type
+        .exports(engine)
+        .map(|(name, ty)| {
+            let kind = match ty {
+                wasmtime::component::types::ComponentItem::ComponentFunc(_) => "func",
+                wasmtime::component::types::ComponentItem::CoreFunc(_) => "core-func",
+                wasmtime::component::types::ComponentItem::Module(_) => "module",
+                wasmtime::component::types::ComponentItem::Component(_) => "component",
+                wasmtime::component::types::ComponentItem::ComponentInstance(_) => "instance",
+                wasmtime::component::types::ComponentItem::Type(_) => "type",
+                wasmtime::component::types::ComponentItem::Resource(_) => "resource",
+            };
+            (name.to_string(), kind.to_string())
+        })
+        .collect();
+
+    // Check for the expected near:agent/tool interface
+    let has_tool_interface = exports
+        .iter()
+        .any(|(name, kind)| kind == "instance" && name.contains("tool"));
+
+    if has_tool_interface {
+        tracing::debug!(
+            exports = ?exports.iter().map(|(n, k)| format!("{}:{}", n, k)).collect::<Vec<_>>(),
+            "WASM component exports near:agent/tool interface"
+        );
+        Ok("WASM sandboxed tool (WIT-compliant)".to_string())
+    } else if exports.is_empty() {
+        Ok("WASM sandboxed tool (no exports detected)".to_string())
+    } else {
+        let export_names: Vec<&str> = exports.iter().map(|(n, _)| n.as_str()).collect();
+        Ok(format!(
+            "WASM sandboxed tool (exports: {})",
+            export_names.join(", ")
+        ))
+    }
 }
 
 /// Extract tool schema from a compiled component.
 ///
-/// In a full implementation, this would use WIT bindgen to call the schema() export.
+/// Uses component type introspection to detect schema-related exports.
+/// Falls back to an open schema that accepts any JSON object.
+/// The actual schema is extracted at first execution via WIT bindgen
+/// or overridden via `WasmToolWrapper::with_schema()`.
 fn extract_tool_schema(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
+    engine: &Engine,
+    component: &wasmtime::component::Component,
 ) -> Result<serde_json::Value, WasmError> {
-    // TODO: Use WIT bindgen to properly extract schema
-    // For now, return a minimal schema that accepts any object.
+    let component_type = component.component_type();
+    let has_tool_interface = component_type
+        .exports(engine)
+        .any(|(name, _)| name.contains("tool"));
+
+    if has_tool_interface {
+        tracing::debug!(
+            "WASM component has tool interface — schema will be extracted at execution time"
+        );
+    }
+
+    // Default: accept any JSON object.
+    // The real schema is extracted by calling the WIT `schema()` export
+    // during the first execution via WasmToolWrapper.
     Ok(serde_json::json!({
         "type": "object",
         "properties": {},

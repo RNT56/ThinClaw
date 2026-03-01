@@ -83,6 +83,7 @@ pub mod tracing_fmt;
 // NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`
 // has a hard dependency on `crate::tunnel::TunnelProviderConfig`. Gating
 // requires first extracting tunnel data types into `config/` — deferred.
+pub mod hardware_bridge;
 pub mod tunnel;
 pub mod update_checker;
 pub mod util;

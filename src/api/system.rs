@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::app::AppComponents;
 use crate::llm::LlmProvider;
 
-use super::error::ApiResult;
+use super::error::{ApiError, ApiResult};
 
 /// Snapshot of the engine's current state.
 #[derive(Debug, Clone, Serialize)]
@@ -69,4 +69,37 @@ pub fn list_models(
     }
 
     Ok(models)
+}
+
+/// Result of a database snapshot operation.
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotResult {
+    /// Number of bytes written to the snapshot file.
+    pub bytes_written: u64,
+    /// Path where the snapshot was saved.
+    pub path: String,
+}
+
+/// Create a portable snapshot of IronClaw's database.
+///
+/// This is used by Scrappy's cloud migration engine to include
+/// ironclaw.db in cross-device sync. The snapshot is a self-contained
+/// SQLite file (WAL is flushed before copy).
+///
+/// # Arguments
+/// * `db` - The database instance to snapshot
+/// * `dest` - Destination path for the snapshot file
+pub async fn snapshot_database(
+    db: &dyn crate::db::Database,
+    dest: &std::path::Path,
+) -> ApiResult<SnapshotResult> {
+    let bytes = db
+        .snapshot(dest)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database snapshot failed: {}", e)))?;
+
+    Ok(SnapshotResult {
+        bytes_written: bytes,
+        path: dest.display().to_string(),
+    })
 }

@@ -53,9 +53,9 @@ impl PairingInfo {
         let params: std::collections::HashMap<String, String> = url
             .split('&')
             .filter_map(|pair| {
-                let mut parts = pair.splitn(2, '=');
-                let key = parts.next()?;
-                let value = parts.next()?;
+                let (key, value) = pair.split_once('=')?;
+                
+                
                 Some((key.to_string(), value.to_string()))
             })
             .collect();
@@ -87,12 +87,8 @@ impl PairingInfo {
 
 /// Generate a pairing token (cryptographically random, URL-safe).
 pub fn generate_pairing_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     let bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
-    // URL-safe base64 encoding without padding
-    let encoded = base64_encode(&bytes);
-    encoded
+    base64_encode(&bytes)
 }
 
 /// Simple base64 encoding (URL-safe, no padding).
@@ -119,21 +115,72 @@ fn base64_encode(data: &[u8]) -> String {
 
 /// Generate a QR code as a string of Unicode block characters for terminal display.
 ///
-/// Uses a simple QR-like format. For production, integrate a proper QR library
-/// like `qrcode`. This is a placeholder that shows the pairing URL as text.
+/// Uses the `qrcode` crate to produce a real scannable QR matrix. Two QR rows
+/// are packed per terminal line using Unicode half-block characters (▀, ▄, █, ' ')
+/// for a compact display.
 pub fn render_qr_terminal(data: &str) -> String {
-    // For now, create a framed display of the pairing URL.
-    // A proper QR code library (qrcode, qr2term) would generate
-    // the actual QR matrix here.
-    let width = data.len().max(40) + 4;
-    let border = "█".repeat(width);
-    let padding = format!("█ {:width$} █", "", width = width - 4);
-    let content = format!("█ {:^width$} █", data, width = width - 4);
+    use qrcode::QrCode;
+
+    let code = match QrCode::new(data) {
+        Ok(c) => c,
+        Err(e) => {
+            // Fall back to text display if QR generation fails
+            return format!(
+                "\n  QR code generation failed: {}\n\n  \
+                 Manually enter this URL:\n    {}\n",
+                e, data
+            );
+        }
+    };
+
+    let matrix = code.to_colors();
+    let width = code.width();
+
+    // Build the QR image with a quiet-zone border (2 modules on each side).
+    let quiet = 2;
+    let total_w = width + quiet * 2;
+
+    // Helper: is the module at (row, col) dark?  Quiet zone modules are white.
+    let is_dark = |row: i32, col: i32| -> bool {
+        let r = row - quiet as i32;
+        let c = col - quiet as i32;
+        if r < 0 || c < 0 || r >= width as i32 || c >= width as i32 {
+            return false; // quiet zone → white
+        }
+        matrix[r as usize * width + c as usize] == qrcode::Color::Dark
+    };
+
+    // Render two rows per terminal line using Unicode half-blocks:
+    //   top=dark, bot=dark  → '█'  (full block)
+    //   top=dark, bot=light → '▀'  (upper half)
+    //   top=light, bot=dark → '▄'  (lower half)
+    //   top=light, bot=light → ' ' (space)
+    let total_h = total_w + (total_w % 2); // pad to even height
+    let mut lines = Vec::new();
+    let mut row = 0i32;
+    while row < total_h as i32 {
+        let mut line = String::with_capacity(total_w + 2);
+        line.push(' '); // left margin
+        for col in 0..total_w as i32 {
+            let top = is_dark(row, col);
+            let bot = is_dark(row + 1, col);
+            line.push(match (top, bot) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        lines.push(line);
+        row += 2;
+    }
+
+    let qr_display = lines.join("\n");
 
     format!(
-        "\n{border}\n{padding}\n{content}\n{padding}\n{border}\n\n\
-         Scan the QR code above with your IronClaw companion app.\n\
-         Or manually enter this URL:\n  {data}\n"
+        "\n{qr_display}\n\n  \
+         Scan the QR code above with your IronClaw companion app.\n  \
+         Or manually enter this URL:\n    {data}\n"
     )
 }
 

@@ -1,14 +1,15 @@
 # ThinClaw Tauri App — Integration Specification
 
-> **Date:** 2026-02-27 (final 2026-02-28) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
+> **Date:** 2026-02-27 (final 2026-03-01) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
 > **Architecture:** Hybrid API — spawn-and-return for agent turns, direct for queries
 > **Approach:** IronClaw as library crate, refactored to expose public API surface
+> **Companion doc:** `documentation/latest/ironclaw_library_roadmap.md` — IronClaw library-side roadmap
 
 ---
 
 ## Implementation Progress
 
-> Last updated: 2026-03-01 — **All phases complete. Zero warnings, zero errors.**
+> Last updated: 2026-03-01 13:10 CET — **All 15 phases complete. Zero warnings, zero errors.** Post-integration work (InferenceRouter, Cloud Model Discovery, Cloud Storage A1–A3) also complete.
 
 | Phase | Status | Key Outcome |
 |---|---|---|
@@ -25,12 +26,16 @@
 | **Phase 9**: Doc & Script Cleanup | ✅ Complete | Removed all `openclaw-engine` refs from `setup.md`, `package.json`, `generate_tauri_overrides.sh`. Updated `TODO.md` with IronClaw integration section. |
 | **Phase 10**: Auth-Profiles Cleanup | ✅ Complete | Removed ~292 LOC of dead `auth-profiles.json`/`agent.json`/`models.json` generation from `write_config()` in `engine.rs`. These were consumed by the deleted Node.js engine; IronClaw uses `SecretsStore`. Updated stale comments in `keys.rs` (6 locations) and `secret_store.rs`. |
 | **Phase 11**: Patch Warnings | ✅ Complete | Fixed 5 `mismatched_lifetime_syntaxes` warnings in `libsql-0.6.0` patch by adding `<'_>` to `Column` return types across `statement.rs`, `local/statement.rs`, `local/impls.rs`, `replication/connection.rs`. Build is now **fully warning-free**. |
+| **Phase 12**: InferenceRouter | ✅ Complete | 29-file `inference/` module: 5 backend traits (Chat, Embedding, TTS, STT, Diffusion), `InferenceRouter` as Tauri state, 14-provider endpoint registry, 24 backend implementations (local + cloud). 2 Tauri commands (`get_inference_backends`, `update_inference_backend`). `UserConfig` extended with 6 per-modality fields. Chat backends fully wired to `UnifiedProvider`. `resolve_provider()` refactored: removed `OpenClawManager` dependency, uses `PROVIDER_ENDPOINTS` for all cloud providers. Router `reconfigure()` eagerly constructs cloud backends from API keys. |
+| **Phase 13**: RAG + UI Integration | ✅ Complete | **RAG embedding:** `ingest_document()` + `retrieve_context_internal()` now prioritize `InferenceRouter` embedding backend, bypassing sidecar for cloud users. All 4 call sites updated. **Model library:** Added 15 cloud model entries (Mistral, xAI, Together, Venice, Cohere, Moonshot, MiniMax, NVIDIA, Xiaomi). **SecretsTab:** Added Cohere + Voyage AI API key cards. **Dimension guard:** `reconfigure()` returns `ReconfigureResult` with old/new dims, logs ⚠️ on mismatch. All unknown-backend arms fixed to not early-return. |
+| **Phase 14**: Inference Mode UI | ✅ Complete | **InferenceModeTab.tsx:** New settings page (5 modalities, backend switcher, Local/Cloud badges). Lazy-loaded via `Suspense`. **Sidebar:** `'inference-mode'` page + `Sparkles` icon. **ModelSelector:** Local/Cloud badge in chat button (`Cloud`/`Monitor` icons), extended 5→14 provider detection via `resolveProvider`+`hasKeyForProvider` helpers. **ImagineGeneration:** Local/Cloud badges on provider buttons + label. **ModelBrowser:** `isCloudConfigured`/`hasAnyCloud`/badges/`Select Brain` all extended to 14 providers via unified `providerMap`. Unified model list sorting: local first, cloud grouped at bottom. **CloudBrainConfigModal:** Verified 15-provider `PROVIDER_MODELS` + `PROVIDER_DISPLAY_NAMES` already up-to-date. |
+| **Phase 15**: Cross-Modal Consistency | ✅ Complete | **SecretsTab:** Added 4 new provider cards (Deepgram STT, ElevenLabs TTS, Stability AI diffusion, fal.ai diffusion) in new "Speech & Image Generation" section. **Keychain:** 6 new slugs (cohere, voyage, deepgram, elevenlabs, stability, fal). **SecretStore:** 15 convenience accessors for all extended providers. **OpenClawConfig/Identity:** key+granted fields for 6 new providers through full lifecycle (constructor, toggle, update, get, save, zeroize Drop). **OpenClawStatus:** 12 new has_*/granted fields wired through gateway.rs. **engine.rs:** `is_provider_granted` extended with 6 new providers. **UserConfig:** Already had all per-modality backend fields (chat, embedding, tts, stt, diffusion + inference_models). |
 
 ### Completion Summary
 
 | Metric | Value |
 |---|---|
-| Total phases | 11 (all ✅) |
+| Total phases | 15 (all ✅) |
 | Dead code removed | ~2,458 LOC |
 | Commands migrated | 66 (WS RPC → direct API) |
 | Build warnings | **0** (including libsql patch) |
@@ -363,16 +368,11 @@ pub async fn send_message(
     }
 
     // 2. Spawn the agent turn — DO NOT AWAIT
-    //    Response, tool cards, streaming all arrive as events
-    //    through TauriChannel::respond() and send_status()
     let agent_clone = Arc::clone(agent);
     let session_key_owned = session_key.to_string();
     tokio::spawn(async move {
         if let Err(e) = agent_clone.handle_message_external(&incoming).await {
             tracing::error!("Agent turn failed: {}", e);
-            // Emit error through channel infrastructure so the UI
-            // receives it as UiEvent::Error (not just a log line).
-            // Without this, a failed turn leaves an infinite spinner.
             agent_clone.channels.send_status_all(
                 StatusUpdate::Error {
                     message: e.to_string(),
@@ -391,10 +391,6 @@ pub async fn send_message(
 }
 
 /// Resolve a tool approval request.
-///
-/// Spawns the approval processing as a background task (the resumed
-/// agent turn may involve further LLM calls and tool executions).
-/// Returns immediately.
 pub async fn resolve_approval(
     agent: &Arc<Agent>,
     session_key: &str,
@@ -412,7 +408,6 @@ pub async fn resolve_approval(
     let msg = IncomingMessage::new("tauri", "local_user", content)
         .with_thread(session_key);
 
-    // Spawn — approval may resume a multi-step tool chain
     let agent_clone = Arc::clone(agent);
     let session_key_owned = session_key.to_string();
     tokio::spawn(async move {
@@ -432,17 +427,10 @@ pub async fn resolve_approval(
 }
 
 /// Abort a running chat turn.
-///
-/// Uses `Agent::cancel_turn()` for direct cancellation — skips the
-/// full message pipeline (hooks, submission parsing, session resolution).
-/// Just locks the session and sets the thread's interrupt flag.
-/// Returns immediately; the running turn stops at its next yield point.
 pub async fn abort(
     agent: &Arc<Agent>,
     session_key: &str,
 ) -> Result<(), ApiError> {
-    // Direct cancellation — no hook overhead, no message parsing.
-    // Internally: session.lock() → thread.interrupt() → done.
     agent.cancel_turn(session_key).await?;
     Ok(())
 }
@@ -489,35 +477,19 @@ pub async fn create_session(
 // NEW: ironclaw/src/api/memory.rs
 
 /// Read a workspace file (SOUL.md, MEMORY.md, BOOTSTRAP.md, etc.)
-pub async fn get_file(
-    workspace: &Workspace,
-    path: &str,
-) -> Result<String, ApiError> { ... }
+pub async fn get_file(workspace: &Workspace, path: &str) -> Result<String, ApiError> { ... }
 
 /// Write a workspace file.
-pub async fn write_file(
-    workspace: &Workspace,
-    path: &str,
-    content: &str,
-) -> Result<(), ApiError> { ... }
+pub async fn write_file(workspace: &Workspace, path: &str, content: &str) -> Result<(), ApiError> { ... }
 
 /// List all files in the workspace.
-pub async fn list_files(
-    workspace: &Workspace,
-) -> Result<Vec<FileEntry>, ApiError> { ... }
+pub async fn list_files(workspace: &Workspace) -> Result<Vec<FileEntry>, ApiError> { ... }
 
 /// Clear memory/identity/all.
-pub async fn clear(
-    workspace: &Workspace,
-    target: ClearTarget, // "memory" | "identity" | "all"
-) -> Result<(), ApiError> { ... }
+pub async fn clear(workspace: &Workspace, target: ClearTarget) -> Result<(), ApiError> { ... }
 
 /// Search workspace files by content.
-pub async fn search(
-    workspace: &Workspace,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchResult>, ApiError> { ... }
+pub async fn search(workspace: &Workspace, query: &str, limit: usize) -> Result<Vec<SearchResult>, ApiError> { ... }
 ```
 
 #### `api/system.rs` — Status & Diagnostics
@@ -526,282 +498,73 @@ pub async fn search(
 // NEW: ironclaw/src/api/system.rs
 
 /// Engine status (maps to Scrappy's OpenClawStatus fields).
-pub fn get_status(components: &AppComponents) -> EngineStatus {
-    EngineStatus {
-        engine_running: true,
-        setup_completed: components.workspace.is_some(),
-        tool_count: components.tools.count(),
-        active_extensions: components.extension_manager
-            .as_ref().map(|m| m.active_count()).unwrap_or(0),
-        model_name: components.llm.active_model_name(),
-        db_connected: components.db.is_some(),
-        // ... etc
-    }
-}
+pub fn get_status(components: &AppComponents) -> EngineStatus { ... }
 
 /// Health check.
 pub fn health_check() -> HealthStatus { ... }
 
 /// List available models from the LLM provider.
-pub async fn list_models(
-    llm: &dyn LlmProvider,
-) -> Result<Vec<ModelInfo>, ApiError> { ... }
+pub async fn list_models(llm: &dyn LlmProvider) -> Result<Vec<ModelInfo>, ApiError> { ... }
 
 /// Tail recent logs.
-pub fn tail_logs(
-    broadcaster: &LogBroadcaster,
-    limit: usize,
-) -> Vec<LogEntry> { ... }
+pub fn tail_logs(broadcaster: &LogBroadcaster, limit: usize) -> Vec<LogEntry> { ... }
 ```
 
 ### 2.2 Make Agent Methods Public
 
-The `Agent` struct needs these changes:
-
 ```rust
-// In agent/agent_loop.rs — changes to existing code:
-
 impl Agent {
     // CHANGE: pub(super) → pub
-    // This is the key method that Scrappy calls through ironclaw::api
-    pub async fn handle_message_external(
-        &self,
-        message: &IncomingMessage,
-    ) -> Result<Option<String>, Error> {
-        // Delegates to existing handle_message() which does:
-        // 1. Parse submission
-        // 2. Run inbound hooks
-        // 3. Hydrate thread from DB
-        // 4. Resolve session/thread
-        // 5. Process based on submission type
-        // 6. Run outbound hooks
-        // 7. Return response
-        self.handle_message(message).await
-    }
+    pub async fn handle_message_external(&self, message: &IncomingMessage) -> Result<Option<String>, Error> { ... }
 
     /// Inject a message into history without triggering a turn.
-    /// Used for boot sequences, context updates, silent system messages.
-    pub async fn inject_context(
-        &self,
-        message: &IncomingMessage,
-    ) -> Result<(), Error> {
-        let (session, thread_id) = self.session_manager
-            .resolve_thread(&message.user_id, &message.channel, message.thread_id.as_deref())
-            .await;
-        self.persist_user_message(thread_id, &message.user_id, &message.content).await;
-        Ok(())
-    }
+    pub async fn inject_context(&self, message: &IncomingMessage) -> Result<(), Error> { ... }
 
     /// Cancel a running turn directly — bypasses the message pipeline.
-    ///
-    /// This is faster than routing `/interrupt` through handle_message_external()
-    /// because it skips hook chains, submission parsing, and session resolution.
-    /// It directly locks the session and sets the thread's cancellation flag.
-    ///
-    /// Internally calls process_interrupt() which does:
-    ///   session.lock() → thread.interrupt() → done
-    pub async fn cancel_turn(
-        &self,
-        session_key: &str,
-    ) -> Result<(), Error> {
-        let (session, thread_id) = self.session_manager
-            .resolve_thread("local_user", "tauri", Some(session_key))
-            .await;
-        self.process_interrupt(session, thread_id).await?;
-        Ok(())
-    }
+    pub async fn cancel_turn(&self, session_key: &str) -> Result<(), Error> { ... }
 }
 ```
 
 ### 2.3 Separate Background Tasks from `Agent::run()`
 
-Currently `Agent::run()` bundles message processing AND background task management
-(heartbeat, self-repair, cron, session pruning) into one blocking function.
-
-**Refactor into two methods:**
-
 ```rust
 impl Agent {
     /// Start background tasks (heartbeat, self-repair, cron, pruning).
-    /// Returns a handle that can be used to shut them down.
-    pub fn start_background_tasks(&self) -> BackgroundTasksHandle {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        // Spawn self-repair (lines 228-307 of current run())
-        let repair_handle = { /* ... existing code ... */ };
-
-        // Spawn session pruning (lines 310-319)
-        let pruning_handle = { /* ... existing code ... */ };
-
-        // Spawn heartbeat if enabled (lines 322-389)
-        let heartbeat_handle = { /* ... existing code ... */ };
-
-        // Spawn routine engine if enabled (lines 392-466)
-        let routine_handle = { /* ... existing code ... */ };
-
-        BackgroundTasksHandle {
-            shutdown_tx,
-            handles: vec![repair_handle, pruning_handle, /* ... */],
-        }
-    }
+    pub fn start_background_tasks(&self) -> BackgroundTasksHandle { ... }
 
     /// Gracefully stop all background tasks.
-    /// Called when the Tauri window closes or app quits.
-    pub async fn shutdown(&self, handle: BackgroundTasksHandle) {
-        handle.shutdown_tx.send(true).ok();
-        for h in handle.handles {
-            h.abort();
-        }
-        self.scheduler.stop_all().await;
-    }
+    pub async fn shutdown(&self, handle: BackgroundTasksHandle) { ... }
 
     // run() still exists for CLI mode — uses start_background_tasks() internally
-    pub async fn run(self) -> Result<(), Error> {
-        let bg = self.start_background_tasks();
-        let mut message_stream = self.channels.start_all().await?;
-        loop {
-            // ... existing message loop ...
-        }
-        self.shutdown(bg).await;
-        Ok(())
-    }
+    pub async fn run(self) -> Result<(), Error> { ... }
 }
 ```
 
 ### 2.4 Accept External Config / Keys in `AppBuilder`
 
-`AppBuilder::init_secrets()` currently creates its own keychain store. For Tauri
-integration, Scrappy passes keys as config strings:
-
-```rust
-// Scrappy-side: build config with keys from its own SecretStore
-let mut config = ironclaw::Config::default();
-config.llm.nearai.api_key = secret_store.get("anthropic");
-config.llm.nearai.model = "anthropic/claude-sonnet-4-5".to_string();
-config.llm.nearai.fallback_model = Some("openai/gpt-4o".to_string());
-
-// Point at Scrappy's local inference server
-if local_inference_enabled {
-    config.llm.nearai.base_url = format!("http://127.0.0.1:{}/v1", sidecar_port);
-    config.llm.nearai.model = "local/model".to_string();
-}
-```
-
-**Optional: Add `with_secrets_store()` for richer integration:**
-
 ```rust
 impl AppBuilder {
     /// Accept a pre-built secrets store, skipping init_secrets().
-    pub fn with_secrets_store(
-        mut self,
-        store: Arc<dyn SecretsStore + Send + Sync>,
-    ) -> Self {
-        self.external_secrets = Some(store);
-        self
-    }
+    pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self { ... }
 }
-
-// In init_secrets():
-if let Some(external) = self.external_secrets.take() {
-    self.secrets_store = external;
-    return Ok(());
-}
-// ... fall back to built-in keychain store
 ```
 
 ### 2.5 Feature-Gate Heavy Modules
 
-IronClaw currently has only `postgres`, `libsql`, and `html-to-markdown` feature
-flags. Add feature gates for heavy modules not needed in Tauri mode:
-
 ```toml
-# Cargo.toml additions
 [features]
 default = ["postgres", "libsql", "html-to-markdown"]
-# NEW: Minimal feature set for embedding in a Tauri app
 desktop = ["libsql", "html-to-markdown"]
-# NEW: Feature gates for heavy modules
-web-gateway = []    # channels/web/server.rs, sse.rs, ws.rs, openai_compat.rs, static/
-repl = []           # channels/repl.rs
-tunnel = []         # tunnel/*
-docker-sandbox = [] # sandbox/container.rs, orchestrator/*, worker/*
+web-gateway = []
 full = ["web-gateway", "repl", "tunnel", "docker-sandbox"]
 ```
 
-Then in `lib.rs`:
-
-```rust
-// Keep unconditionally (needed by all modes):
-pub mod agent;
-pub mod api;           // NEW
-pub mod app;
-pub mod channels;      // Channel trait + types (NOT web server)
-pub mod config;
-pub mod context;
-pub mod db;
-pub mod error;
-pub mod hooks;
-pub mod llm;
-pub mod safety;
-pub mod secrets;
-pub mod skills;
-pub mod tools;
-pub mod workspace;
-
-// Feature-gated:
-#[cfg(feature = "web-gateway")]
-pub mod web_server;     // The Axum server and its handlers
-
-#[cfg(feature = "repl")]
-pub mod repl_channel;
-
-#[cfg(feature = "tunnel")]
-pub mod tunnel;
-
-#[cfg(feature = "docker-sandbox")]
-pub mod orchestrator;
-#[cfg(feature = "docker-sandbox")]
-pub mod worker;
-
-// Always strip in desktop mode:
-#[cfg(not(feature = "desktop"))]
-pub mod boot_screen;
-#[cfg(not(feature = "desktop"))]
-pub mod setup;
-```
-
-**What MUST remain in `desktop` mode:**
-- `channels/channel.rs` — the `Channel` trait
-- `channels/web/types.rs` — 152 typed event DTOs (needed for serialization)
-- `app.rs` — `AppBuilder` + `AppComponents`
-- `agent/` — full agent runtime
-- `tools/` — tool registry, safety layer
-- `llm/` — provider chain
-- `db/` — database trait + libSQL
-- `secrets/` — `SecretsStore` trait (not concrete Keychain impl)
-- `config/` — config types
-
 ### 2.6 Export All Necessary Types from `lib.rs`
 
-Ensure public exports cover everything:
-
 ```rust
-// ironclaw/src/lib.rs — required additions
-pub mod api;  // NEW
-
+pub mod api;
 pub use config::Config;
 pub use error::{Error, Result};
-
-pub mod prelude {
-    pub use crate::api;
-    pub use crate::app::{AppBuilder, AppBuilderFlags, AppComponents};
-    pub use crate::agent::Agent;
-    pub use crate::channels::{Channel, IncomingMessage, OutgoingResponse, StatusUpdate};
-    pub use crate::config::Config;
-    pub use crate::llm::LlmProvider;
-    pub use crate::tools::ToolRegistry;
-    pub use crate::workspace::Workspace;
-}
 ```
 
 ---
@@ -810,320 +573,20 @@ pub mod prelude {
 
 ### 3.1 IronClaw Bridge (`ironclaw_bridge.rs`, ~100 lines)
 
-```rust
-use std::sync::Arc;
-use ironclaw::app::{AppBuilder, AppBuilderFlags, AppComponents};
-use ironclaw::agent::{Agent, AgentDeps};
-use ironclaw::channels::ChannelManager;
-use ironclaw::config::Config;
-use ironclaw::llm::SessionManager;
-
-pub struct IronClawState {
-    pub components: Arc<AppComponents>,
-    pub agent: Arc<Agent>,
-    pub channel: Arc<TauriChannel>,
-    /// Wrapped in Mutex<Option<>> so shutdown can .take() ownership
-    /// from Tauri's managed state (which is behind Arc).
-    pub background: tokio::sync::Mutex<Option<ironclaw::agent::BackgroundTasksHandle>>,
-}
-
-pub async fn init_ironclaw(
-    app: &tauri::AppHandle,
-    secret_store: &crate::secret_store::SecretStore,
-    user_config: &crate::config::UserConfig,
-) -> Result<IronClawState, anyhow::Error> {
-    // 1. Build IronClaw config from Scrappy's settings
-    let app_data_dir = app.path().app_data_dir()?;
-    let ironclaw_dir = app_data_dir.join("ironclaw");
-    std::fs::create_dir_all(&ironclaw_dir)?;
-
-    let mut config = Config::default();
-    config.database.backend = ironclaw::config::DatabaseBackend::LibSql;
-    config.database.libsql_path = Some(ironclaw_dir.join("ironclaw.db"));
-
-    // 2. Pass API keys (only granted providers)
-    inject_granted_keys(&mut config, secret_store, user_config);
-
-    // 3. Point at Scrappy's local inference if enabled
-    if user_config.local_inference_enabled {
-        if let Some(port) = get_inference_port(app) {
-            config.llm.nearai.base_url = format!("http://127.0.0.1:{}/v1", port);
-            config.llm.nearai.model = "local/model".to_string();
-        }
-    }
-
-    // 4. Build engine (same code path as CLI)
-    let session = Arc::new(SessionManager::new());
-    // NOTE: LogBroadcaster may live in channels::web which is behind the
-    // web-gateway feature flag. If so, either:
-    //   (a) Move LogBroadcaster to a shared module (recommended), or
-    //   (b) Use a no-op stub: ironclaw::log::NullBroadcaster::new()
-    // The actual import path depends on IronClaw's module layout.
-    let log_broadcaster = Arc::new(ironclaw::log::LogBroadcaster::new());
-    let builder = AppBuilder::new(
-        config,
-        AppBuilderFlags::default(),
-        None,
-        session,
-        log_broadcaster,
-    );
-    let components = Arc::new(builder.build_all().await?);
-
-    // 5. Create TauriChannel and Agent
-    let tauri_channel = Arc::new(TauriChannel::new(app.clone()));
-    let channel_manager = Arc::new(ChannelManager::new());
-    channel_manager.register(tauri_channel.clone());  // clone Arc before move
-
-    let agent = Arc::new(Agent::new(
-        components.config.agent.clone(),
-        AgentDeps { /* ... from components ... */ },
-        channel_manager,
-        /* heartbeat, hygiene, routine configs ... */
-    ));
-
-    // 6. Start background tasks (heartbeat, cron, self-repair)
-    let background = agent.start_background_tasks();
-
-    Ok(IronClawState {
-        components, agent, channel: tauri_channel,
-        background: tokio::sync::Mutex::new(Some(background)),
-    })
-}
-
-fn inject_granted_keys(config: &mut Config, store: &SecretStore, uc: &UserConfig) {
-    // Only pass keys where both has_key AND granted
-    if uc.anthropic_granted { config.llm.nearai.api_key = store.get("anthropic"); }
-    if uc.openai_granted    { config.llm.nearai.openai_key = store.get("openai"); }
-    // ... more providers ...
-}
-```
+Lifecycle management: init, config, Agent construction, shutdown.
 
 ### 3.2 Tauri Channel (`ironclaw_channel.rs`, ~120 lines)
 
-> **IMPORTANT:** The `session_key` must be populated on every event. The frontend
-> filters events by `uiEvent.session_key !== effectiveSessionKey` — events with
-> empty session keys are silently dropped and nothing renders. The `TauriChannel`
-> tracks the active session via an `Arc<RwLock<String>>` that is set by
-> `ironclaw::api::chat::send_message()` before spawning the agent turn.
+Implements `ironclaw::channels::Channel` trait. Routes `StatusUpdate` events
+to `app.emit("openclaw-event")` with proper session key tracking.
 
-> **CONCURRENCY NOTE:** The `active_session: Arc<RwLock<String>>` is a single
-> global value. If two turns are in-flight on different sessions concurrently,
-> the second `send_message()` overwrites `active_session` and the first turn's
-> streaming events get tagged with the wrong session. For a single-user desktop
-> app this is rare (the UI typically blocks input during a turn), but not
-> impossible. **Future IronClaw fix:** propagate session context through
-> `StatusUpdate` metadata or add an `Option<String>` session field to
-> `StatusUpdate` variants, so `send_status()` can read the session from the
-> event itself instead of a shared mutable. Until then, this workaround is
-> acceptable.
+### 3.3 Rewritten Commands
 
-```rust
-use std::sync::Arc;
-use async_trait::async_trait;
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use ironclaw::error::ChannelError;
-use tauri::Emitter;
-use tokio::sync::RwLock;
-
-use crate::openclaw::normalizer::UiEvent;
-
-pub struct TauriChannel {
-    app: tauri::AppHandle,
-    /// Tracks the session_key of the currently-active agent turn.
-    /// Set by `api::chat::send_message()` before spawning the turn.
-    /// Read by `send_status()` and `respond()` to tag events.
-    ///
-    /// Without this, all streamed events have empty session_key and
-    /// the frontend's `if (uiEvent.session_key !== effectiveSessionKey) return;`
-    /// filter silently drops every event — nothing renders.
-    pub active_session: Arc<RwLock<String>>,
-}
-
-impl TauriChannel {
-    pub fn new(app: tauri::AppHandle) -> Self {
-        Self {
-            app,
-            active_session: Arc::new(RwLock::new(String::new())),
-        }
-    }
-
-    /// Helper: get the current session key for tagging events.
-    async fn session_key(&self) -> String {
-        self.active_session.read().await.clone()
-    }
-}
-
-#[async_trait]
-impl Channel for TauriChannel {
-    fn name(&self) -> &str { "tauri" }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        // Messages arrive via direct API calls, not a stream.
-        // Return an idle stream (never produces items).
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-    }
-
-    /// Called at the END of an agent turn with the final accumulated response.
-    /// This is called once per turn (not per-token — streaming tokens arrive
-    /// via `send_status(StatusUpdate::StreamChunk)`).
-    async fn respond(&self, msg: &IncomingMessage, response: OutgoingResponse) -> Result<(), ChannelError> {
-        // IMPORTANT: Use msg.thread_id (set by IncomingMessage::with_thread())
-        // as the authoritative session_key. Fall back to active_session only
-        // if thread_id is missing. NEVER use futures::executor::block_on()
-        // inside an async fn — it can deadlock the tokio runtime.
-        let session_key = match msg.thread_id.clone() {
-            Some(tid) => tid,
-            None => self.session_key().await,
-        };
-        let event = UiEvent::AssistantFinal {
-            session_key,
-            run_id: None,
-            message_id: msg.id.to_string(),
-            text: response.content,
-            usage: None,
-        };
-        self.app.emit("openclaw-event", &event).ok();
-        Ok(())
-    }
-
-    async fn send_status(&self, status: StatusUpdate, _metadata: &serde_json::Value) -> Result<(), ChannelError> {
-        let sk = self.session_key().await;
-        let event = match status {
-            StatusUpdate::Thinking(_) => UiEvent::RunStatus {
-                session_key: sk, run_id: None,
-                status: "started".into(), error: None,
-            },
-            StatusUpdate::StreamChunk(chunk) => UiEvent::AssistantDelta {
-                session_key: sk, run_id: None,
-                message_id: "stream".into(), delta: chunk,
-            },
-            StatusUpdate::ToolStarted { name } => UiEvent::ToolUpdate {
-                session_key: sk, run_id: None,
-                tool_name: name, status: "started".into(),
-                input: serde_json::Value::Null, output: serde_json::Value::Null,
-            },
-            StatusUpdate::ToolCompleted { name, success } => UiEvent::ToolUpdate {
-                session_key: sk, run_id: None,
-                tool_name: name, status: if success { "ok" } else { "error" }.into(),
-                input: serde_json::Value::Null, output: serde_json::Value::Null,
-            },
-            StatusUpdate::ApprovalNeeded { request_id, tool_name, description, parameters } => {
-                UiEvent::ApprovalRequested {
-                    approval_id: request_id,
-                    session_key: sk,
-                    tool_name,
-                    input: parameters,
-                }
-            },
-            // NEW: Turn-level errors emitted by spawned tasks in api::chat
-            StatusUpdate::Error { message, code } => UiEvent::Error {
-                code: code.unwrap_or_else(|| "turn_error".into()),
-                message,
-                details: serde_json::Value::Null,
-            },
-            _ => return Ok(()),
-        };
-        self.app.emit("openclaw-event", &event).ok();
-        Ok(())
-    }
-
-    /// Desktop is single-user — broadcast is for system-originated messages
-    /// (self-repair notifications, routine results, heartbeat).
-    /// Maps to AssistantInternal (not AssistantFinal) so the frontend can
-    /// distinguish agent-initiated system messages from user-turn responses.
-    async fn broadcast(&self, _user_id: &str, response: OutgoingResponse) -> Result<(), ChannelError> {
-        let sk = self.session_key().await;
-        let event = UiEvent::AssistantInternal {
-            session_key: sk,
-            run_id: None,
-            message_id: uuid::Uuid::new_v4().to_string(),
-            text: response.content,
-        };
-        self.app.emit("openclaw-event", &event).ok();
-        Ok(())
-    }
-
-    /// Required by the Channel trait. Desktop channel is always healthy.
-    async fn health_check(&self) -> Result<(), ChannelError> { Ok(()) }
-}
-```
-
-### 3.3 Rewritten Commands (Example Before/After)
-
-**Before (WebSocket RPC — blocks on WS round-trip):**
-```rust
-#[tauri::command]
-pub async fn openclaw_send_message(
-    state: State<'_, OpenClawManager>,
-    session_key: String, text: String, deliver: bool,
-) -> Result<OpenClawRpcResponse, String> {
-    let handle = state.ws_handle.lock().await;
-    let handle = handle.as_ref().ok_or("Not connected")?;
-    handle.chat_send(&session_key, &uuid::Uuid::new_v4().to_string(), &text, deliver)
-        .await.map_err(|e| e.to_string())
-}
-```
-
-**After (Hybrid API — returns instantly, streams via events):**
-```rust
-#[tauri::command]
-pub async fn openclaw_send_message(
-    state: State<'_, IronClawState>,
-    session_key: String, text: String, deliver: bool,
-) -> Result<serde_json::Value, String> {
-    // CRITICAL: Set the active session on TauriChannel BEFORE spawning
-    // the agent turn. Without this, all streamed events have empty
-    // session_key and the frontend silently drops them.
-    *state.channel.active_session.write().await = session_key.clone();
-
-    // Returns in ~5ms. Agent turn runs in background.
-    // Response streams back via app.emit("openclaw-event") events.
-    let result = ironclaw::api::chat::send_message(
-        &state.agent, &session_key, &text, deliver,
-    ).await.map_err(|e| e.to_string())?;
-    serde_json::to_value(result).map_err(|e| e.to_string())
-}
-
-// Compare with a QUERY command (truly synchronous):
-#[tauri::command]
-pub async fn openclaw_list_sessions(
-    state: State<'_, IronClawState>,
-) -> Result<serde_json::Value, String> {
-    // Returns in ~1ms. No background task — direct data read.
-    let sessions = ironclaw::api::sessions::list_sessions(
-        &state.components.session_manager,
-        state.components.db.as_deref(),
-        "local_user",
-    ).await.map_err(|e| e.to_string())?;
-    serde_json::to_value(sessions).map_err(|e| e.to_string())
-}
-```
+All 66 commands rewritten from WS RPC → direct IronClaw API calls.
 
 ### 3.4 `lib.rs` Setup Changes
 
-```rust
-// In Tauri setup, after existing state registration:
-
-let secret_store_ref = handle.state::<crate::secret_store::SecretStore>();
-let user_config_ref = handle.state::<crate::config::UserConfig>();
-
-match crate::ironclaw_bridge::init_ironclaw(&handle, &secret_store_ref, &user_config_ref).await {
-    Ok(ironclaw_state) => {
-        handle.manage(ironclaw_state);
-        handle.emit("openclaw-event", UiEvent::Connected { protocol: 1 }).ok();
-    }
-    Err(e) => {
-        handle.emit("openclaw-event", UiEvent::Error {
-            code: "init_failed".into(),
-            message: e.to_string(),
-            details: serde_json::Value::Null,
-        }).ok();
-    }
-}
-
-// REMOVE: OpenClawManager::new(), Node.js sidecar spawn, WS handle storage
-```
+Async IronClaw spawn in setup + graceful shutdown in `RunEvent::Exit`.
 
 ---
 
@@ -1181,27 +644,22 @@ match crate::ironclaw_bridge::init_ironclaw(&handle, &secret_store_ref, &user_co
 - Does NOT trigger an agent turn
 - Used for: boot sequences, date context injection, silent memory updates
 
-IronClaw's `Submission::UserInput` always triggers a turn today. **New method
-`Agent::inject_context()` needed** (see §2.2).
-
 ### 5.2 Silent Reply Handling (`NO_REPLY` / `NO_REPL`)
 
 IronClaw uses `NO_REPLY` token (in `llm/reasoning.rs`). Scrappy uses `NO_REPL`.
 The agent loop already suppresses these at line 720 of `agent_loop.rs`. For Tauri,
-IronClaw should **emit raw text** and let Scrappy apply its own sanitization
-(tuned for its local model zoo).
+IronClaw should **emit raw text** and let Scrappy apply its own sanitization.
 
 ### 5.3 Boot Sequence Protocol
 
 On OpenClaw tab open, Scrappy sends a `SYSTEM_BOOT_SEQUENCE` message composed from
 workspace files (SOUL.md, MEMORY.md, BOOTSTRAP.md). This is just a `chat.send()`
-with `deliver=true`. IronClaw processes it like any other user input.
+with `deliver=true`.
 
 ### 5.4 Token Sanitization
 
 Scrappy's `normalizer.rs` has 10 compiled regexes for stripping ChatML/Jinja
-tokens. This stays in Scrappy. IronClaw emits raw LLM output — Scrappy sanitizes
-before displaying.
+tokens. This stays in Scrappy. IronClaw emits raw LLM output.
 
 ### 5.5 Security: Zeroize on Drop
 
@@ -1211,28 +669,22 @@ IronClaw uses `secrecy::SecretString` which zeroizes on drop. Compatible approac
 ### 5.6 Model Selection & Fallback
 
 IronClaw's `build_provider_chain()` implements: primary → retry → smart routing →
-failover → circuit breaker → cache. This maps to Scrappy's model resolution:
-1. Scrappy resolves primary + fallback models from settings + grants
-2. Passes result into IronClaw's `Config` before calling `AppBuilder`
-3. IronClaw builds the chain from config (it does NOT auto-discover models)
+failover → circuit breaker → cache.
 
 ### 5.7 Specta TypeScript Bindings
 
-Scrappy uses `tauri-specta` for TypeScript binding generation. All Tauri command
-types must be `specta::Type`. IronClaw types should be **wrapped in Scrappy-side
-DTOs** that derive `specta::Type`, not add `specta` as a dependency to IronClaw.
+All Tauri command types must be `specta::Type`. IronClaw types should be **wrapped
+in Scrappy-side DTOs** that derive `specta::Type`.
 
 ### 5.8 Rust Edition
 
 IronClaw uses Rust edition **2024** (MSRV 1.92). Scrappy uses edition **2021**.
-This is not a blocker (editions are per-crate in a workspace), but Scrappy's
-toolchain must support 1.92+.
+This is not a blocker (editions are per-crate in a workspace).
 
 ### 5.9 MCP Reverse-RPC
 
 With IronClaw in-process, the MCP reverse-RPC is eliminated. IronClaw calls tools
-directly via `ToolRegistry`. If IronClaw needs Scrappy-hosted tools (browser,
-local file access), it should expose a trait/callback mechanism.
+directly via `ToolRegistry`.
 
 ---
 
@@ -1245,40 +697,30 @@ local file access), it should expose a trait/callback mechanism.
 
 Separate databases serving different domains. Do NOT unify initially.
 
-**SQLite coexistence:** Both `sqlx-sqlite` and `libsql` link against SQLite and call
-`sqlite3_config()` globally. Stock `libsql` panics if `sqlite3_config()` returns
-`SQLITE_MISUSE` (error 21). This is resolved via a patched `libsql-0.6.0` in
-`patches/libsql-0.6.0/` that checks `sqlite3_threadsafe()` instead of asserting.
-The patch is applied via `[patch.crates-io]` in `backend/Cargo.toml`.
-
-**Phase 4 permanent fix:** When Scrappy's sqlx is removed and all data migrated to
-IronClaw's libSQL, the patch becomes unnecessary (only one SQLite library remains).
+**SQLite coexistence:** Resolved via patched `libsql-0.6.0` in `patches/libsql-0.6.0/`.
 
 ---
 
 ## 7. New Code Summary
 
-### IronClaw Side (Build/Refactor)
+### IronClaw Side
 
 | Change | Est. Lines | Complexity |
 |---|---|---|
-| `ironclaw::api` module (chat, sessions, memory, config, extensions, skills, routines, system) | ~500 | Medium — extract from handlers |
-| Make `handle_message()` public + add `inject_context()` + `cancel_turn()` | ~50 | Low |
-| Extract `start_background_tasks()` from `run()` + add `shutdown()` | ~60 | Medium |
-| Add `StatusUpdate::Error` variant to `channels/channel.rs` | ~5 | Low |
-| Accept external secrets/keys via Config | ~20 | Low |
-| Feature flags (Cargo.toml + `#[cfg]` in lib.rs) | ~50 | Low |
-| `EngineStatus` struct for system status | ~80 | Low |
+| `ironclaw::api` module (8 submodules) | ~500 | Medium |
+| Make `handle_message()` public + new methods | ~50 | Low |
+| Extract background tasks + shutdown | ~60 | Medium |
+| `StatusUpdate::Error` variant | ~5 | Low |
+| Feature flags + `#[cfg]` | ~50 | Low |
 | **Total IronClaw changes** | **~765** | |
 
-### Scrappy Side (Build/Adapt)
+### Scrappy Side
 
 | Change | Est. Lines | Complexity |
 |---|---|---|
-| `ironclaw_bridge.rs` (engine init) | ~100 | Low |
-| `ironclaw_channel.rs` (TauriChannel) | ~80 | Low |
-| Rewrite 50+ commands from WS → direct API | ~500 | Medium (tedious) |
-| `lib.rs` modifications | ~40 | Low |
+| `ironclaw_bridge.rs` | ~100 | Low |
+| `ironclaw_channel.rs` | ~80 | Low |
+| Rewrite 50+ commands | ~500 | Medium |
 | Delete WS bridge files | -90 KB | Low |
 | **Total Scrappy changes** | **~720 new, ~90 KB deleted** | |
 
@@ -1286,165 +728,194 @@ IronClaw's libSQL, the patch becomes unnecessary (only one SQLite library remain
 
 ## 8. Implementation Checklist
 
-### Phase 1: IronClaw Library Prep ✅ COMPLETE
+All 15 phases complete. See Implementation Progress table above.
 
-- [x] Add `StatusUpdate::Error { message, code }` variant to `channels/channel.rs`
-- [x] Add `ironclaw::api` module with extracted handler logic
-- [x] Make `Agent::handle_message()` public as `handle_message_external()`
-- [x] Add `Agent::inject_context()` for deliver=false messages
-- [x] Add `Agent::cancel_turn()` for direct abort (bypasses hooks)
-- [x] Extract `start_background_tasks()` and `shutdown()` from `Agent::run()`
-- [x] Add feature flags to Cargo.toml (`desktop`, `web-gateway`, `full`)
-- [x] Gate modules with `#[cfg(feature)]` in lib.rs
-- [x] Verify `cargo build --lib --no-default-features --features desktop` compiles
-- [x] Ensure `AppBuilder` accepts keys via Config fields
-- [x] Create `EngineStatus` struct
-- [x] Export all needed types from lib.rs
-
-### Phase 2: Scrappy Integration Scaffold ✅ COMPLETE
-
-- [x] Add IronClaw as dependency: `ironclaw = { path = "../../ironclaw/ironclaw", features = ["desktop"] }`
-- [x] Create `ironclaw_bridge.rs` with `IronClawState::initialize()` calling `AppBuilder::build_all()`
-- [x] Create `ironclaw_channel.rs` with `TauriChannel` implementing `Channel` trait
-- [x] Create `ironclaw_types.rs` with `StatusUpdate` → `UiEvent` mapping (all 11 variants)
-- [x] Extract `sanitizer.rs` (LLM token stripping) from `normalizer.rs`
-- [x] Extract `ui_types.rs` (UiEvent enum + supporting types) from `normalizer.rs`
-- [x] Register `IronClawState` as Tauri managed state in `lib.rs` (async spawn)
-- [x] Wire up event emission from `TauriChannel` via `app.emit("openclaw-event")`
-- [x] Add graceful shutdown in `RunEvent::Exit` handler
-- [x] Verify Tauri builds and launches with IronClaw dependency
-- [x] Verify: `[main] IronClaw engine initialized successfully.` in console
-
-### Phase 2.5a: libsql/sqlx Conflict ✅ RESOLVED
-
-- [x] Identified root cause: `sqlite3_config()` global one-shot, libsql asserts on `SQLITE_MISUSE`
-- [x] Copied `libsql-0.6.0` to `patches/libsql-0.6.0/`
-- [x] Patched `database.rs:209` — check `sqlite3_threadsafe()` instead of `assert_eq!`
-- [x] Added `[patch.crates-io]` to `backend/Cargo.toml`
-- [x] Removed `no_db: true` — IronClaw now has full libSQL database
-- [x] Verified both databases coexist: sqlx `openclaw.db` + libsql `ironclaw.db`
-
-### Phase 2.5a (cont): Bug Fixes (from IronClaw review) ✅ FIXED
-
-- [x] Fix `browse_url` use-after-move in `ironclaw_types.rs` (borrow for json, move for url)
-- [x] Fix `LlmSessionManager` session path → use Scrappy's `state_dir` instead of `~/.ironclaw/`
-
-### Phase 2.5b: SecretsStore Adapter ⬜ NOT STARTED
-
-- [ ] Create `ironclaw_secrets.rs` implementing `ironclaw::secrets::SecretsStore`
-- [ ] Map IronClaw secret keys to Scrappy keychain keys
-- [ ] Wire adapter into `ironclaw_bridge.rs` (replace `secrets_store: None`)
-- [ ] Verify IronClaw auto-loads API keys from Keychain
-
-### Phase 3: Command Migration ⬜ NOT STARTED (2-3 days)
-
-- [ ] **3.1 Chat commands (12)** — `sessions.rs` rewrite to `ironclaw::api::chat::*`
-- [ ] **3.2 Gateway status (4)** — `gateway.rs` rewrite, `openclaw_get_status` field mapping
-- [ ] **3.3 Memory/workspace (6)** — `rpc.rs` rewrite to `ironclaw::api::memory::*`
-- [ ] **3.4 Keys/config (30+)** — `keys.rs` simplify: remove auth-profiles, keep keychain
-- [ ] **3.5 Skills/cron/fleet (14)** — map to `ironclaw::api::skills::*` + stubs
-- [ ] Test: send message from OpenClaw tab → streaming response renders
-
-### Phase 4: Cleanup ⬜ NOT STARTED (1 day)
-
-- [ ] Delete `openclaw/ws_client.rs`, `normalizer.rs`, `frames.rs`, `ipc.rs`
-- [ ] Remove `OpenClawManager` struct from `commands/mod.rs`
-- [ ] Remove Node.js sidecar from `sidecar.rs`
-- [ ] Remove `node` from `tauri.conf.json` external bins
-- [ ] Remove `openclaw-engine/` directory and npm scripts
-- [ ] Remove sqlx dependency (migrate data to IronClaw's libSQL)
-- [ ] Remove `patches/libsql-0.6.0/` and `[patch.crates-io]` (no longer needed)
-
-### Phase 5: Verification ⬜ NOT STARTED (1 day)
-
-- [ ] All 50+ `openclaw_*` commands work
-- [ ] Approval flow end-to-end
-- [ ] Skills / cron / extensions
-- [ ] Frontend receives all `UiEvent` variants
-- [ ] Boot sequence works (SOUL.md → MEMORY.md → BOOTSTRAP.md)
-- [ ] Latency comparison vs. old WS bridge
-
-**Total estimated time: 7-10 days · Elapsed: ~3 days (Phases 1–2.5a complete, both agents)**
+**Total estimated time: 7-10 days · Elapsed: DONE (all 15 phases complete)**
 
 ---
 
-## 9. Critical Notes for the IronClaw Agent
+## 9. Post-Integration Work Completed
+
+### Work Stream C — Wire Cloud Backends ✅
+All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_generate`) now route through `InferenceRouter`. Frontend badges and voice selectors implemented.
+
+### Work Stream D — Cloud Model Discovery ✅
+12-provider live model discovery (OpenAI, Anthropic, Gemini, Groq, OpenRouter, Mistral, xAI, Together, Cohere, ElevenLabs, Stability, static). Frontend integration in ModelBrowser, ModelSelector, InferenceModeTab. Context size propagation to all chat backends.
+
+### Work Stream A — Cloud Storage (A1–A6 ✅ All Complete)
+- **A1 Foundation ✅:** `CloudProvider` trait, S3 impl (opendal), AES-256-GCM encryption, DB snapshots, `ArchiveManifest`, `CloudManager` state + 8 Tauri commands. 13 tests.
+- **A2 Migration Engine ✅:** `run_to_cloud()` (7-phase), `run_to_local()` (6-phase), cancellable+resumable, spot-check verification. 683 LOC.
+- **A3 FileStore Abstraction ✅:** `FileStore` struct (310 LOC, 12 methods), 13 fs call sites migrated across 5 modules. sessions.rs skipped (IronClaw workspace, outside scope).
+- **A4 Additional Providers ✅:** All 7 providers (S3 end-to-end, iCloud/GDrive/Dropbox with frontend cards, OneDrive/WebDAV/SFTP backend).
+- **A5 Frontend UI ✅:** StorageTab, provider picker, migration progress dialog. `ApprovalCard` extended to 3-tier. Storage breakdown includes Agent Database.
+- **A6 Tests & Polish ✅:** Integration tests, IronClaw DB snapshot in migration Phase 2b (VACUUM INTO + encrypt + upload).
+
+---
+
+## 10. Critical Notes for the IronClaw Agent
 
 1. **You are a library, not the app.** IronClaw replaces only the OpenClaw
    Node.js engine — everything else in Scrappy stays.
 
-2. **The `ironclaw::api` module is the highest-impact deliverable.** Without it,
-   Scrappy must either duplicate business logic or use the Channel-Feed approach
-   (worse UX).
+2. **All 15 integration phases are DONE.** The `ironclaw::api` module, feature
+   flags, public Agent methods, background task separation — all implemented
+   and verified. No spec work remains.
 
-3. **`Agent::handle_message_external()` is the key unlock.** Making
-   `handle_message()` callable from outside the `agent` module is what enables
-   the entire Hybrid API architecture.
+3. **Cloud Storage A1–A6 is DONE.** All phases complete on both sides. IronClaw
+   exposes `api::system::snapshot_database()` for DB migration. No further IronClaw
+   work needed for cloud storage.
 
-4. **Agent turns are spawned, NOT awaited.** `send_message()` and
-   `resolve_approval()` must use `tokio::spawn()` and return immediately.
-   Only queries and simple writes are awaited. This is the single most
-   important UX decision — blocking the Tauri command for 10-30s makes the
-   UI appear frozen.
+4. **IronClaw's libSQL DB is included in cloud migrations.** Scrappy calls
+   `api::system::snapshot_database()` during migration Phase 2b. Uses `VACUUM INTO`
+   for a consistent snapshot, then encrypts and uploads as `db/ironclaw.db.enc`.
 
-5. **Feature flags, not deletion.** Keep web-gateway, REPL, tunnel, Docker modules
-   behind feature flags.
+5. **Workspace files are NOT in cloud migrations.** `SOUL.md`, `MEMORY.md`, and
+   sessions live in IronClaw's workspace directory and are managed by IronClaw's
+   `Workspace` API. They are intentionally excluded from Scrappy's FileStore.
 
-6. **Accept keys via Config strings.** Let Scrappy resolve Keychain → grant
-   flags → Config. IronClaw should not access Scrappy's Keychain.
+6. **Agent turns are spawned, NOT awaited.** This remains the core UX invariant.
+   `send_message()` and `resolve_approval()` return in ~5ms.
 
-7. **Accept external inference URLs.** Scrappy manages local llama-server/MLX/vLLM.
-   IronClaw points at `http://127.0.0.1:{port}/v1`.
+7. **Two databases is still correct.** Chat SQLite (Scrappy) + agent libSQL
+   (IronClaw). No unification planned or needed.
 
-8. **The UiEvent contract is sacred.** Frontend React components already listen
-   for specific shapes. IronClaw events must map to these.
-
-9. **Two databases is correct.** Chat SQLite (Scrappy) + agent libSQL (IronClaw).
-
-10. **LLM token sanitization stays in Scrappy.** Emit raw text. Scrappy sanitizes.
-
-11. **Background tasks need graceful shutdown.** Extract from `Agent::run()` so
-    Tauri can stop them on app quit.
+8. **The UiEvent contract is sacred.** Frontend React components listen for
+   specific shapes. IronClaw events must continue mapping to these.
 
 ---
 
-## 10. Critical Notes for the Scrappy Agent
+## 11. Critical Notes for the Scrappy Agent
 
-1. **Don't await agent turns.** The `send_message` and `resolve_approval` API
-   functions spawn background tasks. The Tauri command returns `Ok(message_id)`
-   in ~5ms. Response content arrives as `"openclaw-event"` emissions.
+1. **All major initiatives are COMPLETE.** Cloud Storage (A1–A6), InferenceRouter,
+   Model Discovery, FileStore, Hardware Bridge, and Voice/Talk Mode integration are
+   all done. Only deferred items remain (Sherpa-ONNX, Skill Deps).
 
-2. **Error handling is split.** Validation errors (empty message, bad UUID,
-   missing config) come back as `Err()` from the Tauri command. Turn errors
-   (LLM down, tool crash, safety rejection) come as `UiEvent::Error` events.
-   Both paths must surface in the UI.
+2. **Zero-downtime secret refresh is available.** Call
+   `ironclaw::api::config::refresh_secrets(secrets, user_id)` instead of stop→start
+   when the user updates an API key. This re-reads all secrets and updates the
+   config overlay atomically.
 
-3. **`IronClawState.agent` must be `Arc<Agent>`.** The spawn pattern requires
-   cloning the Arc into the spawned future. All Tauri commands receive the
-   Agent via `State<'_, IronClawState>` which holds `Arc<Agent>`.
+3. **`sessions.rs` stays on raw filesystem.** These 18 call sites operate on
+   IronClaw's workspace directory, which is outside `app_data_dir`. They are
+   NOT migrated to FileStore.
 
-4. **Token sanitization stays in Scrappy.** IronClaw emits raw LLM output.
-   Apply your regex sanitizers before rendering in the UI.
+4. **Error handling is split.** Validation errors → `Err()` from Tauri commands.
+   Turn errors → `UiEvent::Error` events. Both must surface in UI.
 
-5. **Boot sequence is a normal `send_message()`.** Compose
-   `SYSTEM_BOOT_SEQUENCE` from workspace files, call `send_message` with
-   `deliver=true`. IronClaw processes it like any other user input.
+5. **Token sanitization stays in Scrappy.** IronClaw emits raw LLM output.
+   Apply regex sanitizers before rendering.
 
-6. **Secrets flow one way.** Read from Keychain → check grant flags →
-   inject into `ironclaw::Config` → pass to `AppBuilder`. IronClaw never
-   reads Scrappy's Keychain directly.
+6. **Secrets flow one way.** Keychain → grant flags → `ironclaw::Config` →
+   `AppBuilder`. IronClaw never reads Scrappy's Keychain directly.
 
-7. **Specta types are Scrappy-side DTOs.** Wrap IronClaw return types in
-   Scrappy structs that derive `specta::Type`. Don't add specta as a dep
-   to IronClaw.
+7. **Specta regen needed.** Run `cargo tauri dev` to regenerate `bindings.ts`
+   with new types from cloud storage, model discovery, and inference mode.
 
-8. **Inference URL is Scrappy's responsibility.** Resolve which sidecar is
-   running, get its port, pass `http://127.0.0.1:{port}/v1` into the
-   IronClaw config before init.
+8. **Pre-existing lint note.** `rag.rs:1096` has a `non-primitive cast` error
+   from rust-analyzer. This is pre-existing and unrelated to recent changes.
+   The actual build compiles clean with 0 errors, 0 warnings.
 
-9. **Shutdown on app quit.** Call `agent.shutdown(handle)` in the Tauri
-   `on_window_event(CloseRequested)` handler to stop background tasks.
+---
 
-10. **The `deliver` flag matters.** `deliver=false` adds to history silently
-    (for context injection). `deliver=true` triggers a full agent turn.
-    Boot sequences use `deliver=true`. Date context uses `deliver=false`.
+## 12. Post-Integration Status & Cross-Project Coordination
+
+> Last updated: 2026-03-01 16:10 CET — **Integration complete on both sides. Scrappy can uncomment `with_tool_bridge()` to wire sensor tools.**
+
+### 12.1 IronClaw Internal Tasks — All Complete
+
+| Task | What Was Done |
+|------|---------------|
+| **Self-Repair Wiring** | `with_store()` wired into `agent_loop.rs` — failure tracking persists to DB |
+| **QR Code Rendering** | Added `qrcode = "0.14"`, real Unicode half-block QR matrix in terminal |
+| **Dead Code Audit** | All 41 `#[allow(dead_code)]` annotations reviewed, 4 removed, 2 comments improved |
+| **Paragraph Chunking** | `ChunkingStrategy` enum (`Fixed`/`Paragraph`), `chunk()` dispatch function |
+| **Evaluation Framework** | `RuleBasedEvaluator` runs on every job completion, results logged + persisted |
+| **DB Snapshotting (X2)** | `Database::snapshot()` + `db_path()` on trait. WAL checkpoint + file copy for libsql. `api::system::snapshot_database()` exposed for cloud migration. |
+| **Voice EnergyDetector (T8)** | `cpal = "0.15"` behind `voice` feature flag. RMS energy detection on dedicated OS thread. Headless-only. |
+| **WASM Introspection (T7)** | Component type introspection: detects export kinds, identifies WIT-compliant tools |
+
+### 12.2 Cross-Project Tasks — Resolved
+
+#### T5: Hardware Bridge — Internal Rust Trait (was WS RPC)
+
+**Architecture change:** Since IronClaw is now in-process (not a remote WS server), the Hardware Bridge uses an internal Rust trait instead of WebSocket RPC. This is simpler and faster.
+
+**Scrappy confirmed:** No WS handler exists. The old WS bridge was deleted in Phase 4. An internal trait/callback is the correct approach.
+
+**Implemented:** `hardware_bridge.rs` (380 LOC, 7 tests):
+- `ToolBridge` trait — Scrappy implements this to provide sensor access
+- `BridgedTool` — wraps bridge calls with 30s timeout + session approval caching
+- `SessionApprovals` — in-memory per-session approval tracker (3 tiers: Deny / Allow Once / Allow Session)
+- `SensorRequest` / `SensorResponse` — typed request/response structs
+- `create_bridged_tools()` — creates camera, mic, screen tools for registration
+
+**Scrappy integration needed:** Implement `ToolBridge` trait using the existing `ApprovalCard` component (extend for 3-tier approval). Pass the bridge via `AppBuilder` at startup.
+
+#### T8: Voice & Talk Mode — Dual Architecture
+
+**Scrappy confirmed:**
+- Desktop: Scrappy owns mic capture via browser MediaRecorder API. No cpal conflict.
+- STT: Local whisper at `localhost:53757/v1/audio/transcriptions` (OpenAI-compatible). Auth via Bearer token.
+- Cloud: `InferenceRouter` can select OpenAI Whisper API or Deepgram.
+
+**Implemented:**
+- `TranscriptionBackend::WhisperHttp` — new variant for local sidecar STT
+- `transcribe_whisper_http()` — calls local endpoint with multipart/form-data
+- `TalkModeTool::execute()` — auto-selects backend: `WHISPER_HTTP_ENDPOINT` env → local sidecar, else → OpenAI cloud
+- Voice wake: cpal-based RMS energy detection behind `voice` feature flag (headless only)
+
+#### X1: Cloud Storage — Complete on Both Sides
+
+**Scrappy confirmed:** All 7 providers implemented (S3 end-to-end, iCloud/GDrive/Dropbox with frontend cards, OneDrive/WebDAV/SFTP backend only). CloudProvider trait abstracts all differences. IronClaw doesn't need provider helpers.
+
+**Decision: Include ironclaw.db in cloud migrations.** Scrappy's recommendation: yes, users expect session history to survive device switches. IronClaw now exposes `api::system::snapshot_database()` which Scrappy's migration engine can call.
+
+### 12.3 Scrappy Answers — Archive
+
+> Questions from the previous version of this section, preserved for reference.
+
+| # | Question | Answer | Action Taken |
+|---|----------|--------|--------------|
+| Q1 | WS handler for `tool.rpc.request`? | ❌ No WS handler | **Pivoted** to internal Rust trait (`ToolBridge`) |
+| Q2 | Approval dialog? | ✅ `ApprovalCard.tsx` (binary only) | Bridge supports 3 tiers; Scrappy needs to extend card |
+| Q3 | Sensor crates? | ❌ None linked | No conflict; sensors are host-side only |
+| Q4 | `tool.rpc.response`? | ❌ No | Moot — internal trait returns directly |
+| Q5 | Approval model? | Per-request, `always` param unused | `SessionApprovals` implemented in bridge |
+| Q6 | cpal linked? | ❌ No | No conflict; audio via MediaRecorder |
+| Q7 | Whisper endpoint? | ✅ `localhost:53757` | `WhisperHttp` backend added to talk_mode |
+| Q8 | Mic ownership? | Scrappy (frontend) | cpal only in headless mode behind `voice` flag |
+| Q9 | Cloud providers? | All 7 implemented | No IronClaw action needed |
+
+### 12.4 Build Health
+
+**Build:** 0 warnings, 0 errors (both default and `--features voice`)
+**Tests:** 1,705 passing, 0 failures, 1 ignored
+
+### 12.5 Integration Status — Both Sides Complete
+
+**Scrappy completed (2026-03-01 16:00):**
+- ✅ `TauriToolBridge` — implements `ToolBridge` trait with 3-tier approval, session permission cache, 5-min timeout
+- ✅ `ApprovalCard.tsx` — 3 buttons: Allow Once (green), Allow Session (blue), Deny (red)
+- ✅ `WHISPER_HTTP_ENDPOINT` — set to `http://127.0.0.1:53757/v1/audio/transcriptions` in `ironclaw_bridge.rs`
+- ✅ Cloud DB snapshot — `VACUUM INTO` during migration Phase 2b, encrypted + uploaded as `db/ironclaw.db.enc`
+
+**IronClaw exposed (2026-03-01 16:10):**
+- ✅ `AppBuilder::with_tool_bridge(bridge)` — Scrappy can now inject the bridge at startup
+- ✅ `AppComponents` includes `tool_bridge` and `session_approvals` fields
+- ✅ `build_all()` auto-registers bridged sensor tools when a bridge is present
+
+**Final wiring (2 lines to uncomment in Scrappy):**
+```rust
+// In ironclaw_bridge.rs:
+pub use ironclaw::hardware_bridge::ToolBridge;       // Replace local trait
+builder = builder.with_tool_bridge(tool_bridge.clone()); // Uncomment
+```
+
+| Item | Status |
+|------|--------|
+| Sherpa-ONNX keyword spotting | Deferred — scaffold exists, no ML model |
+| X3: Skill Deps | Deferred — no skills use cross-crate deps |
+| WS RPC for remote mode | Deferred — internal trait handles desktop |
+
+
+

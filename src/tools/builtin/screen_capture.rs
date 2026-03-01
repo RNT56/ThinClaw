@@ -20,6 +20,12 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolO
 /// Screen capture tool.
 pub struct ScreenCaptureTool;
 
+impl Default for ScreenCaptureTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScreenCaptureTool {
     pub fn new() -> Self {
         Self

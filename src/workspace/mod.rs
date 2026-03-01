@@ -48,7 +48,7 @@ pub mod hygiene;
 mod repository;
 mod search;
 
-pub use chunker::{ChunkConfig, chunk_document};
+pub use chunker::{ChunkConfig, ChunkingStrategy, chunk, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
@@ -645,7 +645,7 @@ impl Workspace {
         let doc = self.storage.get_document_by_id(document_id).await?;
 
         // Chunk the content
-        let chunks = chunk_document(&doc.content, ChunkConfig::default());
+        let chunks = chunk(&doc.content, ChunkConfig::default());
 
         // Delete old chunks
         self.storage.delete_chunks(document_id).await?;
