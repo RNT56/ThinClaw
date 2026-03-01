@@ -25,6 +25,8 @@ pub struct AgentConfig {
     pub max_actions_per_hour: Option<u64>,
     /// Maximum tool-call iterations per agentic loop invocation. Default 50.
     pub max_tool_iterations: usize,
+    /// Hard cap on context messages sent to the LLM. Default 200.
+    pub max_context_messages: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
 }
@@ -64,6 +66,10 @@ impl AgentConfig {
             max_tool_iterations: parse_optional_env(
                 "AGENT_MAX_TOOL_ITERATIONS",
                 settings.agent.max_tool_iterations,
+            )?,
+            max_context_messages: parse_optional_env(
+                "AGENT_MAX_CONTEXT_MESSAGES",
+                settings.agent.max_context_messages,
             )?,
             auto_approve_tools: parse_bool_env(
                 "AGENT_AUTO_APPROVE_TOOLS",

@@ -342,6 +342,12 @@ pub struct AgentSettings {
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: usize,
 
+    /// Hard cap on the number of context messages sent to the LLM (default: 200).
+    /// Prevents OOM on very long conversations. System messages + the most recent
+    /// messages are kept; older messages are silently dropped.
+    #[serde(default = "default_max_context_messages")]
+    pub max_context_messages: usize,
+
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     #[serde(default)]
     pub auto_approve_tools: bool,
@@ -379,6 +385,10 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_max_context_messages() -> usize {
+    200
+}
+
 fn default_true() -> bool {
     true
 }
@@ -395,6 +405,7 @@ impl Default for AgentSettings {
             max_repair_attempts: default_max_repair_attempts(),
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
+            max_context_messages: default_max_context_messages(),
             auto_approve_tools: false,
         }
     }

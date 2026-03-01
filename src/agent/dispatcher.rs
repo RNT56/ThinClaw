@@ -183,6 +183,27 @@ impl Agent {
 
             let force_text = iteration >= force_text_at;
 
+            // ── Hard chat history cap ───────────────────────────────────
+            // Enforce max_context_messages to prevent OOM on very long
+            // conversations. System messages are always kept; oldest
+            // non-system messages are dropped first.
+            let max_ctx = self.config.max_context_messages;
+            if context_messages.len() > max_ctx {
+                let (systems, rest): (Vec<ChatMessage>, Vec<ChatMessage>) = context_messages
+                    .drain(..)
+                    .partition(|m| m.role == crate::llm::Role::System);
+                let keep_count = max_ctx.saturating_sub(systems.len());
+                let skip = rest.len().saturating_sub(keep_count);
+                tracing::info!(
+                    total = systems.len() + rest.len(),
+                    dropped = skip,
+                    "Chat history cap applied (max_context_messages={})",
+                    max_ctx
+                );
+                context_messages = systems;
+                context_messages.extend(rest.into_iter().skip(skip));
+            }
+
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
@@ -1061,6 +1082,7 @@ mod tests {
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
+                max_context_messages: 200,
                 auto_approve_tools: false,
             },
             deps,

@@ -50,7 +50,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
-| Oversized payload guard | ✅ | 🚧 | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap |
+| Oversized payload guard | ✅ | ✅ | HTTP webhook 64KB body limit + Content-Length check + chat history cap (`max_context_messages` default 200) |
 | Pre-prompt context diagnostics | ✅ | ✅ | `tracing::debug` logs message count, est. chars, tool count before each LLM call |
 
 ### Owner: _Unassigned_
