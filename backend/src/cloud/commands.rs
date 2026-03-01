@@ -20,6 +20,7 @@ pub struct CloudStatusResponse {
     pub provider_name: Option<String>,
     pub storage_used: f64,
     pub storage_available: Option<f64>,
+    #[specta(type = Option<f64>)]
     pub last_sync_at: Option<i64>,
     pub has_recovery_key: bool,
     pub migration_in_progress: bool,
