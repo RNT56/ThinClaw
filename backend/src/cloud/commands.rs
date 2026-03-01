@@ -18,8 +18,8 @@ pub struct CloudStatusResponse {
     pub mode: String,
     pub provider_connected: bool,
     pub provider_name: Option<String>,
-    pub storage_used: u64,
-    pub storage_available: Option<u64>,
+    pub storage_used: f64,
+    pub storage_available: Option<f64>,
     pub last_sync_at: Option<i64>,
     pub has_recovery_key: bool,
     pub migration_in_progress: bool,
@@ -34,8 +34,8 @@ impl From<CloudManagerStatus> for CloudStatusResponse {
             },
             provider_connected: s.provider_connected,
             provider_name: s.provider_name,
-            storage_used: s.storage_used,
-            storage_available: s.storage_available,
+            storage_used: s.storage_used as f64,
+            storage_available: s.storage_available.map(|v| v as f64),
             last_sync_at: s.last_sync_at,
             has_recovery_key: s.has_recovery_key,
             migration_in_progress: s.migration_in_progress,
@@ -59,8 +59,8 @@ pub struct S3ConfigInput {
 pub struct ConnectionTestResult {
     pub connected: bool,
     pub provider_name: String,
-    pub storage_used: u64,
-    pub storage_available: Option<u64>,
+    pub storage_used: f64,
+    pub storage_available: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -96,14 +96,14 @@ pub async fn cloud_test_connection(
         Ok(status) => Ok(ConnectionTestResult {
             connected: status.connected,
             provider_name: status.provider_name,
-            storage_used: status.storage_used,
-            storage_available: status.storage_available,
+            storage_used: status.storage_used as f64,
+            storage_available: status.storage_available.map(|v| v as f64),
             error: None,
         }),
         Err(e) => Ok(ConnectionTestResult {
             connected: false,
             provider_name: "Unknown".to_string(),
-            storage_used: 0,
+            storage_used: 0.0,
             storage_available: None,
             error: Some(e.to_string()),
         }),
@@ -202,7 +202,7 @@ pub async fn cloud_get_storage_breakdown(
         result.push(StorageCategory {
             id: id.to_string(),
             label: label.to_string(),
-            size_bytes: size,
+            size_bytes: size as f64,
         });
     }
 
@@ -214,7 +214,7 @@ pub async fn cloud_get_storage_breakdown(
 pub struct StorageCategory {
     pub id: String,
     pub label: String,
-    pub size_bytes: u64,
+    pub size_bytes: f64,
 }
 
 /// Recursively calculate directory size.
