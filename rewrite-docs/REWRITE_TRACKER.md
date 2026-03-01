@@ -56,7 +56,7 @@ IronClaw already has the `Channel` trait and `ChannelManager`. Adding channels m
 | **Nostr**    | ✅ Done    | ~3K lines     | `channels/nostr.rs`        | NIP-04 encrypted DMs, multi-relay, allowlist, deterministic threads       | ✅ Complete     |
 | **iMessage** | ✅ Done    | ~2K lines     | `sqlite3` CLI + `osascript`| Poll `chat.db` via sqlite3 CLI, send via AppleScript (macOS only).       | ✅ Complete     |
 | **Telegram** | ✅ Done    | ~11K lines    | `reqwest` (raw Bot API)    | Long polling, text/media, chunking (4096 limit), owner mode, allowlist.  | ✅ Complete     |
-| **Slack**    | 🟡 Medium  | ~8K lines     | `slack-morphism`           | Socket Mode (no public IP needed), Block Kit, threads, mentions.         | ⬜ Not Started |
+| **Slack**    | ✅ Done    | ~8K lines     | `tokio-tungstenite` + Socket Mode | Socket Mode WS, Web API, threading, message chunking (4000 limit).      | ✅ Complete     |
 | **Discord**  | 🔴 High    | ~20K lines    | `serenity` + `poise`       | Guild monitoring, thread replies, chunking (2000 limit), slash commands. | ⬜ Not Started |
 
 _Note: OpenClaw supports 23+ channels. These 6 are the prioritized starting point based on the previous plan._
@@ -67,8 +67,8 @@ Features previously handled by the macOS/iOS Swift apps that need to be ported t
 
 | Capability                 | Complexity | Original File(s)         | Target Rust Approach                                 | Status         |
 | :------------------------- | :--------- | :----------------------- | :--------------------------------------------------- | :------------- |
-| **System Commands**        | 🔴 High    | `SystemCommands.swift`   | `std::process::Command`, approval UI in Tauri        | ⬜ Not Started |
-| **Canvas / A2UI**          | 🔴 High    | `CanvasCommands.swift`   | Tauri WebView manipulation & JS evaluation           | ⬜ Not Started |
+| **System Commands**        | ✅ Done    | `SystemCommands.swift`   | `ShellTool` + file tools (sandbox, injection detection) | ✅ Complete    |
+| **Canvas / A2UI**          | ✅ Done    | `CanvasCommands.swift`   | `tools/builtin/canvas.rs` — structured JSON payload  | ✅ Complete    |
 | **Voice Wake (Hey Molty)** | 🔴 High    | `VoiceWakeRuntime.swift` | `sherpa-rs` (Sherpa-ONNX) for keyword detection      | ⬜ Not Started |
 | **Talk Mode (PTT)**        | 🟡 Medium  | `TalkCommands.swift`     | Standard audio capture traits (`cpal`), `whisper-rs` | ⬜ Not Started |
 | **Screen Recording**       | 🟡 Medium  | `ScreenCommands.swift`   | `scrap` or platform-specific capture APIs            | ⬜ Not Started |
