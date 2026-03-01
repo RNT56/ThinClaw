@@ -351,6 +351,7 @@ impl MlxEngine {
         //   expand_dims(): incompatible function arguments … NoneType, int
         // We insert a key-rename after the torch→mlx conversion block.
         Self::apply_vlm_attention_mask_patch(&venv);
+        Self::apply_vlm_content_normalization_patch(&venv);
 
         // Step 3: Write marker file so is_bootstrapped() returns true next time
         let marker = venv.join(".mlx-openai-server");
@@ -412,6 +413,79 @@ impl MlxEngine {
 
         match std::fs::write(&handler, patched) {
             Ok(_) => println!("[mlx] Patch: applied attention_mask→mask fix to mlx_vlm.py"),
+            Err(e) => println!("[mlx] Patch: failed to write: {}", e),
+        }
+    }
+
+    /// Patch `app/handler/mlx_vlm.py` to normalize list content in
+    /// system/assistant messages to plain strings.
+    ///
+    /// When IronClaw (or any OpenAI-compatible client) sends multipart content
+    /// format for non-user messages, the VLM handler passes
+    /// `ChatCompletionContentPartText` Pydantic objects through as-is. Downstream
+    /// code then crashes with `'ChatCompletionContentPartText' object is not
+    /// subscriptable` because it expects plain strings or dicts.
+    ///
+    /// This patch normalizes list content to a joined text string for system
+    /// and assistant roles.
+    fn apply_vlm_content_normalization_patch(venv: &std::path::Path) {
+        let handler = venv
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("app")
+            .join("handler")
+            .join("mlx_vlm.py");
+
+        if !handler.exists() {
+            return;
+        }
+
+        let Ok(source) = std::fs::read_to_string(&handler) else {
+            return;
+        };
+
+        // Already patched?
+        if source.contains("PATCH (scrappy): normalize list content") {
+            println!("[mlx] Patch: content normalization already applied");
+            return;
+        }
+
+        // The pattern: system/assistant messages pass content through as-is.
+        // We replace the block to normalize list content to plain text.
+        let needle = r#"            if message.role in ["system", "assistant"]:
+                chat_messages.append({"role": message.role, "content": message.content})
+                continue"#;
+
+        let patch = r#"            if message.role in ["system", "assistant"]:
+                # PATCH (scrappy): normalize list content to plain text.
+                # IronClaw sends multipart content format (list of ContentPart
+                # objects) for all roles. Without normalization, Pydantic objects
+                # cause "'ChatCompletionContentPartText' object is not subscriptable".
+                msg_content = message.content
+                if isinstance(msg_content, list):
+                    text_parts = []
+                    for part in msg_content:
+                        if hasattr(part, 'text'):
+                            text_parts.append(part.text)
+                        elif isinstance(part, dict) and 'text' in part:
+                            text_parts.append(part['text'])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    msg_content = "\n".join(text_parts) if text_parts else str(message.content)
+                chat_messages.append({"role": message.role, "content": msg_content})
+                continue"#;
+
+        let patched = source.replace(needle, patch);
+        if patched == source {
+            println!(
+                "[mlx] Patch: could not locate content normalization insertion point, skipping"
+            );
+            return;
+        }
+
+        match std::fs::write(&handler, patched) {
+            Ok(_) => println!("[mlx] Patch: applied content normalization fix to mlx_vlm.py"),
             Err(e) => println!("[mlx] Patch: failed to write: {}", e),
         }
     }
@@ -571,6 +645,11 @@ impl InferenceEngine for MlxEngine {
         if !python.exists() {
             return Err("MLX environment not found. Please set up MLX first.".into());
         }
+
+        // Apply any pending patches to the MLX server code.
+        // These are idempotent — they no-op if already applied.
+        Self::apply_vlm_attention_mask_patch(&venv);
+        Self::apply_vlm_content_normalization_patch(&venv);
 
         // Read the model's native context window from config.json
         let model_max = super::read_model_max_context(model_path);

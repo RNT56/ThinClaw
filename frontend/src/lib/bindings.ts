@@ -868,6 +868,10 @@ async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
  * 
  * Initializes the agent, starts background tasks, emits Connected event.
  * If already running, this is a no-op (returns Ok).
+ * 
+ * When local inference is selected and the engine isn't ready yet, this
+ * command will poll the sidecar/engine status for up to 30 seconds before
+ * proceeding — covering the common case where MLX is still booting.
  */
 async openclawStartGateway() : Promise<Result<null, string>> {
     try {
