@@ -66,6 +66,7 @@ pub mod wizard;
 // future pass.
 pub mod orchestrator;
 pub mod pairing;
+pub mod qr_pairing;
 pub mod registry;
 pub mod safety;
 pub mod sandbox;

@@ -138,7 +138,7 @@ The WebSocket protocol that connects the Tauri Thin Client to the headless Remot
 | **Model Discovery RPC** | `model.list.request` / `model.list.response` | `WsClientMessage::ModelList` + `WsServerMessage::ModelListResult` | ✅ Done |
 | **Auto-Update Check** | Orchestrator polls GitHub Releases every 24h, self-updates via `self_update` crate | `src/update_checker.rs` — background tokio task | ✅ Done |
 | **Tailscale Discovery** | Tauri app queries Tailscale local API to auto-find Orchestrator | `src/tailscale.rs` — `reqwest` to `localhost:41112` | ✅ Done |
-| **QR Code Pairing** | Fallback pairing for non-Tailscale setups, cert-pinned TLS | `rcgen` + QR display | ⏳ Pending |
+| **QR Code Pairing** | Fallback pairing for non-Tailscale setups, cert-pinned TLS | `src/qr_pairing.rs` — URL scheme, token validation, terminal QR | ✅ Done |
 
 ## 🖥️ CLI, TUI & Setup Wizard (Rust-Native)
 
