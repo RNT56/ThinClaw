@@ -469,6 +469,39 @@ pub fn run() {
 
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
+                // Check if local inference is selected and no server is ready yet.
+                // If so, defer IronClaw start — the frontend will trigger
+                // openclaw_start_gateway() after the MLX/sidecar engine is up.
+                let should_defer = {
+                    use tauri::Manager;
+                    let openclaw_mgr = ironclaw_handle.state::<openclaw::OpenClawManager>();
+                    let oc_config = openclaw_mgr.get_config().await;
+                    if let Some(ref cfg) = oc_config {
+                        if cfg.local_inference_enabled {
+                            let sidecar = ironclaw_handle.state::<sidecar::SidecarManager>();
+                            let has_sidecar = sidecar.get_chat_config().is_some();
+                            let has_engine = {
+                                let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
+                                let guard = engine_mgr.engine.lock().await;
+                                guard.as_ref().and_then(|e| e.base_url()).is_some()
+                            };
+                            !has_sidecar && !has_engine
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if should_defer {
+                    println!(
+                        "[main] IronClaw auto-start deferred: local inference selected \
+                         but server not ready yet. Will start via gateway command."
+                    );
+                    return;
+                }
+
                 // Bridge Scrappy's macOS Keychain to IronClaw's SecretsStore trait.
                 let secrets_store: Option<
                     std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>,
