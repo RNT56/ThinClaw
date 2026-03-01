@@ -393,7 +393,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Canvas system (A2UI) | ✅ | ❌ | P3 | Agent-driven UI, improved asset resolution |
 | Control UI i18n | ✅ | ❌ | P3 | English, Chinese, Portuguese |
 | WebChat theme sync | ✅ | ❌ | P3 | Sync with system dark/light mode |
-| Partial output on abort | ✅ | ❌ | P2 | Preserve partial output when aborting |
+| Partial output on abort | ✅ | ✅ | - | Extracts last 3 tool/assistant results on interrupt |
 
 ### Owner: _Unassigned_
 
@@ -535,7 +535,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Configuration hot-reload
 - ❌ Webhook trigger endpoint in web gateway
 - ❌ Channel health monitor with auto-restart
-- ❌ Partial output preservation on abort
+- ✅ Partial output preservation on abort (returns last 3 tool/assistant results when interrupted)
 
 ### P3 - Lower Priority
 - ❌ Discord channel

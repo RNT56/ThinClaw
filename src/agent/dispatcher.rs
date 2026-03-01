@@ -147,17 +147,51 @@ impl Agent {
                 .into());
             }
 
-            // Check if interrupted
+            // Check if interrupted — preserve partial output
             {
                 let sess = session.lock().await;
                 if let Some(thread) = sess.threads.get(&thread_id)
                     && thread.state == ThreadState::Interrupted
                 {
-                    return Err(crate::error::JobError::ContextError {
-                        id: thread_id,
-                        reason: "Interrupted".to_string(),
+                    // Extract the last assistant or tool result content from
+                    // context_messages so the user sees partial progress.
+                    let partial_output = context_messages
+                        .iter()
+                        .rev()
+                        .filter_map(|m| match m.role {
+                            crate::llm::Role::Assistant if !m.content.is_empty() => {
+                                Some(m.content.clone())
+                            }
+                            crate::llm::Role::Tool if !m.content.is_empty() => {
+                                let tool_name = m.name.as_deref().unwrap_or("tool");
+                                Some(format!(
+                                    "[{}: {}]",
+                                    tool_name,
+                                    &m.content[..m.content.len().min(500)]
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .take(3) // At most last 3 tool/assistant results
+                        .collect::<Vec<_>>();
+
+                    if partial_output.is_empty() {
+                        return Err(crate::error::JobError::ContextError {
+                            id: thread_id,
+                            reason: "Interrupted".to_string(),
+                        }
+                        .into());
                     }
-                    .into());
+
+                    // Return the partial output as a response
+                    let mut parts = partial_output;
+                    parts.reverse(); // chronological order
+                    let partial = format!(
+                        "[Interrupted after {} iteration(s)]\n\n{}",
+                        iteration - 1,
+                        parts.join("\n\n")
+                    );
+                    return Ok(AgenticLoopResult::Response(partial));
                 }
             }
 
