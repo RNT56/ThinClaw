@@ -170,6 +170,6 @@ tui = ["ratatui", "crossterm"]
 ## 🗺️ Migration Strategy
 
 1. ~~**Hybrid Phase (Current):** Rust app handles the RIG Agent and local UI, but still relies on the Node.js OpenClaw sidecar for channels and legacy infrastructure.~~ → **COMPLETE: Node.js eliminated.**
-2. **Channel Porting:** Build messaging channels using the existing `Channel` trait. Port channels one by one (recommended order: Signal → Nostr → Telegram → iMessage → Slack → Discord).
-3. **Capabilities Porting:** Implement host-device access (System, Camera, Voice) directly in Rust, eliminating the need for the Swift companion apps.
-4. **Standalone App:** Turn off ALL legacy infrastructure once the 6 core channels and necessary capabilities are running natively in Rust.
+2. ~~**Channel Porting:** Build messaging channels using the existing `Channel` trait. Port channels one by one (recommended order: Signal → Nostr → Telegram → iMessage → Slack → Discord).~~ → **COMPLETE: All 6 core channels implemented.**
+3. **Capabilities Porting:** Implement host-device access (System, Camera, Voice) directly in Rust, eliminating the need for the Swift companion apps. *(Voice Wake, Talk Mode, Screen, Camera, Location remain)*
+4. **Standalone App:** Turn off ALL legacy infrastructure once the necessary capabilities are running natively in Rust. *(Blocked by capabilities porting + Remote Mode networking)*
