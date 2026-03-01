@@ -3,6 +3,7 @@
 mod browser;
 mod canvas;
 mod device_info;
+mod discord_actions;
 mod echo;
 pub mod extension_tools;
 mod file;
@@ -13,6 +14,7 @@ mod memory;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
+mod slack_actions;
 mod telegram_actions;
 mod time;
 mod tts;
@@ -20,6 +22,7 @@ mod tts;
 pub use browser::BrowserTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use device_info::DeviceInfoTool;
+pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
@@ -37,6 +40,7 @@ pub use routine::{
 };
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
+pub use slack_actions::SlackActionsTool;
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use tts::TtsTool;

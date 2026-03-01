@@ -117,8 +117,8 @@ OpenClaw's TypeScript agent has a robust built-in toolkit. To replace the TS age
 
 | Tool                   | Description                                       | OpenClaw TS Source    | Target Rust Approach                               | Status |
 | :--------------------- | :------------------------------------------------ | :-------------------- | :------------------------------------------------- | :----- |
-| **`discord.actions`**  | Kick, ban, manage roles, adjust presence.         | `discord-actions.ts`  | Specific functions on your `serenity` client       | ⬜ Not Started |
-| **`slack.actions`**    | Slack-specific moderation and channel management. | `slack-actions.ts`    | Specific functions on your `slack-morphism` client | ⬜ Not Started |
+| **`discord.actions`**  | Kick, ban, manage roles, adjust presence.         | `discord-actions.ts`  | `tools/builtin/discord_actions.rs` — REST API | ✅ Done |
+| **`slack.actions`**    | Slack-specific moderation and channel management. | `slack-actions.ts`    | `tools/builtin/slack_actions.rs` — Web API    | ✅ Done |
 | **`telegram.actions`** | Telegram specific tools and API interactions.     | `telegram-actions.ts` | `tools/builtin/telegram_actions.rs` — Bot API | ✅ Done |
 
 ## 📻 Client ↔ Orchestrator Protocol (Remote Mode Infrastructure)

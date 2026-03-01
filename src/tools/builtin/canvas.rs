@@ -18,7 +18,7 @@
 //! appropriate frontend via the channel's status update mechanism or
 //! a dedicated Tauri IPC event.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -300,7 +300,9 @@ impl Tool for CanvasTool {
         let action_str = params
             .get("action")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("Missing 'action' parameter".to_string()))?;
+            .ok_or_else(|| {
+                ToolError::InvalidParameters("Missing 'action' parameter".to_string())
+            })?;
 
         let canvas_action = match action_str {
             "show" => {
@@ -347,7 +349,9 @@ impl Tool for CanvasTool {
                     .get("panel_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        ToolError::InvalidParameters("Missing 'panel_id' for update action".to_string())
+                        ToolError::InvalidParameters(
+                            "Missing 'panel_id' for update action".to_string(),
+                        )
                     })?
                     .to_string();
 
@@ -363,7 +367,9 @@ impl Tool for CanvasTool {
                     .get("panel_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        ToolError::InvalidParameters("Missing 'panel_id' for dismiss action".to_string())
+                        ToolError::InvalidParameters(
+                            "Missing 'panel_id' for dismiss action".to_string(),
+                        )
                     })?
                     .to_string();
 
@@ -374,7 +380,9 @@ impl Tool for CanvasTool {
                     .get("message")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        ToolError::InvalidParameters("Missing 'message' for notify action".to_string())
+                        ToolError::InvalidParameters(
+                            "Missing 'message' for notify action".to_string(),
+                        )
                     })?
                     .to_string();
 
