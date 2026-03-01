@@ -1,6 +1,7 @@
-//! NEAR AI Agentic Worker Framework
+//! IronClaw — Secure Personal AI Agent Framework
 //!
-//! An LLM-powered autonomous agent that operates on the NEAR AI marketplace.
+//! An LLM-powered autonomous agent with multi-channel interaction,
+//! WASM-sandboxed tools, and persistent memory.
 //!
 //! # Architecture
 //!
