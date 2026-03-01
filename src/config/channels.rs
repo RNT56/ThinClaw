@@ -15,6 +15,10 @@ pub struct ChannelsConfig {
     pub signal: Option<SignalConfig>,
     pub nostr: Option<NostrConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub slack: Option<SlackChannelConfig>,
+    pub discord: Option<DiscordChannelConfig>,
+    #[cfg(target_os = "macos")]
+    pub imessage: Option<IMessageChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -203,6 +207,10 @@ impl ChannelsConfig {
                 })?
                 .or(settings.channels.telegram_owner_id),
             telegram: Self::resolve_telegram(settings)?,
+            slack: Self::resolve_slack()?,
+            discord: Self::resolve_discord()?,
+            #[cfg(target_os = "macos")]
+            imessage: Self::resolve_imessage()?,
         })
     }
 
@@ -292,4 +300,125 @@ pub struct TelegramConfig {
     pub owner_id: Option<i64>,
     /// Allowed user IDs (empty = allow all; "*" = allow all).
     pub allow_from: Vec<String>,
+}
+
+/// Slack channel configuration.
+#[derive(Debug, Clone)]
+pub struct SlackChannelConfig {
+    /// Bot User OAuth Token (xoxb-...).
+    pub bot_token: SecretString,
+    /// App-Level Token (xapp-...) for Socket Mode.
+    pub app_token: SecretString,
+    /// Allowed channel/DM IDs (empty = allow all).
+    pub allow_from: Vec<String>,
+}
+
+/// Discord channel configuration.
+#[derive(Debug, Clone)]
+pub struct DiscordChannelConfig {
+    /// Bot token.
+    pub bot_token: SecretString,
+    /// Optional guild ID to restrict to.
+    pub guild_id: Option<String>,
+    /// Allowed channel IDs (empty = allow all).
+    pub allow_from: Vec<String>,
+}
+
+/// iMessage channel configuration (macOS only).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct IMessageChannelConfig {
+    /// Allowed phone numbers / email addresses (empty = allow all).
+    pub allow_from: Vec<String>,
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+}
+
+impl ChannelsConfig {
+    fn resolve_slack() -> Result<Option<SlackChannelConfig>, ConfigError> {
+        let bot_token = match optional_env("SLACK_BOT_TOKEN")? {
+            Some(t) => SecretString::from(t),
+            None => return Ok(None),
+        };
+
+        let app_token = match optional_env("SLACK_APP_TOKEN")? {
+            Some(t) => SecretString::from(t),
+            None => {
+                return Err(ConfigError::InvalidValue {
+                    key: "SLACK_APP_TOKEN".to_string(),
+                    message: "SLACK_APP_TOKEN is required when SLACK_BOT_TOKEN is set".to_string(),
+                });
+            }
+        };
+
+        let allow_from = optional_env("SLACK_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(SlackChannelConfig {
+            bot_token,
+            app_token,
+            allow_from,
+        }))
+    }
+
+    fn resolve_discord() -> Result<Option<DiscordChannelConfig>, ConfigError> {
+        let bot_token = match optional_env("DISCORD_BOT_TOKEN")? {
+            Some(t) => SecretString::from(t),
+            None => return Ok(None),
+        };
+
+        let guild_id = optional_env("DISCORD_GUILD_ID")?;
+
+        let allow_from = optional_env("DISCORD_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(DiscordChannelConfig {
+            bot_token,
+            guild_id,
+            allow_from,
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn resolve_imessage() -> Result<Option<IMessageChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("IMESSAGE_ENABLED", false)?;
+        if !enabled {
+            return Ok(None);
+        }
+
+        let allow_from = optional_env("IMESSAGE_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let poll_interval_secs: u64 = optional_env("IMESSAGE_POLL_INTERVAL")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "IMESSAGE_POLL_INTERVAL".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .unwrap_or(3);
+
+        Ok(Some(IMessageChannelConfig {
+            allow_from,
+            poll_interval_secs,
+        }))
+    }
 }
