@@ -4,6 +4,8 @@ When the Rust Orchestrator is deployed remotely (headless VPS or Mac Mini), it d
 
 The Hardware Bridge is an opt-in system that allows the Remote Orchestrator to request local sensor data via the existing WebSocket connection, with explicit user approval for every request type.
 
+> **Implementation Status (2026-03-01):** Local tools for all three sensors are **complete** (`tools/builtin/screen_capture.rs`, `tools/builtin/camera_capture.rs`, `src/talk_mode.rs`). The remote RPC forwarding bridge (sending requests over WebSocket to the Tauri client) is **scaffolded** in the WS message types but not yet wired end-to-end. For local-mode usage, the tools work directly without the bridge.
+
 ---
 
 ## 1. The Core Design Principle: Opt-In Per Sensor

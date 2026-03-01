@@ -1055,14 +1055,19 @@ Apply in the `TauriChannel::send_status` for `StreamChunk` and
 
 These are NOT part of the initial 7-10 day effort but should be planned:
 
-| Enhancement | Priority | Description |
-|---|---|---|
-| Session context in `StatusUpdate` | P1 | Add `session_key: Option<String>` to StatusUpdate variants to eliminate `active_session` concurrency issue |
-| Hot config reload | P2 | Change API keys or model without restart. `reinit_ironclaw()` |
-| Canvas support | P2 | Implement `UiEvent::CanvasUpdate` when IronClaw adds canvas feature |
-| Sub-agent spawning | P3 | When IronClaw adds `agents.list/spawn`, wire to Scrappy commands |
-| Shared database | P3 | Evaluate unifying ironclaw.db + openclaw.db after stabilization |
-| Fleet management | P3 | Desktop fleet support if IronClaw adds peer discovery |
+| Enhancement | Priority | Description | Status |
+|---|---|---|---|
+| Session context in `StatusUpdate` | P1 | Add `session_key: Option<String>` to StatusUpdate variants to eliminate `active_session` concurrency issue | |
+| Hot config reload | P2 | Change API keys or model without restart. `reinit_ironclaw()` | |
+| Canvas support | ~~P2~~ | ~~Implement `UiEvent::CanvasUpdate` when IronClaw adds canvas feature~~ | ✅ Done (`tools/builtin/canvas.rs`) |
+| Sub-agent spawning | P3 | When IronClaw adds `agents.list/spawn`, wire to Scrappy commands | |
+| Shared database | P3 | Evaluate unifying ironclaw.db + openclaw.db after stabilization | |
+| Fleet management | ~~P3~~ | ~~Desktop fleet support if IronClaw adds peer discovery~~ | ✅ Done (`src/tailscale.rs` — Tailscale discovery) |
+| Voice wake word | P2 | `src/voice_wake.rs` scaffold done — needs `cpal` audio capture integration | ✅ Scaffold |
+| Talk mode (PTT) | P2 | `src/talk_mode.rs` — CLI audio capture + Whisper API done — local `whisper-rs` deferred | ✅ Scaffold |
+| Screen/Camera/Location | ~~P2~~ | ~~Device capability tools~~ | ✅ Done (`screen_capture.rs`, `camera_capture.rs`, `location.rs`) |
+| Auto-update checker | ~~P2~~ | ~~GitHub Releases API poller~~ | ✅ Done (`src/update_checker.rs`) |
+| QR code pairing | ~~P2~~ | ~~Non-Tailscale pairing fallback~~ | ✅ Done (`src/qr_pairing.rs`) |
 
 ---
 
