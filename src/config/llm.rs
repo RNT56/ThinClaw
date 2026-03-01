@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use secrecy::SecretString;
 
 use crate::config::helpers::{optional_env, parse_optional_env};
@@ -8,20 +6,19 @@ use crate::settings::Settings;
 
 /// Which LLM backend to use.
 ///
-/// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
-/// Users can override with `LLM_BACKEND` env var to use their own API keys.
+/// Defaults to `OpenAiCompatible` — the most flexible option, working with
+/// OpenRouter, vLLM, LiteLLM, Together, and any other endpoint that speaks
+/// the OpenAI Chat Completions API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmBackend {
-    /// NEAR AI proxy (default) -- session or API key auth
-    #[default]
-    NearAi,
     /// Direct OpenAI API
     OpenAi,
     /// Direct Anthropic API
     Anthropic,
     /// Local Ollama instance
     Ollama,
-    /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
+    /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together, OpenRouter)
+    #[default]
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
@@ -32,14 +29,13 @@ impl std::str::FromStr for LlmBackend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "nearai" | "near_ai" | "near" => Ok(Self::NearAi),
             "openai" | "open_ai" => Ok(Self::OpenAi),
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: openai, anthropic, ollama, openai_compatible, tinfoil",
                 s
             )),
         }
@@ -49,7 +45,6 @@ impl std::str::FromStr for LlmBackend {
 impl std::fmt::Display for LlmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NearAi => write!(f, "nearai"),
             Self::OpenAi => write!(f, "openai"),
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
@@ -102,16 +97,87 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Backend-agnostic reliability and routing configuration.
+///
+/// These settings apply regardless of which LLM backend is selected.
+/// They control retry, failover, circuit breaker, caching, and smart routing.
+#[derive(Debug, Clone)]
+pub struct ReliabilityConfig {
+    /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Falls back to the main model if not set.
+    /// Only applied when backend supports runtime model switching.
+    pub cheap_model: Option<String>,
+
+    /// Optional fallback model for failover.
+    /// When set, a secondary provider is created with this model and wrapped
+    /// in a `FailoverProvider` so transient errors on the primary model
+    /// automatically fall through to the fallback.
+    pub fallback_model: Option<String>,
+
+    /// Maximum number of retries for transient errors (default: 3).
+    /// With the default of 3, the provider makes up to 4 total attempts
+    /// (1 initial + 3 retries) before giving up.
+    pub max_retries: u32,
+
+    /// Consecutive transient failures before the circuit breaker opens.
+    /// None = disabled (default). E.g. 5 means after 5 consecutive failures
+    /// all requests are rejected until recovery timeout elapses.
+    pub circuit_breaker_threshold: Option<u32>,
+
+    /// How long (seconds) the circuit stays open before allowing a probe (default: 30).
+    pub circuit_breaker_recovery_secs: u64,
+
+    /// Enable in-memory response caching for `complete()` calls.
+    /// Saves tokens on repeated prompts within a session. Default: false.
+    pub response_cache_enabled: bool,
+
+    /// TTL in seconds for cached responses (default: 3600 = 1 hour).
+    pub response_cache_ttl_secs: u64,
+
+    /// Max cached responses before LRU eviction (default: 1000).
+    pub response_cache_max_entries: usize,
+
+    /// Cooldown duration in seconds for the failover provider (default: 300).
+    /// When a provider accumulates enough consecutive failures it is skipped
+    /// for this many seconds.
+    pub failover_cooldown_secs: u64,
+
+    /// Number of consecutive retryable failures before a provider enters
+    /// cooldown (default: 3).
+    pub failover_cooldown_threshold: u32,
+
+    /// Enable cascade mode for smart routing: when a moderate-complexity task
+    /// gets an uncertain response from the cheap model, re-send to primary.
+    /// Default: true.
+    pub smart_routing_cascade: bool,
+}
+
+impl Default for ReliabilityConfig {
+    fn default() -> Self {
+        Self {
+            cheap_model: None,
+            fallback_model: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
+        }
+    }
+}
+
 /// LLM provider configuration.
 ///
-/// NEAR AI remains the default backend. Users can switch to other providers
-/// by setting `LLM_BACKEND` (e.g. `openai`, `anthropic`, `ollama`).
+/// Defaults to `OpenAiCompatible` backend. Users select a backend via
+/// `LLM_BACKEND` env var (e.g. `openai`, `anthropic`, `ollama`).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// Which backend to use (default: NearAi)
+    /// Which backend to use (default: OpenAiCompatible)
     pub backend: LlmBackend,
-    /// NEAR AI config (always populated for NEAR AI embeddings, etc.)
-    pub nearai: NearAiConfig,
     /// Direct OpenAI config (populated when backend=openai)
     pub openai: Option<OpenAiDirectConfig>,
     /// Direct Anthropic config (populated when backend=anthropic)
@@ -122,63 +188,13 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
-}
-
-/// NEAR AI configuration.
-#[derive(Debug, Clone)]
-pub struct NearAiConfig {
-    /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
-    pub model: String,
-    /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
-    /// Falls back to the main model if not set.
-    pub cheap_model: Option<String>,
-    /// Base URL for the NEAR AI API.
-    /// Default: `https://private.near.ai` (session token) or `https://cloud-api.near.ai` (API key)
-    pub base_url: String,
-    /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
-    pub auth_base_url: String,
-    /// Path to session file (default: ~/.ironclaw/session.json)
-    pub session_path: PathBuf,
-    /// API key for NEAR AI Cloud. When set, uses API key auth; otherwise uses session token auth.
-    pub api_key: Option<SecretString>,
-    /// Optional fallback model for failover (default: None).
-    /// When set, a secondary provider is created with this model and wrapped
-    /// in a `FailoverProvider` so transient errors on the primary model
-    /// automatically fall through to the fallback.
-    pub fallback_model: Option<String>,
-    /// Maximum number of retries for transient errors (default: 3).
-    /// With the default of 3, the provider makes up to 4 total attempts
-    /// (1 initial + 3 retries) before giving up.
-    pub max_retries: u32,
-    /// Consecutive transient failures before the circuit breaker opens.
-    /// None = disabled (default). E.g. 5 means after 5 consecutive failures
-    /// all requests are rejected until recovery timeout elapses.
-    pub circuit_breaker_threshold: Option<u32>,
-    /// How long (seconds) the circuit stays open before allowing a probe (default: 30).
-    pub circuit_breaker_recovery_secs: u64,
-    /// Enable in-memory response caching for `complete()` calls.
-    /// Saves tokens on repeated prompts within a session. Default: false.
-    pub response_cache_enabled: bool,
-    /// TTL in seconds for cached responses (default: 3600 = 1 hour).
-    pub response_cache_ttl_secs: u64,
-    /// Max cached responses before LRU eviction (default: 1000).
-    pub response_cache_max_entries: usize,
-    /// Cooldown duration in seconds for the failover provider (default: 300).
-    /// When a provider accumulates enough consecutive failures it is skipped
-    /// for this many seconds.
-    pub failover_cooldown_secs: u64,
-    /// Number of consecutive retryable failures before a provider enters
-    /// cooldown (default: 3).
-    pub failover_cooldown_threshold: u32,
-    /// Enable cascade mode for smart routing: when a moderate-complexity task
-    /// gets an uncertain response from the cheap model, re-send to primary.
-    /// Default: true.
-    pub smart_routing_cascade: bool,
+    /// Backend-agnostic reliability/routing settings
+    pub reliability: ReliabilityConfig,
 }
 
 impl LlmConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Determine backend: env var > settings > default (NearAi)
+        // Determine backend: env var > settings > default (OpenAiCompatible)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "LLM_BACKEND".to_string(),
@@ -189,54 +205,15 @@ impl LlmConfig {
                 Ok(backend) => backend,
                 Err(e) => {
                     tracing::warn!(
-                        "Invalid llm_backend '{}' in settings: {}. Using default NearAi.",
+                        "Invalid llm_backend '{}' in settings: {}. Using default OpenAiCompatible.",
                         b,
                         e
                     );
-                    LlmBackend::NearAi
+                    LlmBackend::OpenAiCompatible
                 }
             }
         } else {
-            LlmBackend::NearAi
-        };
-
-        // Resolve NEAR AI config only when backend is NearAi (or when explicitly configured)
-        let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
-
-        let nearai = NearAiConfig {
-            model: optional_env("NEARAI_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "zai-org/GLM-latest".to_string()),
-            cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
-                if nearai_api_key.is_some() {
-                    "https://cloud-api.near.ai".to_string()
-                } else {
-                    "https://private.near.ai".to_string()
-                }
-            }),
-            auth_base_url: optional_env("NEARAI_AUTH_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
-            session_path: optional_env("NEARAI_SESSION_PATH")?
-                .map(PathBuf::from)
-                .unwrap_or_else(default_session_path),
-            api_key: nearai_api_key,
-            fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
-            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
-            circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?,
-            circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
-            response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
-            response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
-            response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
-            failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
-            failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
-            smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
+            LlmBackend::OpenAiCompatible
         };
 
         // Resolve provider-specific configs based on backend
@@ -325,15 +302,67 @@ impl LlmConfig {
             None
         };
 
+        // Resolve backend-agnostic reliability config
+        let reliability = ReliabilityConfig {
+            cheap_model: optional_env("LLM_CHEAP_MODEL")?,
+            fallback_model: optional_env("LLM_FALLBACK_MODEL")?,
+            max_retries: parse_optional_env("LLM_MAX_RETRIES", 3)?,
+            circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
+            circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
+            response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
+            response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
+            response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
+            failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
+            failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
+            smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
+        };
+
         Ok(Self {
             backend,
-            nearai,
             openai,
             anthropic,
             ollama,
             openai_compatible,
             tinfoil,
+            reliability,
         })
+    }
+
+    /// Get the primary model name from the active backend config.
+    pub fn primary_model(&self) -> &str {
+        match self.backend {
+            LlmBackend::OpenAi => self
+                .openai
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("gpt-4o"),
+            LlmBackend::Anthropic => self
+                .anthropic
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("claude-sonnet-4-20250514"),
+            LlmBackend::Ollama => self
+                .ollama
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("llama3"),
+            LlmBackend::OpenAiCompatible => self
+                .openai_compatible
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("default"),
+            LlmBackend::Tinfoil => self
+                .tinfoil
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("kimi-k2-5"),
+        }
     }
 }
 
@@ -369,14 +398,6 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         headers.push((key.to_string(), value.trim().to_string()));
     }
     Ok(headers)
-}
-
-/// Get the default session file path (~/.ironclaw/session.json).
-fn default_session_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("session.json")
 }
 
 #[cfg(test)]
@@ -442,6 +463,15 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn default_backend_is_openai_compatible() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+
+        let backend = LlmBackend::default();
+        assert_eq!(backend, LlmBackend::OpenAiCompatible);
     }
 
     #[test]

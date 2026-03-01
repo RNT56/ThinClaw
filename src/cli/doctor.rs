@@ -17,8 +17,8 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Configuration checks ──────────────────────────────────
 
     check(
-        "NEAR AI session",
-        check_nearai_session().await,
+        "LLM configuration",
+        check_llm_config().await,
         &mut passed,
         &mut failed,
     );
@@ -103,27 +103,52 @@ enum CheckResult {
     Skip(String),
 }
 
-async fn check_nearai_session() -> CheckResult {
-    // Check if session file exists
-    let session_path = crate::llm::session::default_session_path();
-    if !session_path.exists() {
-        // Check for API key mode
-        if std::env::var("NEARAI_API_KEY").is_ok() {
-            return CheckResult::Pass("API key configured".into());
-        }
-        return CheckResult::Fail(format!(
-            "session file not found at {}. Run `ironclaw onboard`",
-            session_path.display()
-        ));
-    }
+async fn check_llm_config() -> CheckResult {
+    let backend = std::env::var("LLM_BACKEND")
+        .ok()
+        .unwrap_or_else(|| "openai_compatible".into());
 
-    // Verify the session file is readable and non-empty
-    match std::fs::read_to_string(&session_path) {
-        Ok(content) if content.trim().is_empty() => {
-            CheckResult::Fail("session file is empty".into())
+    match backend.as_str() {
+        "openai" => {
+            if std::env::var("OPENAI_API_KEY").is_ok() {
+                CheckResult::Pass("OpenAI API key configured".into())
+            } else {
+                CheckResult::Fail("LLM_BACKEND=openai but OPENAI_API_KEY not set".into())
+            }
         }
-        Ok(_) => CheckResult::Pass(format!("session found ({})", session_path.display())),
-        Err(e) => CheckResult::Fail(format!("cannot read session file: {e}")),
+        "anthropic" | "claude" => {
+            if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                CheckResult::Pass("Anthropic API key configured".into())
+            } else {
+                CheckResult::Fail("LLM_BACKEND=anthropic but ANTHROPIC_API_KEY not set".into())
+            }
+        }
+        "ollama" => {
+            let url = std::env::var("OLLAMA_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:11434".into());
+            CheckResult::Pass(format!("Ollama configured ({})", url))
+        }
+        "tinfoil" => {
+            if std::env::var("TINFOIL_API_KEY").is_ok() {
+                CheckResult::Pass("Tinfoil API key configured".into())
+            } else {
+                CheckResult::Fail("LLM_BACKEND=tinfoil but TINFOIL_API_KEY not set".into())
+            }
+        }
+        "openai_compatible" | "compatible" | _ => {
+            if std::env::var("LLM_BASE_URL").is_ok() {
+                CheckResult::Pass(format!(
+                    "OpenAI-compatible endpoint configured ({})",
+                    std::env::var("LLM_BASE_URL").unwrap_or_default()
+                ))
+            } else {
+                CheckResult::Fail(
+                    "LLM_BACKEND=openai_compatible but LLM_BASE_URL not set. \
+                     Set LLM_BASE_URL to your endpoint (e.g. https://openrouter.ai/api/v1)"
+                        .into(),
+                )
+            }
+        }
     }
 }
 
@@ -270,8 +295,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_nearai_session_does_not_panic() {
-        let result = check_nearai_session().await;
+    async fn check_llm_config_does_not_panic() {
+        let result = check_llm_config().await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }

@@ -54,14 +54,12 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         }
     }
 
-    // Session / Auth
-    print!("  Session:     ");
-    let session_path = crate::llm::session::default_session_path();
-    if session_path.exists() {
-        println!("found ({})", session_path.display());
-    } else {
-        println!("not found (run `ironclaw onboard`)");
-    }
+    // LLM Backend
+    print!("  LLM Backend: ");
+    let llm_backend = std::env::var("LLM_BACKEND")
+        .ok()
+        .unwrap_or_else(|| "openai_compatible".to_string());
+    println!("{}", llm_backend);
 
     // Secrets (auto-detect from env only; skip keychain probe to avoid
     // triggering macOS system password dialogs on a simple status check)

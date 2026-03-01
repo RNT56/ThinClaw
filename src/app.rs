@@ -16,7 +16,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hardware_bridge::{SessionApprovals, ToolBridge};
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, SessionManager};
+use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -49,7 +49,6 @@ pub struct AppComponents {
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     /// Hardware bridge for sensor access (camera, mic, screen).
@@ -70,7 +69,6 @@ pub struct AppBuilder {
     config: Config,
     flags: AppBuilderFlags,
     toml_path: Option<std::path::PathBuf>,
-    session: Arc<SessionManager>,
     log_broadcaster: Arc<LogBroadcaster>,
 
     // Accumulated state
@@ -90,21 +88,19 @@ pub struct AppBuilder {
 impl AppBuilder {
     /// Create a new builder.
     ///
-    /// The `session` and `log_broadcaster` are created before the builder
-    /// because tracing must be initialized before any init phase runs,
-    /// and the log broadcaster is part of the tracing layer.
+    /// The `log_broadcaster` is created before the builder because tracing
+    /// must be initialized before any init phase runs, and the log broadcaster
+    /// is part of the tracing layer.
     pub fn new(
         config: Config,
         flags: AppBuilderFlags,
         toml_path: Option<std::path::PathBuf>,
-        session: Arc<SessionManager>,
         log_broadcaster: Arc<LogBroadcaster>,
     ) -> Self {
         Self {
             config,
             flags,
             toml_path,
-            session,
             log_broadcaster,
             db: None,
             secrets_store: None,
@@ -231,8 +227,6 @@ impl AppBuilder {
             }
         }
 
-        self.session.attach_store(db.clone(), "default").await;
-
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
         tokio::spawn(async move {
@@ -354,8 +348,7 @@ impl AppBuilder {
     pub fn init_llm(
         &self,
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        let (llm, cheap_llm) =
-            crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
+        let (llm, cheap_llm) = crate::llm::build_provider_chain(&self.config.llm)?;
         Ok((llm, cheap_llm))
     }
 
@@ -388,10 +381,7 @@ impl AppBuilder {
         tools.register_builtin_tools();
 
         // Create embeddings provider using the unified method
-        let embeddings = self
-            .config
-            .embeddings
-            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+        let embeddings = self.config.embeddings.create_provider();
 
         // Warn if libSQL backend is used with non-1536 embedding dimension.
         if self.config.database.backend == crate::config::DatabaseBackend::LibSql
@@ -821,7 +811,6 @@ impl AppBuilder {
             skill_registry,
             skill_catalog,
             cost_guard,
-            session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
             tool_bridge: self.tool_bridge,
