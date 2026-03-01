@@ -122,6 +122,20 @@ pub enum UiEvent {
         content_type: String, // "html" | "json"
         url: Option<String>,
     },
+
+    /// Sub-agent progress update (relayed to parent session's UI).
+    ///
+    /// Emitted when a child session spawned by `openclaw_spawn_session`
+    /// changes state. The frontend can use this to show a progress panel
+    /// in the parent session's chat view.
+    SubAgentUpdate {
+        parent_session: String,
+        child_session: String,
+        task: String,
+        status: String,        // "running" | "completed" | "failed"
+        progress: Option<f32>, // 0.0–1.0
+        result_preview: Option<String>,
+    },
 }
 
 /// Session metadata for session list

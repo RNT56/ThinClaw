@@ -240,7 +240,7 @@ pub async fn delete_document(pool: State<'_, SqlitePool>, id: String) -> Result<
     // 5. Clean up source file from disk
     if let Some((path,)) = doc_path {
         if std::path::Path::new(&path).exists() {
-            match std::fs::remove_file(&path) {
+            match tokio::fs::remove_file(&path).await {
                 Ok(()) => println!("[projects] deleted document file: {}", path),
                 Err(e) => eprintln!("[projects] failed to delete file {}: {}", path, e),
             }

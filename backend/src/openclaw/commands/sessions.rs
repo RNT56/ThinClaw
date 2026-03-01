@@ -28,6 +28,9 @@ pub async fn openclaw_send_message(
     text: String,
     deliver: bool,
 ) -> Result<OpenClawRpcResponse, String> {
+    // Set session context BEFORE sending so TauriChannel routes events correctly
+    ironclaw.set_session_context(&session_key).await?;
+
     let agent = ironclaw.agent().await?;
     let result = ironclaw::api::chat::send_message(agent, &session_key, &text, deliver)
         .await
@@ -58,32 +61,53 @@ pub async fn openclaw_abort_chat(
     })
 }
 
-/// Resolve a pending tool-execution approval.
+/// Resolve a pending tool-execution approval (3-tier: Deny/AllowOnce/AllowSession).
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_resolve_approval(
     ironclaw: State<'_, IronClawState>,
     approval_id: String,
     approved: bool,
+    allow_session: Option<bool>,
 ) -> Result<OpenClawRpcResponse, String> {
+    use crate::openclaw::tool_bridge::ApprovalDecision;
+
+    // Build the 3-tier decision from frontend params
+    let decision = ApprovalDecision::from_frontend(approved, allow_session.unwrap_or(false));
+    let (ironclaw_approved, ironclaw_always) = decision.to_ironclaw_params();
+
+    // Route through the ToolBridge for session permission caching
+    if let Ok(bridge) = ironclaw.tool_bridge().await {
+        bridge.resolve(&approval_id, decision).await;
+    }
+
     // Use the assistant thread as default session for approval routing.
     // The agent internally correlates the approval_id to the correct turn.
     let session_key = "agent:main";
+
+    // Set session context so approval status events route correctly
+    ironclaw.set_session_context(session_key).await?;
 
     let agent = ironclaw.agent().await?;
     ironclaw::api::chat::resolve_approval(
         agent,
         session_key,
         &approval_id,
-        approved,
-        false, // always = false (don't auto-approve in future)
+        ironclaw_approved,
+        ironclaw_always,
     )
     .await
     .map_err(|e| e.to_string())?;
 
+    let message = match decision {
+        ApprovalDecision::Deny => "Denied",
+        ApprovalDecision::AllowOnce => "Approved (once)",
+        ApprovalDecision::AllowSession => "Approved (session)",
+    };
+
     Ok(OpenClawRpcResponse {
         ok: true,
-        message: Some(if approved { "Approved" } else { "Denied" }.into()),
+        message: Some(message.into()),
     })
 }
 

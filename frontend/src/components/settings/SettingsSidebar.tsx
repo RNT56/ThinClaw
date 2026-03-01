@@ -12,11 +12,13 @@ import {
     Send,
     Radio,
     KeyRound,
-    Plug
+    Plug,
+    Sparkles,
+    Cloud
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'inference' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets' | 'mcp';
+export type SettingsPage = 'models' | 'inference' | 'inference-mode' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets' | 'mcp' | 'cloud-storage';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -31,6 +33,7 @@ const NAV_ITEMS = [
         items: [
             { id: 'models', label: 'Models', icon: Cpu },
             { id: 'inference', label: 'Chat Provider', icon: Radio },
+            { id: 'inference-mode', label: 'Inference Mode', icon: Sparkles },
             { id: 'secrets', label: 'Secrets', icon: KeyRound },
             { id: 'mcp', label: 'MCP Server', icon: Plug },
             { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -49,6 +52,12 @@ const NAV_ITEMS = [
             { id: 'openclaw-slack', label: 'Slack', icon: MessageSquare },
             { id: 'openclaw-telegram', label: 'Telegram', icon: Send },
             { id: 'openclaw-gateway', label: 'Gateway', icon: Radio },
+        ]
+    },
+    {
+        section: "Storage",
+        items: [
+            { id: 'cloud-storage', label: 'Cloud Storage', icon: Cloud },
         ]
     },
     {

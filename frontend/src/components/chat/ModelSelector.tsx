@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useModelContext, RECOMMENDED_MODELS } from '../model-context';
-import { ChevronDown, Check, Box, Sparkles } from 'lucide-react';
+import { ChevronDown, Check, Box, Sparkles, Cloud, Monitor } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { useConfig } from '../../hooks/use-config';
+import { useCloudModels } from '../../hooks/use-cloud-models';
 
 export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { onManageClick: () => void, isAutoMode: boolean, toggleAutoMode: (v: boolean) => void }) {
     const { localModels, currentModelPath: modelPath, setModelPath, downloading, setIsRestarting } = useModelContext();
@@ -75,47 +76,87 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
 
         return true;
     });
+    // Unified provider lookup used across cloud model filtering, selection, and badge rendering
+    const PROVIDER_LOOKUP: [string, string][] = [
+        ["openrouter-", "openrouter"], ["groq-", "groq"],
+        ["anthropic-", "anthropic"], ["openai-", "openai"],
+        ["google-", "gemini"], ["gemini-", "gemini"],
+        ["mistral-", "mistral"], ["codestral-", "mistral"],
+        ["xai-", "xai"], ["together-", "together"],
+        ["venice-", "venice"], ["cohere-", "cohere"],
+        ["moonshot-", "moonshot"], ["minimax-", "minimax"],
+        ["nvidia-", "nvidia"], ["xiaomi-", "xiaomi"],
+    ];
+
+    const resolveProvider = (id: string, fallbackFamily?: string): string => {
+        const lower = id.toLowerCase();
+        const match = PROVIDER_LOOKUP.find(([p]) => lower.startsWith(p));
+        return match ? match[1] : (fallbackFamily?.toLowerCase() ?? "");
+    };
+
+    const hasKeyForProvider = (provider: string): boolean => {
+        if (!status) return false;
+        const s = status as any;
+        // Core 5 providers have dedicated status keys
+        const coreKeys: Record<string, boolean> = {
+            anthropic: !!(s.has_anthropic_key || s.hasAnthropicKey),
+            openai: !!(s.has_openai_key || s.hasOpenaiKey),
+            gemini: !!(s.has_gemini_key || s.hasGeminiKey),
+            groq: !!(s.has_groq_key || s.hasGroqKey),
+            openrouter: !!(s.has_openrouter_key || s.hasOpenrouterKey),
+        };
+        if (provider in coreKeys) return coreKeys[provider];
+        // Implicit providers
+        const camel = provider.charAt(0).toUpperCase() + provider.slice(1);
+        return !!(s[`has_${provider}_key`] || s[`has${camel}Key`]);
+    };
+
     const cloudModels = RECOMMENDED_MODELS.filter(m => {
         if ((m as any).category !== "Cloud") return false;
-
-        const id = m.id.toLowerCase();
-        const provider = id.startsWith("openrouter-") ? "openrouter" :
-            id.startsWith("groq-") ? "groq" :
-                id.startsWith("anthropic-") ? "anthropic" :
-                    id.startsWith("openai-") ? "openai" :
-                        id.startsWith("google-") || id.startsWith("gemini-") ? "gemini" :
-                            m.family.toLowerCase();
-
-        // Check if disabled in config
+        const provider = resolveProvider(m.id, m.family);
         if (config?.disabled_providers?.includes(provider)) return false;
-
-        // Determine provider by ID prefix first (robust for aggregators)
-        if (id.startsWith("openrouter-")) return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
-        if (id.startsWith("groq-")) return !!(status?.has_groq_key || status?.hasGroqKey);
-        if (id.startsWith("anthropic-")) return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
-        if (id.startsWith("openai-")) return !!(status?.has_openai_key || status?.hasOpenaiKey);
-        if (id.startsWith("google-") || id.startsWith("gemini-")) return !!(status?.has_gemini_key || status?.hasGeminiKey);
-
-        // Fallback to family-based check
-        const family = m.family.toLowerCase();
-        if (family === "anthropic") return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
-        if (family === "openai") return !!(status?.has_openai_key || status?.hasOpenaiKey);
-        if (family === "gemini") return !!(status?.has_gemini_key || status?.hasGeminiKey);
-        if (family === "groq") return !!(status?.has_groq_key || status?.hasGroqKey);
-        if (family === "openrouter") return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
-
-        return false;
+        return hasKeyForProvider(provider);
     });
 
-    const models = [
-        ...filteredLocal.map(m => ({ ...m, type: 'local' as const })),
-        ...cloudModels.map(m => ({
+    // ── Merge cloud-discovered chat models ──────────────────────────────
+    const { models: discoveredModels } = useCloudModels();
+
+    const allCloudModels = useMemo(() => {
+        const hardcodedIds = new Set(cloudModels.map(m => m.id.toLowerCase()));
+
+        const discovered = discoveredModels
+            .filter(cm => {
+                if (cm.category !== 'chat') return false;
+                // Deduplicate
+                const fullId = `${cm.provider}-${cm.id}`.toLowerCase();
+                return !hardcodedIds.has(fullId) && !hardcodedIds.has(cm.id.toLowerCase());
+            })
+            .map(cm => ({
+                path: `${cm.provider}-${cm.id}`,
+                name: cm.displayName,
+                type: 'cloud' as const,
+                family: cm.providerName,
+                id: `${cm.provider}-${cm.id}`,
+                _contextWindow: cm.contextWindow,
+                _pricing: cm.pricing,
+            }));
+
+        const hardcoded = cloudModels.map(m => ({
             path: m.id,
             name: m.name,
             type: 'cloud' as const,
             family: m.family,
-            id: m.id
-        }))
+            id: m.id,
+            _contextWindow: null as number | null,
+            _pricing: null as any,
+        }));
+
+        return [...hardcoded, ...discovered];
+    }, [cloudModels, discoveredModels]);
+
+    const models = [
+        ...filteredLocal.map(m => ({ ...m, type: 'local' as const })),
+        ...allCloudModels,
     ];
 
     useEffect(() => {
@@ -137,21 +178,21 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
 
         if (type === 'cloud') {
             try {
-                const modelDef = cloudModels.find(m => m.id === path);
+                const modelDef = cloudModels.find(m => m.id === path)
+                    || allCloudModels.find(m => m.id === path);
                 if (!modelDef) return;
 
-                const id = modelDef.id.toLowerCase();
-                const brain = id.startsWith("openrouter-") ? "openrouter" :
-                    id.startsWith("groq-") ? "groq" :
-                        id.startsWith("anthropic-") ? "anthropic" :
-                            id.startsWith("openai-") ? "openai" :
-                                id.startsWith("google-") ? "gemini" :
-                                    modelDef.family.toLowerCase();
+                const brain = resolveProvider(modelDef.id, modelDef.family);
                 const modelId = modelDef.id.split('-').slice(1).join('-');
+
+                // Propagate the discovered model's context window to the backend.
+                // `_contextWindow` is set for cloud-discovered models; null for hardcoded fallback entries.
+                const contextSize = (modelDef as any)._contextWindow as number | null;
 
                 const newConfig = {
                     ...config,
                     selected_chat_provider: brain,
+                    selected_model_context_size: contextSize ?? undefined,
                 };
 
                 await updateConfig(newConfig);
@@ -217,6 +258,12 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                 : (localModels.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()) || "Select Model"
                         )}
                     </span>
+                    {/* Local / Cloud badge */}
+                    {!isAutoMode && (
+                        config?.selected_chat_provider && config.selected_chat_provider !== "local"
+                            ? <Cloud className="w-3 h-3 text-blue-500 shrink-0" />
+                            : <Monitor className="w-3 h-3 text-emerald-500 shrink-0" />
+                    )}
                 </div>
                 <ChevronDown className={cn("w-3 h-3 transition-transform opacity-50", isOpen && "rotate-180")} />
             </button>
@@ -249,12 +296,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                         const filename = model.type === 'local' ? (model.name.split(/[\\/]/).pop() || model.name) : model.name;
                                         const def = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename) || k.id === model.id);
                                         const isRecommended = def?.recommendedForAgent;
-                                        const provider = model.id?.startsWith("openrouter-") ? "openrouter" :
-                                            model.id?.startsWith("groq-") ? "groq" :
-                                                model.id?.startsWith("anthropic-") ? "anthropic" :
-                                                    model.id?.startsWith("openai-") ? "openai" :
-                                                        model.id?.startsWith("google-") || model.id?.startsWith("gemini-") ? "gemini" :
-                                                            model.family?.toLowerCase();
+                                        const provider = resolveProvider(model.id || '', model.family);
 
                                         const isActive = model.type === 'local'
                                             ? (model.path === modelPath && config?.selected_chat_provider === "local")

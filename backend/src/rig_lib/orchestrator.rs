@@ -438,6 +438,12 @@ impl Orchestrator {
                         let store = app.state::<crate::vector_store::VectorStoreManager>();
                         let reranker = app.state::<crate::reranker::RerankerWrapper>();
 
+                        // Get embedding backend from InferenceRouter (if active)
+                        let emb_backend = {
+                            let router = app.state::<crate::inference::router::InferenceRouter>();
+                            router.embedding_backend().await
+                        };
+
                         // 1. Text RAG
                         let context_res = crate::rag::retrieve_context_internal(
                             Some(app.clone()),
@@ -445,6 +451,7 @@ impl Orchestrator {
                             pool.inner().clone(),
                             store.inner().clone(),
                             reranker.inner(),
+                            emb_backend,
                             query.clone(),
                             conversation_id_clone.clone(),
                             if all_doc_ids.is_empty() {

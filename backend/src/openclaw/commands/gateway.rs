@@ -206,6 +206,42 @@ pub async fn openclaw_get_status(
             .and_then(|c| c.xiaomi_api_key.clone())
             .is_some(),
         xiaomi_granted: config.as_ref().map(|c| c.xiaomi_granted).unwrap_or(false),
+        has_cohere_key: config
+            .as_ref()
+            .and_then(|c| c.cohere_api_key.clone())
+            .is_some(),
+        cohere_granted: config.as_ref().map(|c| c.cohere_granted).unwrap_or(false),
+        has_voyage_key: config
+            .as_ref()
+            .and_then(|c| c.voyage_api_key.clone())
+            .is_some(),
+        voyage_granted: config.as_ref().map(|c| c.voyage_granted).unwrap_or(false),
+        has_deepgram_key: config
+            .as_ref()
+            .and_then(|c| c.deepgram_api_key.clone())
+            .is_some(),
+        deepgram_granted: config.as_ref().map(|c| c.deepgram_granted).unwrap_or(false),
+        has_elevenlabs_key: config
+            .as_ref()
+            .and_then(|c| c.elevenlabs_api_key.clone())
+            .is_some(),
+        elevenlabs_granted: config
+            .as_ref()
+            .map(|c| c.elevenlabs_granted)
+            .unwrap_or(false),
+        has_stability_key: config
+            .as_ref()
+            .and_then(|c| c.stability_api_key.clone())
+            .is_some(),
+        stability_granted: config
+            .as_ref()
+            .map(|c| c.stability_granted)
+            .unwrap_or(false),
+        has_fal_key: config
+            .as_ref()
+            .and_then(|c| c.fal_api_key.clone())
+            .is_some(),
+        fal_granted: config.as_ref().map(|c| c.fal_granted).unwrap_or(false),
         has_bedrock_key: config
             .as_ref()
             .map(|c| c.bedrock_access_key_id.is_some() && c.bedrock_secret_access_key.is_some())
@@ -313,6 +349,32 @@ pub async fn openclaw_stop_gateway(
         info!("[ironclaw] Engine was already stopped");
     }
 
+    Ok(())
+}
+
+/// Reload secrets (API keys) into the running IronClaw agent.
+///
+/// Performs a graceful stop→start cycle to re-inject keys from macOS Keychain.
+/// Called by the frontend after API key save/toggle operations so the IronClaw
+/// agent picks up changes without requiring manual restart by the user.
+///
+/// **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
+///
+/// This is a no-op if the engine isn't running.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_reload_secrets(ironclaw: State<'_, IronClawState>) -> Result<(), String> {
+    info!("[ironclaw] Reload secrets requested");
+
+    // Create a fresh secrets adapter (reads live from Keychain)
+    let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
+        Some(std::sync::Arc::new(
+            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+        ));
+
+    ironclaw.reload_secrets(secrets_store).await?;
+
+    info!("[ironclaw] Secrets reloaded successfully");
     Ok(())
 }
 

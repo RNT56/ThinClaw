@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
     ImageIcon, Sliders, Palette,
-    Download, Copy, Expand, X
+    Download, Copy, Expand, X, Cloud, Monitor
 } from 'lucide-react';
 import { ImagineModeIcon, ImagineSendIcon, ImagineMainIcon } from '../icons/ModeIcons';
 import { cn } from '../../lib/utils';
@@ -652,8 +652,12 @@ export function ImagineGeneration({
                                 <div className="space-y-4">
                                     {/* Provider */}
                                     <div>
-                                        <label className="text-[10px] uppercase font-bold text-muted-foreground/70 tracking-wider mb-2 block">
+                                        <label className="text-[10px] uppercase font-bold text-muted-foreground/70 tracking-wider mb-2 flex items-center gap-2">
                                             Provider
+                                            {provider === 'local'
+                                                ? <span className="flex items-center gap-1 text-emerald-500 normal-case tracking-normal"><Monitor className="w-3 h-3" />Local</span>
+                                                : <span className="flex items-center gap-1 text-blue-500 normal-case tracking-normal"><Cloud className="w-3 h-3" />Cloud</span>
+                                            }
                                         </label>
                                         <div className="grid grid-cols-3 gap-2">
                                             <button
@@ -665,7 +669,7 @@ export function ImagineGeneration({
                                                         : "bg-muted/50 text-muted-foreground hover:text-foreground"
                                                 )}
                                             >
-                                                <div className="font-medium">Local</div>
+                                                <div className="font-medium flex items-center gap-1"><Monitor className="w-3 h-3" />Local</div>
                                                 <div className="text-[10px] opacity-70">On-device</div>
                                             </button>
                                             <button
@@ -677,7 +681,7 @@ export function ImagineGeneration({
                                                         : "bg-muted/50 text-muted-foreground hover:text-foreground"
                                                 )}
                                             >
-                                                <div className="font-medium">Cloud</div>
+                                                <div className="font-medium flex items-center gap-1"><Cloud className="w-3 h-3" />Cloud</div>
                                                 <div className="text-[10px] opacity-70">Nano Banana</div>
                                             </button>
                                             <button
@@ -689,7 +693,7 @@ export function ImagineGeneration({
                                                         : "bg-muted/50 text-muted-foreground hover:text-foreground"
                                                 )}
                                             >
-                                                <div className="font-medium">Pro</div>
+                                                <div className="font-medium flex items-center gap-1"><Cloud className="w-3 h-3" />Pro</div>
                                                 <div className="text-[10px] opacity-70">Nano Banana Pro</div>
                                             </button>
                                         </div>

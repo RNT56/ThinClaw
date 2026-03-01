@@ -65,168 +65,112 @@ pub struct ProviderConfig {
 pub async fn resolve_provider(
     user_config: &crate::config::UserConfig,
     secret_store: &crate::secret_store::SecretStore,
-    openclaw: &State<'_, crate::openclaw::commands::OpenClawManager>,
     sidecar_manager: &State<'_, SidecarManager>,
     engine_manager: &State<'_, crate::engine::EngineManager>,
 ) -> Result<ProviderConfig, String> {
-    match user_config.selected_chat_provider.as_deref() {
-        Some("anthropic") => {
-            info!("[resolve_provider] Routing to Anthropic");
-            let key = secret_store
-                .get("anthropic")
-                .ok_or("Anthropic API key required. Please set it in Settings > Secrets.")?;
-            // selected_cloud_model is a non-secret preference on OpenClawIdentity.
-            // Reading it from OpenClawConfig is fine — it's not an API key.
-            let model_name = openclaw
-                .get_config()
-                .await
-                .and_then(|cfg| cfg.selected_cloud_model.clone())
-                .unwrap_or_else(|| "claude-3-5-sonnet-latest".to_string());
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::Anthropic,
-                base_url: "https://api.anthropic.com/v1".to_string(),
-                model_name,
-                port: 0,
-                token: key,
-                context_size: 200000,
-                model_family: None,
-            })
-        }
-        Some("openai") => {
-            info!("[resolve_provider] Routing to OpenAI");
-            let key = secret_store
-                .get("openai")
-                .ok_or("OpenAI API key required. Please set it in Settings > Secrets.")?;
-            let model_name = openclaw
-                .get_config()
-                .await
-                .and_then(|cfg| cfg.selected_cloud_model.clone())
-                .unwrap_or_else(|| "gpt-4o".to_string());
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
-                base_url: "https://api.openai.com/v1".to_string(),
-                model_name,
-                port: 0,
-                token: key,
-                context_size: 128000,
-                model_family: None,
-            })
-        }
-        Some("openrouter") => {
-            info!("[resolve_provider] Routing to OpenRouter");
-            let key = secret_store
-                .get("openrouter")
-                .ok_or("OpenRouter API key required. Please set it in Settings > Secrets.")?;
-            let model_name = openclaw
-                .get_config()
-                .await
-                .and_then(|cfg| cfg.selected_cloud_model.clone())
-                .unwrap_or_else(|| "moonshotai/kimi-k2.5".to_string());
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::OpenRouter,
-                base_url: "https://openrouter.ai/api/v1".to_string(),
-                model_name,
-                port: 0,
-                token: key,
-                context_size: 128000,
-                model_family: None,
-            })
-        }
-        Some("gemini") => {
-            info!("[resolve_provider] Routing to Gemini");
-            let key = secret_store
-                .get("gemini")
-                .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
-            let model_name = openclaw
-                .get_config()
-                .await
-                .and_then(|cfg| cfg.selected_cloud_model.clone())
-                .unwrap_or_else(|| "gemini-2.0-flash".to_string());
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::Gemini,
-                base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
-                model_name,
-                port: 0,
-                token: key,
-                context_size: 128000,
-                model_family: None,
-            })
-        }
-        Some("groq") => {
-            info!("[resolve_provider] Routing to Groq");
-            let key = secret_store
-                .get("groq")
-                .ok_or("Groq API key required. Please set it in Settings > Secrets.")?;
-            let model_name = openclaw
-                .get_config()
-                .await
-                .and_then(|cfg| cfg.selected_cloud_model.clone())
-                .unwrap_or_else(|| "llama-3.3-70b-versatile".to_string());
-            Ok(ProviderConfig {
-                kind: crate::rig_lib::unified_provider::ProviderKind::OpenAI,
-                base_url: "https://api.groq.com/openai/v1".to_string(),
-                model_name,
-                port: 0,
-                token: key,
-                context_size: 128000,
-                model_family: None,
-            })
-        }
-        _ => {
-            info!("[resolve_provider] Routing to Local Provider");
+    // Determine provider: prefer new `chat_backend`, fall back to legacy `selected_chat_provider`
+    let provider_id = user_config
+        .chat_backend
+        .as_deref()
+        .or(user_config.selected_chat_provider.as_deref())
+        .unwrap_or("local");
 
-            // Primary: llama.cpp sidecar (always present in llamacpp builds)
-            if let Some(cfg) = sidecar_manager.get_chat_config() {
+    // Check if it's a known cloud provider
+    if provider_id != "local" {
+        if let Some(endpoint) = crate::inference::provider_endpoints::endpoint_for(provider_id) {
+            info!(
+                "[resolve_provider] Routing to {} ({})",
+                endpoint.display_name, provider_id
+            );
+
+            let key = secret_store.get(provider_id).ok_or(format!(
+                "{} API key required. Please set it in Settings > Secrets.",
+                endpoint.display_name
+            ))?;
+
+            // Model name: prefer UserConfig.inference_models["chat"], then endpoint default
+            let model_name = user_config
+                .inference_models
+                .as_ref()
+                .and_then(|m| m.get("chat"))
+                .cloned()
+                .unwrap_or_else(|| endpoint.default_model.to_string());
+
+            return Ok(ProviderConfig {
+                kind: endpoint.api_compat.to_provider_kind(),
+                base_url: endpoint.base_url.to_string(),
+                model_name,
+                port: 0,
+                token: key,
+                // Prefer user-configured context size (from model discovery),
+                // fall back to provider-level default.
+                context_size: user_config
+                    .selected_model_context_size
+                    .unwrap_or(endpoint.default_context_size),
+                model_family: None,
+            });
+        }
+
+        // Unknown cloud provider — warn and fall through to local
+        info!(
+            "[resolve_provider] Unknown provider '{}', falling back to local",
+            provider_id
+        );
+    }
+
+    // ── Local provider ──────────────────────────────────────────────────
+    info!("[resolve_provider] Routing to Local Provider");
+
+    // Primary: llama.cpp sidecar (always present in llamacpp builds)
+    if let Some(cfg) = sidecar_manager.get_chat_config() {
+        return Ok(ProviderConfig {
+            kind: crate::rig_lib::unified_provider::ProviderKind::Local,
+            base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
+            model_name: "default".to_string(),
+            port: cfg.0,
+            token: cfg.1,
+            context_size: cfg.2,
+            model_family: Some(cfg.3),
+        });
+    }
+
+    // Fallback: non-llamacpp engine (MLX, vLLM, Ollama) running via EngineManager.
+    // start_engine() must have been called first (done by useAutoStart).
+    {
+        let guard = engine_manager.engine.lock().await;
+        if let Some(engine) = guard.as_ref() {
+            if let Some(url) = engine.base_url() {
+                let model_name = engine.model_id().unwrap_or_else(|| "default".to_string());
+                let context_size = engine.max_context().unwrap_or(4096);
+                info!(
+                    "[resolve_provider] Using EngineManager base_url: {}, model: {}, context: {}",
+                    url, model_name, context_size
+                );
+                // Parse port from URL like "http://127.0.0.1:PORT/v1"
+                let port: u16 = url
+                    .trim_end_matches('/')
+                    .rsplit(':')
+                    .next()
+                    .and_then(|p| p.split('/').next())
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(8080);
                 return Ok(ProviderConfig {
                     kind: crate::rig_lib::unified_provider::ProviderKind::Local,
-                    base_url: format!("http://127.0.0.1:{}/v1", cfg.0),
-                    model_name: "default".to_string(),
-                    port: cfg.0,
-                    token: cfg.1,
-                    context_size: cfg.2,
-                    model_family: Some(cfg.3),
+                    base_url: url,
+                    model_name,
+                    port,
+                    // mlx_lm.server runs unauthenticated by default
+                    token: String::new(),
+                    context_size,
+                    model_family: None,
                 });
             }
-
-            // Fallback: non-llamacpp engine (MLX, vLLM, Ollama) running via EngineManager.
-            // start_engine() must have been called first (done by useAutoStart).
-            {
-                let guard = engine_manager.engine.lock().await;
-                if let Some(engine) = guard.as_ref() {
-                    if let Some(url) = engine.base_url() {
-                        let model_name = engine.model_id().unwrap_or_else(|| "default".to_string());
-                        let context_size = engine.max_context().unwrap_or(4096);
-                        info!(
-                            "[resolve_provider] Using EngineManager base_url: {}, model: {}, context: {}",
-                            url, model_name, context_size
-                        );
-                        // Parse port from URL like "http://127.0.0.1:PORT/v1"
-                        let port: u16 = url
-                            .trim_end_matches('/')
-                            .rsplit(':')
-                            .next()
-                            .and_then(|p| p.split('/').next())
-                            .and_then(|p| p.parse().ok())
-                            .unwrap_or(8080);
-                        return Ok(ProviderConfig {
-                            kind: crate::rig_lib::unified_provider::ProviderKind::Local,
-                            base_url: url,
-                            model_name,
-                            port,
-                            // mlx_lm.server runs unauthenticated by default
-                            token: String::new(),
-                            context_size,
-                            model_family: None,
-                        });
-                    }
-                }
-            }
-
-            Err("No local inference server is running. \
-                 Select a model in the chat tab — the engine will start automatically."
-                .to_string())
         }
     }
+
+    Err("No local inference server is running. \
+         Select a model in the chat tab — the engine will start automatically."
+        .to_string())
 }
 
 #[tauri::command]
@@ -236,7 +180,6 @@ pub async fn chat_stream(
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
     secret_store: State<'_, crate::secret_store::SecretStore>,
-    openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     rig_cache: State<'_, crate::rig_cache::RigManagerCache>,
     payload: ChatPayload,
@@ -259,15 +202,9 @@ pub async fn chat_stream(
     // General Knowledge Injection
     let user_config = config.get_config();
 
-    // Provider Routing Logic — keys from SecretStore, model selection from OpenClawConfig
-    let provider_cfg = resolve_provider(
-        &user_config,
-        &secret_store,
-        &openclaw,
-        &state,
-        &engine_manager,
-    )
-    .await?;
+    // Provider Routing Logic — keys from SecretStore, model from UserConfig
+    let provider_cfg =
+        resolve_provider(&user_config, &secret_store, &state, &engine_manager).await?;
     let kind = provider_cfg.kind;
     let base_url = provider_cfg.base_url;
     let model_name = provider_cfg.model_name;
@@ -806,7 +743,6 @@ pub async fn chat_completion(
     state: State<'_, SidecarManager>,
     config: State<'_, crate::config::ConfigManager>,
     secret_store: State<'_, crate::secret_store::SecretStore>,
-    openclaw: State<'_, crate::openclaw::commands::OpenClawManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
 ) -> Result<String, String> {
@@ -814,15 +750,9 @@ pub async fn chat_completion(
 
     let user_config = config.get_config();
 
-    // Resolve provider — keys from SecretStore, model selection from OpenClawConfig
-    let provider_cfg = resolve_provider(
-        &user_config,
-        &secret_store,
-        &openclaw,
-        &state,
-        &engine_manager,
-    )
-    .await?;
+    // Resolve provider — keys from SecretStore, model from UserConfig
+    let provider_cfg =
+        resolve_provider(&user_config, &secret_store, &state, &engine_manager).await?;
 
     let provider = crate::rig_lib::unified_provider::UnifiedProvider::new(
         provider_cfg.kind,

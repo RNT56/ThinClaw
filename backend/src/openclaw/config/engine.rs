@@ -40,6 +40,12 @@ impl OpenClawConfig {
                 "nvidia" => self.nvidia_granted && has_key(&self.nvidia_api_key),
                 "qianfan" => self.qianfan_granted && has_key(&self.qianfan_api_key),
                 "xiaomi" => self.xiaomi_granted && has_key(&self.xiaomi_api_key),
+                "cohere" => self.cohere_granted && has_key(&self.cohere_api_key),
+                "voyage" => self.voyage_granted && has_key(&self.voyage_api_key),
+                "deepgram" => self.deepgram_granted && has_key(&self.deepgram_api_key),
+                "elevenlabs" => self.elevenlabs_granted && has_key(&self.elevenlabs_api_key),
+                "stability" => self.stability_granted && has_key(&self.stability_api_key),
+                "fal" => self.fal_granted && has_key(&self.fal_api_key),
                 "amazon-bedrock" => {
                     self.bedrock_granted
                         && has_key(&self.bedrock_access_key_id)

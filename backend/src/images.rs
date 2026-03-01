@@ -2,9 +2,10 @@ use image::imageops::FilterType;
 use image::GenericImageView;
 use serde::Serialize;
 use specta::Type;
-use std::fs;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
+
+use crate::file_store::FileStore;
 
 #[derive(Serialize, Type)]
 pub struct ImageResponse {
@@ -14,13 +15,16 @@ pub struct ImageResponse {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn upload_image(app: AppHandle, image_bytes: Vec<u8>) -> Result<ImageResponse, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let images_dir = app_data_dir.join("images");
-
-    if !images_dir.exists() {
-        fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    }
+pub async fn upload_image(
+    _app: AppHandle,
+    file_store: State<'_, FileStore>,
+    image_bytes: Vec<u8>,
+) -> Result<ImageResponse, String> {
+    // Ensure images directory exists
+    file_store
+        .create_dir_all("images")
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Decode image (supports PNG, JPEG, WebP, GIF, BMP, etc.)
     let img = image::load_from_memory(&image_bytes)
@@ -44,7 +48,9 @@ pub async fn upload_image(app: AppHandle, image_bytes: Vec<u8>) -> Result<ImageR
 
     let id = Uuid::new_v4().to_string();
     let filename = format!("{}.jpg", id);
-    let path = images_dir.join(&filename);
+    let path = file_store
+        .resolve_path(&format!("images/{}", filename))
+        .await;
 
     rgb_img
         .save(&path)
@@ -68,21 +74,24 @@ pub async fn upload_image(app: AppHandle, image_bytes: Vec<u8>) -> Result<ImageR
 // Helper to get absolute path for an image ID
 #[tauri::command]
 #[specta::specta]
-pub async fn get_image_path(app: AppHandle, id: String) -> Result<String, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let images_dir = app_data_dir.join("images");
-
+pub async fn get_image_path(
+    file_store: State<'_, FileStore>,
+    id: String,
+) -> Result<String, String> {
     // Try png first (SD output), then jpg (Upload output)
-    let mut path = images_dir.join(format!("{}.png", id));
-    if !path.exists() {
-        path = images_dir.join(format!("{}.jpg", id));
+    let png_path = format!("images/{}.png", id);
+    let jpg_path = format!("images/{}.jpg", id);
+
+    if file_store.exists(&png_path).await {
+        let full = file_store.resolve_path(&png_path).await;
+        return Ok(full.to_string_lossy().to_string());
+    }
+    if file_store.exists(&jpg_path).await {
+        let full = file_store.resolve_path(&jpg_path).await;
+        return Ok(full.to_string_lossy().to_string());
     }
 
-    if !path.exists() {
-        return Err(format!("Image not found: {}", id));
-    }
-
-    Ok(path.to_string_lossy().to_string())
+    Err(format!("Image not found: {}", id))
 }
 
 // Helper to load and base64 encode an image by ID (Available as command)
@@ -122,7 +131,12 @@ pub async fn load_image_as_base64_with_mime(
     }
 
     let mime = mime_for_path(&path);
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+    // Use FileStore for the read
+    let file_store = app.state::<FileStore>();
+    let bytes = file_store
+        .read_absolute(&path)
+        .await
+        .map_err(|e| e.to_string())?;
     use base64::prelude::*;
     Ok((BASE64_STANDARD.encode(bytes), mime))
 }
@@ -136,12 +150,12 @@ pub async fn load_image_as_base64(app: &AppHandle, image_id: &str) -> Result<Str
 #[tauri::command]
 #[specta::specta]
 pub async fn open_images_folder(app: AppHandle) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let images_dir = app_data_dir.join("images");
-
-    if !images_dir.exists() {
-        fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    }
+    let file_store = app.state::<FileStore>();
+    file_store
+        .create_dir_all("images")
+        .await
+        .map_err(|e| e.to_string())?;
+    let images_dir = file_store.resolve_path("images").await;
 
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")

@@ -234,6 +234,18 @@ impl OpenClawConfig {
             mistral_granted: identity.mistral_granted,
             xiaomi_api_key: keychain::get_key("xiaomi"),
             xiaomi_granted: identity.xiaomi_granted,
+            cohere_api_key: keychain::get_key("cohere"),
+            cohere_granted: identity.cohere_granted,
+            voyage_api_key: keychain::get_key("voyage"),
+            voyage_granted: identity.voyage_granted,
+            deepgram_api_key: keychain::get_key("deepgram"),
+            deepgram_granted: identity.deepgram_granted,
+            elevenlabs_api_key: keychain::get_key("elevenlabs"),
+            elevenlabs_granted: identity.elevenlabs_granted,
+            stability_api_key: keychain::get_key("stability"),
+            stability_granted: identity.stability_granted,
+            fal_api_key: keychain::get_key("fal"),
+            fal_granted: identity.fal_granted,
             bedrock_access_key_id: keychain::get_key("bedrock_access_key_id"),
             bedrock_secret_access_key: keychain::get_key("bedrock_secret_access_key"),
             bedrock_region: keychain::get_key("bedrock_region"),
@@ -342,6 +354,12 @@ impl OpenClawConfig {
             "qianfan" => self.qianfan_granted = granted,
             "mistral" => self.mistral_granted = granted,
             "xiaomi" => self.xiaomi_granted = granted,
+            "cohere" => self.cohere_granted = granted,
+            "voyage" => self.voyage_granted = granted,
+            "deepgram" => self.deepgram_granted = granted,
+            "elevenlabs" => self.elevenlabs_granted = granted,
+            "stability" => self.stability_granted = granted,
+            "fal" => self.fal_granted = granted,
             "amazon-bedrock" | "bedrock" => self.bedrock_granted = granted,
             _ => {
                 return Err(std::io::Error::new(
@@ -421,6 +439,42 @@ impl OpenClawConfig {
                     self.xiaomi_granted = false;
                 }
             }
+            "cohere" => {
+                self.cohere_api_key = key;
+                if is_delete {
+                    self.cohere_granted = false;
+                }
+            }
+            "voyage" => {
+                self.voyage_api_key = key;
+                if is_delete {
+                    self.voyage_granted = false;
+                }
+            }
+            "deepgram" => {
+                self.deepgram_api_key = key;
+                if is_delete {
+                    self.deepgram_granted = false;
+                }
+            }
+            "elevenlabs" => {
+                self.elevenlabs_api_key = key;
+                if is_delete {
+                    self.elevenlabs_granted = false;
+                }
+            }
+            "stability" => {
+                self.stability_api_key = key;
+                if is_delete {
+                    self.stability_granted = false;
+                }
+            }
+            "fal" => {
+                self.fal_api_key = key;
+                if is_delete {
+                    self.fal_granted = false;
+                }
+            }
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -443,6 +497,12 @@ impl OpenClawConfig {
             "qianfan" => self.qianfan_api_key.clone(),
             "mistral" => self.mistral_api_key.clone(),
             "xiaomi" => self.xiaomi_api_key.clone(),
+            "cohere" => self.cohere_api_key.clone(),
+            "voyage" => self.voyage_api_key.clone(),
+            "deepgram" => self.deepgram_api_key.clone(),
+            "elevenlabs" => self.elevenlabs_api_key.clone(),
+            "stability" => self.stability_api_key.clone(),
+            "fal" => self.fal_api_key.clone(),
             _ => None,
         }
     }
@@ -579,6 +639,12 @@ impl OpenClawConfig {
             qianfan_granted: self.qianfan_granted,
             mistral_granted: self.mistral_granted,
             xiaomi_granted: self.xiaomi_granted,
+            cohere_granted: self.cohere_granted,
+            voyage_granted: self.voyage_granted,
+            deepgram_granted: self.deepgram_granted,
+            elevenlabs_granted: self.elevenlabs_granted,
+            stability_granted: self.stability_granted,
+            fal_granted: self.fal_granted,
             bedrock_granted: self.bedrock_granted,
             bedrock_region: self.bedrock_region.clone(), // region is not a secret
         };

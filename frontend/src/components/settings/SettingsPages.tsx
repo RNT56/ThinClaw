@@ -14,6 +14,8 @@ const ModelBrowser = lazy(() => import('./ModelBrowser').then(m => ({ default: m
 const GatewayTab = lazy(() => import('./GatewayTab').then(m => ({ default: m.GatewayTab })));
 const SecretsTab = lazy(() => import('./SecretsTab').then(m => ({ default: m.SecretsTab })));
 const McpTab = lazy(() => import('./McpTab').then(m => ({ default: m.McpTab })));
+const InferenceModeTab = lazy(() => import('./InferenceModeTab').then(m => ({ default: m.InferenceModeTab })));
+const StorageTab = lazy(() => import('./StorageTab').then(m => ({ default: m.StorageTab })));
 import {
     Cpu,
     Server,
@@ -33,7 +35,8 @@ import {
     Command,
     Sparkles,
     FlaskConical,
-    Plug
+    Plug,
+    Cloud
 } from 'lucide-react';
 import { useModelContext } from '../model-context';
 
@@ -178,7 +181,9 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'openclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
                         {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
                         {activePage === 'inference' && <ChatProviderTab />}
+                        {activePage === 'inference-mode' && <Suspense fallback={<TabSkeleton />}><InferenceModeTab /></Suspense>}
                         {activePage === 'mcp' && <Suspense fallback={<TabSkeleton />}><McpTab /></Suspense>}
+                        {activePage === 'cloud-storage' && <Suspense fallback={<TabSkeleton />}><StorageTab /></Suspense>}
                     </div>
                 </motion.div>
             </AnimatePresence>
@@ -254,10 +259,20 @@ function PageHeader({ page }: { page: SettingsPage }) {
             description: "Manage API keys for cloud providers.",
             icon: KeyRound
         },
+        'inference-mode': {
+            title: "Inference Mode",
+            description: "Configure which backend powers each AI modality — local, cloud, or hybrid.",
+            icon: Sparkles
+        },
         'mcp': {
             title: "MCP Server",
             description: "Connect your FastAPI MCP server to unlock remote tools, finance, news, and domain-specific capabilities for the AI agent.",
             icon: Plug
+        },
+        'cloud-storage': {
+            title: "Cloud Storage",
+            description: "Encrypt and sync your data to a cloud provider. Migrate seamlessly between local and cloud modes.",
+            icon: Cloud
         }
     };
 

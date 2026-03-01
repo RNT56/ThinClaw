@@ -1,4 +1,4 @@
-import { Trash2, RefreshCw, Download, Search, CheckCircle2, FolderOpen, Globe } from "lucide-react";
+import { Trash2, RefreshCw, Download, Search, CheckCircle2, FolderOpen, Globe, Loader2 } from "lucide-react";
 import * as Progress from '@radix-ui/react-progress';
 import { cn } from "../../lib/utils";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,9 +7,22 @@ import { useEffect, useMemo, useState } from "react";
 import { commands } from "../../lib/bindings";
 import { toast } from "sonner";
 import { useConfig } from "../../hooks/use-config";
+import { useCloudModels, type CloudModelEntry } from "../../hooks/use-cloud-models";
 import { HFDiscovery } from "./HFDiscovery";
 import { ActiveEngineChip } from "./ActiveEngineChip";
 import { EngineSetupBanner } from "./EngineSetupBanner";
+
+/** Format a short description for a cloud-discovered model. */
+function formatCloudDescription(cm: CloudModelEntry): string {
+    const parts: string[] = [cm.providerName];
+    if (cm.contextWindow) parts.push(`${(cm.contextWindow / 1000).toFixed(0)}K context`);
+    if (cm.supportsVision) parts.push('Vision');
+    if (cm.supportsTools) parts.push('Tools');
+    if (cm.pricing?.inputPerMillion != null) {
+        parts.push(`$${cm.pricing.inputPerMillion.toFixed(2)}/1M input`);
+    }
+    return parts.join(' · ');
+}
 
 export function ModelBrowser() {
     const {
@@ -57,6 +70,11 @@ export function ModelBrowser() {
     // Top-level tab: Discover (HF Hub, default) vs My Models (downloaded)
     const [topTab, setTopTab] = useState<"discover" | "library">("discover");
 
+    // Cloud model discovery
+    const { models: cloudDiscovered, loading: cloudLoading, refreshAll: refreshCloudModels, totalModels: cloudTotal, providers: cloudProviders, error: cloudError } = useCloudModels();
+    // Suppress unused-var warnings for values used in JSX below
+    void cloudTotal;
+
     useEffect(() => {
         const load = async () => {
             try {
@@ -86,30 +104,62 @@ export function ModelBrowser() {
         if (!status || !config) return false;
 
         const id = model.id.toLowerCase();
-        const provider = id.startsWith("anthropic") ? "anthropic" :
-            id.startsWith("openai") ? "openai" :
-                id.startsWith("google") || id.startsWith("gemini") ? "gemini" :
-                    id.startsWith("groq") ? "groq" :
-                        id.startsWith("openrouter") ? "openrouter" : "";
+
+        // Detect provider slug from model ID prefix
+        const providerMap: [string, string][] = [
+            ["anthropic", "anthropic"],
+            ["openai", "openai"],
+            ["gemini", "gemini"], ["google", "gemini"],
+            ["groq", "groq"],
+            ["openrouter", "openrouter"],
+            ["mistral", "mistral"], ["codestral", "mistral"],
+            ["xai", "xai"],
+            ["together", "together"],
+            ["venice", "venice"],
+            ["cohere", "cohere"],
+            ["moonshot", "moonshot"],
+            ["minimax", "minimax"],
+            ["nvidia", "nvidia"],
+            ["xiaomi", "xiaomi"],
+        ];
+        const matched = providerMap.find(([prefix]) => id.startsWith(prefix));
+        const provider = matched ? matched[1] : "";
 
         // Check if disabled in config
-        if (config.disabled_providers?.includes(provider)) return false;
+        if (provider && config.disabled_providers?.includes(provider)) return false;
 
-        if (id.startsWith("anthropic")) return !!(status?.has_anthropic_key || status?.hasAnthropicKey);
-        if (id.startsWith("openai")) return !!(status?.has_openai_key || status?.hasOpenaiKey);
-        if (id.startsWith("gemini") || id.startsWith("google")) return !!(status?.has_gemini_key || status?.hasGeminiKey);
-        if (id.startsWith("groq")) return !!(status?.has_groq_key || status?.hasGroqKey);
-        if (id.startsWith("openrouter")) return !!(status?.has_openrouter_key || status?.hasOpenrouterKey);
+        // Original 5 providers use dedicated status keys
+        if (provider === "anthropic") return !!(status?.has_anthropic_key || (status as any)?.hasAnthropicKey);
+        if (provider === "openai") return !!(status?.has_openai_key || (status as any)?.hasOpenaiKey);
+        if (provider === "gemini") return !!(status?.has_gemini_key || (status as any)?.hasGeminiKey);
+        if (provider === "groq") return !!(status?.has_groq_key || (status as any)?.hasGroqKey);
+        if (provider === "openrouter") return !!(status?.has_openrouter_key || (status as any)?.hasOpenrouterKey);
+
+        // Additional providers use implicit provider key pattern
+        const implicitProviders = ["mistral", "xai", "together", "venice", "cohere", "moonshot", "minimax", "nvidia", "xiaomi"];
+        if (implicitProviders.includes(provider)) {
+            const camel = provider.charAt(0).toUpperCase() + provider.slice(1);
+            return !!((status as any)?.[`has_${provider}_key`] || (status as any)?.[`has${camel}Key`]);
+        }
 
         return false;
     };
 
     const hasAnyCloud = !!(
-        status?.has_anthropic_key || status?.hasAnthropicKey ||
-        status?.has_openai_key || status?.hasOpenaiKey ||
-        status?.has_gemini_key || status?.hasGeminiKey ||
-        status?.has_groq_key || status?.hasGroqKey ||
-        status?.has_openrouter_key || status?.hasOpenrouterKey
+        status?.has_anthropic_key || (status as any)?.hasAnthropicKey ||
+        status?.has_openai_key || (status as any)?.hasOpenaiKey ||
+        status?.has_gemini_key || (status as any)?.hasGeminiKey ||
+        status?.has_groq_key || (status as any)?.hasGroqKey ||
+        status?.has_openrouter_key || (status as any)?.hasOpenrouterKey ||
+        (status as any)?.has_mistral_key || (status as any)?.hasMistralKey ||
+        (status as any)?.has_xai_key || (status as any)?.hasXaiKey ||
+        (status as any)?.has_together_key || (status as any)?.hasTogetherKey ||
+        (status as any)?.has_venice_key || (status as any)?.hasVeniceKey ||
+        (status as any)?.has_cohere_key || (status as any)?.hasCohereKey ||
+        (status as any)?.has_moonshot_key || (status as any)?.hasMoonshotKey ||
+        (status as any)?.has_minimax_key || (status as any)?.hasMinimaxKey ||
+        (status as any)?.has_nvidia_key || (status as any)?.hasNvidiaKey ||
+        (status as any)?.has_xiaomi_key || (status as any)?.hasXiaomiKey
     );
 
     const unifiedModels = useMemo(() => {
@@ -117,6 +167,41 @@ export function ModelBrowser() {
         const merged = isLlamaCpp
             ? [...models]
             : models.filter(m => m.category === 'Cloud');
+
+        // ── Merge cloud-discovered models ──────────────────────────────────
+        // Convert CloudModelEntry to ExtendedModelDefinition-like shape
+        const existingCloudIds = new Set(merged.filter(m => (m as any).category === 'Cloud').map(m => m.id.toLowerCase()));
+
+        const discoveredAsModels = cloudDiscovered
+            .filter(cm => {
+                // Only show chat models in the main browser (other modalities are in InferenceModeTab)
+                if (cm.category !== 'chat') return false;
+                // Deduplicate against hardcoded entries
+                const fullId = `${cm.provider}-${cm.id}`.toLowerCase();
+                return !existingCloudIds.has(fullId) && !existingCloudIds.has(cm.id.toLowerCase());
+            })
+            .map(cm => ({
+                id: `${cm.provider}-${cm.id}`,
+                name: cm.displayName,
+                description: formatCloudDescription(cm),
+                family: cm.providerName,
+                category: 'Cloud' as const,
+                tags: ['Cloud', cm.providerName],
+                components: undefined as any,
+                mmproj: undefined as any,
+                variants: [{
+                    name: cm.id,
+                    filename: cm.id,
+                    url: '',
+                    size: 'Cloud',
+                    vram_required_gb: 0,
+                    recommended_min_ram: 0,
+                }],
+                // Extra metadata for display
+                _cloudMeta: cm,
+            }));
+
+        const allMerged = [...merged, ...discoveredAsModels];
 
         // Helper to get basename
         const getBasename = (path: string) => path.split(/[\\/]/).pop() || path;
@@ -139,7 +224,7 @@ export function ModelBrowser() {
             return !curatedComponentFilenames.has(basename) && !curatedVariantFilenames.has(basename);
         });
 
-        const curatedDisplay = merged.map(m => {
+        const curatedDisplay = allMerged.map(m => {
             // A curated model is "local" if its main variant is downloaded
             // Check if ANY variant matches a local file basename
             const downloadedVariants = m.variants.filter(v =>
@@ -151,7 +236,7 @@ export function ModelBrowser() {
             const local = localModels.find(l => getBasename(l.name) === activeVariant.filename);
 
             // Track status of components
-            const componentsStatus = (m.components || []).map(c => ({
+            const componentsStatus = (m.components || []).map((c: any) => ({
                 ...c,
                 isDownloaded: localModels.some(l => getBasename(l.name) === c.filename)
             }));
@@ -261,18 +346,25 @@ export function ModelBrowser() {
 
         // Sorting: Local first, then by family/name
         return allModels.sort((a, b) => {
-            // If one is cloud and other isn't, cloud usually at bottom unless in Cloud tab
+            // Cloud Brains tab: group by family
             if (activeCategory === "Cloud Brains") {
-                // Group by family
                 if (a.family !== b.family) return a.family.localeCompare(b.family);
                 return a.name.localeCompare(b.name);
+            }
+
+            // "All" view: group by category, then local-before-cloud, then name
+            if (activeCategory === "All") {
+                const catOrder: Record<string, number> = { Cloud: 99 };
+                const aCatRank = catOrder[(a as any).category] ?? 0;
+                const bCatRank = catOrder[(b as any).category] ?? 0;
+                if (aCatRank !== bCatRank) return aCatRank - bCatRank;
             }
 
             if (a.isLocal && !b.isLocal) return -1;
             if (!a.isLocal && b.isLocal) return 1;
             return a.name.localeCompare(b.name);
         });
-    }, [models, localModels, searchQuery, activeCategory, isLlamaCpp, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath, config, status]);
+    }, [models, localModels, searchQuery, activeCategory, isLlamaCpp, currentModelPath, currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath, currentImageGenModelPath, currentSummarizerModelPath, config, status, cloudDiscovered]);
 
     const isActive = (path: string | null) => path && currentModelPath && path === currentModelPath;
     const isEmbeddingActive = (path: string | null) => path && currentEmbeddingModelPath && path === currentEmbeddingModelPath;
@@ -335,7 +427,34 @@ export function ModelBrowser() {
                 {/* Sticky Header Container */}
                 <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 -mx-1 px-1 py-4 space-y-4">
                     <div className="flex flex-col gap-3">
-                        <div className="flex justify-end items-center h-4">
+                        <div className="flex justify-end items-center h-4 gap-2">
+                            {cloudLoading && (
+                                <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Discovering cloud models...
+                                </span>
+                            )}
+                            {/* Cloud discovery error badge */}
+                            {!cloudLoading && cloudProviders.some(p => p.error) && (
+                                <span
+                                    className="flex items-center gap-1 text-[10px] text-amber-500 cursor-help"
+                                    title={cloudProviders.filter(p => p.error).map(p => `${p.provider}: ${p.error}`).join('\n')}
+                                >
+                                    ⚠️ {cloudProviders.filter(p => p.error).length} provider{cloudProviders.filter(p => p.error).length > 1 ? 's' : ''} failed
+                                </span>
+                            )}
+                            {cloudError && (
+                                <span className="text-[10px] text-destructive" title={cloudError}>
+                                    Discovery failed
+                                </span>
+                            )}
+                            <button
+                                onClick={() => refreshCloudModels()}
+                                className="p-1 hover:bg-accent rounded-md transition-colors"
+                                title="Refresh cloud models"
+                            >
+                                <Globe className={cn("w-3.5 h-3.5 text-muted-foreground", cloudLoading && "animate-pulse")} />
+                            </button>
                             <button onClick={refreshModels} disabled={isRefreshing} className="p-1 hover:bg-accent rounded-md transition-colors" title="Refresh">
                                 <RefreshCw className={cn("w-4 h-4 text-muted-foreground", isRefreshing && "animate-spin")} />
                             </button>
@@ -503,15 +622,25 @@ export function ModelBrowser() {
                                                 {isImageGen && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Image Gen</span>}
                                                 {model.isCurated && model.isLocal && <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500/5 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-md border border-emerald-500/10">Installed</span>}
                                                 {!model.isCurated && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted/50 text-muted-foreground/50 px-2 py-0.5 rounded-md border border-border/10">Local</span>}
-                                                {category === "Cloud" && (
-                                                    <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500/10 text-indigo-500 border border-indigo-500/20 px-2 py-0.5 rounded-md">
-                                                        {model.id.toLowerCase().startsWith("anthropic") ? "Anthropic" :
-                                                            model.id.toLowerCase().startsWith("openai") ? "OpenAI" :
-                                                                (model.id.toLowerCase().startsWith("google") || model.id.toLowerCase().startsWith("gemini")) ? "Google" :
-                                                                    model.id.toLowerCase().startsWith("groq") ? "Groq" :
-                                                                        model.id.toLowerCase().startsWith("openrouter") ? "OpenRouter" : "Cloud"}
-                                                    </span>
-                                                )}
+                                                {category === "Cloud" && (() => {
+                                                    const id = model.id.toLowerCase();
+                                                    const badges: [string, string][] = [
+                                                        ["anthropic", "Anthropic"], ["openai", "OpenAI"],
+                                                        ["google", "Google"], ["gemini", "Google"],
+                                                        ["groq", "Groq"], ["openrouter", "OpenRouter"],
+                                                        ["mistral", "Mistral"], ["codestral", "Mistral"],
+                                                        ["xai", "xAI"], ["together", "Together"],
+                                                        ["venice", "Venice"], ["cohere", "Cohere"],
+                                                        ["moonshot", "Moonshot"], ["minimax", "MiniMax"],
+                                                        ["nvidia", "NVIDIA"], ["xiaomi", "Xiaomi"],
+                                                    ];
+                                                    const label = badges.find(([p]) => id.startsWith(p))?.[1] ?? "Cloud";
+                                                    return (
+                                                        <span className="text-[10px] uppercase tracking-wider font-bold bg-indigo-500/10 text-indigo-500 border border-indigo-500/20 px-2 py-0.5 rounded-md">
+                                                            {label}
+                                                        </span>
+                                                    );
+                                                })()}
                                             </div>
                                         </h3>
                                         <p className="text-sm text-muted-foreground line-clamp-2" title={model.description}>{model.description}</p>
@@ -752,19 +881,27 @@ export function ModelBrowser() {
                                             onClick={async () => {
                                                 try {
                                                     const id = model.id.toLowerCase();
-                                                    const brain = id.startsWith("openrouter-") ? "openrouter" :
-                                                        id.startsWith("groq-") ? "groq" :
-                                                            id.startsWith("anthropic-") ? "anthropic" :
-                                                                id.startsWith("openai-") ? "openai" :
-                                                                    id.startsWith("google-") || id.startsWith("gemini-") ? "gemini" :
-                                                                        model.family.toLowerCase();
+                                                    const brainMap: [string, string][] = [
+                                                        ["openrouter-", "openrouter"], ["groq-", "groq"],
+                                                        ["anthropic-", "anthropic"], ["openai-", "openai"],
+                                                        ["google-", "gemini"], ["gemini-", "gemini"],
+                                                        ["mistral-", "mistral"], ["codestral-", "mistral"],
+                                                        ["xai-", "xai"], ["together-", "together"],
+                                                        ["venice-", "venice"], ["cohere-", "cohere"],
+                                                        ["moonshot-", "moonshot"], ["minimax-", "minimax"],
+                                                        ["nvidia-", "nvidia"], ["xiaomi-", "xiaomi"],
+                                                    ];
+                                                    const brain = brainMap.find(([p]) => id.startsWith(p))?.[1] ?? model.family.toLowerCase();
                                                     const modelId = model.id.split('-').slice(1).join('-');
+                                                    // Propagate context window from discovery metadata
+                                                    const contextSize = (model as any)._cloudMeta?.contextWindow ?? null;
                                                     const cfg = await commands.getUserConfig();
                                                     const newConfig = {
                                                         ...cfg,
                                                         selected_chat_provider: brain,
                                                         selected_cloud_brain: brain,
-                                                        selected_cloud_model: modelId
+                                                        selected_cloud_model: modelId,
+                                                        selected_model_context_size: contextSize ?? undefined,
                                                     };
                                                     await updateConfig(newConfig);
                                                     if (commands.openclawSaveSelectedCloudModel) {

@@ -1696,7 +1696,32 @@ mcp_cache_ttl_secs?: number;
  * Larger values give the agent more context at the cost of token usage.
  * Default: 5000.
  */
-mcp_tool_result_max_chars?: number }
+mcp_tool_result_max_chars?: number; 
+/**
+ * Chat backend: "local", "anthropic", "openai", "gemini", etc.
+ * Falls back to `selected_chat_provider` for backward compat.
+ */
+chat_backend?: string | null; 
+/**
+ * Embedding backend: "local", "openai", "gemini", "voyage", "cohere".
+ */
+embedding_backend?: string | null; 
+/**
+ * TTS backend: "local", "openai", "elevenlabs", "gemini".
+ */
+tts_backend?: string | null; 
+/**
+ * STT backend: "local", "openai", "gemini", "deepgram".
+ */
+stt_backend?: string | null; 
+/**
+ * Diffusion backend: "local", "openai", "gemini", "stability", "fal", "together".
+ */
+diffusion_backend?: string | null; 
+/**
+ * Per-modality model selection (JSON object: { "chat": "gpt-4o", "embedding": "text-embedding-3-small", ... }).
+ */
+inference_models?: { [key in string]: string } | null }
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/

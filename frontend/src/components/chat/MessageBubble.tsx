@@ -1,5 +1,5 @@
 import ReactMarkdown from 'react-markdown';
-import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon, Volume2 } from 'lucide-react';
+import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon, Volume2, Monitor, Cloud } from 'lucide-react';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
@@ -14,6 +14,7 @@ import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
 import { revealPath } from '../../lib/openclaw';
 import { ThinkingDots } from './ThinkingDots';
+import { useInferenceBackends } from '../../hooks/use-inference-backends';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -399,6 +400,9 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     const [showOriginals, setShowOriginals] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
 
+    // TTS backend info for badge
+    const { tts: ttsBackend } = useInferenceBackends();
+
     const handleReadAloud = async () => {
         if (isSpeaking) return;
         setIsSpeaking(true);
@@ -699,14 +703,23 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                             onClick={handleReadAloud}
                             disabled={isSpeaking}
                             className={cn(
-                                "p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground border-border/50 shadow-sm",
+                                "p-1.5 rounded-md transition-all duration-200 bg-background/50 backdrop-blur-md hover:bg-accent hover:text-accent-foreground border-border/50 shadow-sm flex items-center gap-1",
                                 isSpeaking && "text-primary"
                             )}
-                            title={isSpeaking ? 'Playing…' : 'Read Aloud'}
+                            title={isSpeaking ? 'Playing…' : `Read Aloud${ttsBackend ? ` (${ttsBackend.displayName})` : ''}`}
                         >
                             {isSpeaking
                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                 : <Volume2 className="w-3.5 h-3.5 text-muted-foreground" />}
+                            {ttsBackend && (
+                                <span className={cn(
+                                    "text-[7px] font-bold uppercase tracking-wider opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5",
+                                    ttsBackend.isLocal ? "text-emerald-500/70" : "text-blue-500/70"
+                                )}>
+                                    {ttsBackend.isLocal ? <Monitor className="w-2 h-2" /> : <Cloud className="w-2 h-2" />}
+                                    {ttsBackend.isLocal ? '' : ttsBackend.displayName.split(' ')[0]}
+                                </span>
+                            )}
                         </button>
                     </div>
                 )}

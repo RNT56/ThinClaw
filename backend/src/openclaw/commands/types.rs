@@ -67,6 +67,18 @@ pub struct OpenClawStatus {
     pub mistral_granted: bool,
     pub has_xiaomi_key: bool,
     pub xiaomi_granted: bool,
+    pub has_cohere_key: bool,
+    pub cohere_granted: bool,
+    pub has_voyage_key: bool,
+    pub voyage_granted: bool,
+    pub has_deepgram_key: bool,
+    pub deepgram_granted: bool,
+    pub has_elevenlabs_key: bool,
+    pub elevenlabs_granted: bool,
+    pub has_stability_key: bool,
+    pub stability_granted: bool,
+    pub has_fal_key: bool,
+    pub fal_granted: bool,
     pub has_bedrock_key: bool,
     pub bedrock_granted: bool,
 }
@@ -150,4 +162,30 @@ pub struct OpenClawDiagnostics {
     pub state_dir: Option<String>,
     pub slack_enabled: Option<bool>,
     pub telegram_enabled: Option<bool>,
+}
+
+/// Response from spawning a sub-agent session.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SpawnSessionResponse {
+    /// The session key of the newly spawned child session.
+    pub session_key: String,
+    /// The session key of the parent that spawned this child.
+    pub parent_session: Option<String>,
+    /// The task description given to the sub-agent.
+    pub task: String,
+}
+
+/// Information about a child session spawned by a parent session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct ChildSessionInfo {
+    /// The session key of the child session.
+    pub session_key: String,
+    /// The task description given to the sub-agent.
+    pub task: String,
+    /// Current status: "running", "completed", or "failed".
+    pub status: String,
+    /// UNIX timestamp (ms) when the child was spawned.
+    pub spawned_at: u64,
+    /// Summary of the result (set on completion/failure).
+    pub result_summary: Option<String>,
 }

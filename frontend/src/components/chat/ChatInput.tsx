@@ -1,8 +1,9 @@
 import { memo, useRef, useEffect, useState } from 'react';
 import { cn } from '../../lib/utils';
-import { Paperclip, X, Sparkles, Globe, Mic, Square, Palette, Send, Server, Terminal, Layers, ChevronRight, ImageIcon } from 'lucide-react';
+import { Paperclip, X, Sparkles, Globe, Mic, Square, Palette, Send, Server, Terminal, Layers, ChevronRight, ImageIcon, Monitor, Cloud } from 'lucide-react';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useInferenceBackends } from '../../hooks/use-inference-backends';
 
 // ... This would rely on many props. Let's define the interface.
 
@@ -85,6 +86,9 @@ export const ChatInput = memo(function ChatInput({
     const mentionsContainerRef = useRef<HTMLDivElement>(null);
     const [showAttachMenu, setShowAttachMenu] = useState(false);
     const attachMenuRef = useRef<HTMLDivElement>(null);
+
+    // STT backend badge
+    const { stt: sttBackend } = useInferenceBackends();
 
     // Close attach menu on outside click
     useEffect(() => {
@@ -313,11 +317,22 @@ export const ChatInput = memo(function ChatInput({
                 </div>
             )}
 
-            <button onClick={handleMicClick} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isRecording ? "bg-red-500 text-white animate-stop-pulse" : "text-muted-foreground hover:bg-muted hover:text-foreground")}
-                title={isRecording ? "Stop Recording" : "Voice Input"}
-            >
-                {isRecording ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-5 h-5" />}
-            </button>
+            <div className="relative">
+                <button onClick={handleMicClick} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isRecording ? "bg-red-500 text-white animate-stop-pulse" : "text-muted-foreground hover:bg-muted hover:text-foreground")}
+                    title={isRecording ? "Stop Recording" : `Voice Input${sttBackend ? ` (${sttBackend.displayName})` : ''}`}
+                >
+                    {isRecording ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-5 h-5" />}
+                </button>
+                {sttBackend && !isRecording && (
+                    <span className={cn(
+                        "absolute -bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-0.5 text-[8px] font-bold uppercase tracking-wider whitespace-nowrap pointer-events-none select-none",
+                        sttBackend.isLocal ? "text-emerald-500/70" : "text-blue-500/70"
+                    )}>
+                        {sttBackend.isLocal ? <Monitor className="w-2 h-2" /> : <Cloud className="w-2 h-2" />}
+                        {sttBackend.isLocal ? 'Local' : sttBackend.displayName.split(' ')[0]}
+                    </span>
+                )}
+            </div>
 
             {!autoMode && !isWebSearchEnabled && (
                 <button onClick={() => { setIsImageMode(!isImageMode); }} disabled={isRecording} className={cn("p-2 rounded-xl transition-all duration-300 mr-1", isImageMode ? "bg-primary text-primary-foreground shadow-md shadow-primary/20" : (imageRunning ? "text-primary hover:bg-primary/10" : "text-muted-foreground hover:bg-muted"))}

@@ -124,6 +124,53 @@ impl SecretStore {
         self.get("remote_token")
     }
 
+    // Extended providers (B2 + B8)
+    pub fn xai_key(&self) -> Option<String> {
+        self.get("xai")
+    }
+    pub fn mistral_key(&self) -> Option<String> {
+        self.get("mistral")
+    }
+    pub fn together_key(&self) -> Option<String> {
+        self.get("together")
+    }
+    pub fn venice_key(&self) -> Option<String> {
+        self.get("venice")
+    }
+    pub fn cohere_key(&self) -> Option<String> {
+        self.get("cohere")
+    }
+    pub fn voyage_key(&self) -> Option<String> {
+        self.get("voyage")
+    }
+    pub fn deepgram_key(&self) -> Option<String> {
+        self.get("deepgram")
+    }
+    pub fn elevenlabs_key(&self) -> Option<String> {
+        self.get("elevenlabs")
+    }
+    pub fn stability_key(&self) -> Option<String> {
+        self.get("stability")
+    }
+    pub fn fal_key(&self) -> Option<String> {
+        self.get("fal")
+    }
+    pub fn moonshot_key(&self) -> Option<String> {
+        self.get("moonshot")
+    }
+    pub fn minimax_key(&self) -> Option<String> {
+        self.get("minimax")
+    }
+    pub fn nvidia_key(&self) -> Option<String> {
+        self.get("nvidia")
+    }
+    pub fn qianfan_key(&self) -> Option<String> {
+        self.get("qianfan")
+    }
+    pub fn xiaomi_key(&self) -> Option<String> {
+        self.get("xiaomi")
+    }
+
     // NOTE: `snapshot()` was intentionally removed.
     //
     // It returned ALL keys in the store without checking OpenClaw grant flags.

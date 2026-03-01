@@ -59,14 +59,17 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 }
 
 pub mod chat;
+pub mod cloud;
 pub mod config;
 pub mod engine;
+pub mod file_store;
 pub mod gguf;
 pub mod hf_hub;
 mod history;
 pub mod image_gen;
 pub mod images;
 pub mod imagine;
+pub mod inference;
 pub mod model_manager;
 pub mod openclaw;
 pub mod permissions;
@@ -115,6 +118,7 @@ pub fn run() {
         sidecar::start_tts_server,
         sidecar::cancel_generation,
         tts::tts_synthesize,
+        tts::tts_list_voices,
         web_search::check_web_search,
         image_gen::generate_image,
         stt::transcribe_audio,
@@ -198,6 +202,7 @@ pub fn run() {
         openclaw::fleet::openclaw_broadcast_command,
         openclaw::commands::openclaw_start_gateway,
         openclaw::commands::openclaw_stop_gateway,
+        openclaw::commands::openclaw_reload_secrets,
         openclaw::commands::openclaw_get_sessions,
         openclaw::commands::openclaw_get_history,
         openclaw::commands::openclaw_delete_session,
@@ -248,6 +253,8 @@ pub fn run() {
         openclaw::deploy::openclaw_deploy_remote,
         // Orchestration & Canvas
         openclaw::commands::openclaw_spawn_session,
+        openclaw::commands::openclaw_list_child_sessions,
+        openclaw::commands::openclaw_update_sub_agent_status,
         openclaw::commands::openclaw_agents_list,
         openclaw::commands::openclaw_canvas_push,
         openclaw::commands::openclaw_canvas_navigate,
@@ -265,6 +272,21 @@ pub fn run() {
         hf_hub::discover_hf_models,
         hf_hub::get_model_files,
         hf_hub::download_hf_model_files,
+        // Inference Router
+        inference::get_inference_backends,
+        inference::update_inference_backend,
+        // Cloud Model Discovery
+        inference::discover_cloud_models,
+        inference::refresh_cloud_models,
+        // Cloud Storage
+        cloud::commands::cloud_get_status,
+        cloud::commands::cloud_test_connection,
+        cloud::commands::cloud_migrate_to_cloud,
+        cloud::commands::cloud_migrate_to_local,
+        cloud::commands::cloud_cancel_migration,
+        cloud::commands::cloud_get_recovery_key,
+        cloud::commands::cloud_import_recovery_key,
+        cloud::commands::cloud_get_storage_breakdown,
     ]);
 
     #[cfg(debug_assertions)]
@@ -310,6 +332,8 @@ pub fn run() {
     app.manage(openclaw::OpenClawManager::new(app.handle().clone()));
     app.manage(rig_cache::RigManagerCache::new());
 
+    // FileStore — centralized file I/O abstraction (local-first, cloud-ready)
+
     // Setup Logic
     {
         let handle = app.handle().clone();
@@ -330,7 +354,20 @@ pub fn run() {
 
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
+            // InferenceRouter needs an Arc handle to the store.  Since
+            // SecretStore is a zero-state wrapper over keychain (module-level
+            // Mutex cache), a second instance is safe — they share the same
+            // underlying cache.
+            let secret_store_for_router = std::sync::Arc::new(secret_store::SecretStore::new());
             handle.manage(secret_store);
+
+            // ── Inference Router — routes all AI modalities to backends ───
+            let inference_router = inference::InferenceRouter::new(secret_store_for_router.clone());
+            handle.manage(inference_router);
+
+            // ── Cloud Model Discovery Registry ───
+            let model_registry = inference::CloudModelRegistry::new(secret_store_for_router);
+            handle.manage(model_registry);
 
             // Engine Manager — singleton inference engine instance
             let engine_manager = engine::EngineManager::new(app_data_dir.clone());
@@ -384,6 +421,20 @@ pub fn run() {
                 .expect("failed to run migrations");
 
             handle.manage(pool);
+
+            // Cloud Storage Manager
+            let cloud_manager = cloud::CloudManager::new(app_data_dir.clone());
+            {
+                let pool_ref = handle.state::<sqlx::SqlitePool>();
+                if let Err(e) = cloud_manager.init_from_db(&pool_ref).await {
+                    eprintln!("[main] Cloud manager init warning: {}", e);
+                }
+            }
+            handle.manage(cloud_manager);
+
+            // FileStore — centralized file I/O (local-first, cloud-ready)
+            let file_store = file_store::FileStore::new(app_data_dir.clone());
+            handle.manage(file_store);
 
             // 2. Integrity Check
             println!("[main] Running Integrity Check...");

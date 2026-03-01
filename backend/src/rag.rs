@@ -27,17 +27,15 @@ struct EmbeddingData {
 #[tauri::command]
 #[specta::specta]
 pub async fn upload_document(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
+    file_store: tauri::State<'_, crate::file_store::FileStore>,
     file_bytes: Vec<u8>,
     filename: String,
 ) -> Result<String, String> {
-    use tauri::Manager;
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let docs_dir = app_data_dir.join("documents");
-
-    if !docs_dir.exists() {
-        fs::create_dir_all(&docs_dir).map_err(|e| e.to_string())?;
-    }
+    file_store
+        .create_dir_all("documents")
+        .await
+        .map_err(|e| e.to_string())?;
 
     let safe_filename = std::path::Path::new(&filename)
         .file_name()
@@ -51,9 +49,12 @@ pub async fn upload_document(
         .collect::<String>();
 
     let final_filename = format!("{}_{}", id, safe_filename);
-    let path = docs_dir.join(&final_filename);
-
-    fs::write(&path, &file_bytes).map_err(|e| format!("Failed to save document: {}", e))?;
+    let relative_path = format!("documents/{}", final_filename);
+    file_store
+        .write(&relative_path, &file_bytes)
+        .await
+        .map_err(|e| format!("Failed to save document: {}", e))?;
+    let path = file_store.resolve_path(&relative_path).await;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -159,10 +160,10 @@ pub async fn extract_document_content(
                     {
                         // Save first page as preview if needed
                         if i == 1 {
-                            if let Ok(app_data_dir) = app.path().app_data_dir() {
-                                let preview_path = app_data_dir.join("previews").join(format!("{}.jpg", hash));
-                                let _ = fs::create_dir_all(preview_path.parent().unwrap());
-                                let _ = fs::write(preview_path, &screenshot);
+                            {
+                                let preview_rel = format!("previews/{}.jpg", hash);
+                                let file_store = app.state::<crate::file_store::FileStore>();
+                                let _ = file_store.write(&preview_rel, &screenshot).await;
                             }
                         }
 
@@ -248,8 +249,9 @@ pub async fn extract_document_content(
                         .map_err(|e| e.to_string())?;
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if let Ok(screenshot) = page.screenshot(chromiumoxide::page::ScreenshotParams::builder().format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Jpeg).quality(80).build()).await {
-                        let _ = fs::create_dir_all(preview_path.parent().unwrap());
-                        let _ = fs::write(preview_path, &screenshot);
+                        let preview_rel = format!("previews/{}.jpg", hash);
+                        let file_store = app.state::<crate::file_store::FileStore>();
+                        let _ = file_store.write(&preview_rel, &screenshot).await;
                     }
                     let _ = browser.close().await;
                 }
@@ -277,6 +279,7 @@ pub async fn ingest_document(
     sidecar: State<'_, SidecarManager>,
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
+    inference_router: State<'_, crate::inference::router::InferenceRouter>,
     file_path: String,
     chat_id: Option<String>,
     project_id: Option<String>,
@@ -379,59 +382,8 @@ pub async fn ingest_document(
         }
     }
 
-    // ── Ensure the embedding server is alive ────────────────────────────────
-    // Check if the server is actually responding; if not, start it on-demand.
-    // This is more reliable than trusting sidecar state (which can be stale).
-    let (port, token) = {
-        // Quick liveness check: try getting config + an HTTP health ping
-        let maybe_live = if let Some((p, t)) = sidecar.get_embedding_config() {
-            let health_url = format!("http://127.0.0.1:{}/health", p);
-            let alive = reqwest::Client::new()
-                .get(&health_url)
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-                .is_ok();
-            if alive {
-                Some((p, t))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(cfg) = maybe_live {
-            cfg
-        } else {
-            // Server isn't running or not responding — start it now
-            let model_path = embedding_model_path
-                .clone()
-                .ok_or_else(|| "Embedding server is not running and no embedding_model_path provided. Please select an embedding model in Settings.".to_string())?;
-
-            println!(
-                "[rag] Embedding server not alive — starting on demand with model: {}",
-                model_path
-            );
-
-            // Reuse start_embedding_server logic (handles dim-detection + reinit)
-            crate::sidecar::start_embedding_server_core(
-                &app,
-                &sidecar,
-                &vector_manager,
-                model_path.clone(),
-            )
-            .await
-            .map_err(|e| format!("Failed to auto-start embedding server: {}", e))?;
-
-            sidecar.get_embedding_config().ok_or_else(|| {
-                "Embedding server failed to start (no config after launch)".to_string()
-            })?
-        }
-    };
-
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
+    // ── Try InferenceRouter embedding backend first ───────────────────────
+    let embedding_backend = inference_router.embedding_backend().await;
 
     let chunks_with_index: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
     let total_chunks = chunks_with_index.len();
@@ -447,51 +399,31 @@ pub async fn ingest_document(
         total_chunks, scope
     );
 
-    let stream = futures::stream::iter(chunks_with_index)
-        .map(|(i, chunk_text)| {
-            let pool = pool.clone();
-            let scoped_store = scoped_store.clone();
-            let client = client.clone();
-            let url = url.clone();
-            let token = token.clone();
-            let doc_id = doc_id.clone();
+    if let Some(backend) = embedding_backend {
+        // ── Cloud/configured embedding backend path ──────────────────────
+        println!(
+            "[rag] Using InferenceRouter embedding backend: {}",
+            backend.info().display_name
+        );
 
-            async move {
-                if chunk_text.trim().is_empty() {
-                    return Ok(());
-                }
+        let stream = futures::stream::iter(chunks_with_index)
+            .map(|(i, chunk_text)| {
+                let pool = pool.clone();
+                let scoped_store = scoped_store.clone();
+                let backend = backend.clone();
+                let doc_id = doc_id.clone();
 
-                let response = client
-                    .post(&url)
-                    .header("Authorization", format!("Bearer {}", token))
-                    .json(&serde_json::json!({
-                        "input": chunk_text,
-                        "model": "default"
-                    }))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Request failed: {}", e))?;
+                async move {
+                    if chunk_text.trim().is_empty() {
+                        return Ok(());
+                    }
 
-                if !response.status().is_success() {
-                    let status = response.status();
-                    let text = response
-                        .text()
+                    let embedding = backend
+                        .embed(chunk_text.clone())
                         .await
-                        .unwrap_or_else(|_| "Could not read response text".to_string());
-                    return Err(format!(
-                        "Embedding failed for chunk {}: {} - Body: {}",
-                        i, status, text
-                    ));
-                }
+                        .map_err(|e| format!("Embedding failed for chunk {}: {}", i, e))?;
 
-                let res_json: EmbeddingResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| format!("Parse error: {}", e))?;
-
-                if let Some(data) = res_json.data.first() {
-                    let bytes: Vec<u8> = data
-                        .embedding
+                    let bytes: Vec<u8> = embedding
                         .iter()
                         .flat_map(|f| f.to_le_bytes())
                         .collect();
@@ -507,24 +439,155 @@ pub async fn ingest_document(
                         .await
                         .map_err(|e| format!("Database insert failed: {}", e))?;
 
-                    if let Err(e) = scoped_store.add(rowid as u64, &data.embedding) {
+                    if let Err(e) = scoped_store.add(rowid as u64, &embedding) {
                         return Err(format!("Vector store index failed: {}", e));
                     }
+                    Ok(())
                 }
-                Ok(())
+            })
+            .buffer_unordered(5);
+
+        let results: Vec<Result<(), String>> = stream.collect().await;
+
+        for res in &results {
+            if let Err(e) = res {
+                let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+                    .bind(&doc_id)
+                    .execute(pool.inner())
+                    .await;
+                return Err(format!("Ingestion failed (rolling back): {}", e));
             }
-        })
-        .buffer_unordered(5);
+        }
+    } else {
+        // ── Sidecar fallback path ────────────────────────────────────────
+        // Ensure the embedding server is alive; start on demand if not.
+        let (port, token) = {
+            let maybe_live = if let Some((p, t)) = sidecar.get_embedding_config() {
+                let health_url = format!("http://127.0.0.1:{}/health", p);
+                let alive = reqwest::Client::new()
+                    .get(&health_url)
+                    .timeout(std::time::Duration::from_secs(2))
+                    .send()
+                    .await
+                    .is_ok();
+                if alive {
+                    Some((p, t))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
-    let results: Vec<Result<(), String>> = stream.collect().await;
+            if let Some(cfg) = maybe_live {
+                cfg
+            } else {
+                let model_path = embedding_model_path
+                    .clone()
+                    .ok_or_else(|| "Embedding server is not running and no embedding_model_path provided. Please select an embedding model in Settings.".to_string())?;
 
-    for res in &results {
-        if let Err(e) = res {
-            let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
-                .bind(&doc_id)
-                .execute(pool.inner())
-                .await;
-            return Err(format!("Ingestion failed (rolling back): {}", e));
+                println!(
+                    "[rag] Embedding server not alive — starting on demand with model: {}",
+                    model_path
+                );
+
+                crate::sidecar::start_embedding_server_core(
+                    &app,
+                    &sidecar,
+                    &vector_manager,
+                    model_path.clone(),
+                )
+                .await
+                .map_err(|e| format!("Failed to auto-start embedding server: {}", e))?;
+
+                sidecar.get_embedding_config().ok_or_else(|| {
+                    "Embedding server failed to start (no config after launch)".to_string()
+                })?
+            }
+        };
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
+
+        let stream = futures::stream::iter(chunks_with_index)
+            .map(|(i, chunk_text)| {
+                let pool = pool.clone();
+                let scoped_store = scoped_store.clone();
+                let client = client.clone();
+                let url = url.clone();
+                let token = token.clone();
+                let doc_id = doc_id.clone();
+
+                async move {
+                    if chunk_text.trim().is_empty() {
+                        return Ok(());
+                    }
+
+                    let response = client
+                        .post(&url)
+                        .header("Authorization", format!("Bearer {}", token))
+                        .json(&serde_json::json!({
+                            "input": chunk_text,
+                            "model": "default"
+                        }))
+                        .send()
+                        .await
+                        .map_err(|e| format!("Request failed: {}", e))?;
+
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Could not read response text".to_string());
+                        return Err(format!(
+                            "Embedding failed for chunk {}: {} - Body: {}",
+                            i, status, text
+                        ));
+                    }
+
+                    let res_json: EmbeddingResponse = response
+                        .json()
+                        .await
+                        .map_err(|e| format!("Parse error: {}", e))?;
+
+                    if let Some(data) = res_json.data.first() {
+                        let bytes: Vec<u8> = data
+                            .embedding
+                            .iter()
+                            .flat_map(|f| f.to_le_bytes())
+                            .collect();
+                        let chunk_id = format!("{}-{}", doc_id, i);
+
+                        let rowid: i64 = sqlx::query_scalar("INSERT INTO chunks (id, document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?, ?) RETURNING rowid")
+                            .bind(&chunk_id)
+                            .bind(&doc_id)
+                            .bind(chunk_text)
+                            .bind(i as i64)
+                            .bind(&bytes)
+                            .fetch_one(pool.inner())
+                            .await
+                            .map_err(|e| format!("Database insert failed: {}", e))?;
+
+                        if let Err(e) = scoped_store.add(rowid as u64, &data.embedding) {
+                            return Err(format!("Vector store index failed: {}", e));
+                        }
+                    }
+                    Ok(())
+                }
+            })
+            .buffer_unordered(5);
+
+        let results: Vec<Result<(), String>> = stream.collect().await;
+
+        for res in &results {
+            if let Err(e) = res {
+                let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+                    .bind(&doc_id)
+                    .execute(pool.inner())
+                    .await;
+                return Err(format!("Ingestion failed (rolling back): {}", e));
+            }
         }
     }
 
@@ -553,17 +616,20 @@ pub async fn retrieve_context(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     reranker: State<'_, crate::reranker::RerankerWrapper>,
+    inference_router: State<'_, crate::inference::router::InferenceRouter>,
     query: String,
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id: Option<String>,
 ) -> Result<Vec<String>, String> {
+    let embedding_backend = inference_router.embedding_backend().await;
     retrieve_context_internal(
         Some(app),
         sidecar.inner(),
         pool.inner().clone(),
         vector_manager.inner().clone(),
         reranker.inner(),
+        embedding_backend,
         query,
         chat_id,
         doc_ids,
@@ -578,6 +644,7 @@ pub async fn retrieve_context_internal(
     pool: SqlitePool,
     vector_manager: crate::vector_store::VectorStoreManager,
     reranker: &crate::reranker::RerankerWrapper,
+    embedding_backend: Option<std::sync::Arc<dyn crate::inference::embedding::EmbeddingBackend>>,
     query: String,
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
@@ -743,23 +810,49 @@ pub async fn retrieve_context_internal(
         search_scopes.push(crate::vector_store::VectorScope::Global);
     }
 
-    if let Some((port, token)) = sidecar.get_embedding_config() {
-        let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
+    // Try embedding via InferenceRouter first (supports cloud + local backends),
+    // fall back to direct sidecar HTTP call if no embedding backend is active.
+    if let Some(backend) = &embedding_backend {
+        match backend.embed(query.clone()).await {
+            Ok(embedding) => {
+                if let Ok(keys) =
+                    vector_manager.search_scoped(&embedding, &search_scopes, initial_top_k)
+                {
+                    vector_results = keys.into_iter().map(|k| k as i64).collect();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[rag] InferenceRouter embedding failed, trying sidecar: {}",
+                    e
+                );
+                // Fall through to sidecar below
+            }
+        }
+    }
 
-        if let Ok(response) = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&serde_json::json!({ "input": query, "model": "default" }))
-            .send()
-            .await
-        {
-            if let Ok(res_json) = response.json::<EmbeddingResponse>().await {
-                if let Some(data) = res_json.data.first() {
-                    if let Ok(keys) =
-                        vector_manager.search_scoped(&data.embedding, &search_scopes, initial_top_k)
-                    {
-                        vector_results = keys.into_iter().map(|k| k as i64).collect();
+    // Sidecar fallback (or primary if no embedding backend configured)
+    if vector_results.is_empty() {
+        if let Some((port, token)) = sidecar.get_embedding_config() {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
+
+            if let Ok(response) = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&serde_json::json!({ "input": query, "model": "default" }))
+                .send()
+                .await
+            {
+                if let Ok(res_json) = response.json::<EmbeddingResponse>().await {
+                    if let Some(data) = res_json.data.first() {
+                        if let Ok(keys) = vector_manager.search_scoped(
+                            &data.embedding,
+                            &search_scopes,
+                            initial_top_k,
+                        ) {
+                            vector_results = keys.into_iter().map(|k| k as i64).collect();
+                        }
                     }
                 }
             }

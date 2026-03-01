@@ -1,12 +1,12 @@
 use crate::config::ConfigManager;
 use crate::images::ImageResponse;
+use crate::inference::diffusion::DiffusionRequest;
+use crate::inference::InferenceRouter;
 use crate::sidecar::SidecarManager;
-use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Manager, State};
-use uuid::Uuid;
+use tauri::{AppHandle, State};
 
 /// Image generation parameters for the Imagine mode
 #[derive(Debug, Deserialize, Type)]
@@ -63,201 +63,70 @@ fn parse_aspect_ratio(ratio: &str, resolution: Option<&str>) -> (u32, u32) {
     }
 }
 
-/// Generate image using Gemini Imagen 3 API
-async fn generate_with_gemini(
-    app: &AppHandle,
+/// Generate image using a cloud diffusion backend via InferenceRouter.
+///
+/// The `DiffusionBackend` trait handles all provider-specific logic (API calls,
+/// response parsing, image saving).  This function converts `ImagineParams` →
+/// `DiffusionRequest`, calls the backend, and converts the result back.
+async fn generate_with_cloud_backend(
+    router: &InferenceRouter,
     params: &ImagineParams,
-    is_pro: bool,
+    width: u32,
+    height: u32,
 ) -> Result<ImageResponse, String> {
-    // Get Gemini API key from SecretStore (app-level key store, NOT OpenClawConfig)
-    let api_key = app
-        .try_state::<crate::secret_store::SecretStore>()
-        .and_then(|store| store.get("gemini"))
-        .ok_or("Gemini API key required. Please set it in Settings > Secrets.")?;
+    let backend = router.diffusion_backend().await.ok_or(
+        "No cloud diffusion backend configured. Please select one in Settings > Inference Mode.",
+    )?;
 
-    // Build the full prompt with style
-    let full_prompt = if let Some(style_prompt) = &params.style_prompt {
-        format!("{}\n\nStyle: {}", params.prompt, style_prompt)
-    } else {
-        params.prompt.clone()
+    let info = backend.info();
+    tracing::info!(
+        "[imagine] Using cloud diffusion backend: {}",
+        info.display_name
+    );
+
+    let request = DiffusionRequest {
+        prompt: params.prompt.clone(),
+        negative_prompt: None,
+        width,
+        height,
+        steps: params.steps,
+        cfg_scale: None,
+        seed: None,
+        model: params.model.clone(),
+        style_prompt: params.style_prompt.clone(),
+        source_images: params.source_images.clone(),
     };
 
-    // Use correct Nano Banana models
-    // - Nano Banana: gemini-2.5-flash-image (fast, efficient)
-    // - Nano Banana Pro: gemini-3-pro-image-preview (professional, with thinking)
-    let model = if is_pro {
-        "gemini-3-pro-image-preview"
-    } else {
-        "gemini-2.5-flash-image"
-    };
-
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
-    );
-
-    // Build contents array - include source image if provided for editing
-    let mut parts = Vec::new();
-
-    if let Some(source_images) = &params.source_images {
-        for source_image in source_images {
-            // Handle data URL and extract mime type
-            let (mime_type, base64_data) = if source_image.contains(";base64,") {
-                let splitted: Vec<&str> = source_image.split(";base64,").collect();
-                if splitted.len() == 2 {
-                    let mime = splitted[0].replace("data:", "");
-                    (mime, splitted[1])
-                } else {
-                    ("image/png".to_string(), source_image.as_str())
-                }
-            } else {
-                ("image/png".to_string(), source_image.as_str())
-            };
-
-            parts.push(serde_json::json!({
-                "inline_data": {
-                    "mime_type": mime_type,
-                    "data": base64_data
-                }
-            }));
-        }
-    }
-
-    // Add prompt text last (recommended for Gemini multimodal input)
-    parts.push(serde_json::json!({"text": full_prompt}));
-
-    // Build generation config with image output
-    let mut generation_config = serde_json::json!({
-        "responseModalities": ["TEXT", "IMAGE"]
-    });
-
-    // Add image config for aspect ratio and resolution
-    let mut image_config = serde_json::Map::new();
-
-    // Map aspect ratio
-    let aspect_ratio = &params.aspect_ratio;
-    if !aspect_ratio.is_empty() && aspect_ratio != "1:1" {
-        image_config.insert("aspectRatio".to_string(), serde_json::json!(aspect_ratio));
-    }
-
-    // Map resolution (1K, 2K, 4K) - only for Pro model
-    if is_pro {
-        if let Some(resolution) = &params.resolution {
-            image_config.insert("imageSize".to_string(), serde_json::json!(resolution));
-        }
-    }
-
-    if !image_config.is_empty() {
-        generation_config["imageConfig"] = serde_json::Value::Object(image_config);
-    }
-
-    let payload = serde_json::json!({
-        "contents": [{
-            "parts": parts
-        }],
-        "generationConfig": generation_config
-    });
-
-    println!(
-        "[imagine] Calling {} with payload: {}",
-        model,
-        serde_json::to_string_pretty(&payload).unwrap_or_default()
-    );
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
+    let result = backend
+        .generate(request)
         .await
-        .map_err(|e| format!("Failed to call Gemini API: {}", e))?;
+        .map_err(|e| format!("Cloud diffusion failed ({}): {}", info.display_name, e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Gemini API error ({}): {}", status, error_text));
-    }
-
-    let result: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
-
-    println!(
-        "[imagine] Gemini response: {}",
-        serde_json::to_string_pretty(&result).unwrap_or_default()
-    );
-
-    // Extract base64 image from response - new format uses candidates[0].content.parts
-    // Find the first part with inlineData (could have text parts too)
-    let image_base64 = result
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|parts| parts.as_array())
-        .and_then(|parts| {
-            parts.iter().find_map(|part| {
-                // Skip thought parts
-                if part
-                    .get("thought")
-                    .and_then(|t| t.as_bool())
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                part.get("inlineData")
-                    .and_then(|d| d.get("data"))
-                    .and_then(|d| d.as_str())
-            })
-        })
-        .ok_or_else(|| {
-            // Try to get error message from response
-            let error_msg = result
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("No image in Gemini response");
-            format!("Gemini API error: {}", error_msg)
-        })?;
-
-    // Decode and save image
-    let image_bytes = BASE64_STANDARD
-        .decode(image_base64)
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
-
-    let images_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("images");
-
-    if !images_dir.exists() {
-        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    }
-
-    let id = Uuid::new_v4().to_string();
-    let file_path = images_dir.join(format!("{}.png", id));
-
-    std::fs::write(&file_path, &image_bytes).map_err(|e| format!("Failed to save image: {}", e))?;
-
-    println!(
-        "[imagine] Generated image with Nano Banana{}: {}",
-        if is_pro { " Pro" } else { "" },
-        file_path.display()
+    tracing::info!(
+        "[imagine] Cloud generation complete — saved to {}",
+        result.path
     );
 
     Ok(ImageResponse {
-        id,
-        path: file_path.to_string_lossy().to_string(),
+        id: result.id,
+        path: result.path,
     })
 }
 
-/// Main command to generate an image in Imagine mode
+/// Main command to generate an image in Imagine mode.
+///
+/// Routes through `InferenceRouter` for cloud diffusion backends (Imagen 3,
+/// DALL-E 3, Stability AI, fal.ai, Together AI).  Falls back to the local
+/// sd.cpp / mflux sidecar for `"local"` provider.
+///
+/// Provider ID mapping (frontend → backend):
+///   - `"nano-banana"` / `"gemini"` → Imagen 3 Flash (via InferenceRouter)
+///   - `"nano-banana-pro"` → Imagen 3 Pro (via InferenceRouter)
+///   - `"openai"` → DALL-E 3 (via InferenceRouter)
+///   - `"stability"` → Stability AI SDXL (via InferenceRouter)
+///   - `"fal"` → fal.ai FLUX (via InferenceRouter)
+///   - `"together"` → Together AI (via InferenceRouter)
+///   - `"local"` / anything else → local sd.cpp / mflux sidecar
 #[tauri::command]
 #[specta::specta]
 pub async fn imagine_generate(
@@ -265,9 +134,10 @@ pub async fn imagine_generate(
     pool: State<'_, SqlitePool>,
     sidecar: State<'_, SidecarManager>,
     config: State<'_, ConfigManager>,
+    router: State<'_, InferenceRouter>,
     params: ImagineParams,
 ) -> Result<GeneratedImage, String> {
-    println!(
+    tracing::info!(
         "[imagine] Generating image with provider: {}",
         params.provider
     );
@@ -276,21 +146,20 @@ pub async fn imagine_generate(
 
     // Generate based on provider
     let result = match params.provider.as_str() {
-        "nano-banana" => generate_with_gemini(&app, &params, false).await,
-        "nano-banana-pro" => generate_with_gemini(&app, &params, true).await,
+        // Cloud providers — route through InferenceRouter
+        "nano-banana" | "nano-banana-pro" | "gemini" | "openai" | "stability" | "fal"
+        | "together" => generate_with_cloud_backend(&router, &params, width, height).await,
+        // Local sd.cpp / mflux sidecar
         "local" | _ => {
-            // Use existing local diffusion
             let local_params = crate::image_gen::ImageGenParams {
                 prompt: if let Some(style_prompt) = &params.style_prompt {
                     format!("{}\n\n{}", params.prompt, style_prompt)
                 } else {
                     params.prompt.clone()
                 },
-                // IMPORTANT: Use the model explicitly passed from UI params if available,
-                // otherwise fall back to SidecarManager's active image model
                 model: {
                     let m = params.model.clone().or_else(|| sidecar.get_image_model());
-                    println!("[imagine] Local diffusion model resolved to: {:?}", m);
+                    tracing::info!("[imagine] Local diffusion model resolved to: {:?}", m);
                     m
                 },
                 vae: None,
@@ -556,7 +425,8 @@ pub async fn imagine_delete_image(
 
     if let Some((file_path,)) = row {
         // Delete file
-        let _ = std::fs::remove_file(&file_path);
+        let file_path_buf = std::path::Path::new(&file_path);
+        let _ = tokio::fs::remove_file(file_path_buf).await;
 
         // Delete from database
         sqlx::query("DELETE FROM generated_images WHERE id = ?")

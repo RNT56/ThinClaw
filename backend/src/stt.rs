@@ -1,3 +1,6 @@
+use crate::inference::stt::SttRequest;
+use crate::inference::AudioFormat;
+use crate::inference::InferenceRouter;
 use crate::sidecar::SidecarManager;
 use std::io::Write;
 use tauri::AppHandle;
@@ -11,11 +14,44 @@ use tempfile::NamedTempFile;
 pub async fn transcribe_audio(
     #[allow(unused_variables)] app: AppHandle,
     state: State<'_, SidecarManager>,
+    router: State<'_, InferenceRouter>,
     audio_bytes: Vec<u8>,
 ) -> Result<String, String> {
+    // ── Cloud STT backend ────────────────────────────────────────────────
+    // If a cloud backend is active (user selected in InferenceModeTab),
+    // send audio directly to the provider API — no local server needed.
+    if let Some(backend) = router.stt_backend().await {
+        let info = backend.info();
+        tracing::info!(
+            "[stt] Using cloud STT backend: {} ({} audio bytes)",
+            info.display_name,
+            audio_bytes.len()
+        );
+
+        let request = SttRequest {
+            audio: audio_bytes.clone(),
+            format: AudioFormat::Wav,
+            language: None,
+        };
+
+        let text = backend
+            .transcribe(request)
+            .await
+            .map_err(|e| format!("Cloud STT failed ({}): {}", info.display_name, e))?;
+
+        tracing::info!(
+            "[stt] Cloud transcription complete — {} chars from {}",
+            text.len(),
+            info.display_name
+        );
+
+        return Ok(text);
+    }
+
+    // ── Local STT backend (whisper-server / whisper CLI) ──────────────────
     // 1. Get Model
     #[allow(unused_variables)]
-    let model_path = state.get_stt_model().ok_or("STT Model not selected")?;
+    let model_path = state.get_stt_model().ok_or("STT Model not selected. Please select a Whisper model in Settings, or enable a cloud STT backend.")?;
 
     // 2. Write audio to temp file (needed for CLI fallback)
     let mut temp_file =

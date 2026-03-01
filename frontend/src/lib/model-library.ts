@@ -965,7 +965,13 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
             }
         ]
     },
-    // --- CLOUD BRAINS ---
+    // ─── CLOUD BRAINS (OFFLINE FALLBACK) ─────────────────────────────────
+    // These hardcoded cloud model entries serve as a fallback when:
+    //   1. The user is offline or discovery fails
+    //   2. API keys are not yet configured (shows what's available)
+    // When live discovery is active (via CloudModelRegistry), these entries
+    // are deduplicated against the API-fetched models.
+    // See: hooks/use-cloud-models.ts, inference/model_discovery/
     {
         id: "anthropic-claude-sonnet-4-5",
         name: "Claude Sonnet 4.5",
@@ -1107,6 +1113,150 @@ export const MODEL_LIBRARY: ExtendedModelDefinition[] = [
         description: "A faster, nitro-powered version of Kimi K2.5 for rapid inference.",
         family: "Kimi",
         tags: ["Cloud", "Fast", "Nitro", "OpenRouter"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- MISTRAL AI (DIRECT) ---
+    {
+        id: "mistral-large-latest",
+        name: "Mistral Large",
+        description: "Mistral AI's flagship model. Superior multilingual reasoning and code generation.",
+        family: "Mistral",
+        tags: ["Cloud", "SOTA", "Multilingual"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "mistral-medium-latest",
+        name: "Mistral Medium",
+        description: "Balanced Mistral model for general-purpose tasks.",
+        family: "Mistral",
+        tags: ["Cloud", "Balanced"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "codestral-latest",
+        name: "Codestral",
+        description: "Mistral's specialized coding model with Fill-in-the-Middle support.",
+        family: "Mistral",
+        tags: ["Cloud", "Coding", "FIM"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- xAI (GROK) ---
+    {
+        id: "xai-grok-3",
+        name: "Grok 3",
+        description: "xAI's most capable model with strong reasoning and real-time knowledge.",
+        family: "Grok",
+        tags: ["Cloud", "SOTA", "Reasoning"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "xai-grok-3-mini",
+        name: "Grok 3 Mini",
+        description: "xAI's efficient model for fast inference with solid quality.",
+        family: "Grok",
+        tags: ["Cloud", "Fast", "Efficient"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- TOGETHER AI ---
+    {
+        id: "together-meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        name: "Llama 3.3 70B Turbo (Together)",
+        description: "Meta's powerful open model with Together's optimized Turbo inference.",
+        family: "Llama",
+        tags: ["Cloud", "Open Model", "Turbo"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "together-deepseek-ai/DeepSeek-R1",
+        name: "DeepSeek R1 (Together)",
+        description: "DeepSeek's reasoning model with chain-of-thought, hosted on Together AI.",
+        family: "DeepSeek",
+        tags: ["Cloud", "Reasoning", "Open Model"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "together-Qwen/Qwen2.5-72B-Instruct-Turbo",
+        name: "Qwen 2.5 72B Turbo (Together)",
+        description: "Alibaba's large instruct model, Turbo inference on Together AI.",
+        family: "Qwen",
+        tags: ["Cloud", "Large", "Multilingual"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- VENICE AI ---
+    {
+        id: "venice-llama-3.3-70b",
+        name: "Llama 3.3 70B (Venice)",
+        description: "Privacy-first inference with no data logging. Uncensored and fast.",
+        family: "Llama",
+        tags: ["Cloud", "Privacy", "Uncensored"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- COHERE ---
+    {
+        id: "cohere-command-r-plus",
+        name: "Command R+ (Cohere)",
+        description: "Cohere's most capable model for complex tasks and RAG workflows.",
+        family: "Cohere",
+        tags: ["Cloud", "RAG", "Enterprise"],
+        category: "Cloud",
+        variants: []
+    },
+    {
+        id: "cohere-command-r",
+        name: "Command R (Cohere)",
+        description: "Cohere's efficient model optimized for retrieval-augmented generation.",
+        family: "Cohere",
+        tags: ["Cloud", "RAG", "Efficient"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- MOONSHOT / KIMI ---
+    {
+        id: "moonshot-moonshot-v1-auto",
+        name: "Kimi v1 Auto (Moonshot)",
+        description: "Moonshot's auto-routing model with strong multilingual and long-context support.",
+        family: "Kimi",
+        tags: ["Cloud", "Multilingual", "Long Context"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- MINIMAX ---
+    {
+        id: "minimax-MiniMax-Text-01",
+        name: "MiniMax Text 01",
+        description: "MiniMax's flagship text model with 1M context window.",
+        family: "MiniMax",
+        tags: ["Cloud", "Long Context", "1M Tokens"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- NVIDIA NIM ---
+    {
+        id: "nvidia-meta/llama-3.3-70b-instruct",
+        name: "Llama 3.3 70B (NVIDIA NIM)",
+        description: "Meta's open model with NVIDIA's enterprise-grade optimized inference.",
+        family: "Llama",
+        tags: ["Cloud", "Enterprise", "NVIDIA"],
+        category: "Cloud",
+        variants: []
+    },
+    // --- XIAOMI ---
+    {
+        id: "xiaomi-MiMo-7B-RL",
+        name: "MiMo 7B RL (Xiaomi)",
+        description: "Xiaomi's reinforcement-learning optimized language model.",
+        family: "Xiaomi",
+        tags: ["Cloud", "RL", "Efficient"],
         category: "Cloud",
         variants: []
     },

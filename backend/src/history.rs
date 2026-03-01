@@ -1,9 +1,9 @@
 use crate::chat::AttachedDoc;
+use crate::file_store::FileStore;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use sqlx::SqlitePool;
-use std::fs;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 fn generate_id() -> String {
     use rand::{distributions::Alphanumeric, Rng};
@@ -343,9 +343,10 @@ pub async fn edit_message(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_all_history(
-    app: AppHandle,
+    _app: AppHandle,
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
+    file_store: State<'_, FileStore>,
 ) -> Result<(), String> {
     println!("[history] delete_all_history: clearing database...");
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -400,19 +401,23 @@ pub async fn delete_all_history(
     // 2. Reset all Vector Store indices
     vector_manager.reset_all().map_err(|e| e.to_string())?;
 
-    // 3. Clear Files
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-
-    let docs_dir = app_data_dir.join("documents");
-    if docs_dir.exists() {
-        fs::remove_dir_all(&docs_dir).map_err(|e| e.to_string())?;
-        fs::create_dir_all(&docs_dir).map_err(|e| e.to_string())?;
+    // 3. Clear Files via FileStore
+    if file_store.exists("documents").await {
+        let docs_path = file_store.resolve_path("documents").await;
+        let _ = tokio::fs::remove_dir_all(&docs_path).await;
+        file_store
+            .create_dir_all("documents")
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
-    let images_dir = app_data_dir.join("images");
-    if images_dir.exists() {
-        fs::remove_dir_all(&images_dir).map_err(|e| e.to_string())?;
-        fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    if file_store.exists("images").await {
+        let images_path = file_store.resolve_path("images").await;
+        let _ = tokio::fs::remove_dir_all(&images_path).await;
+        file_store
+            .create_dir_all("images")
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     println!("[history] All history deleted and vector stores reset.");

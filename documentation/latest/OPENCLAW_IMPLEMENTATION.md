@@ -1,7 +1,18 @@
 # OpenClaw Implementation — Comprehensive Technical Report
 
-> **Generated**: 2026-02-24  
-> **Scope**: Full analysis of the OpenClaw integration within Scrappy — engine, gateway, WebSocket client, configuration, security, remote deployment, frontend integration, and all supporting subsystems.
+> **⚠️ HISTORICAL DOCUMENT — SUPERSEDED (2026-02-28)**
+>
+> The Node.js gateway architecture documented here has been **fully replaced** by **IronClaw** — a Rust library linked directly into the Tauri binary. For current documentation, see:
+> - **`MICROSERVICES_AND_SIDECARS.md` §6** — IronClaw in-process engine architecture
+> - **`TECHNICAL_ARCHITECTURE.md` §5** — Module structure, lifecycle, commands
+> - **`ironclaw_library_roadmap.md`** — IronClaw library-side migration roadmap
+> - **`ironclaw_phase1_spec.md`** / **`ironclaw_phase2_spec.md`** — Detailed implementation specs
+> - **`tauri_dropin_spec.md`** — Complete integration specification (15 phases, all ✅)
+>
+> This document is preserved for historical reference. Sections on Keychain integration (§9), security model (§10), and frontend integration (§16-17) remain partially relevant.
+
+> **Generated**: 2026-02-24
+> **Scope**: ~~Full analysis of the OpenClaw integration within Scrappy~~ **(SUPERSEDED — see note above)**
 
 ---
 

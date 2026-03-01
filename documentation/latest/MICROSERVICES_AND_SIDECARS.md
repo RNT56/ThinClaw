@@ -1,7 +1,7 @@
 # Scrappy — Microservices & Sidecar Reference
 
-> **Last updated:** 2026-02-25  
-> **Scope:** All external processes spawned or managed by the Tauri host, the multi-engine inference system (`InferenceEngine` trait + `EngineManager`), the OpenClaw Node.js engine, the `scrappy-mcp-tools` Rust crate, and all build- and dev-time infrastructure scripts.
+> **Last updated:** 2026-03-01  
+> **Scope:** All external processes spawned or managed by the Tauri host, the multi-engine inference system (`InferenceEngine` trait + `EngineManager`), the IronClaw in-process agent engine, the `scrappy-mcp-tools` Rust crate, and all build- and dev-time infrastructure scripts.
 
 ---
 
@@ -16,6 +16,7 @@
    - 2a.4 [Engine Tauri Commands](#2a4-engine-tauri-commands)
    - 2a.5 [Engine Setup & Bootstrap](#2a5-engine-setup--bootstrap)
 2b. [HuggingFace Hub Model Discovery](#2b-huggingface-hub-model-discovery)
+2c. [InferenceRouter & SecretStore](#2c-inferencerouter--secretstore)
 3. [Sidecar: llama-server (LLM Inference)](#3-sidecar-llama-server-llm-inference)
    - 3.1 [Chat Server Instance](#31-chat-server-instance)
    - 3.2 [Embedding Server Instance](#32-embedding-server-instance)
@@ -23,14 +24,14 @@
 4. [Sidecar: whisper-server (Speech-to-Text)](#4-sidecar-whisper-server-speech-to-text)
 5. [Sidecar: sd-server (Image Generation)](#5-sidecar-sd-server-image-generation)
 5a. [Sidecar: piper (Text-to-Speech)](#5a-sidecar-piper-text-to-speech)
-6. [Sidecar: node + openclaw-engine (Agent Gateway)](#6-sidecar-node--openclaw-engine-agent-gateway)
+6. [IronClaw Agent Engine (In-Process)](#6-ironclaw-agent-engine-in-process)
    - 6.1 [Purpose and Role](#61-purpose-and-role)
-   - 6.2 [Process Startup Flow](#62-process-startup-flow)
-   - 6.3 [Configuration Generation](#63-configuration-generation)
-   - 6.4 [Auth Profiles](#64-auth-profiles)
-   - 6.5 [Gateway Protocol (WebSocket)](#65-gateway-protocol-websocket)
-   - 6.6 [RPC Method Reference](#66-rpc-method-reference)
-   - 6.7 [Remote Deployment](#67-remote-deployment)
+   - 6.2 [Integration Architecture](#62-integration-architecture)
+   - 6.3 [Startup Flow](#63-startup-flow)
+   - 6.4 [IronClaw API Surface](#64-ironclaw-api-surface)
+   - 6.5 [StatusUpdate → UiEvent Conversion](#65-statusupdate--uievent-conversion)
+   - 6.6 [Background Tasks](#66-background-tasks)
+   - 6.7 [Remote Deployment (Retained)](#67-remote-deployment-retained)
 7. [scrappy-mcp-tools Crate](#7-scrappy-mcp-tools-crate)
    - 7.1 [Rhai Sandbox](#71-rhai-sandbox)
    - 7.2 [MCP HTTP Client](#72-mcp-http-client)
@@ -83,9 +84,10 @@ Scrappy's process model is a **multi-process star topology**: the Rust/Tauri hos
 │                 ─── whisper-server (STT)     :53757           │
 │                 ─── llama-server (summarizer):53758           │
 │                                                              │
-│  OpenClawManager ── node (openclaw-engine)   :18789          │
-│                       │                                      │
-│                       └── WebSocket Client (ws_client.rs)    │
+│  IronClawState ──── ironclaw library (in-process)            │
+│                     ├─ Agent + background tasks              │
+│                     ├─ TauriChannel (Channel impl)           │
+│                     └─ KeychainSecretsAdapter                │
 │                                                              │
 │  ProcessTracker — global PID registry for cleanup            │
 └──────────────────────────────────────────────────────────────┘
@@ -171,7 +173,9 @@ Emitted on Tauri event channel `"sidecar_event"`.
 
 **Files:** `backend/src/engine/mod.rs`, `engine_llamacpp.rs`, `engine_mlx.rs`, `engine_vllm.rs`, `engine_ollama.rs`
 
-The multi-engine system abstracts how local inference is provided. Each build of Scrappy compiles exactly **one** engine implementation, selected by a Cargo feature flag (`default = ["llamacpp"]` in `backend/Cargo.toml`).
+The multi-engine system abstracts how **local chat inference** is provided. Each build of Scrappy compiles exactly **one** engine implementation, selected by a Cargo feature flag (`default = ["llamacpp"]` in `backend/Cargo.toml`).
+
+> **Scope:** This section covers only local chat inference engines. For the full multi-modal routing layer (Chat + Embedding + TTS + STT + Diffusion, local + cloud), see [§2c InferenceRouter & SecretStore](#2c-inferencerouter--secretstore).
 
 ### 2a.1 InferenceEngine Trait
 
@@ -292,6 +296,113 @@ Provides live search of HuggingFace Hub models, filtered by the active engine's 
 - **Post-filter validation**: After each API response, verifies the engine tag is genuinely in each model's `tags` array (safety net against API false positives)
 - **Rate limit handling**: Returns user-friendly error message when HF API rate limit is hit
 - **Progress events**: Emits `download_progress` events compatible with the existing `model_manager.rs` format
+
+---
+
+## 2c. InferenceRouter & SecretStore
+
+**Files:** `backend/src/inference/mod.rs`, `backend/src/inference/backends/`, `backend/src/inference/providers.rs`, `backend/src/secret_store.rs`
+
+The `InferenceRouter` is a **cross-modal routing layer** that manages all 5 AI modalities (Chat, Embedding, TTS, STT, Diffusion) and routes each to either a local sidecar or a cloud provider backend. It complements the `EngineManager` (§2a), which handles only local chat inference.
+
+> **Relationship to §2a:** `EngineManager` manages the local inference engine binary (llama-server, MLX, vLLM, Ollama) for chat. `InferenceRouter` sits above it and adds: (a) cloud provider fallback for chat, (b) 4 additional modalities (Embedding, TTS, STT, Diffusion), (c) per-modality backend selection stored in `UserConfig`.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│  InferenceRouter (Tauri Managed State)           │
+│    Arc<SecretStore> ─────► macOS Keychain         │
+│                                                   │
+│    ┌──── Chat ────┐  ┌── Embedding ─┐            │
+│    │ Local (sidecar)│  │ Local (sidecar)│          │
+│    │ Cloud (14 APIs)│  │ Cloud (Cohere, │          │
+│    └────────────────┘  │ Voyage, OpenAI)│          │
+│                        └───────────────┘          │
+│    ┌──── TTS ─────┐  ┌──── STT ────┐             │
+│    │ Local (piper) │  │ Local (whisper)│           │
+│    │ Cloud (11Labs)│  │ Cloud (Deepgram)│          │
+│    └──────────────┘  └───────────────┘            │
+│    ┌── Diffusion ─┐                               │
+│    │ Local (sd.cpp)│                               │
+│    │ Cloud(Stability│                              │
+│    │  fal, OpenAI) │                               │
+│    └──────────────┘                               │
+└─────────────────────────────────────────────────┘
+```
+
+### SecretStore — Single Source of Truth for API Keys
+
+**File:** `backend/src/secret_store.rs`
+
+`SecretStore` is a zero-state wrapper over the `keychain` module. It provides 21 typed convenience accessors:
+
+| Method | Keychain Slug |
+|--------|---------------|
+| `openai_key()` | `openai` |
+| `anthropic_key()` | `anthropic` |
+| `gemini_key()` | `gemini` |
+| `groq_key()` | `groq` |
+| `openrouter_key()` | `openrouter` |
+| `xai_key()` | `xai` |
+| `mistral_key()` | `mistral` |
+| `together_key()` | `together` |
+| `venice_key()` | `venice` |
+| `moonshot_key()` | `moonshot` |
+| `minimax_key()` | `minimax` |
+| `nvidia_key()` | `nvidia` |
+| `qianfan_key()` | `qianfan` |
+| `xiaomi_key()` | `xiaomi` |
+| `cohere_key()` | `cohere` |
+| `voyage_key()` | `voyage` |
+| `deepgram_key()` | `deepgram` |
+| `elevenlabs_key()` | `elevenlabs` |
+| `stability_key()` | `stability` |
+| `fal_key()` | `fal` |
+| `huggingface_key()` | `huggingface` |
+
+All accessors delegate to `keychain::get_key(slug)`, which reads from the in-memory cache populated at startup by `keychain::load_all()`.
+
+### Provider Endpoints Registry
+
+`PROVIDER_ENDPOINTS` in `inference/providers.rs` is a compile-time map of 14 cloud providers:
+
+| Provider | Base URL | Modalities |
+|----------|---------|------------|
+| OpenAI | `api.openai.com` | Chat, Embedding, TTS, Diffusion |
+| Anthropic | `api.anthropic.com` | Chat |
+| Google/Gemini | `generativelanguage.googleapis.com` | Chat, Embedding |
+| Groq | `api.groq.com` | Chat |
+| OpenRouter | `openrouter.ai` | Chat |
+| xAI | `api.x.ai` | Chat |
+| Mistral | `api.mistral.ai` | Chat, Embedding |
+| Together | `api.together.xyz` | Chat, Embedding |
+| Venice | `api.venice.ai` | Chat |
+| Cohere | `api.cohere.com` | Chat, Embedding |
+| Deepgram | `api.deepgram.com` | STT |
+| ElevenLabs | `api.elevenlabs.io` | TTS |
+| Stability AI | `api.stability.ai` | Diffusion |
+| fal.ai | `fal.run` | Diffusion |
+
+### Tauri Commands
+
+| Command | Purpose |
+|---------|---------|
+| `get_inference_backends` | Returns current backend selection for all 5 modalities |
+| `update_inference_backend` | Updates backend for a specific modality; persists to `UserConfig` |
+
+### UserConfig Integration
+
+`UserConfig` (in `config.rs`) stores the user's per-modality backend preferences:
+
+| Field | Type | Default |
+|-------|------|--------|
+| `chat_backend` | `String` | `"local"` |
+| `embedding_backend` | `String` | `"local"` |
+| `tts_backend` | `String` | `"local"` |
+| `stt_backend` | `String` | `"local"` |
+| `diffusion_backend` | `String` | `"local"` |
+| `inference_models` | `HashMap<String, String>` | `{}` |
 
 ---
 
@@ -529,246 +640,134 @@ Frontend: Web Audio API decodes base64 PCM → AudioBuffer → AudioContext.play
 
 **Bundling note:** The `download_ai_binaries.js` script does not yet auto-download the TTS binary. It must be placed manually in `backend/bin/` with the Tauri sidecar naming convention: `tts-{target-triple}` (e.g. `tts-aarch64-apple-darwin`, `tts-x86_64-unknown-linux-gnu`). The binary must be the Piper executable renamed to match the `bin/tts` sidecar registration in `tauri.conf.json`.
 
-## 6. Sidecar: node + openclaw-engine (Agent Gateway)
+## 6. IronClaw Agent Engine (In-Process)
+
+> **Architecture change (2026-02-28):** The Node.js-based `openclaw-engine` sidecar has been replaced with **IronClaw**, a Rust library linked directly into the Tauri binary. This eliminated the Node.js runtime (~120 MB), the WebSocket bridge (~2,166 LOC), and reduced time-to-first-token from ~200ms to ~50ms. For the full migration story, see `ironclaw_library_roadmap.md` and `ironclaw_integration_roadmap.md`.
 
 ### 6.1 Purpose and Role
 
-`openclaw-engine` is a **Node.js-based AI agent gateway** that runs as a persistent background service. It provides:
+IronClaw is an **in-process Rust AI agent engine** that provides:
 
-- A multi-channel agent interface (local WebSocket, Slack, Telegram, WhatsApp, Telegram)
-- Tool execution with a sandboxed skill runner
-- Session persistence and multi-turn memory
-- Cron job scheduling (automated agent tasks)
-- Fleet management (multiple connected agent instances)
-- Model provider abstraction with allowlist enforcement
+- Multi-turn agentic sessions with tool execution and approval flow
+- Session persistence and memory (SOUL.md, MEMORY.md, workspace files)
+- Cron job scheduling (automated routines)
+- Skill system (installable agent capabilities)
+- Extension manager (auth-gated integrations)
+- Canvas output (HTML/JSON structured results)
+- Multi-provider LLM abstraction with safety guardrails
 
-The gateway runs on port `18789` (configurable) and is accessed by the Rust host via a **persistent WebSocket connection** (`ws_client.rs`).
+The engine runs **inside the Tauri process** — no child process, no WebSocket, no serialization overhead.
 
-**Version:** `openclaw` npm package `^2026.2.14`
-
-### 6.2 Process Startup Flow
+### 6.2 Integration Architecture
 
 ```
-OpenClawManager.start_gateway()
+┌─────────────────────────────────────────────────────────────────┐
+│                       Tauri Host (Rust)                          │
+│                                                                   │
+│  IronClawState (managed state)                                    │
+│  ├─ inner: RwLock<Option<IronClawInner>>                         │
+│  │         ├─ agent: Arc<Agent>                                   │
+│  │         ├─ inject_tx: mpsc::Sender<IncomingMessage>           │
+│  │         ├─ bg_handle: BackgroundTasksHandle                    │
+│  │         └─ log_broadcaster: Arc<LogBroadcaster>               │
+│  ├─ app_handle: AppHandle<Wry>                                   │
+│  └─ state_dir: PathBuf                                           │
+│                                                                   │
+│  TauriChannel (impl ironclaw::Channel)                           │
+│  ├─ respond()     → emit UiEvent::AssistantFinal                 │
+│  ├─ send_status() → emit UiEvent::{Delta,ToolUpdate,Error,...}   │
+│  └─ broadcast()   → emit UiEvent::AssistantFinal (system)        │
+│                                                                   │
+│  KeychainSecretsAdapter (impl ironclaw::SecretsStore)            │
+│  └─ maps ironclaw secret names → Scrappy keychain slugs          │
+│                                                                   │
+│  66 openclaw_* Tauri commands                                     │
+│  └─ call ironclaw::api::* directly (no WS, no serialization)     │
+└─────────────────────────────────────────────────────────────────┘
         │
-        ├─ 1. Read OpenClawConfig from $APP_DATA/openclaw/openclaw.json
-        │      (generates default config if missing)
-        │
-        ├─ 2. Write config files to disk:
-        │      $APP_DATA/openclaw/openclaw_engine.json  ← gateway config
-        │      $APP_DATA/openclaw/agents/main/agent/
-        │        ├── auth-profiles.json                 ← API keys
-        │        ├── agent.json                         ← instructions
-        │        └── models.json                        ← model list
-        │
-        ├─ 3. Spawn node binary (bundled sidecar):
-        │      node openclaw-engine-wrapper.js
-        │          --config $APP_DATA/openclaw/openclaw_engine.json
-        │
-        ├─ 4. gateway_alive AtomicBool → true
-        │
-        ├─ 5. Spawn WS client loop (ws_client.rs):
-        │      Connects to ws://127.0.0.1:18789
-        │      Backoff: 250ms → 500ms → 1s → ... → 10s max
-        │
-        └─ 6. On successful WS connect:
-               Emit UiEvent::Connected to OpenClawChatView
+        │  emit("openclaw-event", UiEvent)
+        ▼
+┌─────────────────────────────────┐
+│  Frontend (React WebView)       │
+│  listen("openclaw-event")       │
+│  → OpenClawChatView.tsx         │
+└─────────────────────────────────┘
 ```
 
-**Binary:** `node-aarch64-apple-darwin` (bundled Node.js `v24.13.0`)  
-**Wrapper:** `openclaw-engine/main.js` — resolves the `openclaw` npm package bin path and spawns it as a child of the Node.js process
+### 6.3 Startup Flow
 
-**OPENCLAW_HOME env var:** Set to `$APP_DATA/openclaw/` — the engine stores all state here.
-
-### 6.3 Configuration Generation
-
-`OpenClawConfig.generate_config()` (`config/engine.rs`) produces the `OpenClawEngineConfig` JSON written to `openclaw_engine.json`.
-
-**Key sections:**
-
-```jsonc
-{
-  "gateway": {
-    "mode": "local",
-    "bind": "loopback",          // "0.0.0.0" if expose_inference
-    "port": 18789,
-    "auth": { "mode": "token", "token": "<auth_token>" }
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "$APP_DATA/openclaw/workspace/",
-      "model": {
-        "primary": "anthropic/claude-sonnet-4-5",
-        "fallbacks": ["openai/gpt-5-mini", "local/model"]
-      },
-      "models": {
-        "anthropic/claude-sonnet-4-5": {},
-        "local/model": {}
-        // ... all user-enabled models (allowlist)
-      }
-    },
-    "list": [{ "id": "main", "name": "OpenClaw", "model": "<primary>" }]
-  },
-  "models": {
-    "providers": {
-      "local": {
-        "baseUrl": "http://127.0.0.1:53755",
-        "api": "openai-completions",
-        "apiKey": "<llama-server-token>",
-        "models": [{ "id": "model", "contextWindow": 16384, "maxTokens": 4096 }]
-      }
-      // amazon-bedrock added if credentials present (other providers are implicit)
-    }
-  },
-  "channels": {
-    "slack": { ... },   // Populated if Slack bot token is configured
-    "telegram": { ... } // Populated if Telegram bot token is configured
-  },
-  "tools": {
-    "allow": ["group:fs", "group:runtime", "group:messaging"],
-    "deny": ["group:ui", "group:system"]   // when node host disabled
-  }
-}
+```
+Tauri setup() hook
+    │
+    ├─ 1. Register IronClawState::new_stopped(app_handle, state_dir)
+    │      as Tauri managed state
+    │
+    ├─ 2. If auto_start enabled:
+    │      IronClawState::start(secrets_store)
+    │      │
+    │      ├─ Load Config from $STATE_DIR/ironclaw.toml
+    │      ├─ Create TauriChannel + mpsc::Sender
+    │      ├─ AppBuilder::build_all() → DB, secrets, LLM, tools, extensions
+    │      ├─ Agent::new(deps, channel_manager, ...)
+    │      ├─ agent.start_background_tasks()
+    │      └─ emit UiEvent::Connected { protocol: 2 }
+    │
+    └─ 3. On app exit:
+           IronClawState::shutdown()
+           ├─ agent.shutdown_background(bg_handle)
+           └─ channels.shutdown_all()
 ```
 
-**Model resolution priority:**
-1. `local/model` if `local_inference_enabled == true`
-2. `selected_cloud_brain` (starred provider) + `selected_cloud_model`, if granted + in allowlist
-3. First enabled model of the starred provider, if granted
-4. First enabled+granted provider in `enabled_cloud_providers` list
-5. `local/model` as final fallback
+### 6.4 IronClaw API Surface
 
-**Provider architecture:** Built-in providers (Anthropic, OpenAI, Gemini, Groq, OpenRouter, xAI, Mistral, Venice, Together, Moonshot, MiniMax, NVIDIA, Qianfan, Xiaomi) are auto-discovered by the engine's pi-ai catalog — only API keys in `auth-profiles.json` are needed. Amazon Bedrock and Local require explicit `models.providers` entries.
+The `ironclaw::api` module (1,320 LOC, 8 submodules) provides framework-agnostic functions:
 
-### 6.4 Auth Profiles
+| Module | Key Functions |
+|--------|-------------|
+| `api::chat` | `send_message()`, `resolve_approval()`, `abort()` |
+| `api::sessions` | `list_sessions()`, `get_history()`, `create_session()`, `delete_session()`, `clear_session()` |
+| `api::memory` | `get_file()`, `write_file()`, `list_files()`, `clear()`, `search()` |
+| `api::config` | `get_config()`, `set_config()` |
+| `api::skills` | `list_skills()`, `toggle_skill()`, `install_skill()` |
+| `api::routines` | `list_routines()`, `trigger_routine()` |
+| `api::system` | `get_status()`, `health_check()`, `list_models()`, `tail_logs()`, `diagnostics()` |
+| `api::extensions` | `list_extensions()`, `toggle_extension()` |
 
-Written to `$APP_DATA/openclaw/agents/main/agent/auth-profiles.json`:
+### 6.5 StatusUpdate → UiEvent Conversion
 
-```jsonc
-{
-  "profiles": {
-    "anthropic:default": { "type": "api_key", "provider": "anthropic", "key": "sk-..." },
-    "openai:default":    { "type": "api_key", "provider": "openai",    "key": "sk-..." },
-    "gemini:default":    { "type": "api_key", "provider": "gemini",    "key": "AIza..." },
-    "groq:default":      { "type": "api_key", "provider": "groq",      "key": "gsk_..." },
-    "local:default":     { "type": "api_key", "provider": "local",     "key": "<llama-token>" },
-    "amazon-bedrock:default": {
-      "type": "aws", "provider": "amazon-bedrock",
-      "auth": "aws-sdk",
-      "accessKeyId": "...", "secretAccessKey": "...", "region": "us-east-1"
-    }
-    // + any custom secrets (brave search, etc.)
-  }
-}
-```
+`ironclaw_types.rs` maps IronClaw's `StatusUpdate` enum to Scrappy's `UiEvent`:
 
-**Security invariants:**
+| StatusUpdate Variant | UiEvent Variant |
+|---------------------|----------------|
+| `Thinking(_)` | `RunStatus { status: "in_flight" }` |
+| `StreamChunk(delta)` | `AssistantDelta { delta }` (sanitized) |
+| `ToolStarted { name }` | `ToolUpdate { status: "started" }` |
+| `ToolCompleted { name, success }` | `ToolUpdate { status: "ok"/"error" }` |
+| `ToolResult { name, preview }` | `ToolUpdate { status: "stream", output }` |
+| `Status(text)` | `RunStatus { status: text }` |
+| `ApprovalNeeded { ... }` | `ApprovalRequested { ... }` |
+| `AuthRequired { ... }` | `WebLogin { status: auth_url }` |
+| `AuthCompleted { ... }` | `WebLogin { status: "authenticated"/"failed" }` |
+| `JobStarted { ... }` | `CanvasUpdate { content_type: "json" }` |
+| `Error { message, code }` | `Error { code, message }` |
 
-1. Profiles are only written when the provider is `granted` AND the key is non-empty, ensuring no stale/unauthorized keys reach the engine.
-2. API keys are sourced from the **macOS Keychain** at runtime (via `keychain::get_key()`), never from `identity.json`.
-3. Saving a key to Keychain does **not** auto-grant — the user must explicitly toggle the grant in Settings › Secrets.  Only key *deletion* auto-revokes.
-4. Custom LLM credentials (`OPENCLAW_CUSTOM_LLM_KEY`, `_URL`, `_MODEL`) are only injected as **environment variables** when `custom_llm_enabled = true` — they are never written to `auth-profiles.json`.
-5. Amazon Bedrock credentials are injected as env vars (`AWS_ACCESS_KEY_ID`, etc.) only when `bedrock_granted = true`, in addition to their `auth-profiles.json` entry.
+### 6.6 Background Tasks
 
-### 6.5 Gateway Protocol (WebSocket)
+`BackgroundTasksHandle` manages long-running agent tasks:
 
-The WS client (`ws_client.rs`) implements a bespoke bi-directional JSON-RPC protocol:
+- **Self-repair:** Periodic health checks and recovery
+- **Session pruning:** Cleanup of stale/expired sessions
+- **Heartbeat:** Keep-alive for connected channels
+- **Routine engine:** Cron job scheduler (`RoutineEngine::fire_manual()`)
 
-**Frame types:**
+All tasks listen to a `watch::Sender<bool>` for graceful shutdown.
 
-```typescript
-// Client → Server
-type Req = { type: "req", id: string, method: string, params: object }
+### 6.7 Remote Deployment (Retained)
 
-// Server → Client  
-type Res = { type: "res", id: string, ok: boolean, payload: object, error?: WsError }
-type Event = { type: "event", id: string, event: string, payload: object }
-```
-
-**Connection handshake:**
-1. Server sends `connect.challenge` event with a `nonce`
-2. Client builds an ed25519 signature over `"v2|{deviceId}|cli|cli|operator|{scopes}|{signedAtMs}|{token}|{nonce}"`
-3. Client sends a `Req` with `method: "connect"`, including token, deviceId, publicKeyPem, and signature
-4. Server responds with `Res { ok: true, payload: { protocol: 3 } }`
-5. `UiEvent::Connected { protocol }` emitted — frontend shows connection status
-
-**Reconnection:** Exponential backoff from 250ms to 10s. Stops reconnecting when:
-- `ClientCommand::Shutdown` received
-- `gateway_alive` atomic flag is `false` (engine process exited)
-
-**MCP reverse-RPC:** The gateway can send `Req` frames to the Rust host with `method` starting `"mcp."` — these are dispatched to `McpRequestHandler` in `ipc.rs`, which routes them to the appropriate tool implementation.
-
-**Event normalization:** Raw gateway events are normalized by `normalizer.rs` into typed `UiEvent` variants:
-
-```rust
-pub enum UiEvent {
-    Connected { protocol: u32 },
-    Disconnected { reason: String },
-    SessionList { sessions: Vec<UiSession> },
-    SessionUpdate { session: UiSession },
-    MessageNew { session_key: String, message: UiMessage },
-    StreamChunk { session_key: String, run_id: String, delta: String },
-    StreamEnd { session_key: String, run_id: String },
-    ToolCall { session_key: String, run_id: String, tool: String, args: Value },
-    ApprovalRequest { id: String, session_key: String, run_id: String, tool: String, args: Value, risk: String },
-    UsageUpdate { session_key: String, run_id: String, usage: UiUsage },
-    Error { session_key: Option<String>, message: String },
-}
-```
-
-These are forwarded to the frontend via Tauri `emit("openclaw-event", ...)`.
-
-### 6.6 RPC Method Reference
-
-All methods callable via `OpenClawWsHandle.rpc(method, params)`:
-
-| Method | Params | Purpose |
-|--------|--------|---------|
-| `sessions.list` | `{}` | List all agent sessions |
-| `chat.history` | `{ sessionKey, limit }` | Fetch message history |
-| `chat.send` | `{ sessionKey, idempotencyKey, message }` | Send a user message |
-| `chat.abort` | `{ sessionKey, runId? }` | Cancel an in-progress run |
-| `chat.subscribe` | `{ sessionKey }` | Subscribe to session events |
-| `sessions.delete` | `{ key }` | Delete a session |
-| `sessions.reset` | `{ key }` | Clear session history |
-| `exec.approval.resolve` | `{ approvalId, approved }` | Approve/deny HITL tool use |
-| `cron.list` | `{}` | List scheduled automations |
-| `cron.run` | `{ key }` | Manually trigger a cron job |
-| `cron.history` | `{ key, limit }` | Get cron run history |
-| `skills.list` | `{}` | List available skills |
-| `skills.status` | `{}` | Skill enable/disable status |
-| `skills.update` | `{ skillKey, enabled }` | Toggle a skill |
-| `skills.install` | `{ name, installId? }` | Install skill dependencies |
-| `config.schema` | `{}` | Get engine config JSON schema |
-| `config.get` | `{}` | Get current engine config |
-| `config.set` | `{ key, value }` | Set a config value |
-| `config.patch` | `{ ...patch }` | Patch multiple config keys |
-| `system.presence` | `{}` | Get connected fleet nodes |
-| `logs.tail` | `{ limit }` | Recent log lines |
-| `update.run` | `{}` | Trigger engine self-update |
-| `web.login.whatsapp` | `{}` | Initiate WhatsApp Web login |
-| `web.login.telegram` | `{}` | Initiate Telegram login |
-
-### 6.7 Remote Deployment
-
-The engine can be deployed to a remote Linux server via `deploy-remote.sh`:
-
-**Flow:**
-1. Auto-installs Ansible on the controller machine (macOS via Homebrew; Linux via apt)
-2. Clones `github.com/openclaw/openclaw-ansible` playbook into `.deploy-cache/`
-3. Patches `playbook.yml` to target `hosts: all` instead of `hosts: localhost`
-4. Runs the Ansible playbook against the target IP via SSH
-5. Playbook installs Docker, deploys the `openclaw-engine` Docker image, enables Tailscale
-
-**Docker setup (`Dockerfile` + `docker-compose.yml`):**
-- Base: `node:22-alpine`
-- Serves on `PORT=18789`
-- State persisted in `/app/state` volume (→ `$OPENCLAW_HOME`)
-- `docker-compose.yml` maps `./state:/app/state`
-
-**Post-deploy:** Connect the desktop app to `ws://<tailscale-ip>:18789` in the Gateway settings tab.
+The `deploy-remote.sh` script and `Dockerfile` are retained in `openclaw-engine/` for deploying IronClaw to remote Linux servers via Ansible + Docker. The desktop app can connect to remote instances via Tailscale.
 
 ---
+
 
 ## 7. scrappy-mcp-tools Crate
 

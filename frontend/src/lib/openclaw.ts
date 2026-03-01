@@ -229,6 +229,17 @@ export async function stopOpenClawGateway(): Promise<void> {
     return invoke('openclaw_stop_gateway');
 }
 
+/**
+ * Reload secrets (API keys) into the running IronClaw agent.
+ * 
+ * Performs a graceful engine restart to re-inject keys from macOS Keychain.
+ * Call after saving or toggling API keys so the agent picks up changes
+ * without requiring manual restart.
+ */
+export async function reloadSecrets(): Promise<void> {
+    return invoke('openclaw_reload_secrets');
+}
+
 export interface CustomLlmConfigInput {
     url: string | null;
     key: string | null;
@@ -299,13 +310,18 @@ export async function abortOpenClawChat(
 }
 
 /**
- * Resolve an approval request
+ * Resolve an approval request (3-tier: Deny / Allow Once / Allow Session)
+ *
+ * @param approvalId   Unique approval request ID from the agent
+ * @param approved     Whether the action is approved (true) or denied (false)
+ * @param allowSession If true, approve for the entire session (until engine restart)
  */
 export async function resolveOpenClawApproval(
     approvalId: string,
-    approved: boolean
+    approved: boolean,
+    allowSession: boolean = false
 ): Promise<OpenClawRpcResponse> {
-    return invoke('openclaw_resolve_approval', { approvalId, approved });
+    return invoke('openclaw_resolve_approval', { approvalId, approved, allowSession });
 }
 
 /**
@@ -522,8 +538,61 @@ export async function getFleetStatus(): Promise<AgentStatusSummary[]> {
     return invoke('openclaw_get_fleet_status');
 }
 
-export async function spawnSession(agentId: string, task: string): Promise<string> {
-    return invoke('openclaw_spawn_session', { agentId, task });
+// ── Sub-agent spawning types ─────────────────────────────────────────────
+
+export interface SpawnSessionResponse {
+    session_key: string;
+    parent_session: string | null;
+    task: string;
+}
+
+export interface ChildSessionInfo {
+    session_key: string;
+    task: string;
+    status: 'running' | 'completed' | 'failed';
+    spawned_at: number;
+    result_summary: string | null;
+}
+
+/**
+ * Spawn a new sub-agent session.
+ *
+ * @param agentId       Agent to spawn
+ * @param task          Task description for the sub-agent
+ * @param parentSession Optional parent session key for tracking
+ */
+export async function spawnSession(
+    agentId: string,
+    task: string,
+    parentSession?: string
+): Promise<SpawnSessionResponse> {
+    return invoke('openclaw_spawn_session', {
+        agentId,
+        task,
+        parentSession: parentSession ?? null,
+    });
+}
+
+/**
+ * List all child sessions spawned by a parent session.
+ */
+export async function listChildSessions(parentSession: string): Promise<ChildSessionInfo[]> {
+    return invoke('openclaw_list_child_sessions', { parentSession });
+}
+
+/**
+ * Update a sub-agent's status (mark as completed/failed).
+ */
+export async function updateSubAgentStatus(
+    childSession: string,
+    status: 'running' | 'completed' | 'failed',
+    resultSummary?: string
+): Promise<OpenClawRpcResponse> {
+    return invoke('openclaw_update_sub_agent_status', {
+        childSession,
+        status,
+        resultSummary: resultSummary ?? null,
+    });
 }
 
 export async function getAgentsList(): Promise<AgentProfile[]> {

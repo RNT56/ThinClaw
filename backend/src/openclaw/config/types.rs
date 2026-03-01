@@ -118,6 +118,18 @@ pub struct OpenClawIdentity {
     pub mistral_granted: bool,
     #[serde(default)]
     pub xiaomi_granted: bool,
+    #[serde(default)]
+    pub cohere_granted: bool,
+    #[serde(default)]
+    pub voyage_granted: bool,
+    #[serde(default)]
+    pub deepgram_granted: bool,
+    #[serde(default)]
+    pub elevenlabs_granted: bool,
+    #[serde(default)]
+    pub stability_granted: bool,
+    #[serde(default)]
+    pub fal_granted: bool,
     // Bedrock: region is not a secret, access/secret keys → Keychain
     #[serde(default)]
     pub bedrock_region: Option<String>,
@@ -205,6 +217,19 @@ pub struct OpenClawConfig {
     pub mistral_granted: bool,
     pub xiaomi_api_key: Option<String>,
     pub xiaomi_granted: bool,
+    // --- Embedding / Speech / Image providers ---
+    pub cohere_api_key: Option<String>,
+    pub cohere_granted: bool,
+    pub voyage_api_key: Option<String>,
+    pub voyage_granted: bool,
+    pub deepgram_api_key: Option<String>,
+    pub deepgram_granted: bool,
+    pub elevenlabs_api_key: Option<String>,
+    pub elevenlabs_granted: bool,
+    pub stability_api_key: Option<String>,
+    pub stability_granted: bool,
+    pub fal_api_key: Option<String>,
+    pub fal_granted: bool,
     // --- Amazon Bedrock ---
     pub bedrock_access_key_id: Option<String>,
     pub bedrock_secret_access_key: Option<String>,
@@ -248,6 +273,12 @@ impl Drop for OpenClawConfig {
         z!(self.qianfan_api_key);
         z!(self.mistral_api_key);
         z!(self.xiaomi_api_key);
+        z!(self.cohere_api_key);
+        z!(self.voyage_api_key);
+        z!(self.deepgram_api_key);
+        z!(self.elevenlabs_api_key);
+        z!(self.stability_api_key);
+        z!(self.fal_api_key);
         z!(self.bedrock_access_key_id);
         z!(self.bedrock_secret_access_key);
         z!(self.private_key);

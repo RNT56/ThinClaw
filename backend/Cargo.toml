@@ -83,6 +83,12 @@ clawscan = "1.0.0"
 zeroize = { version = "1", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
+# Cloud storage (Work Stream A)
+opendal = { version = "0.55", features = ["services-s3", "services-webdav", "services-sftp"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+zstd = "0.13"
+
 # IronClaw agent engine (local path during development, desktop feature = libsql + html-to-markdown)
 ironclaw = { path = "../../ironclaw/ironclaw", features = ["desktop"] }
 

@@ -490,15 +490,146 @@ pub async fn openclaw_save_cloud_config(
 // Orchestration & Canvas Commands
 // ============================================================================
 
-/// Spawn a new session for a specific agent
+/// In-memory registry of sub-agent sessions and their parent relationships.
+///
+/// This is separate from IronClaw's session storage — it only tracks the
+/// parent→child spawning relationships and task metadata needed for the
+/// SubAgentPanel UI. Sessions are evicted from this registry when the parent
+/// session is deleted or the engine is stopped.
+mod sub_agent_registry {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    use tokio::sync::RwLock;
+
+    use super::super::types::ChildSessionInfo;
+
+    /// Global sub-agent registry (per-process lifetime).
+    static REGISTRY: OnceLock<RwLock<SubAgentStore>> = OnceLock::new();
+
+    struct SubAgentStore {
+        /// parent_session → list of child sessions
+        children: HashMap<String, Vec<ChildSessionInfo>>,
+    }
+
+    fn store() -> &'static RwLock<SubAgentStore> {
+        REGISTRY.get_or_init(|| {
+            RwLock::new(SubAgentStore {
+                children: HashMap::new(),
+            })
+        })
+    }
+
+    /// Register a new child session under a parent.
+    pub async fn register(parent: &str, child: ChildSessionInfo) {
+        let mut s = store().write().await;
+        s.children
+            .entry(parent.to_string())
+            .or_default()
+            .push(child);
+    }
+
+    /// List all child sessions of a parent.
+    pub async fn list_children(parent: &str) -> Vec<ChildSessionInfo> {
+        let s = store().read().await;
+        s.children.get(parent).cloned().unwrap_or_default()
+    }
+
+    /// Update a child session's status and optional result summary.
+    pub async fn update_status(
+        child_session_key: &str,
+        status: &str,
+        result_summary: Option<&str>,
+    ) -> Option<String> {
+        let mut s = store().write().await;
+        for children in s.children.values_mut() {
+            if let Some(child) = children
+                .iter_mut()
+                .find(|c| c.session_key == child_session_key)
+            {
+                child.status = status.to_string();
+                if let Some(summary) = result_summary {
+                    child.result_summary = Some(summary.to_string());
+                }
+                // Return the parent session key for event emission
+                return Some(child_session_key.to_string());
+            }
+        }
+        None
+    }
+
+    /// Find the parent session for a given child session.
+    pub async fn find_parent(child_session_key: &str) -> Option<String> {
+        let s = store().read().await;
+        for (parent, children) in &s.children {
+            if children.iter().any(|c| c.session_key == child_session_key) {
+                return Some(parent.clone());
+            }
+        }
+        None
+    }
+
+    /// Remove all child records for a parent (called on session deletion).
+    #[allow(dead_code)]
+    pub async fn remove_parent(parent: &str) {
+        let mut s = store().write().await;
+        s.children.remove(parent);
+    }
+
+    /// Clear the entire registry (called on engine stop).
+    #[allow(dead_code)]
+    pub async fn clear() {
+        let mut s = store().write().await;
+        s.children.clear();
+    }
+}
+
+/// Spawn a new sub-agent session with optional parent tracking.
+///
+/// If `parent_session` is provided, the child session is registered in the
+/// sub-agent registry and a `SubAgentUpdate` event is emitted to the parent
+/// session's frontend. If no parent is provided, behaves like a standalone
+/// session spawn.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_spawn_session(
     ironclaw: State<'_, IronClawState>,
     agent_id: String,
     task: String,
-) -> Result<String, String> {
+    parent_session: Option<String>,
+) -> Result<SpawnSessionResponse, String> {
     let new_session_id = format!("agent:{}:task-{}", agent_id, uuid::Uuid::new_v4());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Activate the new session for event routing
+    ironclaw.activate_session(&new_session_id).await?;
+
+    // Register in sub-agent registry if this is a child session
+    if let Some(ref parent) = parent_session {
+        let child_info = ChildSessionInfo {
+            session_key: new_session_id.clone(),
+            task: task.clone(),
+            status: "running".to_string(),
+            spawned_at: now,
+            result_summary: None,
+        };
+        sub_agent_registry::register(parent, child_info).await;
+
+        // Emit SubAgentUpdate to the parent session's frontend
+        use tauri::Emitter;
+        let event = crate::openclaw::ui_types::UiEvent::SubAgentUpdate {
+            parent_session: parent.clone(),
+            child_session: new_session_id.clone(),
+            task: task.clone(),
+            status: "running".to_string(),
+            progress: Some(0.0),
+            result_preview: None,
+        };
+        let _ = ironclaw.app_handle().emit("openclaw-event", &event);
+    }
 
     // Send the task as the first message using IronClaw API
     let agent = ironclaw.agent().await?;
@@ -507,11 +638,74 @@ pub async fn openclaw_spawn_session(
         .map_err(|e| e.to_string())?;
 
     info!(
-        "[ironclaw] Spawned session {} for agent {}",
-        new_session_id, agent_id
+        "[ironclaw] Spawned session {} for agent {} (parent: {:?})",
+        new_session_id, agent_id, parent_session
     );
 
-    Ok(new_session_id)
+    Ok(SpawnSessionResponse {
+        session_key: new_session_id,
+        parent_session,
+        task,
+    })
+}
+
+/// List all child sessions spawned by a parent session.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_list_child_sessions(
+    _ironclaw: State<'_, IronClawState>,
+    parent_session: String,
+) -> Result<Vec<ChildSessionInfo>, String> {
+    Ok(sub_agent_registry::list_children(&parent_session).await)
+}
+
+/// Update a sub-agent's status (called when a child session completes or fails).
+///
+/// Also emits a `SubAgentUpdate` event to the parent session's frontend.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_update_sub_agent_status(
+    ironclaw: State<'_, IronClawState>,
+    child_session: String,
+    status: String,
+    result_summary: Option<String>,
+) -> Result<OpenClawRpcResponse, String> {
+    // Find the parent before updating
+    let parent = sub_agent_registry::find_parent(&child_session).await;
+
+    // Update the registry
+    sub_agent_registry::update_status(&child_session, &status, result_summary.as_deref()).await;
+
+    // Emit SubAgentUpdate to the parent session's frontend
+    if let Some(parent_key) = parent {
+        // Look up the task from the registry
+        let children = sub_agent_registry::list_children(&parent_key).await;
+        let task = children
+            .iter()
+            .find(|c| c.session_key == child_session)
+            .map(|c| c.task.clone())
+            .unwrap_or_default();
+
+        use tauri::Emitter;
+        let event = crate::openclaw::ui_types::UiEvent::SubAgentUpdate {
+            parent_session: parent_key,
+            child_session: child_session.clone(),
+            task,
+            status: status.clone(),
+            progress: if status == "completed" {
+                Some(1.0)
+            } else {
+                None
+            },
+            result_preview: result_summary.clone(),
+        };
+        let _ = ironclaw.app_handle().emit("openclaw-event", &event);
+    }
+
+    Ok(OpenClawRpcResponse {
+        ok: true,
+        message: Some(format!("Sub-agent {} status: {}", child_session, status)),
+    })
 }
 
 /// List available agents (Discovery)

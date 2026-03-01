@@ -2,6 +2,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Settings } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { ChatModeIcon, OpenClawModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
+import { CloudSyncIndicator } from './CloudSyncIndicator';
 
 export type AppMode = 'chat' | 'openclaw' | 'imagine' | 'settings';
 
@@ -79,6 +80,9 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                     })}
                 </AnimatePresence>
             </motion.div>
+
+            {/* Cloud Sync Indicator — A5-9 */}
+            <CloudSyncIndicator sidebarOpen={sidebarOpen} />
 
             {/* Settings Button - Full button with text when expanded */}
             <motion.button

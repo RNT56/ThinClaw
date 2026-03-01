@@ -16,6 +16,7 @@ pub mod ironclaw_channel; // impl Channel for TauriChannel
 pub mod ironclaw_secrets; // SecretsStore adapter (Keychain → IronClaw trait)
 pub mod ironclaw_types; // StatusUpdate → UiEvent conversion
 pub mod sanitizer; // LLM token stripping
+pub mod tool_bridge; // ToolBridge trait + TauriToolBridge (3-tier approval)
 pub mod ui_types; // UiEvent enum + supporting types
 
 // Legacy WS modules removed in Phase 4:

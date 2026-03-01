@@ -1,6 +1,6 @@
 # Scrappy — Technical Architecture Reference
 
-> **Last updated:** 2026-02-23  
+> **Last updated:** 2026-03-01  
 > **Version:** 0.1.0  
 > **Stack:** Tauri v2 · Rust 2021 edition · React 19 · TypeScript 5.8 · Vite 7
 
@@ -293,6 +293,9 @@ All state is registered via `app.manage(...)` before `run()`:
 | `OpenClawManager` | `openclaw/commands/` | WebSocket handle + OpenClaw config |
 | `RigManagerCache` | `rig_cache.rs` | Caches the last-built `RigManager` alongside a `RigManagerKey`; rebuilt only when provider, model, token, context size, tools, or knowledge content changes |
 | `EngineManager` | `engine/mod.rs` | Holds the active `Box<dyn InferenceEngine>` + `app_data_dir`. Auto-creates the correct engine instance based on compile-time feature flag (`llamacpp`, `mlx`, `vllm`, or `ollama`). Exposes `start_engine`, `stop_engine`, `is_engine_ready`, `setup_engine`, and `get_engine_setup_status` Tauri commands. |
+| `SecretStore` | `secret_store.rs` | **Single source of truth for all API keys.** Thin delegation wrapper over `keychain` module (macOS Keychain). Provides 21 convenience accessors (`openai_key()`, `anthropic_key()`, …, `fal_key()`). Shared with `InferenceRouter` via `Arc<SecretStore>`. |
+| `InferenceRouter` | `inference/mod.rs` | Routes all 5 AI modalities (Chat, Embedding, TTS, STT, Diffusion) to local or cloud backends. Holds an `Arc<SecretStore>` for key lookups. `reconfigure()` eagerly constructs cloud backends from available API keys. Exposed via `get_inference_backends` and `update_inference_backend` Tauri commands. |
+| `IronClawState` | `openclaw/ironclaw_bridge.rs` | In-process IronClaw agent engine state; auto-started on app launch. |
 
 ### 4.3 Core Modules
 
@@ -324,6 +327,10 @@ All state is registered via `app.manage(...)` before `run()`:
 | `engine/engine_vllm.rs` | ~ | vLLM engine: `uv` bootstraps Python + `vllm.entrypoints.openai.api_server` (Linux CUDA only) |
 | `engine/engine_ollama.rs` | ~ | Ollama engine: detects/connects to existing Ollama daemon |
 | `hf_hub.rs` | ~ | HuggingFace Hub model discovery: `discover_hf_models`, `get_model_files`, `download_hf_model_files` — live HF API search with engine-aware tag filtering |
+| `secret_store.rs` | ~140 | `SecretStore` — single source of truth for API keys. Delegates to `keychain` module. 21 convenience accessors for all providers (OpenAI, Anthropic, …, Cohere, Voyage, Deepgram, ElevenLabs, Stability, fal). Shared with `InferenceRouter` via `Arc`. |
+| `inference/mod.rs` | ~350 | `InferenceRouter` — routes 5 modalities (Chat, Embedding, TTS, STT, Diffusion) to `BackendKind::Local` or `BackendKind::Cloud(provider)`. Holds `Arc<SecretStore>`. `reconfigure()` scans keys and eagerly constructs cloud backends. |
+| `inference/backends/` | ~ | 24 backend implementations: `chat_local.rs`, `chat_openai.rs`, `chat_anthropic.rs`, …, `diffusion_stability.rs`, `diffusion_fal.rs`. Each implements a modality-specific trait (`ChatBackend`, `EmbeddingBackend`, `TtsBackend`, `SttBackend`, `DiffusionBackend`). |
+| `inference/providers.rs` | ~180 | `PROVIDER_ENDPOINTS` — compile-time registry mapping 14 cloud providers to their base URLs, API key slugs, and supported modalities. |
 
 ### 4.4 Chat Pipeline (`chat.rs`)
 
@@ -411,105 +418,133 @@ pub enum SidecarEvent {
 
 ---
 
-## 5. OpenClaw Integration
+## 5. IronClaw Agent Engine (In-Process)
+
+> **Architecture change (2026-02-28):** The agent engine was migrated from an out-of-process Node.js gateway (OpenClaw) communicating via WebSocket to an **in-process Rust library** (IronClaw) linked directly into the Tauri binary. This eliminated ~120 MB from the app bundle (Node.js runtime), reduced time-to-first-token from ~200ms to ~50ms, and removed ~2,166 LOC of WebSocket bridge code. See `ironclaw_library_roadmap.md` and `ironclaw_integration_roadmap.md` for the full migration story.
 
 ### 5.1 Module Structure
 
 ```
 src/openclaw/
-├── mod.rs           # Public re-exports
-├── commands/        # Tauri commands exposed to frontend
-│   ├── mod.rs       # OpenClawManager struct + all #[command] fns
-│   ├── gateway.rs   # Gateway start/stop/status
-│   ├── keys.rs      # API key & secrets management
-│   ├── rpc.rs       # Generic RPC forwarding commands
-│   ├── sessions.rs  # Session CRUD commands
-│   └── types.rs     # Shared Rust types
-├── config/          # OpenClaw config (openclaw.json / identity.json)
-│   ├── mod.rs
-│   └── types.rs     # OpenClawConfig, IdentityConfig, etc.
-├── ws_client.rs     # WebSocket client (challenge-response auth, reconnect)
-├── normalizer.rs    # Raw ACP events → stable UiEvent
-├── frames.rs        # WsFrame / WsError types
-├── ipc.rs           # Tauri event emission helpers
-├── fleet.rs         # Multi-agent fleet management
-├── deploy.rs        # Remote deployment helpers
-└── extra_commands.rs
+├── mod.rs                # Public re-exports (UiEvent, UiSession, etc.)
+├── ironclaw_bridge.rs    # IronClawState lifecycle (init, start, stop, shutdown)
+├── ironclaw_channel.rs   # impl Channel for TauriChannel (StatusUpdate → UiEvent)
+├── ironclaw_secrets.rs   # SecretsStore adapter (Keychain → IronClaw trait)
+├── ironclaw_types.rs     # StatusUpdate → UiEvent conversion
+├── sanitizer.rs          # LLM token sanitizer (strip ChatML/Jinja leaks)
+├── ui_types.rs           # UiEvent, UiSession, UiMessage, UiUsage (frontend contract)
+├── commands/             # 66 Tauri commands (direct IronClaw API calls)
+│   ├── mod.rs            # Command registration + shared helpers
+│   ├── gateway.rs        # Engine start/stop/status (delegates to IronClawState)
+│   ├── keys.rs           # API key & secrets management (Keychain + grant flags)
+│   ├── rpc.rs            # Memory, skills, cron, config, system commands
+│   ├── sessions.rs       # Session CRUD + chat send/abort/approve
+│   └── types.rs          # OpenClawStatus, response DTOs
+├── config/               # OpenClaw config persistence (identity.json)
+│   ├── mod.rs            # OpenClawConfig read/write
+│   ├── engine.rs         # Engine config generation (provider grants)
+│   ├── identity.rs       # OpenClawIdentity + OpenClawConfig structs
+│   ├── keychain.rs       # macOS Keychain storage (unified JSON blob)
+│   └── types.rs          # Supporting types
+├── fleet.rs              # Multi-agent fleet management (Tailscale)
+├── deploy.rs             # Remote deployment helpers (Ansible)
+└── extra_commands.rs     # Profile switching, connection test
 ```
 
-### 5.2 WebSocket Client (`ws_client.rs`)
+### 5.2 IronClawState — Engine Lifecycle
 
-The `OpenClawWsClient` implements the **ACP (Agent Communication Protocol)** WebSocket connection to the OpenClaw gateway (default port `18789`).
+**File:** `ironclaw_bridge.rs` (300 LOC)
 
-**Connection lifecycle:**
-1. TCP connect → TLS handshake (if `wss://`).
-2. Challenge/response authentication using the device token from `identity.json`.
-3. RPC message loop: JSON-framed `{ id, method, params }` / `{ id, result/error }`.
-4. Incoming event stream forwarded to UI via IPC.
-5. Automatic exponential backoff reconnection on disconnect.
-
-`OpenClawWsHandle` provides typed async RPC methods:
-
-| Method | Description |
-|--------|-------------|
-| `status()` | Gateway health and version |
-| `sessions_list()` | Active session enumeration |
-| `chat_history(session_key, limit, before)` | Paginated message history |
-| `chat_send(session_key, idempotency_key, text)` | Send user message |
-| `chat_abort(session_key, run_id)` | Abort in-flight generation |
-| `session_delete / session_reset` | Session management |
-| `approval_resolve(id, approved)` | HITL approval resolution |
-| `cron_list / cron_run / cron_history` | Automation scheduling |
-| `skills_list / skills_status / skills_update / skills_install` | Skill management |
-| `config_schema / config_get / config_set` | Agent runtime config |
-| `web_login_whatsapp / web_login_telegram` | Channel auth |
-
-### 5.3 Commands (`commands/`)
-
-`OpenClawManager` (a Tauri managed state struct) owns the `Option<OpenClawWsHandle>` and the `OpenClawConfig`. Tauri commands in `commands/` include:
-
-- **Gateway**: `start_openclaw_gateway`, `stop_openclaw_gateway`, `get_openclaw_status`, `restart_openclaw_gateway`, `get_openclaw_diagnostics`
-- **Sessions**: `get_openclaw_sessions`, `get_openclaw_chat_history`, `openclaw_send_message`, `delete_openclaw_session`, `reset_openclaw_session`, `get_all_openclaw_messages`
-- **Keys**: `save_slack_config`, `save_telegram_config`, `save_anthropic_key`, `save_cloud_config`, `save_gateway_settings`, `save_custom_llm_config`, `get_hf_token`, `save_custom_secret`, `delete_custom_secret`, `list_custom_secrets`
-- **RPC**: `openclaw_rpc`, `openclaw_resolve_approval`, `openclaw_abort_run`
-- **Cron**: `get_openclaw_cron_jobs`, `run_openclaw_cron_job`, `get_openclaw_cron_history`
-- **Skills**: `get_openclaw_skills`, `get_openclaw_skills_status`, `update_openclaw_skill`, `install_openclaw_skill`
-
-### 5.4 Config
-
-`OpenClawConfig` reads from (and writes to) several JSON files in `$APP_DATA/OpenClaw/`:
-
-| File | Contents |
-|------|---------|
-| `state/identity.json` | Device ID, auth token, API keys, cloud provider enables |
-| `openclaw.json` | Gateway port, model config, channel settings |
-| `auth-profiles.json` | API keys authorized for agent use (Brave, custom secrets) |
-
-The config layer is split into `types.rs` (data structures) and `mod.rs` (read/write logic).
-
-### 5.5 IPC & Event Normalizer
-
-`normalizer.rs` transforms raw ACP WebSocket frames into a stable `UiEvent` enum:
+`IronClawState` is the Tauri managed state that holds the running IronClaw agent. It wraps `RwLock<Option<IronClawInner>>` to support manual start/stop lifecycle:
 
 ```rust
-pub enum UiEvent {
-    SessionList(Vec<UiSession>),
-    MessageReceived(UiMessage),
-    ToolCall { name, input },
-    ToolResult { name, output },
-    Thinking(String),
-    ApprovalRequest { id, command, risk_level },
-    Done,
-    Error(String),
-    // ...
+pub struct IronClawState {
+    inner: tokio::sync::RwLock<Option<IronClawInner>>,
+    app_handle: AppHandle<Wry>,
+    state_dir: PathBuf,
+}
+
+struct IronClawInner {
+    agent: Arc<Agent>,
+    inject_tx: mpsc::Sender<IncomingMessage>,
+    bg_handle: Option<BackgroundTasksHandle>,
+    log_broadcaster: Arc<LogBroadcaster>,
 }
 ```
 
-`ipc.rs` emits these to the frontend via `app.emit("openclaw-event", event)`.
+**Lifecycle methods:**
 
-### 5.6 Fleet & Remote Deploy
+| Method | Purpose |
+|--------|---------|
+| `new_stopped(app_handle, state_dir)` | Create empty state (registered at app startup) |
+| `start(secrets_store)` | Initialize IronClaw engine, start background tasks, emit `Connected` |
+| `stop()` | Gracefully shut down engine, emit `Disconnected` |
+| `shutdown()` | Called on app exit — stops engine if running |
+| `agent()` | Get `Arc<Agent>` or error if stopped |
+| `inject_tx()` | Get message sender or error if stopped |
+| `is_running()` | Check if engine is active |
 
-`fleet.rs` manages **multi-agent fleet** scenarios where multiple OpenClaw gateways are connected simultaneously. `RemoteDeployWizard.tsx` in the frontend drives the Ansible-based remote deployment flow documented in `REMOTE_DEPLOYMENT.md`.
+**Initialization flow (`build_inner`):**
+1. Load `IronClawConfig` from `$STATE_DIR/ironclaw.toml` (or defaults)
+2. Create `TauriChannel` + `mpsc::Sender` for message injection
+3. Build engine components via `AppBuilder::build_all()` (DB, secrets, LLM, tools, extensions)
+4. Create `Agent` with full dependency injection (`AgentDeps`)
+5. Start background tasks (self-repair, heartbeat, session pruning, routine engine)
+6. Emit `UiEvent::Connected { protocol: 2 }` to frontend
+
+### 5.3 TauriChannel (`ironclaw_channel.rs`)
+
+Implements IronClaw's `Channel` trait for Tauri, bridging the agent's event system to the frontend:
+
+| Trait Method | UiEvent Emitted |
+|---|---|
+| `respond(msg, response)` | `AssistantFinal` (final text, sanitized) |
+| `send_status(StatusUpdate::StreamChunk)` | `AssistantDelta` (streaming tokens) |
+| `send_status(StatusUpdate::ToolStarted)` | `ToolUpdate { status: "started" }` |
+| `send_status(StatusUpdate::ToolCompleted)` | `ToolUpdate { status: "ok"/"error" }` |
+| `send_status(StatusUpdate::ApprovalNeeded)` | `ApprovalRequested` |
+| `send_status(StatusUpdate::Error)` | `Error` |
+| `broadcast()` | `AssistantFinal` (system channel) |
+
+All events emitted via `AppHandle::emit("openclaw-event", UiEvent)`. The token sanitizer (`strip_llm_tokens`) is applied to all assistant text before emission.
+
+### 5.4 SecretsStore Adapter (`ironclaw_secrets.rs`)
+
+Bridges Scrappy's macOS Keychain to IronClaw's `SecretsStore` trait:
+
+- **Key name mapping:** IronClaw uses `"llm_anthropic_api_key"`, Scrappy uses `"anthropic"` — `map_key_name()` translates between conventions
+- **No double encryption:** macOS Keychain handles encryption; IronClaw's AES-256-GCM layer is bypassed — plaintext returned directly as `DecryptedSecret`
+- **Zero-allocation:** All state lives in the keychain module's global cache
+- Implements: `create`, `get`, `get_decrypted`, `exists`, `list`, `delete`, `record_usage`, `is_accessible`
+
+### 5.5 Commands — Direct API Calls
+
+All 66 `openclaw_*` Tauri commands call `ironclaw::api::*` functions directly (no WebSocket, no serialization overhead):
+
+| Group | Commands | IronClaw API |
+|-------|----------|-------------|
+| **Chat** (5) | `send_message`, `abort`, `approve`, `reject`, `resend` | `api::chat::*` |
+| **Sessions** (12) | `list`, `get_history`, `create`, `delete`, `reset`, `rename`, etc. | `api::sessions::*` |
+| **Memory** (8) | `get_memory`, `save_memory`, `get_soul`, `list_workspace`, etc. | `api::memory::*` |
+| **Skills** (6) | `list_skills`, `toggle_skill`, `install_skill`, etc. | `api::skills::*` |
+| **Cron** (4) | `list_routines`, `trigger_routine`, `create`, `delete` | `api::routines::*` |
+| **Config/System** (8) | `get_config`, `set_config`, `status`, `diagnostics`, `tail_logs` | `api::config::*`, `api::system::*` |
+| **Keys** (30+) | `save_*_key`, `toggle_secret_access`, `set_hf_token`, etc. | `SecretStore` + `UserConfig` (Scrappy-owned) |
+
+### 5.6 Config Persistence
+
+`OpenClawConfig` still manages identity and provider grants in `$APP_DATA/OpenClaw/state/identity.json`. This is Scrappy-owned configuration (not IronClaw's):
+
+| File | Contents |
+|------|---------|
+| `state/identity.json` | Device ID, auth token, cloud provider grant flags, selected model |
+| `$STATE_DIR/ironclaw.toml` | IronClaw agent config (LLM chain, safety, tools — optional) |
+
+**Deleted (post-integration):** `auth-profiles.json`, `agent.json`, `models.json` — these were consumed by the Node.js engine; IronClaw uses `SecretsStore` directly.
+
+### 5.7 Fleet & Remote Deploy
+
+`fleet.rs` manages **multi-agent fleet** scenarios via Tailscale discovery. `deploy.rs` provides Ansible-based remote deployment. These features are retained but operate independently from the in-process IronClaw engine.
 
 ---
 

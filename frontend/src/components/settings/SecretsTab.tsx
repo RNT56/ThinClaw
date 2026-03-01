@@ -5,6 +5,7 @@ import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Bot, Search, Loader2, Tras
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { useConfig } from '../../hooks/use-config';
+import { reloadSecrets } from '../../lib/openclaw';
 
 interface SecretCardProps {
     title: string;
@@ -58,6 +59,8 @@ function SecretCard({
             setKey('');
             setShowKey(false);
             toast.success(`${title} saved`);
+            // Trigger hot-reload so IronClaw picks up the new key (fire-and-forget)
+            reloadSecrets().catch(() => {/* best-effort */ });
         } catch (e) {
             toast.error(`Failed to save ${title}`);
         } finally {
@@ -1120,6 +1123,166 @@ export function SecretsTab() {
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Xiaomi key');
                             }}
+                        />
+
+                        <SecretCard
+                            title="Cohere API Key"
+                            description="Access Command R+ for chat and embed-multilingual for RAG embeddings."
+                            icon={<Bot className="w-5 h-5 text-fuchsia-500" />}
+                            placeholder="..."
+                            hasKey={!!(status?.has_cohere_key ?? (status as any)?.hasCohereKey)}
+                            granted={!!(status?.cohere_granted ?? (status as any)?.cohereGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('cohere', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Cohere key saved'); }
+                                else toast.error('Failed to save Cohere key');
+                            }}
+                            onToggle={(g) => handleToggle('cohere', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('cohere');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('cohere', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Cohere key');
+                            }}
+                            getKeyUrl="https://dashboard.cohere.com/api-keys"
+                        />
+
+                        <SecretCard
+                            title="Voyage AI API Key"
+                            description="High-quality embedding models for advanced RAG and semantic search."
+                            icon={<Bot className="w-5 h-5 text-sky-400" />}
+                            placeholder="pa-..."
+                            hasKey={!!(status?.has_voyage_key ?? (status as any)?.hasVoyageKey)}
+                            granted={!!(status?.voyage_granted ?? (status as any)?.voyageGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('voyage', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Voyage key saved'); }
+                                else toast.error('Failed to save Voyage key');
+                            }}
+                            onToggle={(g) => handleToggle('voyage', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('voyage');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('voyage', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Voyage key');
+                            }}
+                            getKeyUrl="https://dash.voyageai.com/api-keys"
+                        />
+                    </div>
+                </div>
+
+                {/* Speech & Image Generation Section */}
+                <div className="space-y-6">
+                    <div className="flex items-center gap-2 border-b border-border/10 pb-4">
+                        <Radio className="w-5 h-5 text-muted-foreground" />
+                        <h3 className="text-sm font-bold uppercase tracking-[0.1em] text-muted-foreground">Speech & Image Generation</h3>
+                    </div>
+
+                    <div className="grid gap-6">
+                        <SecretCard
+                            title="Deepgram API Key"
+                            description="Cloud speech-to-text — fast and accurate transcription with Nova-2."
+                            icon={<Bot className="w-5 h-5 text-green-400" />}
+                            placeholder="dg_..."
+                            hasKey={!!((status as any)?.has_deepgram_key ?? (status as any)?.hasDeepgramKey)}
+                            granted={!!((status as any)?.deepgram_granted ?? (status as any)?.deepgramGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('deepgram', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Deepgram key saved'); }
+                                else toast.error('Failed to save Deepgram key');
+                            }}
+                            onToggle={(g) => handleToggle('deepgram', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('deepgram');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('deepgram', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Deepgram key');
+                            }}
+                            getKeyUrl="https://console.deepgram.com/"
+                        />
+
+                        <SecretCard
+                            title="ElevenLabs API Key"
+                            description="Cloud text-to-speech — natural voices with emotional range."
+                            icon={<Bot className="w-5 h-5 text-violet-400" />}
+                            placeholder="sk_..."
+                            hasKey={!!((status as any)?.has_elevenlabs_key ?? (status as any)?.hasElevenlabsKey)}
+                            granted={!!((status as any)?.elevenlabs_granted ?? (status as any)?.elevenlabsGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('elevenlabs', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('ElevenLabs key saved'); }
+                                else toast.error('Failed to save ElevenLabs key');
+                            }}
+                            onToggle={(g) => handleToggle('elevenlabs', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('elevenlabs');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('elevenlabs', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete ElevenLabs key');
+                            }}
+                            getKeyUrl="https://elevenlabs.io/app/settings/api-keys"
+                        />
+
+                        <SecretCard
+                            title="Stability AI API Key"
+                            description="Cloud image generation — SDXL Turbo, Stable Diffusion 3, and more."
+                            icon={<Bot className="w-5 h-5 text-rose-400" />}
+                            placeholder="sk-..."
+                            hasKey={!!((status as any)?.has_stability_key ?? (status as any)?.hasStabilityKey)}
+                            granted={!!((status as any)?.stability_granted ?? (status as any)?.stabilityGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('stability', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('Stability AI key saved'); }
+                                else toast.error('Failed to save Stability AI key');
+                            }}
+                            onToggle={(g) => handleToggle('stability', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('stability');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('stability', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete Stability AI key');
+                            }}
+                            getKeyUrl="https://platform.stability.ai/account/keys"
+                        />
+
+                        <SecretCard
+                            title="fal.ai API Key"
+                            description="Cloud image generation — FLUX, SDXL, fast inference via serverless GPU."
+                            icon={<Bot className="w-5 h-5 text-amber-400" />}
+                            placeholder="fal_..."
+                            hasKey={!!((status as any)?.has_fal_key ?? (status as any)?.hasFalKey)}
+                            granted={!!((status as any)?.fal_granted ?? (status as any)?.falGranted)}
+                            onSave={async (key) => {
+                                const res = await commands.openclawSaveImplicitProviderKey('fal', key);
+                                if (res.status === 'ok') { await loadStatus(); toast.success('fal.ai key saved'); }
+                                else toast.error('Failed to save fal.ai key');
+                            }}
+                            onToggle={(g) => handleToggle('fal', g)}
+                            onFetch={async () => {
+                                const res = await commands.openclawGetImplicitProviderKey('fal');
+                                return res.status === 'ok' ? res.data : null;
+                            }}
+                            onDelete={async () => {
+                                const res = await commands.openclawSaveImplicitProviderKey('fal', '');
+                                if (res.status === 'ok') await loadStatus();
+                                else toast.error('Failed to delete fal.ai key');
+                            }}
+                            getKeyUrl="https://fal.ai/dashboard/keys"
                         />
                     </div>
                 </div>

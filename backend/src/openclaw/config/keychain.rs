@@ -59,6 +59,12 @@ pub const PROVIDERS: &[&str] = &[
     "qianfan",
     "mistral",
     "xiaomi",
+    "cohere",
+    "voyage",
+    "deepgram",
+    "elevenlabs",
+    "stability",
+    "fal",
     // Bedrock stores three separate fields
     "bedrock_access_key_id",
     "bedrock_secret_access_key",

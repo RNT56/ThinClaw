@@ -139,12 +139,17 @@ where
                         let pool = app.state::<sqlx::SqlitePool>();
                         let store = app.state::<crate::vector_store::VectorStoreManager>();
                         let reranker = app.state::<crate::reranker::RerankerWrapper>();
+                        let emb_backend = {
+                            let router = app.state::<crate::inference::router::InferenceRouter>();
+                            router.embedding_backend().await
+                        };
                         match crate::rag::retrieve_context_internal(
                             Some(app.clone()),
                             sidecar.inner(),
                             pool.inner().clone(),
                             store.inner().clone(),
                             reranker.inner(),
+                            emb_backend,
                             query.clone(),
                             rig.conversation_id.clone(),
                             None::<Vec<String>>,

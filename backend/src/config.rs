@@ -113,6 +113,40 @@ pub struct UserConfig {
     /// Default: 5000.
     #[serde(default = "default_mcp_tool_result_max_chars")]
     pub mcp_tool_result_max_chars: u32,
+
+    // --- Inference Backend Selection ---
+    // Each modality can independently use "local" or a cloud provider id.
+    // These replace the old `selected_chat_provider` for all modalities.
+    /// Chat backend: "local", "anthropic", "openai", "gemini", etc.
+    /// Falls back to `selected_chat_provider` for backward compat.
+    #[serde(default)]
+    pub chat_backend: Option<String>,
+
+    /// Embedding backend: "local", "openai", "gemini", "voyage", "cohere".
+    #[serde(default)]
+    pub embedding_backend: Option<String>,
+
+    /// TTS backend: "local", "openai", "elevenlabs", "gemini".
+    #[serde(default)]
+    pub tts_backend: Option<String>,
+
+    /// STT backend: "local", "openai", "gemini", "deepgram".
+    #[serde(default)]
+    pub stt_backend: Option<String>,
+
+    /// Diffusion backend: "local", "openai", "gemini", "stability", "fal", "together".
+    #[serde(default)]
+    pub diffusion_backend: Option<String>,
+
+    /// Per-modality model selection (JSON object: { "chat": "gpt-4o", "embedding": "text-embedding-3-small", ... }).
+    #[serde(default)]
+    pub inference_models: Option<std::collections::HashMap<String, String>>,
+
+    /// Context window size for the currently selected cloud model.
+    /// Set by the frontend when a user picks a discovered model.
+    /// Falls back to the provider's `default_context_size` when `None`.
+    #[serde(default)]
+    pub selected_model_context_size: Option<u32>,
 }
 
 impl Default for UserConfig {
@@ -145,6 +179,13 @@ impl Default for UserConfig {
             mcp_sandbox_enabled: false,
             mcp_cache_ttl_secs: default_mcp_cache_ttl(),
             mcp_tool_result_max_chars: default_mcp_tool_result_max_chars(),
+            chat_backend: None,
+            embedding_backend: None,
+            tts_backend: None,
+            stt_backend: None,
+            diffusion_backend: None,
+            inference_models: None,
+            selected_model_context_size: None,
         }
     }
 }

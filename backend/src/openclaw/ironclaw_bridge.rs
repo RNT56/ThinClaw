@@ -4,6 +4,7 @@
 //! the Tauri application. Supports start/stop lifecycle so users
 //! can manually control the agent.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -15,6 +16,7 @@ use ironclaw::channels::ChannelManager;
 use ironclaw::llm::SessionManager as LlmSessionManager;
 
 use super::ironclaw_channel::TauriChannel;
+use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
 
 /// Inner state: only present when the engine is running.
@@ -27,6 +29,11 @@ pub(crate) struct IronClawInner {
     pub inject_tx: mpsc::Sender<ironclaw::channels::IncomingMessage>,
     /// Log broadcaster for retrieving recent log entries.
     pub log_broadcaster: Arc<LogBroadcaster>,
+    /// Active session tracking — maps session_key → activation timestamp.
+    /// Shared with TauriChannel for multi-session event routing.
+    pub active_sessions: Arc<RwLock<HashMap<String, u64>>>,
+    /// ToolBridge — routes hardware tool approvals through Tauri's UI.
+    pub tool_bridge: Arc<TauriToolBridge>,
 }
 
 /// Managed state: holds the running IronClaw agent and background task handle.
@@ -56,6 +63,11 @@ impl IronClawState {
             app_handle,
             state_dir,
         }
+    }
+
+    /// Get a reference to the Tauri AppHandle.
+    pub fn app_handle(&self) -> &tauri::AppHandle<tauri::Wry> {
+        &self.app_handle
     }
 
     /// Start the IronClaw engine.
@@ -103,6 +115,12 @@ impl IronClawState {
             if let Err(e) = inner.agent.channels().shutdown_all().await {
                 tracing::warn!("[ironclaw] Error shutting down channels: {}", e);
             }
+
+            // Clear session-level tool permissions
+            inner.tool_bridge.clear_session_permissions().await;
+
+            // Clear active session tracking
+            inner.active_sessions.write().await.clear();
 
             // Emit disconnected event
             use tauri::Emitter;
@@ -165,6 +183,116 @@ impl IronClawState {
             .ok_or_else(|| "IronClaw engine is not running".to_string())
     }
 
+    /// Get the ToolBridge Arc, or error if engine is stopped.
+    pub async fn tool_bridge(&self) -> Result<Arc<TauriToolBridge>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.tool_bridge))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the active sessions map, or error if engine is stopped.
+    pub async fn active_sessions(&self) -> Result<Arc<RwLock<HashMap<String, u64>>>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.active_sessions))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Activate a session for event routing.
+    ///
+    /// Records a timestamp so `TauriChannel::most_recent_session()` can
+    /// use this as fallback when metadata doesn't include a session key.
+    /// Safe for concurrent sessions — each gets its own timestamp.
+    pub async fn activate_session(&self, session_key: &str) -> Result<(), String> {
+        let sessions = self.active_sessions().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut map = sessions.write().await;
+        map.insert(session_key.to_string(), now);
+        // Evict oldest if we have too many tracked sessions
+        if map.len() > 32 {
+            if let Some(oldest_key) = map.iter().min_by_key(|(_, ts)| *ts).map(|(k, _)| k.clone()) {
+                map.remove(&oldest_key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Backward-compat wrapper — calls `activate_session()` internally.
+    pub async fn set_session_context(&self, session_key: &str) -> Result<(), String> {
+        self.activate_session(session_key).await
+    }
+
+    /// Deactivate a session (called after session deletion).
+    pub async fn deactivate_session(&self, session_key: &str) -> Result<(), String> {
+        let sessions = self.active_sessions().await?;
+        sessions.write().await.remove(session_key);
+        Ok(())
+    }
+
+    /// Hot-reload secrets into the running IronClaw agent.
+    ///
+    /// **Strategy (2-tier):**
+    /// 1. When available, call `ironclaw::api::config::refresh_secrets()` for
+    ///    in-place refresh — no downtime, preserves session state and bg tasks.
+    /// 2. Otherwise, fall back to graceful stop→start cycle.
+    ///
+    /// Called after API key save/toggle commands so the agent picks up
+    /// new keys without requiring the user to manually restart.
+    ///
+    /// **Note:** Tier 1 (in-place refresh) requires IronClaw to expose
+    /// `api::config::refresh_secrets()`. Until then, the stop→start
+    /// fallback is used. See enhancement plan 2B.
+    pub async fn reload_secrets(
+        &self,
+        secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
+    ) -> Result<(), String> {
+        if !self.is_running().await {
+            tracing::info!("[ironclaw] Engine not running, nothing to reload");
+            return Ok(());
+        }
+
+        // Tier 1: In-place hot reload (zero downtime)
+        // TODO(2B): Uncomment when IronClaw exposes refresh_secrets() API:
+        //
+        // if let Ok(agent) = self.agent().await {
+        //     match ironclaw::api::config::refresh_secrets(agent).await {
+        //         Ok(()) => {
+        //             tracing::info!("[ironclaw] Secrets hot-reloaded (no restart needed)");
+        //             return Ok(());
+        //         }
+        //         Err(e) => {
+        //             tracing::warn!(
+        //                 "[ironclaw] Hot reload not available ({}), falling back to restart",
+        //                 e
+        //             );
+        //         }
+        //     }
+        // }
+
+        // Tier 2: Fall back to stop→start cycle
+        tracing::info!("[ironclaw] Reloading secrets via stop→start cycle...");
+        self.stop().await;
+
+        self.start(secrets_store).await.map_err(|e| {
+            tracing::error!(
+                "[ironclaw] Failed to restart engine after secrets reload: {}",
+                e
+            );
+            format!("Failed to restart engine: {}", e)
+        })?;
+
+        tracing::info!("[ironclaw] Secrets reloaded successfully (engine restarted)");
+        Ok(())
+    }
+
     /// Access the background tasks handle (for routine engine, etc).
     pub(crate) async fn bg_handle_ref(
         &self,
@@ -199,6 +327,23 @@ impl IronClawState {
             }
         }
 
+        // ── 1b. Set WHISPER_HTTP_ENDPOINT for IronClaw voice/talk mode ───
+        // Scrappy's STT sidecar runs on port 53757 (fixed). IronClaw uses
+        // this env var to call the local whisper server instead of bundling
+        // its own whisper-rs. The endpoint is OpenAI-compatible.
+        if std::env::var("WHISPER_HTTP_ENDPOINT").is_err() {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(
+                    "WHISPER_HTTP_ENDPOINT",
+                    "http://127.0.0.1:53757/v1/audio/transcriptions",
+                );
+            }
+            tracing::debug!(
+                "[ironclaw] Set WHISPER_HTTP_ENDPOINT=http://127.0.0.1:53757/v1/audio/transcriptions"
+            );
+        }
+
         // ── 2. Load config ──────────────────────────────────────────────
         let toml_path = state_dir.join("ironclaw.toml");
         let toml_path_ref = if toml_path.exists() {
@@ -215,8 +360,9 @@ impl IronClawState {
             }
         };
 
-        // ── 3. Create TauriChannel ──────────────────────────────────────
-        let (tauri_channel, inject_tx) = TauriChannel::new(app_handle.clone());
+        // ── 3. Create TauriChannel + ToolBridge ────────────────────────────
+        let (tauri_channel, inject_tx, active_sessions) = TauriChannel::new(app_handle.clone());
+        let tool_bridge = TauriToolBridge::new(app_handle.clone());
 
         // ── 4. Build engine components ──────────────────────────────────
         let session_config = ironclaw::llm::session::SessionConfig {
@@ -243,6 +389,10 @@ impl IronClawState {
         if let Some(store) = secrets_store {
             builder = builder.with_secrets_store(store);
         }
+
+        // Wire TauriToolBridge into the IronClaw engine — enables hardware
+        // sensor tools (camera, mic, screen) with 3-tier user approval.
+        builder = builder.with_tool_bridge(tool_bridge.clone());
 
         let components = builder.build_all().await?;
 
@@ -294,6 +444,8 @@ impl IronClawState {
             bg_handle: Mutex::new(Some(bg_handle)),
             inject_tx,
             log_broadcaster,
+            active_sessions,
+            tool_bridge,
         })
     }
 }

@@ -82,12 +82,18 @@ impl Tool for RAGTool {
                 },
             );
 
+            let emb_backend = {
+                let router = app_handle.state::<crate::inference::router::InferenceRouter>();
+                router.embedding_backend().await
+            };
+
             crate::rag::retrieve_context_internal(
                 Some(app_handle.clone()), // Pass app_handle to internal
                 &sidecar,
                 pool,
                 vector_manager,
                 &reranker,
+                emb_backend,
                 query,
                 None, // chat_id
                 None, // doc_ids
