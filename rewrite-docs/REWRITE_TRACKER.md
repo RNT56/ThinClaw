@@ -71,9 +71,9 @@ Features previously handled by the macOS/iOS Swift apps that need to be ported t
 | **Canvas / A2UI**          | ✅ Done    | `CanvasCommands.swift`   | `tools/builtin/canvas.rs` — structured JSON payload  | ✅ Complete    |
 | **Voice Wake (Hey Molty)** | 🔴 High    | `VoiceWakeRuntime.swift` | `sherpa-rs` (Sherpa-ONNX) for keyword detection      | ⬜ Not Started |
 | **Talk Mode (PTT)**        | 🟡 Medium  | `TalkCommands.swift`     | Standard audio capture traits (`cpal`), `whisper-rs` | ⬜ Not Started |
-| **Screen Recording**       | 🟡 Medium  | `ScreenCommands.swift`   | `scrap` or platform-specific capture APIs            | ⬜ Not Started |
-| **Camera Capture**         | 🟡 Medium  | `CameraCommands.swift`   | `nokhwa` for cross-platform camera access            | ⬜ Not Started |
-| **Location (GPS)**         | 🟡 Medium  | `LocationCommands.swift` | CoreLocation FFI (macOS), standard libs              | ⬜ Not Started |
+| **Screen Recording**       | ✅ Done    | `ScreenCommands.swift` | `tools/builtin/screen_capture.rs` — CLI (`screencapture`, `scrot`) | ✅ Complete    |
+| **Camera Capture**         | ✅ Done    | `CameraCommands.swift`   | `tools/builtin/camera_capture.rs` — CLI (`imagesnap`, `ffmpeg`) | ✅ Complete    |
+| **Location (GPS)**         | ✅ Done    | `LocationCommands.swift` | `tools/builtin/location.rs` — CoreLocation via Swift, IP fallback | ✅ Complete    |
 | **Device Status**          | 🟢 Low     | `DeviceCommands.swift`   | `tools/builtin/device_info.rs` — `sysinfo` crate      | ✅ Complete    |
 
 _Note: Mobile-specific capabilities (Contacts, Calendar, Walk/Activity, Watch, SMS) are excluded for now assuming a desktop-first Rust application._
@@ -136,8 +136,8 @@ The WebSocket protocol that connects the Tauri Thin Client to the headless Remot
 | **Secret Transmission** | `secret.set` to relay API keys from Tauri UI to remote Keychain | `WsClientMessage::SecretSet` + handler scaffold | ✅ Scaffold |
 | **Hardware Bridge RPC** | `tool.rpc.request` / `tool.rpc.response` for cam/mic/screen | See `HARDWARE_BRIDGE_RS.md` | ⏳ Pending |
 | **Model Discovery RPC** | `model.list.request` / `model.list.response` | `WsClientMessage::ModelList` + `WsServerMessage::ModelListResult` | ✅ Done |
-| **Auto-Update Check** | Orchestrator polls GitHub Releases every 24h, self-updates via `self_update` crate | Background `tokio` task | ⏳ Pending |
-| **Tailscale Discovery** | Tauri app queries Tailscale local API to auto-find Orchestrator | `reqwest` to `localhost:41112` | ⏳ Pending |
+| **Auto-Update Check** | Orchestrator polls GitHub Releases every 24h, self-updates via `self_update` crate | `src/update_checker.rs` — background tokio task | ✅ Done |
+| **Tailscale Discovery** | Tauri app queries Tailscale local API to auto-find Orchestrator | `src/tailscale.rs` — `reqwest` to `localhost:41112` | ✅ Done |
 | **QR Code Pairing** | Fallback pairing for non-Tailscale setups, cert-pinned TLS | `rcgen` + QR display | ⏳ Pending |
 
 ## 🖥️ CLI, TUI & Setup Wizard (Rust-Native)

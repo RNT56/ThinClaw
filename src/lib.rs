@@ -75,12 +75,14 @@ pub mod service;
 pub mod settings;
 pub mod setup;
 pub mod skills;
+pub mod tailscale;
 pub mod tools;
 pub mod tracing_fmt;
 // NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`
 // has a hard dependency on `crate::tunnel::TunnelProviderConfig`. Gating
 // requires first extracting tunnel data types into `config/` — deferred.
 pub mod tunnel;
+pub mod update_checker;
 pub mod util;
 pub mod worker;
 pub mod workspace;
