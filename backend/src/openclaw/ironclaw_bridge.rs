@@ -343,6 +343,106 @@ impl IronClawState {
             );
         }
 
+        // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from Scrappy's config ───
+        // IronClaw's LlmConfig::resolve() defaults to openai_compatible which
+        // requires LLM_BASE_URL. We must tell it which backend to use based on
+        // the user's gateway settings (local core vs cloud brain).
+        if std::env::var("LLM_BACKEND").is_err() {
+            use tauri::Manager;
+            let openclaw_mgr = app_handle.state::<super::OpenClawManager>();
+            let oc_config = openclaw_mgr.get_config().await;
+
+            if let Some(ref cfg) = oc_config {
+                if cfg.local_inference_enabled {
+                    // Local inference: point to llama.cpp / MLX sidecar
+                    let sidecar = app_handle.state::<crate::sidecar::SidecarManager>();
+                    if let Some((port, token, _ctx, _family)) = sidecar.get_chat_config() {
+                        let base_url = format!("http://127.0.0.1:{}/v1", port);
+                        tracing::info!(
+                            "[ironclaw] Local inference: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                            base_url
+                        );
+                        #[allow(unused_unsafe)]
+                        unsafe {
+                            std::env::set_var("LLM_BACKEND", "openai_compatible");
+                            std::env::set_var("LLM_BASE_URL", &base_url);
+                            if !token.is_empty() {
+                                std::env::set_var("LLM_API_KEY", &token);
+                            }
+                        }
+                    } else {
+                        // Sidecar not running yet — try engine manager (MLX/vLLM)
+                        let engine_mgr = app_handle.state::<crate::engine::EngineManager>();
+                        let guard = engine_mgr.engine.lock().await;
+                        if let Some(engine) = guard.as_ref() {
+                            if let Some(url) = engine.base_url() {
+                                tracing::info!(
+                                    "[ironclaw] Engine manager: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                                    url
+                                );
+                                #[allow(unused_unsafe)]
+                                unsafe {
+                                    std::env::set_var("LLM_BACKEND", "openai_compatible");
+                                    std::env::set_var("LLM_BASE_URL", &url);
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(ref brain) = cfg.selected_cloud_brain {
+                    // Cloud brain selected: set the matching backend
+                    match brain.as_str() {
+                        "anthropic" => {
+                            tracing::info!("[ironclaw] Cloud brain: LLM_BACKEND=anthropic");
+                            #[allow(unused_unsafe)]
+                            unsafe {
+                                std::env::set_var("LLM_BACKEND", "anthropic");
+                            }
+                        }
+                        "openai" => {
+                            tracing::info!("[ironclaw] Cloud brain: LLM_BACKEND=openai");
+                            #[allow(unused_unsafe)]
+                            unsafe {
+                                std::env::set_var("LLM_BACKEND", "openai");
+                            }
+                        }
+                        // All other providers use OpenAI-compatible endpoints
+                        other => {
+                            if let Some(ep) =
+                                crate::inference::provider_endpoints::endpoint_for(other)
+                            {
+                                tracing::info!(
+                                    "[ironclaw] Cloud brain '{}': LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
+                                    other, ep.base_url
+                                );
+                                #[allow(unused_unsafe)]
+                                unsafe {
+                                    std::env::set_var("LLM_BACKEND", "openai_compatible");
+                                    std::env::set_var("LLM_BASE_URL", ep.base_url);
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "[ironclaw] Unknown cloud brain '{}', defaulting to openai_compatible",
+                                    other
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Final safety net: if still no LLM_BACKEND is set, default to
+            // anthropic (most common) so IronClaw doesn't crash requiring LLM_BASE_URL.
+            if std::env::var("LLM_BACKEND").is_err() {
+                tracing::info!(
+                    "[ironclaw] No provider config found, defaulting LLM_BACKEND=anthropic"
+                );
+                #[allow(unused_unsafe)]
+                unsafe {
+                    std::env::set_var("LLM_BACKEND", "anthropic");
+                }
+            }
+        }
+
         // ── 2. Load config ──────────────────────────────────────────────
         let toml_path = state_dir.join("ironclaw.toml");
         let toml_path_ref = if toml_path.exists() {
