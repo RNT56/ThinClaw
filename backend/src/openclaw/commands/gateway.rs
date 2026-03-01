@@ -298,15 +298,74 @@ pub async fn openclaw_sync_local_llm(
 ///
 /// Initializes the agent, starts background tasks, emits Connected event.
 /// If already running, this is a no-op (returns Ok).
+///
+/// When local inference is selected and the engine isn't ready yet, this
+/// command will poll the sidecar/engine status for up to 30 seconds before
+/// proceeding — covering the common case where MLX is still booting.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_start_gateway(
-    _state: State<'_, OpenClawManager>,
+    state: State<'_, OpenClawManager>,
     ironclaw: State<'_, IronClawState>,
-    _sidecar: State<'_, crate::sidecar::SidecarManager>,
+    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
 ) -> Result<(), String> {
     info!("[ironclaw] Start gateway requested");
 
+    // ── Check if local inference engine needs to be awaited ──────────
+    let oc_config = state.get_config().await;
+    let local_inference = oc_config
+        .as_ref()
+        .map(|c| c.local_inference_enabled)
+        .unwrap_or(false);
+
+    if local_inference {
+        let has_sidecar = sidecar.get_chat_config().is_some();
+        let has_engine = {
+            let guard = engine_manager.engine.lock().await;
+            guard
+                .as_ref()
+                .map(|e| e.base_url().is_some())
+                .unwrap_or(false)
+        };
+
+        if !has_sidecar && !has_engine {
+            info!(
+                "[ironclaw] Local inference selected but server not ready — \
+                 waiting for engine to come online (up to 30s)..."
+            );
+
+            let mut ready = false;
+            for attempt in 1..=60 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                // Check sidecar first (used by llamacpp builds)
+                if sidecar.get_chat_config().is_some() {
+                    info!("[ironclaw] Sidecar detected after {}ms", attempt * 500);
+                    ready = true;
+                    break;
+                }
+
+                // Check engine manager (MLX/vLLM/Ollama)
+                let guard = engine_manager.engine.lock().await;
+                if let Some(engine) = guard.as_ref() {
+                    if engine.is_ready().await {
+                        info!("[ironclaw] Engine ready after {}ms", attempt * 500);
+                        ready = true;
+                        break;
+                    }
+                }
+            }
+
+            if !ready {
+                return Err("Local inference engine did not start within 30 seconds. \
+                     Please ensure a model is loaded and try again."
+                    .to_string());
+            }
+        }
+    }
+
+    // ── Start IronClaw engine ────────────────────────────────────────
     // Create secrets adapter (bridges macOS Keychain to IronClaw)
     let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
         Some(std::sync::Arc::new(

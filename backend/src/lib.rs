@@ -469,17 +469,18 @@ pub fn run() {
 
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                // Check if local inference is selected and no server is ready yet.
-                // If so, defer IronClaw start — the frontend will trigger
-                // openclaw_start_gateway() after the MLX/sidecar engine is up.
-                let should_defer = {
-                    use tauri::Manager;
+                use tauri::Manager;
+
+                // If local inference is selected but no server is running yet,
+                // wait for the engine to come online before starting IronClaw.
+                // This handles the common case where MLX boots after IronClaw init.
+                let needs_local_wait = {
                     let openclaw_mgr = ironclaw_handle.state::<openclaw::OpenClawManager>();
                     let oc_config = openclaw_mgr.get_config().await;
                     if let Some(ref cfg) = oc_config {
                         if cfg.local_inference_enabled {
-                            let sidecar = ironclaw_handle.state::<sidecar::SidecarManager>();
-                            let has_sidecar = sidecar.get_chat_config().is_some();
+                            let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
+                            let has_sidecar = sidecar_mgr.get_chat_config().is_some();
                             let has_engine = {
                                 let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
                                 let guard = engine_mgr.engine.lock().await;
@@ -494,12 +495,43 @@ pub fn run() {
                     }
                 };
 
-                if should_defer {
-                    println!(
-                        "[main] IronClaw auto-start deferred: local inference selected \
-                         but server not ready yet. Will start via gateway command."
-                    );
-                    return;
+                if needs_local_wait {
+                    println!("[main] IronClaw: waiting for local inference engine (up to 45s)...");
+
+                    let mut engine_ready = false;
+                    for attempt in 1..=90 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                        // Check sidecar (llamacpp builds)
+                        let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
+                        if sidecar_mgr.get_chat_config().is_some() {
+                            println!(
+                                "[main] IronClaw: sidecar detected after {}ms",
+                                attempt * 500
+                            );
+                            engine_ready = true;
+                            break;
+                        }
+
+                        // Check engine manager (MLX/vLLM/Ollama)
+                        let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
+                        let guard = engine_mgr.engine.lock().await;
+                        if let Some(eng) = guard.as_ref() {
+                            if eng.is_ready().await {
+                                println!("[main] IronClaw: engine ready after {}ms", attempt * 500);
+                                engine_ready = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !engine_ready {
+                        eprintln!(
+                            "[main] IronClaw auto-start skipped: local inference engine \
+                             did not come online within 45s. Start manually via gateway."
+                        );
+                        return;
+                    }
                 }
 
                 // Bridge Scrappy's macOS Keychain to IronClaw's SecretsStore trait.
