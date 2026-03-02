@@ -8,6 +8,7 @@ use futures::Stream;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
+use crate::media::MediaContent;
 
 /// A message received from an external channel.
 #[derive(Debug, Clone)]
@@ -28,6 +29,8 @@ pub struct IncomingMessage {
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
     pub metadata: serde_json::Value,
+    /// Media attachments (images, PDFs, audio files, etc.).
+    pub attachments: Vec<MediaContent>,
 }
 
 impl IncomingMessage {
@@ -46,6 +49,7 @@ impl IncomingMessage {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
+            attachments: Vec::new(),
         }
     }
 
@@ -64,6 +68,12 @@ impl IncomingMessage {
     /// Set user name.
     pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
         self.user_name = Some(name.into());
+        self
+    }
+
+    /// Add media attachments.
+    pub fn with_attachments(mut self, attachments: Vec<MediaContent>) -> Self {
+        self.attachments = attachments;
         self
     }
 }
