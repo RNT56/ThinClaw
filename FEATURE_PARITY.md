@@ -299,7 +299,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | YAML alternative | ✅ | ❌ | |
 | Environment variable interpolation | ✅ | ✅ | `${VAR}` |
 | Config validation/schema | ✅ | ✅ | Type-safe Config struct |
-| Hot-reload | ✅ | ❌ | |
+| Hot-reload | ✅ | ✅ | `ConfigWatcher` polls mtime, broadcasts changes |
 | Legacy migration | ✅ | ➖ | |
 | State directory | ✅ `~/.openclaw-state/` | ✅ `~/.ironclaw/` | |
 | Credentials directory | ✅ | ✅ | Session files |
@@ -409,7 +409,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
 | Timezone support | ✅ | ✅ | - | Via cron expressions |
 | One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
-| Channel health monitor | ✅ | ❌ | P2 | Auto-restart with configurable interval |
+| Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor` wired into background tasks |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
 | `beforeOutbound` hook | ✅ | ✅ | P2 | |
 | `beforeToolCall` hook | ✅ | ✅ | P2 | |
@@ -532,11 +532,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
 ### P2 - Medium Priority
-- ❌ Media handling (images, PDFs)
+- ✅ Media handling (images, PDFs, audio — `src/media/`, wired into agent loop)
 - ✅ Ollama/local model support (via rig::providers::ollama)
-- ❌ Configuration hot-reload
+- ✅ Configuration hot-reload (`ConfigWatcher` — mtime polling, broadcast subscribers)
 - ❌ Webhook trigger endpoint in web gateway
-- ❌ Channel health monitor with auto-restart
+- ✅ Channel health monitor with auto-restart (`ChannelHealthMonitor` — wired into background tasks)
 - ✅ Partial output preservation on abort (returns last 3 tool/assistant results when interrupted)
 
 ### P3 - Lower Priority
