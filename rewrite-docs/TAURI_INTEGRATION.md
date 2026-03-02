@@ -996,3 +996,17 @@ extractor based on MIME type.
 **Impact for Scrappy:** `ChannelHealthMonitor` can be started as a background task to
 auto-restart failing channels. `ConfigWatcher` can watch `~/.ironclaw/config.toml` and
 trigger config reload on changes.
+
+### 12.11 Integration Wiring — Shipped (2026-03-02)
+
+All three new subsystems are now wired into the agent's lifecycle:
+
+| Subsystem | Where | How |
+|-----------|-------|-----|
+| **MediaPipeline** | `thread_ops.rs:process_user_input()` | Extracts text from `message.attachments` and prepends to user content before LLM call |
+| **ChannelHealthMonitor** | `agent_loop.rs:start_background_tasks()` | Started/stopped alongside self-repair and session pruning |
+| **ConfigWatcher** | `agent_loop.rs:run()` | Watches `~/.ironclaw/config.toml`, logs changes, stopped on shutdown |
+
+**Impact for Scrappy:** Scrappy can now attach files via `IncomingMessage.attachments`
+and they will be automatically processed before the LLM call. Channel health is
+monitored continuously. Config file changes are detected and logged.
