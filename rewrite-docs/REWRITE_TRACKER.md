@@ -19,7 +19,7 @@ See `TAURI_INTEGRATION.md` for the 15-phase Tauri integration report.
 | Build errors | 0 |
 | API stubs remaining | 0 |
 | Open TODOs in `src/` | **0** (all resolved 2026-03-01) |
-| Test suite | **1,699 tests passing** |
+| Test suite | **1,740 tests passing** |
 
 ---
 

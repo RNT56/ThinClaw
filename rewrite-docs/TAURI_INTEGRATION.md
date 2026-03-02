@@ -889,7 +889,7 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 ### 12.4 Build Health
 
 **Build:** 0 warnings, 0 errors (both default and `--features voice`)
-**Tests:** 1,699 passing, 0 failures, 1 ignored
+**Tests:** 1,740 passing, 0 failures, 1 ignored
 
 ### 12.5 Integration Status — Both Sides Complete
 
@@ -967,3 +967,32 @@ Scrappy uncommented `refresh_secrets()` hot-reload (Enhancement 2B Tier 1) and f
 the API signature to `(secrets_store, "local_user")`. The enhancement table in
 `ironclaw_library_roadmap.md` has been updated by Scrappy: 2A/2B/2C all marked done,
 Extended Thinking row added.
+
+### 12.9 Media Pipeline — Shipped (2026-03-02)
+
+New `src/media/` module (4 files, ~1,200 LOC) for processing binary attachments:
+
+| Component | File | What |
+|-----------|------|------|
+| **Types** | `media/types.rs` | `MediaType` enum, `MediaContent` struct, `MediaExtractor` trait, `MediaPipeline` |
+| **Image** | `media/image.rs` | Dimension detection (PNG/GIF/WebP/JPEG), base64 data-URI, LLM multimodal formatting |
+| **PDF** | `media/pdf.rs` | BT/ET text block parsing, parenthesized string extraction, readable-sequence fallback |
+| **Audio** | `media/audio.rs` | Whisper HTTP endpoint integration, multipart upload, duration estimation |
+| **Channel** | `channel.rs` | `IncomingMessage.attachments: Vec<MediaContent>` field added |
+| **Tests** | All | 31 unit tests across all modules |
+
+**Impact for Scrappy:** Channels can now pass media attachments on `IncomingMessage`.
+Scrappy's `ironclaw_channel.rs` can populate `attachments` from Tauri file drops or
+clipboard images. The `MediaPipeline.extract()` method handles routing to the correct
+extractor based on MIME type.
+
+### 12.10 Infrastructure — Shipped (2026-03-02)
+
+| Component | File | What |
+|-----------|------|------|
+| **D2: ChannelHealthMonitor** | `channels/health_monitor.rs` | Periodic `health_check_all()`, failure counting, auto-restart with configurable max attempts (3) and cooldown (30s) |
+| **D3: ConfigWatcher** | `config/watcher.rs` | Polling-based file watcher (2s default), mtime comparison, debounce (500ms), `broadcast::channel` for subscribers |
+
+**Impact for Scrappy:** `ChannelHealthMonitor` can be started as a background task to
+auto-restart failing channels. `ConfigWatcher` can watch `~/.ironclaw/config.toml` and
+trigger config reload on changes.

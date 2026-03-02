@@ -35,7 +35,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
-| Configuration hot-reload | ✅ | ❌ | |
+| Configuration hot-reload | ✅ | ✅ | `ConfigWatcher` with mtime polling, debounce, broadcast subscribers |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
 | Canvas hosting | ✅ | ❌ | Agent-driven UI |
@@ -46,7 +46,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
 | `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
-| Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
+| Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
