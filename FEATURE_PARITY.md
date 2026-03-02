@@ -185,9 +185,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
 | Thinking modes (low/med/high) | ✅ | ✅ | `ThinkingConfig` enum (Disabled/Enabled with budget_tokens), configurable via `thinking_enabled` + `thinking_budget_tokens` settings |
 | Per-model thinkingDefault override | ✅ | 🚧 | Global thinking config done; per-model override not yet in config |
-| Block-level streaming | ✅ | ❌ | |
-| Tool-level streaming | ✅ | ❌ | |
-| Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
+| Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
+| Tool-level streaming | ✅ | ✅ | `StreamChunk::ToolCall` + `StreamChunk::ToolCallDelta` via `complete_stream_with_tools()` |
+| Z.AI tool_stream | ✅ | 🚧 | Tool call deltas work; full Z.AI streaming protocol not yet wired |
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
@@ -546,7 +546,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Video support
 - 🚧 Skills routing blocks (activation criteria exist, but no "Use when / Don't use when")
 - ❌ Plugin registry
-- ❌ Streaming (block/tool/Z.AI tool_stream)
+- ✅ Streaming (block/tool via `StreamChunk` API) — Z.AI tool_stream 🚧
 - ❌ Memory: temporal decay, MMR re-ranking, query expansion
 - ❌ Control UI i18n
 - ✅ Stuck loop detection (consecutive same-tool detection + forced text response)

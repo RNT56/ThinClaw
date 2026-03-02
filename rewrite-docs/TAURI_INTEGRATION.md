@@ -1,6 +1,6 @@
 # ThinClaw Tauri App — Integration Specification
 
-> **Date:** 2026-02-27 (final 2026-03-01) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
+> **Date:** 2026-02-27 (final 2026-03-02) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
 > **Architecture:** Hybrid API — spawn-and-return for agent turns, direct for queries
 > **Approach:** IronClaw as library crate, refactored to expose public API surface
 > **Companion doc:** `documentation/latest/ironclaw_library_roadmap.md` — IronClaw library-side roadmap
@@ -9,7 +9,7 @@
 
 ## Implementation Progress
 
-> Last updated: 2026-03-01 13:10 CET — **All 15 phases complete. Zero warnings, zero errors.** Post-integration work (InferenceRouter, Cloud Model Discovery, Cloud Storage A1–A3) also complete.
+> Last updated: 2026-03-02 08:00 CET — **All 15 phases complete. Zero warnings, zero errors.** Post-integration work (InferenceRouter, Cloud Model Discovery, Cloud Storage A1–A3) also complete.
 
 | Phase | Status | Key Outcome |
 |---|---|---|
@@ -889,7 +889,7 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 ### 12.4 Build Health
 
 **Build:** 0 warnings, 0 errors (both default and `--features voice`)
-**Tests:** 1,686 passing, 0 failures, 1 ignored
+**Tests:** 1,699 passing, 0 failures, 1 ignored
 
 ### 12.5 Integration Status — Both Sides Complete
 
@@ -904,12 +904,17 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 - ✅ `AppComponents` includes `tool_bridge` and `session_approvals` fields
 - ✅ `build_all()` auto-registers bridged sensor tools when a bridge is present
 
-**Final wiring (2 lines to uncomment in Scrappy):**
+**Final wiring — CONFIRMED LIVE (2026-03-02):**
+
+Scrappy confirmed both lines were already uncommented and operational:
 ```rust
-// In ironclaw_bridge.rs:
-pub use ironclaw::hardware_bridge::ToolBridge;       // Replace local trait
-builder = builder.with_tool_bridge(tool_bridge.clone()); // Uncomment
+// In ironclaw_bridge.rs — ALREADY LIVE:
+pub use ironclaw::hardware_bridge::ToolBridge;       // ✅ Live
+builder = builder.with_tool_bridge(tool_bridge.clone()); // ✅ Live
 ```
+
+The 3-tier approval flow (ToolBridge → TauriToolBridge → ApprovalCard.tsx) is fully wired
+and operational. IronClaw's prior report claiming "2 lines to uncomment" was stale.
 
 | Item | Status |
 |------|--------|
@@ -931,6 +936,34 @@ Full end-to-end extended thinking / chain-of-thought reasoning:
 | **SSE/WS** | `SseEvent::ReasoningContent` variant, mapped in both SSE and WS |
 | **OpenAI-compat** | `reasoning_content` field on `OpenAiMessage` (skip_serializing_if = None) |
 | **Rig Adapter** | `thinking_config_to_params()` maps to Anthropic/OpenAI-specific JSON params |
+| **Tests** | 10 tests: 4 unit (thinking_config_to_params), 4 unit (extract_response reasoning), 2 integration (openai-compat API) |
 
+**Scrappy thinking UI mapping (2026-03-02):** `StatusUpdate::Thinking(text)` now maps to
+`AssistantInternal` in `ironclaw_types.rs` (was discarding the text). Rendered with 🧠 indicator.
+Collapsible reasoning UI is P3.
 
+### 12.7 Real Token-Level Streaming — Shipped (2026-03-02)
 
+Replaces the previous simulated word-chunking with native token-level streaming:
+
+| Layer | What |
+|-------|------|
+| **StreamChunk** | New enum: `Text`, `ReasoningDelta`, `ToolCall`, `ToolCallDelta`, `Done` |
+| **StreamChunkStream** | `Pin<Box<dyn Stream<Item = Result<StreamChunk, LlmError>> + Send>>` |
+| **LlmProvider trait** | `complete_stream()` + `complete_stream_with_tools()` with default simulated fallback |
+| **LlmProvider trait** | `supports_streaming()` flag for header reporting |
+| **RigAdapter** | Native streaming via rig's `CompletionModel::stream()` + `async_stream` |
+| **OpenAI-compat SSE** | `handle_streaming()` rewritten to consume `StreamChunkStream` |
+| **Header** | `x-ironclaw-streaming: native` (RigAdapter) or `simulated` (fallback) |
+| **Tests** | 3 unit tests: text-only, reasoning+tools, empty content |
+
+**Impact for Scrappy:** The `/v1/chat/completions` endpoint now delivers per-token SSE chunks
+instead of word-boundary simulated chunks. The SSE format is unchanged (standard OpenAI
+streaming protocol), so no Scrappy-side changes are needed.
+
+### 12.8 Scrappy Hot-Reload Fix (2026-03-02)
+
+Scrappy uncommented `refresh_secrets()` hot-reload (Enhancement 2B Tier 1) and fixed
+the API signature to `(secrets_store, "local_user")`. The enhancement table in
+`ironclaw_library_roadmap.md` has been updated by Scrappy: 2A/2B/2C all marked done,
+Extended Thinking row added.
