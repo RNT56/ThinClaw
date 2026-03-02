@@ -247,19 +247,20 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| Image processing (Sharp) | ✅ | ❌ | P2 | Resize, format convert |
+| Image processing (Sharp) | ✅ | 🚧 | P2 | `ImageExtractor`: dimension detection (PNG/GIF/WebP/JPEG), base64 data-URI, no resize/convert |
 | Configurable image resize dims | ✅ | ❌ | P2 | Per-agent dimension config |
 | Multiple images per tool call | ✅ | ❌ | P2 | Single tool invocation, multiple images |
-| Audio transcription | ✅ | ❌ | P2 | |
+| Audio transcription | ✅ | ✅ | P2 | `AudioExtractor`: Whisper HTTP endpoint, multipart upload |
 | Video support | ✅ | ❌ | P3 | |
-| PDF parsing | ✅ | ❌ | P2 | pdfjs-dist |
-| MIME detection | ✅ | ❌ | P2 | |
+| PDF parsing | ✅ | ✅ | P2 | `PdfExtractor`: BT/ET text blocks, readable-sequence fallback |
+| MIME detection | ✅ | ✅ | P2 | `media/types.rs`: extension + magic bytes detection |
 | Media caching | ✅ | ❌ | P3 | |
-| Vision model integration | ✅ | ❌ | P2 | Image understanding |
+| Vision model integration | ✅ | ✅ | P2 | `ImageExtractor::format_for_llm()` — base64 data-URI for multimodal LLMs |
 | TTS (Edge TTS) | ✅ | ❌ | P3 | Text-to-speech |
-| TTS (OpenAI) | ✅ | ❌ | P3 | |
+| TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
 | Incremental TTS playback | ✅ | ❌ | P3 | iOS progressive playback |
 | Sticker-to-image | ✅ | ❌ | P3 | Telegram stickers |
+| Media pipeline integration | ❌ | ✅ | - | `MediaPipeline` auto-wired into `process_user_input()` via `IncomingMessage.attachments` |
 
 ### Owner: _Unassigned_
 

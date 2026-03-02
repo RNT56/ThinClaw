@@ -2,7 +2,7 @@
 
 This document tracks all components needed to completely replace the OpenClaw Node.js sidecar and Swift companion apps with a unified Rust/Tauri application containing the IronClaw agent.
 
-> **Last updated:** 2026-03-02 08:00 CET · IronClaw v0.12.0
+> **Last updated:** 2026-03-02 09:30 CET · IronClaw v0.12.0
 
 ## 🏆 Milestone: ALL Tracked Items Complete
 
@@ -190,4 +190,4 @@ tui = ["ratatui", "crossterm"]
 | CLI / TUI / Wizard | 3 | 3 | ✅ 100% |
 | **Total** | **57** | **57** | **✅ 100%** |
 
-> **1,686 tests pass** with 0 failures, 0 clippy warnings.
+> **1,740 tests pass** with 0 failures, 0 clippy warnings.

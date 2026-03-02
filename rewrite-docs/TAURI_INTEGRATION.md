@@ -1,6 +1,6 @@
 # ThinClaw Tauri App — Integration Specification
 
-> **Date:** 2026-02-27 (final 2026-03-02) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
+> **Date:** 2026-02-27 (final 2026-03-02 09:30 CET) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
 > **Architecture:** Hybrid API — spawn-and-return for agent turns, direct for queries
 > **Approach:** IronClaw as library crate, refactored to expose public API surface
 > **Companion doc:** `documentation/latest/ironclaw_library_roadmap.md` — IronClaw library-side roadmap
