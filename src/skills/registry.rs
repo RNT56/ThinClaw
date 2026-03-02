@@ -62,6 +62,9 @@ pub enum SkillRegistryError {
 
     #[error("Failed to write skill file {path}: {reason}")]
     WriteError { path: String, reason: String },
+
+    #[error("Invalid skill name '{name}': {reason}")]
+    InvalidName { name: String, reason: String },
 }
 
 /// Registry of available skills.
@@ -307,13 +310,51 @@ impl SkillRegistry {
         skill_name: &str,
         normalized_content: &str,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        // ── Path traversal protection ──────────────────────────────────
+        // Reject skill names that could escape the target directory.
+        if skill_name.contains("..")
+            || skill_name.contains('/')
+            || skill_name.contains('\\')
+            || skill_name.contains('\0')
+            || skill_name.starts_with('.')
+            || skill_name.is_empty()
+        {
+            return Err(SkillRegistryError::InvalidName {
+                name: skill_name.to_string(),
+                reason: "skill name must not contain '..', '/', '\\', or start with '.'".into(),
+            });
+        }
+
         let skill_dir = user_dir.join(skill_name);
+
+        // Double-check: after join, the resolved path must still be inside user_dir.
+        // We create the dir first so canonicalize works, then verify containment.
         tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
             SkillRegistryError::WriteError {
                 path: skill_dir.display().to_string(),
                 reason: e.to_string(),
             }
         })?;
+
+        let canonical_parent = user_dir
+            .canonicalize()
+            .unwrap_or_else(|_| user_dir.to_path_buf());
+        let canonical_skill = skill_dir
+            .canonicalize()
+            .unwrap_or_else(|_| skill_dir.clone());
+
+        if !canonical_skill.starts_with(&canonical_parent) {
+            // Clean up the directory we just created
+            let _ = tokio::fs::remove_dir(&skill_dir).await;
+            return Err(SkillRegistryError::InvalidName {
+                name: skill_name.to_string(),
+                reason: format!(
+                    "resolved path '{}' escapes skills directory '{}'",
+                    canonical_skill.display(),
+                    canonical_parent.display()
+                ),
+            });
+        }
 
         let skill_path = skill_dir.join("SKILL.md");
         tokio::fs::write(&skill_path, normalized_content)
@@ -1061,5 +1102,62 @@ mod tests {
 
         let skill = registry.find_by_name("my-skill").unwrap();
         assert_eq!(skill.trust, SkillTrust::Trusted);
+    }
+
+    // ── Path traversal protection tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_install_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = SkillRegistry::prepare_install_to_disk(
+            dir.path(),
+            "../escape",
+            "---\nname: escape\n---\n\nEvil.\n",
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid skill name"));
+    }
+
+    #[tokio::test]
+    async fn test_install_rejects_slash_in_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = SkillRegistry::prepare_install_to_disk(
+            dir.path(),
+            "foo/bar",
+            "---\nname: foo-bar\n---\n\nTest.\n",
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_install_rejects_hidden_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = SkillRegistry::prepare_install_to_disk(
+            dir.path(),
+            ".hidden",
+            "---\nname: hidden\n---\n\nTest.\n",
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_install_rejects_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result =
+            SkillRegistry::prepare_install_to_disk(dir.path(), "", "---\nname: x\n---\n\nTest.\n")
+                .await;
+
+        assert!(result.is_err());
     }
 }

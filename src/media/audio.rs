@@ -29,9 +29,22 @@ pub struct AudioExtractor {
 impl AudioExtractor {
     /// Create a new audio extractor with default settings.
     pub fn new() -> Self {
+        let whisper_url = std::env::var("WHISPER_HTTP_ENDPOINT")
+            .unwrap_or_else(|_| DEFAULT_WHISPER_URL.to_string());
+
+        // Log a warning if the URL is not using HTTPS (defense-in-depth)
+        if !whisper_url.starts_with("https://")
+            && !whisper_url.starts_with("http://127.0.0.1")
+            && !whisper_url.starts_with("http://localhost")
+        {
+            tracing::warn!(
+                url = %whisper_url,
+                "Whisper endpoint is using plaintext HTTP to a non-loopback address; consider HTTPS"
+            );
+        }
+
         Self {
-            whisper_url: std::env::var("WHISPER_HTTP_ENDPOINT")
-                .unwrap_or_else(|_| DEFAULT_WHISPER_URL.to_string()),
+            whisper_url,
             max_audio_size: 25 * 1024 * 1024,
             model: "whisper-1".to_string(),
         }

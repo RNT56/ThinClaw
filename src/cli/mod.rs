@@ -13,9 +13,11 @@
 
 mod completion;
 mod config;
+mod cron;
 mod doctor;
 mod mcp;
 pub mod memory;
+mod message;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -26,12 +28,14 @@ mod tool;
 
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
+pub use cron::{CronCommand, run_cron_command};
 pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
 pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
+pub use message::{MessageCommand, run_message_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 #[cfg(feature = "repl")]
@@ -92,6 +96,10 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
+    /// Manage scheduled routines (cron jobs)
+    #[command(subcommand)]
+    Cron(CronCommand),
+
     /// Manage WASM tools
     #[command(subcommand)]
     Tool(ToolCommand),
@@ -107,6 +115,10 @@ pub enum Command {
     /// Query and manage workspace memory
     #[command(subcommand)]
     Memory(MemoryCommand),
+
+    /// Send messages to the agent
+    #[command(subcommand)]
+    Message(MessageCommand),
 
     /// DM pairing (approve inbound requests from unknown senders)
     #[command(subcommand)]
