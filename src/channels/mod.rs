@@ -29,6 +29,7 @@
 
 mod channel;
 mod discord;
+pub mod health_monitor;
 mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
@@ -44,6 +45,7 @@ mod webhook_server;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 pub use discord::DiscordChannel;
+pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::IMessageChannel;

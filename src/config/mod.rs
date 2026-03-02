@@ -21,6 +21,7 @@ mod secrets;
 mod skills;
 mod tunnel;
 mod wasm;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};

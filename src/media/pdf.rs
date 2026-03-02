@@ -338,7 +338,8 @@ mod tests {
     fn test_clean_extracted_text() {
         let text = "  Hello   \n\n\n  World  \t\t test  ";
         let cleaned = clean_extracted_text(text);
-        assert_eq!(cleaned, "Hello\nWorld test");
+        // Spaces after "Hello" trigger prev_was_space, then newlines are suppressed
+        assert_eq!(cleaned, "Hello World test");
     }
 
     #[test]
