@@ -259,6 +259,13 @@ impl Agent {
 
             // Call LLM with current context; force_text drops tools to guarantee a
             // text response on the final iteration.
+            let thinking = if self.config.thinking_enabled {
+                crate::llm::ThinkingConfig::Enabled {
+                    budget_tokens: self.config.thinking_budget_tokens,
+                }
+            } else {
+                crate::llm::ThinkingConfig::Disabled
+            };
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
@@ -268,6 +275,7 @@ impl Agent {
                     m
                 });
             context.force_text = force_text;
+            context.thinking = thinking;
 
             if force_text {
                 tracing::info!(
@@ -343,6 +351,24 @@ impl Agent {
                 output.usage.output_tokens,
                 call_cost,
             );
+
+            // Emit extended thinking content if present
+            if let Some(ref thinking_text) = output.thinking_content
+                && !thinking_text.is_empty()
+            {
+                tracing::debug!(
+                    thinking_len = thinking_text.len(),
+                    "LLM returned extended thinking content"
+                );
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking(format!("[Reasoning]\n{}", thinking_text)),
+                        &message.metadata,
+                    )
+                    .await;
+            }
 
             match output.result {
                 RespondResult::Text(text) => {
@@ -1119,6 +1145,8 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 max_context_messages: 200,
+                thinking_enabled: false,
+                thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
             },
             deps,

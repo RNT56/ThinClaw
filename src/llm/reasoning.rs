@@ -65,6 +65,9 @@ pub struct ReasoningContext {
     /// When true, force a text-only response (ignore available tools).
     /// Used by the agentic loop to guarantee termination near the iteration limit.
     pub force_text: bool,
+    /// Extended thinking configuration. When enabled, compatible providers
+    /// will return their chain-of-thought reasoning alongside the response.
+    pub thinking: crate::llm::ThinkingConfig,
 }
 
 impl ReasoningContext {
@@ -77,6 +80,7 @@ impl ReasoningContext {
             current_state: None,
             metadata: std::collections::HashMap::new(),
             force_text: false,
+            thinking: Default::default(),
         }
     }
 
@@ -198,6 +202,8 @@ pub enum RespondResult {
 pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
+    /// Extended thinking / chain-of-thought content from the LLM, if available.
+    pub thinking_content: Option<String>,
 }
 
 /// Reasoning engine for the agent.
@@ -480,10 +486,12 @@ Respond in JSON format:
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
                 .with_max_tokens(4096)
                 .with_temperature(0.7)
-                .with_tool_choice("auto");
+                .with_tool_choice("auto")
+                .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete_with_tools(request).await?;
+            let thinking = response.thinking_content.clone();
             let usage = TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
@@ -497,6 +505,7 @@ Respond in JSON format:
                         content: response.content.map(|c| clean_response(&c)),
                     },
                     usage,
+                    thinking_content: thinking,
                 });
             }
 
@@ -520,6 +529,7 @@ Respond in JSON format:
                         },
                     },
                     usage,
+                    thinking_content: thinking,
                 });
             }
 
@@ -541,12 +551,14 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                thinking_content: thinking,
             })
         } else {
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
-                .with_temperature(0.7);
+                .with_temperature(0.7)
+                .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
@@ -566,6 +578,7 @@ Respond in JSON format:
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
                 },
+                thinking_content: response.thinking_content,
             })
         }
     }

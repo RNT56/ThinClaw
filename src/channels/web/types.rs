@@ -95,6 +95,14 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    /// Extended thinking / chain-of-thought reasoning from the LLM.
+    /// Sent alongside the Response event when extended thinking is enabled.
+    #[serde(rename = "reasoning_content")]
+    ReasoningContent {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "tool_started")]
     ToolStarted {
         name: String,
@@ -685,6 +693,7 @@ impl WsServerMessage {
         let event_type = match event {
             SseEvent::Response { .. } => "response",
             SseEvent::Thinking { .. } => "thinking",
+            SseEvent::ReasoningContent { .. } => "reasoning_content",
             SseEvent::ToolStarted { .. } => "tool_started",
             SseEvent::ToolCompleted { .. } => "tool_completed",
             SseEvent::ToolResult { .. } => "tool_result",

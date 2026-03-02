@@ -59,6 +59,10 @@ pub struct OpenAiMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
+    /// Extended thinking (chain-of-thought) content from the model.
+    /// Non-standard extension; compatible clients will receive it, others ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,6 +518,7 @@ pub async fn chat_completions_handler(
                     name: None,
                     tool_call_id: None,
                     tool_calls: tool_calls_openai,
+                    reasoning_content: resp.thinking_content.clone(),
                 },
                 finish_reason: finish_reason_str(resp.finish_reason),
             }],
@@ -553,6 +558,7 @@ pub async fn chat_completions_handler(
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: resp.thinking_content,
                 },
                 finish_reason: finish_reason_str(resp.finish_reason),
             }],
@@ -891,6 +897,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             OpenAiMessage {
                 role: "user".to_string(),
@@ -898,6 +905,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         ];
 
@@ -917,6 +925,7 @@ mod tests {
             name: Some("calculator".to_string()),
             tool_call_id: Some("call_123".to_string()),
             tool_calls: None,
+            reasoning_content: None,
         }];
 
         let converted = convert_messages(&msgs).unwrap();
@@ -1018,6 +1027,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 finish_reason: "stop".to_string(),
             }],
@@ -1053,6 +1063,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }];
         let err = convert_messages(&msgs).unwrap_err();
         assert!(err.contains("messages[0]"));
@@ -1068,6 +1079,7 @@ mod tests {
             name: Some("calc".to_string()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }];
         let err = convert_messages(&msgs).unwrap_err();
         assert!(err.contains("tool_call_id"));
@@ -1079,6 +1091,7 @@ mod tests {
             name: None,
             tool_call_id: Some("call_1".to_string()),
             tool_calls: None,
+            reasoning_content: None,
         }];
         let err = convert_messages(&msgs).unwrap_err();
         assert!(err.contains("'name'"));

@@ -109,6 +109,7 @@ impl SseManager {
                 let event_type = match &event {
                     SseEvent::Response { .. } => "response",
                     SseEvent::Thinking { .. } => "thinking",
+                    SseEvent::ReasoningContent { .. } => "reasoning_content",
                     SseEvent::ToolStarted { .. } => "tool_started",
                     SseEvent::ToolCompleted { .. } => "tool_completed",
                     SseEvent::ToolResult { .. } => "tool_result",

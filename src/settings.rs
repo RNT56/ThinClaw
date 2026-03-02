@@ -348,6 +348,18 @@ pub struct AgentSettings {
     #[serde(default = "default_max_context_messages")]
     pub max_context_messages: usize,
 
+    /// Enable extended thinking / chain-of-thought reasoning (default: false).
+    /// When enabled, compatible providers (e.g. Anthropic) will return their
+    /// internal reasoning alongside the response.
+    #[serde(default)]
+    pub thinking_enabled: bool,
+
+    /// Token budget for extended thinking (default: 10000).
+    /// Only used when `thinking_enabled` is true. Controls how many tokens
+    /// the model may use for its internal reasoning.
+    #[serde(default = "default_thinking_budget_tokens")]
+    pub thinking_budget_tokens: u32,
+
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     #[serde(default)]
     pub auto_approve_tools: bool,
@@ -389,6 +401,10 @@ fn default_max_context_messages() -> usize {
     200
 }
 
+fn default_thinking_budget_tokens() -> u32 {
+    10_000
+}
+
 fn default_true() -> bool {
     true
 }
@@ -406,6 +422,8 @@ impl Default for AgentSettings {
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
             max_context_messages: default_max_context_messages(),
+            thinking_enabled: false,
+            thinking_budget_tokens: default_thinking_budget_tokens(),
             auto_approve_tools: false,
         }
     }

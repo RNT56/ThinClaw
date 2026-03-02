@@ -27,6 +27,10 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// Hard cap on context messages sent to the LLM. Default 200.
     pub max_context_messages: usize,
+    /// Enable extended thinking / chain-of-thought reasoning.
+    pub thinking_enabled: bool,
+    /// Token budget for extended thinking.
+    pub thinking_budget_tokens: u32,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
 }
@@ -70,6 +74,14 @@ impl AgentConfig {
             max_context_messages: parse_optional_env(
                 "AGENT_MAX_CONTEXT_MESSAGES",
                 settings.agent.max_context_messages,
+            )?,
+            thinking_enabled: parse_bool_env(
+                "AGENT_THINKING_ENABLED",
+                settings.agent.thinking_enabled,
+            )?,
+            thinking_budget_tokens: parse_optional_env(
+                "AGENT_THINKING_BUDGET_TOKENS",
+                settings.agent.thinking_budget_tokens,
             )?,
             auto_approve_tools: parse_bool_env(
                 "AGENT_AUTO_APPROVE_TOOLS",

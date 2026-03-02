@@ -11,7 +11,7 @@ use crate::error::LlmError;
 /// When enabled, models that support it (e.g. Anthropic Claude with extended
 /// thinking, OpenAI o-series with reasoning) will output their chain-of-thought
 /// reasoning alongside the final response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum ThinkingConfig {
     /// Thinking is disabled (default). The model responds normally.
     #[default]
@@ -189,6 +189,12 @@ impl CompletionRequest {
         self.thinking = ThinkingConfig::Enabled { budget_tokens };
         self
     }
+
+    /// Set the thinking configuration directly.
+    pub fn set_thinking(mut self, config: ThinkingConfig) -> Self {
+        self.thinking = config;
+        self
+    }
 }
 
 /// Response from a chat completion.
@@ -296,6 +302,12 @@ impl ToolCompletionRequest {
     /// Enable extended thinking with a token budget.
     pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
         self.thinking = ThinkingConfig::Enabled { budget_tokens };
+        self
+    }
+
+    /// Set the thinking configuration directly.
+    pub fn set_thinking(mut self, config: ThinkingConfig) -> Self {
+        self.thinking = config;
         self
     }
 }
