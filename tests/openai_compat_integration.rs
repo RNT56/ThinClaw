@@ -68,6 +68,7 @@ impl LlmProvider for MockLlmProvider {
 
         Ok(CompletionResponse {
             content: format!("Mock response to: {}", user_msg),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
@@ -93,6 +94,7 @@ impl LlmProvider for MockLlmProvider {
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
                 }],
+                thinking_content: None,
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
@@ -101,6 +103,7 @@ impl LlmProvider for MockLlmProvider {
             Ok(ToolCompletionResponse {
                 content: Some("No tools available".to_string()),
                 tool_calls: vec![],
+                thinking_content: None,
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
@@ -139,6 +142,7 @@ impl LlmProvider for FixedModelProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
             content: "fixed response".to_string(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
@@ -152,6 +156,7 @@ impl LlmProvider for FixedModelProvider {
         Ok(ToolCompletionResponse {
             content: Some("fixed response".to_string()),
             tool_calls: vec![],
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,

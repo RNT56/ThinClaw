@@ -484,6 +484,7 @@ mod tests {
     fn detects_uncertain_short_response() {
         let response = CompletionResponse {
             content: "I'm not sure.".to_string(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
@@ -495,6 +496,7 @@ mod tests {
     fn detects_empty_response_as_uncertain() {
         let response = CompletionResponse {
             content: "".to_string(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 0,
             finish_reason: crate::llm::FinishReason::Stop,
@@ -506,6 +508,7 @@ mod tests {
     fn short_confident_response_is_not_uncertain() {
         let response = CompletionResponse {
             content: "Yes.".to_string(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
@@ -518,6 +521,7 @@ mod tests {
         let response = CompletionResponse {
             content: "The answer is 42. This is a well-known constant from the Hitchhiker's Guide."
                 .to_string(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 20,
             finish_reason: crate::llm::FinishReason::Stop,

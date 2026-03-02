@@ -135,7 +135,7 @@ async fn check_llm_config() -> CheckResult {
                 CheckResult::Fail("LLM_BACKEND=tinfoil but TINFOIL_API_KEY not set".into())
             }
         }
-        "openai_compatible" | "compatible" | _ => {
+        _ => {
             if std::env::var("LLM_BASE_URL").is_ok() {
                 CheckResult::Pass(format!(
                     "OpenAI-compatible endpoint configured ({})",

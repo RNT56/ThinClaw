@@ -21,7 +21,8 @@ pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    Role, ThinkingConfig, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolResult,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,

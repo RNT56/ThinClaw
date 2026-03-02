@@ -147,6 +147,7 @@ async fn llm_complete(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         stop_sequences: req.stop_sequences,
+        thinking: crate::llm::ThinkingConfig::Disabled,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -175,6 +176,7 @@ async fn llm_complete_with_tools(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         tool_choice: req.tool_choice,
+        thinking: crate::llm::ThinkingConfig::Disabled,
         metadata: std::collections::HashMap::new(),
     };
 

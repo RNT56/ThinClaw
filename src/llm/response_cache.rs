@@ -243,6 +243,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            thinking: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -254,6 +255,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            thinking: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -381,6 +383,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            thinking: Default::default(),
             metadata: Default::default(),
         };
         cached.complete(third).await.unwrap();
@@ -400,6 +403,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             tool_choice: None,
+            thinking: Default::default(),
             metadata: Default::default(),
         };
 

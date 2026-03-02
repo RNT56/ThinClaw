@@ -23,7 +23,7 @@ use std::collections::HashSet;
 use crate::error::LlmError;
 use crate::llm::costs;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ThinkingConfig,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition as IronToolDefinition,
 };
@@ -313,20 +313,25 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
     }
 }
 
-/// Extract text and tool calls from a rig-core completion response.
+/// Extract text, tool calls, thinking content, and finish reason from a rig-core response.
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
-) -> (Option<String>, Vec<IronToolCall>, FinishReason) {
+) -> (
+    Option<String>,
+    Vec<IronToolCall>,
+    Option<String>,
+    FinishReason,
+) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<IronToolCall> = Vec::new();
+    let mut thinking_parts: Vec<String> = Vec::new();
 
     for content in choice.iter() {
         match content {
-            AssistantContent::Text(t)
-                if !t.text.is_empty() => {
-                    text_parts.push(t.text.clone());
-                }
+            AssistantContent::Text(t) if !t.text.is_empty() => {
+                text_parts.push(t.text.clone());
+            }
             AssistantContent::ToolCall(tc) => {
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
@@ -334,7 +339,14 @@ fn extract_response(
                     arguments: tc.function.arguments.clone(),
                 });
             }
-            // Reasoning and Image variants are not mapped to IronClaw types
+            AssistantContent::Reasoning(reasoning) => {
+                // Capture extended thinking / reasoning content
+                for part in &reasoning.reasoning {
+                    if !part.is_empty() {
+                        thinking_parts.push(part.clone());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -345,13 +357,19 @@ fn extract_response(
         Some(text_parts.join(""))
     };
 
+    let thinking = if thinking_parts.is_empty() {
+        None
+    } else {
+        Some(thinking_parts.join("\n"))
+    };
+
     let finish = if !tool_calls.is_empty() {
         FinishReason::ToolUse
     } else {
         FinishReason::Stop
     };
 
-    (text, tool_calls, finish)
+    (text, tool_calls, thinking, finish)
 }
 
 /// Saturate u64 to u32 for token counts.
@@ -367,6 +385,7 @@ fn build_rig_request(
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    additional_params: Option<JsonValue>,
 ) -> Result<RigRequest, LlmError> {
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
@@ -386,8 +405,25 @@ fn build_rig_request(
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
-        additional_params: None,
+        additional_params,
     })
+}
+
+/// Convert a ThinkingConfig into provider-specific additional_params JSON.
+///
+/// For Anthropic: `{ "thinking": { "type": "enabled", "budget_tokens": N } }`
+/// This is passed through rig-core's `additional_params` on the completion request,
+/// and the Anthropic provider implementation in rig maps it to the API correctly.
+fn thinking_config_to_params(config: &ThinkingConfig) -> Option<JsonValue> {
+    match config {
+        ThinkingConfig::Disabled => None,
+        ThinkingConfig::Enabled { budget_tokens } => Some(serde_json::json!({
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": budget_tokens
+            }
+        })),
+    }
 }
 
 #[async_trait]
@@ -418,6 +454,14 @@ where
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
+        let additional_params = thinking_config_to_params(&request.thinking);
+
+        if additional_params.is_some() {
+            tracing::info!(
+                model = %self.model_name,
+                "Extended thinking enabled for completion request"
+            );
+        }
 
         let rig_req = build_rig_request(
             preamble,
@@ -426,6 +470,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
+            additional_params,
         )?;
 
         let response =
@@ -437,10 +482,12 @@ where
                     reason: e.to_string(),
                 })?;
 
-        let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, _tool_calls, thinking, finish) =
+            extract_response(&response.choice, &response.usage);
 
         Ok(CompletionResponse {
             content: text.unwrap_or_default(),
+            thinking_content: thinking,
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
@@ -469,6 +516,15 @@ where
         let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
+        let additional_params = thinking_config_to_params(&request.thinking);
+
+        if additional_params.is_some() {
+            tracing::info!(
+                model = %self.model_name,
+                tools = known_tool_names.len(),
+                "Extended thinking enabled for tool completion request"
+            );
+        }
 
         let rig_req = build_rig_request(
             preamble,
@@ -477,6 +533,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
+            additional_params,
         )?;
 
         let response =
@@ -488,7 +545,8 @@ where
                     reason: e.to_string(),
                 })?;
 
-        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, mut tool_calls, thinking, finish) =
+            extract_response(&response.choice, &response.usage);
 
         // Normalize tool call names: some proxies prepend "proxy_" prefixes.
         for tc in &mut tool_calls {
@@ -506,6 +564,7 @@ where
         Ok(ToolCompletionResponse {
             content: text,
             tool_calls,
+            thinking_content: thinking,
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
@@ -692,7 +751,7 @@ mod tests {
     fn test_extract_response_text_only() {
         let content = OneOrMany::one(AssistantContent::text("Hello world"));
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, _thinking, finish) = extract_response(&content, &usage);
         assert_eq!(text, Some("Hello world".to_string()));
         assert!(calls.is_empty());
         assert_eq!(finish, FinishReason::Stop);
@@ -703,7 +762,7 @@ mod tests {
         let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
         let content = OneOrMany::one(tc);
         let usage = RigUsage::new();
-        let (text, calls, finish) = extract_response(&content, &usage);
+        let (text, calls, _thinking, finish) = extract_response(&content, &usage);
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");

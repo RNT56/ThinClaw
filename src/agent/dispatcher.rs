@@ -1062,6 +1062,7 @@ mod tests {
         ) -> Result<CompletionResponse, crate::error::LlmError> {
             Ok(CompletionResponse {
                 content: "ok".to_string(),
+                thinking_content: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
@@ -1075,6 +1076,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
                 tool_calls: Vec::new(),
+                thinking_content: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,

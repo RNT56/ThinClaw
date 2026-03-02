@@ -165,6 +165,7 @@ impl LlmProvider for StubLlm {
         }
         Ok(CompletionResponse {
             content: self.response.clone(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
@@ -182,6 +183,7 @@ impl LlmProvider for StubLlm {
         Ok(ToolCompletionResponse {
             content: Some(self.response.clone()),
             tool_calls: Vec::new(),
+            thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,

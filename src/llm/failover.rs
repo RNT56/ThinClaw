@@ -401,6 +401,7 @@ mod tests {
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Ok(CompletionResponse {
                     content: content.to_string(),
+                    thinking_content: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
@@ -408,6 +409,7 @@ mod tests {
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
                     tool_calls: vec![],
+                    thinking_content: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
@@ -789,6 +791,7 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: format!("{} ok", self.name),
+                thinking_content: None,
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
@@ -814,6 +817,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: Some(format!("{} ok", self.name)),
                 tool_calls: vec![],
+                thinking_content: None,
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,

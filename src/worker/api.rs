@@ -224,6 +224,7 @@ impl WorkerHttpClient {
 
         Ok(CompletionResponse {
             content: proxy_resp.content,
+            thinking_content: None, // Worker proxy doesn't forward thinking yet
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
@@ -251,6 +252,7 @@ impl WorkerHttpClient {
         Ok(ToolCompletionResponse {
             content: proxy_resp.content,
             tool_calls: proxy_resp.tool_calls,
+            thinking_content: None, // Worker proxy doesn't forward thinking yet
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),

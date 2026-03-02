@@ -6,6 +6,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 
+/// Configuration for extended thinking / reasoning mode.
+///
+/// When enabled, models that support it (e.g. Anthropic Claude with extended
+/// thinking, OpenAI o-series with reasoning) will output their chain-of-thought
+/// reasoning alongside the final response.
+#[derive(Debug, Clone, Default)]
+pub enum ThinkingConfig {
+    /// Thinking is disabled (default). The model responds normally.
+    #[default]
+    Disabled,
+    /// Thinking is enabled with a token budget for the reasoning phase.
+    /// The model may use up to `budget_tokens` for its internal reasoning
+    /// before producing the final response.
+    Enabled {
+        /// Maximum tokens the model can use for thinking/reasoning.
+        /// Anthropic: maps to `thinking.budget_tokens`.
+        /// OpenAI: maps to `reasoning_effort` (low/medium/high scaled).
+        budget_tokens: u32,
+    },
+}
+
 /// Role in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -125,6 +146,8 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
+    /// Extended thinking / reasoning configuration.
+    pub thinking: ThinkingConfig,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -138,6 +161,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            thinking: ThinkingConfig::Disabled,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -159,12 +183,20 @@ impl CompletionRequest {
         self.temperature = Some(temperature);
         self
     }
+
+    /// Enable extended thinking with a token budget.
+    pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
+        self.thinking = ThinkingConfig::Enabled { budget_tokens };
+        self
+    }
 }
 
 /// Response from a chat completion.
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub content: String,
+    /// Extended thinking / reasoning content, if the model produced it.
+    pub thinking_content: Option<String>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
@@ -216,6 +248,8 @@ pub struct ToolCompletionRequest {
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
     pub tool_choice: Option<String>,
+    /// Extended thinking / reasoning configuration.
+    pub thinking: ThinkingConfig,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -230,6 +264,7 @@ impl ToolCompletionRequest {
             max_tokens: None,
             temperature: None,
             tool_choice: None,
+            thinking: ThinkingConfig::Disabled,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -257,6 +292,12 @@ impl ToolCompletionRequest {
         self.tool_choice = Some(choice.into());
         self
     }
+
+    /// Enable extended thinking with a token budget.
+    pub fn with_thinking(mut self, budget_tokens: u32) -> Self {
+        self.thinking = ThinkingConfig::Enabled { budget_tokens };
+        self
+    }
 }
 
 /// Response from a completion with potential tool calls.
@@ -266,6 +307,8 @@ pub struct ToolCompletionResponse {
     pub content: Option<String>,
     /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
+    /// Extended thinking / reasoning content, if the model produced it.
+    pub thinking_content: Option<String>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
