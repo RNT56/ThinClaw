@@ -30,6 +30,10 @@ pub struct HttpTool {
     client: Client,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Optional domain allowlist. When set (non-empty), only URLs whose host
+    /// matches one of the glob patterns are permitted. Patterns are
+    /// case-insensitive. Example: `*.openai.com, api.github.com`.
+    url_allowlist: Vec<String>,
 }
 
 impl HttpTool {
@@ -41,10 +45,22 @@ impl HttpTool {
             .build()
             .expect("Failed to create HTTP client");
 
+        // Parse URL allowlist from environment
+        let url_allowlist: Vec<String> = std::env::var("HTTP_URL_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !url_allowlist.is_empty() {
+            tracing::info!(patterns = ?url_allowlist, "HTTP URL allowlist active");
+        }
+
         Self {
             client,
             credential_registry: None,
             secrets_store: None,
+            url_allowlist,
         }
     }
 
@@ -60,7 +76,7 @@ impl HttpTool {
     }
 }
 
-fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
+fn validate_url(url: &str, url_allowlist: &[String]) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 
@@ -79,6 +95,24 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         return Err(ToolError::NotAuthorized(
             "localhost is not allowed".to_string(),
         ));
+    }
+
+    // Domain allowlist check
+    if !url_allowlist.is_empty() {
+        let allowed = url_allowlist.iter().any(|pattern| {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                // Glob: *.example.com matches example.com and sub.example.com
+                host_lower == suffix || host_lower.ends_with(&format!(".{}", suffix))
+            } else {
+                host_lower == *pattern
+            }
+        });
+        if !allowed {
+            return Err(ToolError::NotAuthorized(format!(
+                "host '{}' is not in the URL allowlist",
+                host
+            )));
+        }
     }
 
     // Check literal IP addresses
@@ -125,8 +159,33 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
                 || v6.is_unicast_link_local()
                 || v6.is_multicast()
                 || v6.is_unspecified()
+                // Block IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+                // These can bypass IPv4 checks when the kernel maps them back.
+                || is_ipv4_mapped_v6_private(v6)
         }
     }
+}
+
+/// Check if an IPv6 address is an IPv4-mapped address (::ffff:x.x.x.x)
+/// pointing to a private/local IPv4 range. Attackers use these to bypass
+/// IPv4 SSRF checks.
+fn is_ipv4_mapped_v6_private(v6: &std::net::Ipv6Addr) -> bool {
+    let segments = v6.segments();
+    // IPv4-mapped: first 5 segments are 0, 6th is 0xffff
+    if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+        let v4 = std::net::Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            (segments[6] & 0xff) as u8,
+            (segments[7] >> 8) as u8,
+            (segments[7] & 0xff) as u8,
+        );
+        return v4.is_private()
+            || v4.is_loopback()
+            || v4.is_link_local()
+            || v4.is_unspecified()
+            || v4 == std::net::Ipv4Addr::new(169, 254, 169, 254);
+    }
+    false
 }
 
 #[cfg(feature = "html-to-markdown")]
@@ -252,7 +311,7 @@ impl Tool for HttpTool {
         let method = require_str(&params, "method")?;
 
         let url = require_str(&params, "url")?;
-        let mut parsed_url = validate_url(url)?;
+        let mut parsed_url = validate_url(url, &self.url_allowlist)?;
 
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
@@ -475,37 +534,37 @@ mod tests {
 
     #[test]
     fn test_validate_url_rejects_http() {
-        let err = validate_url("http://example.com").unwrap_err();
+        let err = validate_url("http://example.com", &[]).unwrap_err();
         assert!(err.to_string().contains("https"));
     }
 
     #[test]
     fn test_validate_url_rejects_localhost() {
-        let err = validate_url("https://localhost:8080").unwrap_err();
+        let err = validate_url("https://localhost:8080", &[]).unwrap_err();
         assert!(err.to_string().contains("localhost"));
     }
 
     #[test]
     fn test_validate_url_accepts_https_public() {
-        let url = validate_url("https://example.com").unwrap();
+        let url = validate_url("https://example.com", &[]).unwrap();
         assert_eq!(url.host_str(), Some("example.com"));
     }
 
     #[test]
     fn test_validate_url_rejects_private_ip_literal() {
-        let err = validate_url("https://192.168.1.1/api").unwrap_err();
+        let err = validate_url("https://192.168.1.1/api", &[]).unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
     #[test]
     fn test_validate_url_rejects_loopback_ip() {
-        let err = validate_url("https://127.0.0.1/api").unwrap_err();
+        let err = validate_url("https://127.0.0.1/api", &[]).unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
     #[test]
     fn test_validate_url_rejects_link_local() {
-        let err = validate_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
+        let err = validate_url("https://169.254.169.254/latest/meta-data/", &[]).unwrap_err();
         assert!(err.to_string().contains("private"));
     }
 
@@ -802,5 +861,87 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    // ── URL Allowlist tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_allowlist_blocks_non_listed_host() {
+        let allowlist = vec!["api.openai.com".to_string()];
+        let err = validate_url("https://evil.com/data", &allowlist).unwrap_err();
+        assert!(err.to_string().contains("not in the URL allowlist"));
+    }
+
+    #[test]
+    fn test_allowlist_allows_listed_host() {
+        let allowlist = vec!["api.openai.com".to_string()];
+        let url = validate_url("https://api.openai.com/v1/models", &allowlist).unwrap();
+        assert_eq!(url.host_str(), Some("api.openai.com"));
+    }
+
+    #[test]
+    fn test_allowlist_glob_matches_subdomain() {
+        let allowlist = vec!["*.example.com".to_string()];
+        let url = validate_url("https://api.example.com/path", &allowlist).unwrap();
+        assert_eq!(url.host_str(), Some("api.example.com"));
+
+        // Root domain also matches
+        let url2 = validate_url("https://example.com/path", &allowlist).unwrap();
+        assert_eq!(url2.host_str(), Some("example.com"));
+    }
+
+    #[test]
+    fn test_allowlist_glob_rejects_different_domain() {
+        let allowlist = vec!["*.openai.com".to_string()];
+        let err = validate_url("https://evil-openai.com/phish", &allowlist).unwrap_err();
+        assert!(err.to_string().contains("not in the URL allowlist"));
+    }
+
+    #[test]
+    fn test_empty_allowlist_allows_all() {
+        let url = validate_url("https://anything.com/path", &[]).unwrap();
+        assert_eq!(url.host_str(), Some("anything.com"));
+    }
+
+    // ── IPv4-mapped IPv6 bypass blocking tests ─────────────────────────
+
+    #[test]
+    fn test_ipv4_mapped_v6_loopback_blocked() {
+        // ::ffff:127.0.0.1 — IPv4-mapped loopback
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&ip),
+            "IPv4-mapped loopback should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_mapped_v6_private_blocked() {
+        // ::ffff:192.168.1.1 — IPv4-mapped private
+        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&ip),
+            "IPv4-mapped private should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_mapped_v6_public_allowed() {
+        // ::ffff:8.8.8.8 — IPv4-mapped public
+        let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+        assert!(
+            !is_disallowed_ip(&ip),
+            "IPv4-mapped public should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_mapped_v6_metadata_blocked() {
+        // ::ffff:169.254.169.254 — IPv4-mapped cloud metadata
+        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(
+            is_disallowed_ip(&ip),
+            "IPv4-mapped cloud metadata should be blocked"
+        );
     }
 }

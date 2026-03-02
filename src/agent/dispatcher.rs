@@ -259,12 +259,16 @@ impl Agent {
 
             // Call LLM with current context; force_text drops tools to guarantee a
             // text response on the final iteration.
-            let thinking = if self.config.thinking_enabled {
-                crate::llm::ThinkingConfig::Enabled {
-                    budget_tokens: self.config.thinking_budget_tokens,
+            let thinking = {
+                let model_name = self.llm().active_model_name();
+                let (enabled, budget) = self.config.resolve_thinking_for_model(&model_name);
+                if enabled {
+                    crate::llm::ThinkingConfig::Enabled {
+                        budget_tokens: budget,
+                    }
+                } else {
+                    crate::llm::ThinkingConfig::Disabled
                 }
-            } else {
-                crate::llm::ThinkingConfig::Disabled
             };
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
@@ -1148,6 +1152,7 @@ mod tests {
                 thinking_enabled: false,
                 thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
+                model_thinking_overrides: std::collections::HashMap::new(),
             },
             deps,
             Arc::new(ChannelManager::new()),

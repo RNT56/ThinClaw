@@ -1,8 +1,16 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::config::helpers::{parse_bool_env, parse_option_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
+
+/// Per-model thinking override.
+#[derive(Debug, Clone)]
+pub struct ModelThinkingOverride {
+    pub enabled: bool,
+    pub budget_tokens: Option<u32>,
+}
 
 /// Agent behavior configuration.
 #[derive(Debug, Clone)]
@@ -33,6 +41,10 @@ pub struct AgentConfig {
     pub thinking_budget_tokens: u32,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// Per-model thinking overrides. Key is a model name (exact or prefix match).
+    /// When a model matches, its override takes precedence over global thinking settings.
+    /// Format of env var: `MODEL_THINKING_OVERRIDE=model1:true:16000,model2:false`
+    pub model_thinking_overrides: HashMap<String, ModelThinkingOverride>,
 }
 
 impl AgentConfig {
@@ -87,6 +99,86 @@ impl AgentConfig {
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
             )?,
+            model_thinking_overrides: parse_model_thinking_overrides()?,
         })
     }
+
+    /// Resolve thinking config for a specific model.
+    ///
+    /// Checks `model_thinking_overrides` first (exact match, then prefix match),
+    /// falling back to global `thinking_enabled` / `thinking_budget_tokens`.
+    pub fn resolve_thinking_for_model(&self, model_name: &str) -> (bool, u32) {
+        // Exact match first
+        if let Some(ovr) = self.model_thinking_overrides.get(model_name) {
+            return (
+                ovr.enabled,
+                ovr.budget_tokens.unwrap_or(self.thinking_budget_tokens),
+            );
+        }
+        // Prefix match (e.g. "claude-sonnet" matches "claude-sonnet-4-20250514")
+        for (pattern, ovr) in &self.model_thinking_overrides {
+            if model_name.starts_with(pattern.as_str()) {
+                return (
+                    ovr.enabled,
+                    ovr.budget_tokens.unwrap_or(self.thinking_budget_tokens),
+                );
+            }
+        }
+        // Global default
+        (self.thinking_enabled, self.thinking_budget_tokens)
+    }
+}
+
+/// Parse `MODEL_THINKING_OVERRIDE` env var into a map.
+///
+/// Format: `model1:true:16000,model2:false` (budget_tokens is optional)
+fn parse_model_thinking_overrides() -> Result<HashMap<String, ModelThinkingOverride>, ConfigError> {
+    let val = match optional_env("MODEL_THINKING_OVERRIDE")? {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(HashMap::new()),
+    };
+
+    let mut map = HashMap::new();
+    for entry in val.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = entry.splitn(3, ':').collect();
+        if parts.len() < 2 {
+            return Err(ConfigError::InvalidValue {
+                key: "MODEL_THINKING_OVERRIDE".to_string(),
+                message: format!("malformed entry '{}', expected model:bool[:budget]", entry),
+            });
+        }
+        let model = parts[0].trim().to_string();
+        let enabled = parts[1]
+            .trim()
+            .parse::<bool>()
+            .map_err(|_| ConfigError::InvalidValue {
+                key: "MODEL_THINKING_OVERRIDE".to_string(),
+                message: format!("invalid bool '{}' in entry '{}'", parts[1], entry),
+            })?;
+        let budget_tokens = if parts.len() == 3 {
+            Some(
+                parts[2]
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| ConfigError::InvalidValue {
+                        key: "MODEL_THINKING_OVERRIDE".to_string(),
+                        message: format!("invalid budget '{}' in entry '{}'", parts[2], entry),
+                    })?,
+            )
+        } else {
+            None
+        };
+        map.insert(
+            model,
+            ModelThinkingOverride {
+                enabled,
+                budget_tokens,
+            },
+        );
+    }
+    Ok(map)
 }
