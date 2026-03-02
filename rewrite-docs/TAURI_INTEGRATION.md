@@ -1,6 +1,6 @@
 # ThinClaw Tauri App — Integration Specification
 
-> **Date:** 2026-02-27 (final 2026-03-02 09:30 CET) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
+> **Date:** 2026-02-27 (final 2026-03-02 12:00 CET) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)
 > **Architecture:** Hybrid API — spawn-and-return for agent turns, direct for queries
 > **Approach:** IronClaw as library crate, refactored to expose public API surface
 > **Companion doc:** `documentation/latest/ironclaw_library_roadmap.md` — IronClaw library-side roadmap
@@ -1010,3 +1010,31 @@ All three new subsystems are now wired into the agent's lifecycle:
 **Impact for Scrappy:** Scrappy can now attach files via `IncomingMessage.attachments`
 and they will be automatically processed before the LLM call. Channel health is
 monitored continuously. Config file changes are detected and logged.
+
+### 12.12 Security Hardening & Intelligence — Shipped (2026-03-02)
+
+Sprint 1 improvements to security and agent intelligence:
+
+| Feature | File(s) | What |
+|---------|---------|------|
+| **Per-model thinking override** | `config/agent.rs`, `agent/dispatcher.rs` | `MODEL_THINKING_OVERRIDE` env var: comma-separated `model:bool[:budget]` entries. `resolve_thinking_for_model()` does exact → prefix match. Dispatcher uses it per-turn. |
+| **URL domain allowlist** | `tools/builtin/http.rs` | `HTTP_URL_ALLOWLIST` env var: comma-separated domain globs (e.g. `*.openai.com,api.github.com`). When set, only matching hosts pass `validate_url()`. |
+| **IPv4-mapped IPv6 SSRF block** | `tools/builtin/http.rs` | `is_ipv4_mapped_v6_private()` detects `::ffff:x.x.x.x` pointing to private/loopback/metadata ranges. Closes transition bypass vector. |
+| **Tests** | All above | 12 new tests: 5 allowlist, 4 IPv6 bypass, 3 model thinking override |
+
+**Environment variables added:**
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `MODEL_THINKING_OVERRIDE` | `model:bool[:budget],...` | *(empty)* | Per-model thinking overrides, comma-separated |
+| `HTTP_URL_ALLOWLIST` | `glob,...` | *(empty)* | Domain allowlist for HTTP tool, comma-separated |
+
+**Already-done items confirmed:**
+
+- **Session pruning** — `prune_stale_sessions()` runs every 10min, configurable via `SESSION_IDLE_TIMEOUT_SECS`
+- **Webhook trigger** — `POST /api/routines/:id/trigger` already wired in gateway
+- **Loopback-first** — Gateway defaults to `127.0.0.1`; HTTP webhook uses `0.0.0.0` for inbound
+
+**Impact for Scrappy:** The URL allowlist can be set via Scrappy's settings UI to restrict
+which external services the agent can reach. Per-model thinking lets users configure e.g.
+`claude-sonnet:true:16000,gpt-4o:false` to enable thinking only for specific models.
