@@ -184,7 +184,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skill routing blocks | ✅ | 🚧 | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks |
 | Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
 | Thinking modes (low/med/high) | ✅ | ✅ | `ThinkingConfig` enum (Disabled/Enabled with budget_tokens), configurable via `thinking_enabled` + `thinking_budget_tokens` settings |
-| Per-model thinkingDefault override | ✅ | 🚧 | Global thinking config done; per-model override not yet in config |
+| Per-model thinkingDefault override | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var: exact+prefix model match with per-model budget |
 | Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
 | Tool-level streaming | ✅ | ✅ | `StreamChunk::ToolCall` + `StreamChunk::ToolCallDelta` via `complete_stream_with_tools()` |
 | Z.AI tool_stream | ✅ | 🚧 | Tool call deltas work; full Z.AI streaming protocol not yet wired |
@@ -199,7 +199,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ❌ | Single tool call, multiple images |
-| URL allowlist (web_search/fetch) | ✅ | ❌ | Restrict web tool targets |
+| URL allowlist (web_search/fetch) | ✅ | ✅ | `HTTP_URL_ALLOWLIST` env var — comma-separated domain globs |
 | suppressToolErrors config | ✅ | ❌ | Hide tool errors from user |
 | Intent-first tool display | ✅ | ❌ | Details and exec summaries |
 | Transcript file size in status | ✅ | ❌ | Show size in session status |
@@ -236,7 +236,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cooldown management | ✅ | ✅ | Lock-free per-provider cooldown in `FailoverProvider` |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
-| Per-model thinkingDefault | ✅ | 🚧 | Global thinking config done; per-model not yet |
+| Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
 | 1M context beta header | ✅ | ❌ | Anthropic extended context support |
 
 ### Owner: _Unassigned_
@@ -447,9 +447,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Exec approvals | ✅ | ✅ | TUI overlay |
 | TLS 1.3 minimum | ✅ | ✅ | reqwest rustls |
 | SSRF protection | ✅ | ✅ | WASM allowlist |
-| SSRF IPv6 transition bypass block | ✅ | ❌ | Block IPv4-mapped IPv6 bypasses |
+| SSRF IPv6 transition bypass block | ✅ | ✅ | IPv4-mapped IPv6 (::ffff:x.x.x.x) detection in `is_ipv4_mapped_v6_private()` |
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
-| Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
+| Loopback-first | ✅ | ✅ | Gateway binds 127.0.0.1 by default, HTTP webhook binds 0.0.0.0 for inbound |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
