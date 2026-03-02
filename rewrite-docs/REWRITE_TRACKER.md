@@ -190,4 +190,4 @@ tui = ["ratatui", "crossterm"]
 | CLI / TUI / Wizard | 3 | 3 | ✅ 100% |
 | **Total** | **57** | **57** | **✅ 100%** |
 
-> **1,752 tests pass** with 0 failures, 0 clippy warnings.
+> **1,755 tests pass** with 0 failures, 0 clippy warnings.

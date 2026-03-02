@@ -448,7 +448,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | TLS 1.3 minimum | ✅ | ✅ | reqwest rustls |
 | SSRF protection | ✅ | ✅ | WASM allowlist |
 | SSRF IPv6 transition bypass block | ✅ | ✅ | IPv4-mapped IPv6 (::ffff:x.x.x.x) detection in `is_ipv4_mapped_v6_private()` |
-| Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
+| Cron webhook SSRF guard | ✅ | ✅ | N/A — webhooks are inbound-only; no outbound delivery to user URLs |
 | Loopback-first | ✅ | ✅ | Gateway binds 127.0.0.1 by default, HTTP webhook binds 0.0.0.0 for inbound |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |

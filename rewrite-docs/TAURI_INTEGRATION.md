@@ -1038,3 +1038,20 @@ Sprint 1 improvements to security and agent intelligence:
 **Impact for Scrappy:** The URL allowlist can be set via Scrappy's settings UI to restrict
 which external services the agent can reach. Per-model thinking lets users configure e.g.
 `claude-sonnet:true:16000,gpt-4o:false` to enable thinking only for specific models.
+
+### 12.13 Sprint 1 Completion — CLI & Security (2026-03-02)
+
+Final Sprint 1 batch: CLI subcommands and security hardening.
+
+| Feature | File(s) | What |
+|---------|---------|------|
+| **`ironclaw cron` CLI** | `cli/cron.rs`, `cli/mod.rs`, `main.rs` | `list\|add\|remove\|trigger\|runs` subcommands. Table/JSON output. Resolve by UUID or name. Validates cron schedules. |
+| **`ironclaw message send` CLI** | `cli/message.rs`, `cli/mod.rs`, `main.rs` | Send messages via gateway REST API. Auto-detects URL from env. Auth token support. |
+| **Skill path traversal protection** | `skills/registry.rs` | `prepare_install_to_disk()` rejects `..`, `/`, `\`, leading `.`, empty names. Canonicalize + containment double-check. |
+| **Media URL defense-in-depth** | `media/audio.rs` | Warns when Whisper endpoint is non-loopback HTTP |
+| **Webhook SSRF: N/A** | *(none)* | Webhooks are inbound-only — no outbound delivery to user URLs |
+| **Tests** | All above | +5 tests (4 path traversal, 1 CLI schema) |
+
+**Impact for Scrappy:** Both `cron` and `message` CLIs are operational for headless/server
+deployments. The path traversal protection prevents skill installs from writing outside
+`~/.ironclaw/skills/`, hardening the skill marketplace pipeline.
