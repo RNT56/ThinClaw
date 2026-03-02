@@ -334,6 +334,38 @@ pub struct ModelMetadata {
     pub context_length: Option<u32>,
 }
 
+/// A single chunk in a streaming LLM response.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// A text delta (token or word boundary chunk).
+    Text(String),
+    /// Extended thinking / reasoning delta.
+    ReasoningDelta(String),
+    /// A complete tool call (accumulated from deltas).
+    ToolCall(ToolCall),
+    /// A partial tool call delta — name or argument fragment.
+    ToolCallDelta {
+        /// The tool call index (0-based) within this response.
+        index: u32,
+        /// Tool call ID (may be empty for deltas after the first).
+        id: String,
+        /// Name delta (first delta typically carries the full name).
+        name: Option<String>,
+        /// Arguments delta (JSON string fragment).
+        arguments_delta: Option<String>,
+    },
+    /// Stream is complete — carries final token counts.
+    Done {
+        input_tokens: u32,
+        output_tokens: u32,
+        finish_reason: FinishReason,
+    },
+}
+
+/// Type alias for a boxed stream of StreamChunks.
+pub type StreamChunkStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamChunk, LlmError>> + Send>>;
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -351,6 +383,49 @@ pub trait LlmProvider: Send + Sync {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
+
+    /// Stream a chat completion token-by-token.
+    ///
+    /// Default implementation calls `complete()` and simulates streaming
+    /// by splitting the response into word-boundary chunks.
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content,
+            resp.thinking_content,
+            vec![],
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+        ))
+    }
+
+    /// Stream a tool completion token-by-token.
+    ///
+    /// Default implementation calls `complete_with_tools()` and simulates streaming.
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete_with_tools(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content.unwrap_or_default(),
+            resp.thinking_content,
+            resp.tool_calls,
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+        ))
+    }
+
+    /// Whether this provider supports native token-level streaming.
+    /// Used by the OpenAI-compat endpoint to set the `x-ironclaw-streaming` header.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
 
     /// List available models from the provider.
     /// Default implementation returns empty list.
@@ -397,6 +472,113 @@ pub trait LlmProvider: Send + Sync {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
+    }
+}
+
+/// Simulate a streaming response by word-chunking a completed response.
+///
+/// Used as the default implementation for providers that don't support
+/// native token-level streaming.
+fn simulate_stream_from_response(
+    content: String,
+    thinking_content: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    input_tokens: u32,
+    output_tokens: u32,
+    finish_reason: FinishReason,
+) -> StreamChunkStream {
+    Box::pin(futures::stream::unfold(
+        SimState::new(
+            content,
+            thinking_content,
+            tool_calls,
+            input_tokens,
+            output_tokens,
+            finish_reason,
+        ),
+        |mut state| async move {
+            // Phase 1: Emit reasoning deltas
+            if let Some(ref mut thinking) = state.thinking {
+                if !thinking.is_empty() {
+                    let chunk = std::mem::take(thinking);
+                    state.thinking = None;
+                    return Some((Ok(StreamChunk::ReasoningDelta(chunk)), state));
+                }
+                state.thinking = None;
+            }
+
+            // Phase 2: Emit content word-by-word
+            if !state.words.is_empty() {
+                let word = state.words.remove(0);
+                return Some((Ok(StreamChunk::Text(word)), state));
+            }
+
+            // Phase 3: Emit tool calls
+            if !state.tool_calls.is_empty() {
+                let tc = state.tool_calls.remove(0);
+                return Some((Ok(StreamChunk::ToolCall(tc)), state));
+            }
+
+            // Phase 4: Done
+            if !state.done {
+                state.done = true;
+                return Some((
+                    Ok(StreamChunk::Done {
+                        input_tokens: state.input_tokens,
+                        output_tokens: state.output_tokens,
+                        finish_reason: state.finish_reason,
+                    }),
+                    state,
+                ));
+            }
+
+            None
+        },
+    ))
+}
+
+/// Internal state for the simulated stream.
+struct SimState {
+    thinking: Option<String>,
+    words: Vec<String>,
+    tool_calls: Vec<ToolCall>,
+    input_tokens: u32,
+    output_tokens: u32,
+    finish_reason: FinishReason,
+    done: bool,
+}
+
+impl SimState {
+    fn new(
+        content: String,
+        thinking: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        input_tokens: u32,
+        output_tokens: u32,
+        finish_reason: FinishReason,
+    ) -> Self {
+        // Split content into word-boundary chunks, keeping ~20 char groups
+        let mut words = Vec::new();
+        let mut buf = String::new();
+        for word in content.split_inclusive(char::is_whitespace) {
+            buf.push_str(word);
+            if buf.len() >= 20 {
+                words.push(std::mem::take(&mut buf));
+            }
+        }
+        if !buf.is_empty() {
+            words.push(buf);
+        }
+
+        Self {
+            thinking,
+            words,
+            tool_calls,
+            input_tokens,
+            output_tokens,
+            finish_reason,
+            done: false,
+        }
     }
 }
 

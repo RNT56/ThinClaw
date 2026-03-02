@@ -573,34 +573,32 @@ pub async fn chat_completions_handler(
     }
 }
 
-/// Handle streaming responses.
+/// Handle streaming responses using real token-level streaming.
 ///
-/// The current `LlmProvider` returns complete responses (no streaming method).
-/// We execute the LLM call first, then simulate chunked delivery by splitting
-/// the response into word-boundary chunks. This ensures LLM failures return
-/// proper HTTP errors instead of SSE error events. True token streaming can be
-/// added later by extending `LlmProvider` with a `complete_stream()` method.
+/// Calls `LlmProvider::complete_stream()` or `complete_stream_with_tools()` to
+/// obtain a `StreamChunkStream`, then translates each `StreamChunk` into an
+/// SSE event matching the OpenAI Chat Completions streaming format.
+///
+/// Providers that support native streaming will deliver per-token chunks;
+/// those that don't will use the default simulated word-chunking fallback.
 async fn handle_streaming(
     llm: Arc<dyn crate::llm::LlmProvider>,
     req: OpenAiChatRequest,
     has_tools: bool,
 ) -> Result<Response, (StatusCode, Json<OpenAiErrorResponse>)> {
+    use crate::llm::StreamChunk;
+    use futures::StreamExt;
+
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
     let requested_model = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
+    let is_native = llm.supports_streaming();
 
-    // Execute the LLM call before starting the SSE stream.
-    // Since streaming is simulated (LlmProvider returns complete responses),
-    // this lets us return proper HTTP errors on failure.
-    enum LlmResult {
-        Simple(crate::llm::CompletionResponse),
-        WithTools(crate::llm::ToolCompletionResponse),
-    }
-
-    let llm_result = if has_tools {
+    // Obtain the streaming chunk stream from the provider.
+    let chunk_stream = if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
         let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
@@ -614,11 +612,9 @@ async fn handle_streaming(
         {
             tool_req = tool_req.with_tool_choice(choice);
         }
-        LlmResult::WithTools(
-            llm.complete_with_tools(tool_req)
-                .await
-                .map_err(map_llm_error)?,
-        )
+        llm.complete_stream_with_tools(tool_req)
+            .await
+            .map_err(map_llm_error)?
     } else {
         let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
         if let Some(t) = req.temperature {
@@ -630,14 +626,17 @@ async fn handle_streaming(
         if let Some(ref stop_val) = req.stop {
             comp_req.stop_sequences = parse_stop(stop_val);
         }
-        LlmResult::Simple(llm.complete(comp_req).await.map_err(map_llm_error)?)
+        llm.complete_stream(comp_req).await.map_err(map_llm_error)?
     };
+
     let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
-    // LLM succeeded — emit the response as SSE chunks
+    // Build the SSE stream from StreamChunks
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
     tokio::spawn(async move {
+        let mut chunk_stream = std::pin::pin!(chunk_stream);
+
         // Send initial chunk with role
         let role_chunk = OpenAiChatChunk {
             id: id.clone(),
@@ -657,31 +656,47 @@ async fn handle_streaming(
         let data = serde_json::to_string(&role_chunk).unwrap_or_default();
         let _ = tx.send(Ok(Event::default().data(data))).await;
 
-        match llm_result {
-            LlmResult::WithTools(resp) => {
-                // Stream content chunks
-                if let Some(ref content) = resp.content {
-                    stream_content_chunks(&tx, &id, created, &model_name, content).await;
+        // Stream each chunk
+        while let Some(chunk_result) = chunk_stream.next().await {
+            match chunk_result {
+                Ok(StreamChunk::Text(text)) => {
+                    let chunk = OpenAiChatChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk",
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![OpenAiChunkChoice {
+                            index: 0,
+                            delta: OpenAiDelta {
+                                role: None,
+                                content: Some(text),
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                    };
+                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                        break;
+                    }
                 }
-
-                // Stream tool calls
-                if !resp.tool_calls.is_empty() {
-                    let deltas: Vec<OpenAiToolCallDelta> = resp
-                        .tool_calls
-                        .iter()
-                        .enumerate()
-                        .map(|(i, tc)| OpenAiToolCallDelta {
-                            index: i as u32,
-                            id: Some(tc.id.clone()),
-                            call_type: Some("function".to_string()),
-                            function: Some(OpenAiToolCallFunctionDelta {
-                                name: Some(tc.name.clone()),
-                                arguments: Some(
-                                    serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                                ),
-                            }),
-                        })
-                        .collect();
+                Ok(StreamChunk::ReasoningDelta(_reasoning)) => {
+                    // Reasoning deltas are not part of the standard OpenAI streaming
+                    // format; silently consume them for now.
+                    // Future: could emit as custom SSE event or extension field.
+                }
+                Ok(StreamChunk::ToolCall(tc)) => {
+                    let deltas = vec![OpenAiToolCallDelta {
+                        index: 0,
+                        id: Some(tc.id),
+                        call_type: Some("function".to_string()),
+                        function: Some(OpenAiToolCallFunctionDelta {
+                            name: Some(tc.name),
+                            arguments: Some(
+                                serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                            ),
+                        }),
+                    }];
 
                     let chunk = OpenAiChatChunk {
                         id: id.clone(),
@@ -699,15 +714,60 @@ async fn handle_streaming(
                         }],
                     };
                     let data = serde_json::to_string(&chunk).unwrap_or_default();
-                    let _ = tx.send(Ok(Event::default().data(data))).await;
+                    if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                        break;
+                    }
                 }
+                Ok(StreamChunk::ToolCallDelta {
+                    index,
+                    id: tc_id,
+                    name,
+                    arguments_delta,
+                }) => {
+                    let delta = OpenAiToolCallDelta {
+                        index,
+                        id: if tc_id.is_empty() { None } else { Some(tc_id) },
+                        call_type: if name.is_some() {
+                            Some("function".to_string())
+                        } else {
+                            None
+                        },
+                        function: Some(OpenAiToolCallFunctionDelta {
+                            name,
+                            arguments: arguments_delta,
+                        }),
+                    };
 
-                // Final chunk with finish_reason
-                send_finish_chunk(&tx, &id, created, &model_name, resp.finish_reason).await;
-            }
-            LlmResult::Simple(resp) => {
-                stream_content_chunks(&tx, &id, created, &model_name, &resp.content).await;
-                send_finish_chunk(&tx, &id, created, &model_name, resp.finish_reason).await;
+                    let chunk = OpenAiChatChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk",
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![OpenAiChunkChoice {
+                            index: 0,
+                            delta: OpenAiDelta {
+                                role: None,
+                                content: None,
+                                tool_calls: Some(vec![delta]),
+                            },
+                            finish_reason: None,
+                        }],
+                    };
+                    let data = serde_json::to_string(&chunk).unwrap_or_default();
+                    if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(StreamChunk::Done { finish_reason, .. }) => {
+                    send_finish_chunk(&tx, &id, created, &model_name, finish_reason).await;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Stream error during SSE delivery");
+                    // Send an error as a finish reason
+                    send_finish_chunk(&tx, &id, created, &model_name, FinishReason::Stop).await;
+                    break;
+                }
             }
         }
 
@@ -720,66 +780,9 @@ async fn handle_streaming(
     let mut response = sse.into_response();
     response.headers_mut().insert(
         "x-ironclaw-streaming",
-        HeaderValue::from_static("simulated"),
+        HeaderValue::from_static(if is_native { "native" } else { "simulated" }),
     );
     Ok(response)
-}
-
-/// Split content into word-boundary chunks and send as SSE events.
-async fn stream_content_chunks(
-    tx: &tokio::sync::mpsc::Sender<Result<Event, std::convert::Infallible>>,
-    id: &str,
-    created: u64,
-    model: &str,
-    content: &str,
-) {
-    // Split on word boundaries, grouping ~20 chars per chunk
-    let mut buf = String::new();
-    for word in content.split_inclusive(char::is_whitespace) {
-        buf.push_str(word);
-        if buf.len() >= 20 {
-            let chunk = OpenAiChatChunk {
-                id: id.to_string(),
-                object: "chat.completion.chunk",
-                created,
-                model: model.to_string(),
-                choices: vec![OpenAiChunkChoice {
-                    index: 0,
-                    delta: OpenAiDelta {
-                        role: None,
-                        content: Some(buf.clone()),
-                        tool_calls: None,
-                    },
-                    finish_reason: None,
-                }],
-            };
-            let data = serde_json::to_string(&chunk).unwrap_or_default();
-            if tx.send(Ok(Event::default().data(data))).await.is_err() {
-                return;
-            }
-            buf.clear();
-        }
-    }
-    // Flush remaining
-    if !buf.is_empty() {
-        let chunk = OpenAiChatChunk {
-            id: id.to_string(),
-            object: "chat.completion.chunk",
-            created,
-            model: model.to_string(),
-            choices: vec![OpenAiChunkChoice {
-                index: 0,
-                delta: OpenAiDelta {
-                    role: None,
-                    content: Some(buf),
-                    tool_calls: None,
-                },
-                finish_reason: None,
-            }],
-        };
-        let data = serde_json::to_string(&chunk).unwrap_or_default();
-        let _ = tx.send(Ok(Event::default().data(data))).await;
-    }
 }
 
 async fn send_finish_chunk(

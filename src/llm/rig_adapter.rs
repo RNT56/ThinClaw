@@ -23,9 +23,9 @@ use std::collections::HashSet;
 use crate::error::LlmError;
 use crate::llm::costs;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ThinkingConfig,
-    ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, StreamChunk,
+    StreamChunkStream, ThinkingConfig, ToolCall as IronToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition as IronToolDefinition,
 };
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
@@ -589,6 +589,80 @@ where
                 .to_string(),
         })
     }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+        let additional_params = thinking_config_to_params(&request.thinking);
+
+        let rig_req = build_rig_request(
+            preamble,
+            history,
+            Vec::new(),
+            None,
+            request.temperature,
+            request.max_tokens,
+            additional_params,
+        )?;
+
+        let streaming_resp =
+            self.model
+                .stream(rig_req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: self.model_name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+        Ok(rig_stream_to_chunks(streaming_resp))
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let known_tool_names: HashSet<String> =
+            request.tools.iter().map(|t| t.name.clone()).collect();
+
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+        let tools = convert_tools(&request.tools);
+        let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
+        let additional_params = thinking_config_to_params(&request.thinking);
+
+        let rig_req = build_rig_request(
+            preamble,
+            history,
+            tools,
+            tool_choice,
+            request.temperature,
+            request.max_tokens,
+            additional_params,
+        )?;
+
+        let streaming_resp =
+            self.model
+                .stream(rig_req)
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: self.model_name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+        Ok(rig_stream_to_chunks_with_normalization(
+            streaming_resp,
+            known_tool_names,
+        ))
+    }
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -608,6 +682,111 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
     }
 
     name.to_string()
+}
+
+/// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream.
+fn rig_stream_to_chunks<R>(
+    streaming_resp: rig::streaming::StreamingCompletionResponse<R>,
+) -> StreamChunkStream
+where
+    R: Clone
+        + Unpin
+        + Send
+        + Sync
+        + 'static
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + rig::completion::GetTokenUsage,
+{
+    rig_stream_to_chunks_with_normalization(streaming_resp, HashSet::new())
+}
+
+/// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream,
+/// normalizing tool call names against known tools.
+fn rig_stream_to_chunks_with_normalization<R>(
+    mut streaming_resp: rig::streaming::StreamingCompletionResponse<R>,
+    known_tool_names: HashSet<String>,
+) -> StreamChunkStream
+where
+    R: Clone
+        + Unpin
+        + Send
+        + Sync
+        + 'static
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + rig::completion::GetTokenUsage,
+{
+    use futures::StreamExt;
+    use rig::streaming::{StreamedAssistantContent, ToolCallDeltaContent};
+
+    let stream = async_stream::stream! {
+        while let Some(chunk_result) = streaming_resp.next().await {
+            match chunk_result {
+                Ok(StreamedAssistantContent::Text(text)) => {
+                    if !text.text.is_empty() {
+                        yield Ok(StreamChunk::Text(text.text));
+                    }
+                }
+                Ok(StreamedAssistantContent::Reasoning(reasoning)) => {
+                    let combined: String = reasoning.reasoning.join("");
+                    if !combined.is_empty() {
+                        yield Ok(StreamChunk::ReasoningDelta(combined));
+                    }
+                }
+                Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
+                    if !reasoning.is_empty() {
+                        yield Ok(StreamChunk::ReasoningDelta(reasoning));
+                    }
+                }
+                Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                    let mut name = tool_call.function.name;
+                    if !known_tool_names.is_empty() {
+                        name = normalize_tool_name(&name, &known_tool_names);
+                    }
+                    yield Ok(StreamChunk::ToolCall(IronToolCall {
+                        id: tool_call.id,
+                        name,
+                        arguments: tool_call.function.arguments,
+                    }));
+                }
+                Ok(StreamedAssistantContent::ToolCallDelta { id, content, .. }) => {
+                    let (name_delta, args_delta) = match content {
+                        ToolCallDeltaContent::Name(n) => (Some(n), None),
+                        ToolCallDeltaContent::Delta(d) => (None, Some(d)),
+                    };
+                    yield Ok(StreamChunk::ToolCallDelta {
+                        index: 0,
+                        id,
+                        name: name_delta,
+                        arguments_delta: args_delta,
+                    });
+                }
+                Ok(StreamedAssistantContent::Final(resp)) => {
+                    // Extract usage if available
+                    let usage = resp.token_usage().unwrap_or_default();
+                    yield Ok(StreamChunk::Done {
+                        input_tokens: saturate_u32(usage.input_tokens),
+                        output_tokens: saturate_u32(usage.output_tokens),
+                        finish_reason: FinishReason::Stop,
+                    });
+                }
+                Err(e) => {
+                    if e.to_string().contains("aborted") {
+                        // Stream was cancelled
+                        break;
+                    }
+                    yield Err(LlmError::RequestFailed {
+                        provider: "rig-stream".to_string(),
+                        reason: e.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+    };
+
+    Box::pin(stream)
 }
 
 #[cfg(test)]
