@@ -819,7 +819,7 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 
 ## 12. Post-Integration Status & Cross-Project Coordination
 
-> Last updated: 2026-03-01 16:10 CET — **Integration complete on both sides. Scrappy can uncomment `with_tool_bridge()` to wire sensor tools.**
+> Last updated: 2026-03-02 07:10 CET — **Integration complete on both sides. Extended thinking shipped end-to-end. Scrappy can uncomment `with_tool_bridge()` to wire sensor tools.**
 
 ### 12.1 IronClaw Internal Tasks — All Complete
 
@@ -889,7 +889,7 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 ### 12.4 Build Health
 
 **Build:** 0 warnings, 0 errors (both default and `--features voice`)
-**Tests:** 1,705 passing, 0 failures, 1 ignored
+**Tests:** 1,686 passing, 0 failures, 1 ignored
 
 ### 12.5 Integration Status — Both Sides Complete
 
@@ -916,6 +916,21 @@ builder = builder.with_tool_bridge(tool_bridge.clone()); // Uncomment
 | Sherpa-ONNX keyword spotting | Deferred — scaffold exists, no ML model |
 | X3: Skill Deps | Deferred — no skills use cross-crate deps |
 | WS RPC for remote mode | Deferred — internal trait handles desktop |
+
+### 12.6 Extended Thinking — Shipped (2026-03-02)
+
+Full end-to-end extended thinking / chain-of-thought reasoning:
+
+| Layer | What |
+|-------|------|
+| **Settings** | `thinking_enabled` + `thinking_budget_tokens` in `AgentSettings` with env var overrides (`AGENT_THINKING_ENABLED`, `AGENT_THINKING_BUDGET_TOKENS`) |
+| **Config** | `AgentConfig` resolves thinking settings from `Settings` + env vars |
+| **Core** | `ThinkingConfig` enum (Disabled/Enabled), `Copy` derive, builder methods on `CompletionRequest` / `ToolCompletionRequest` |
+| **Reasoning** | `thinking` field on `ReasoningContext`, `thinking_content` on `RespondOutput`, both LLM paths wired |
+| **Dispatcher** | Reads config → builds `ThinkingConfig` → emits thinking as `StatusUpdate::Thinking` |
+| **SSE/WS** | `SseEvent::ReasoningContent` variant, mapped in both SSE and WS |
+| **OpenAI-compat** | `reasoning_content` field on `OpenAiMessage` (skip_serializing_if = None) |
+| **Rig Adapter** | `thinking_config_to_params()` maps to Anthropic/OpenAI-specific JSON params |
 
 
 

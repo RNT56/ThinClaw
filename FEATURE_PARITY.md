@@ -183,8 +183,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | 🚧 | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks |
 | Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
-| Thinking modes (low/med/high) | ✅ | ❌ | Configurable reasoning depth |
-| Per-model thinkingDefault override | ✅ | ❌ | Override thinking level per model |
+| Thinking modes (low/med/high) | ✅ | ✅ | `ThinkingConfig` enum (Disabled/Enabled with budget_tokens), configurable via `thinking_enabled` + `thinking_budget_tokens` settings |
+| Per-model thinkingDefault override | ✅ | 🚧 | Global thinking config done; per-model override not yet in config |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
@@ -236,7 +236,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cooldown management | ✅ | ✅ | Lock-free per-provider cooldown in `FailoverProvider` |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
-| Per-model thinkingDefault | ✅ | ❌ | Override thinking level per model in config |
+| Per-model thinkingDefault | ✅ | 🚧 | Global thinking config done; per-model not yet |
 | 1M context beta header | ✅ | ❌ | Anthropic extended context support |
 
 ### Owner: _Unassigned_
@@ -521,6 +521,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Shell env scrubbing + command injection detection
 - ✅ Tinfoil private inference provider
 - ✅ OpenAI-compatible / OpenRouter provider support
+- ✅ Extended thinking (ThinkingConfig, reasoning extraction, SSE/WS/OpenAI-compat exposure)
 
 ### P1 - High Priority
 - ❌ Slack channel (real implementation)
