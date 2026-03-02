@@ -738,3 +738,108 @@ async fn test_chat_completions_body_too_large() {
 
     assert_eq!(resp.status(), 413);
 }
+
+// ---------------------------------------------------------------------------
+// Thinking / reasoning_content tests
+// ---------------------------------------------------------------------------
+
+/// Mock LLM that returns thinking_content alongside its response.
+struct ThinkingMockProvider;
+
+#[async_trait]
+impl LlmProvider for ThinkingMockProvider {
+    fn model_name(&self) -> &str {
+        "thinking-model"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            content: "The answer is 42.".to_string(),
+            thinking_content: Some("Let me think step by step...".to_string()),
+            input_tokens: 20,
+            output_tokens: 10,
+            finish_reason: FinishReason::Stop,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _req: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Ok(ToolCompletionResponse {
+            content: Some("Tool result".to_string()),
+            tool_calls: vec![],
+            thinking_content: Some("Reasoning about tools...".to_string()),
+            input_tokens: 15,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_chat_completions_reasoning_content_in_response() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(ThinkingMockProvider);
+    let (addr, _state) = start_test_server_with_provider(provider).await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "thinking-model",
+            "messages": [
+                {"role": "user", "content": "What is the meaning of life?"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // The main content should be present
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
+    assert_eq!(content, "The answer is 42.");
+
+    // reasoning_content should be present
+    let reasoning = body["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .expect("reasoning_content should be present in response");
+    assert_eq!(reasoning, "Let me think step by step...");
+}
+
+#[tokio::test]
+async fn test_chat_completions_no_reasoning_content_when_absent() {
+    // Use the default mock which returns thinking_content: None
+    let (addr, _state, _mock_state) = start_test_server().await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "mock-model-v1",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // reasoning_content should be absent (skip_serializing_if = None)
+    assert!(
+        body["choices"][0]["message"]["reasoning_content"].is_null(),
+        "reasoning_content should be null/absent when thinking is disabled, got: {}",
+        body["choices"][0]["message"]
+    );
+}

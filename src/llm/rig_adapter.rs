@@ -613,6 +613,7 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig::message::Reasoning;
 
     #[test]
     fn test_convert_messages_system_to_preamble() {
@@ -926,5 +927,100 @@ mod tests {
     fn test_normalize_tool_name_unknown_passthrough() {
         let known = HashSet::from(["echo".to_string()]);
         assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
+    }
+
+    // -- thinking_config_to_params tests --
+
+    #[test]
+    fn test_thinking_config_disabled_returns_none() {
+        let config = ThinkingConfig::Disabled;
+        assert!(thinking_config_to_params(&config).is_none());
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_returns_anthropic_params() {
+        let config = ThinkingConfig::Enabled {
+            budget_tokens: 8192,
+        };
+        let params = thinking_config_to_params(&config).expect("should return Some");
+        let thinking = params.get("thinking").expect("should have 'thinking' key");
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 8192);
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_zero_budget() {
+        let config = ThinkingConfig::Enabled { budget_tokens: 0 };
+        let params = thinking_config_to_params(&config).expect("should return Some");
+        assert_eq!(params["thinking"]["budget_tokens"], 0);
+    }
+
+    #[test]
+    fn test_thinking_config_enabled_large_budget() {
+        let config = ThinkingConfig::Enabled {
+            budget_tokens: 100_000,
+        };
+        let params = thinking_config_to_params(&config).expect("should return Some");
+        assert_eq!(params["thinking"]["budget_tokens"], 100_000);
+    }
+
+    // -- extract_response reasoning content tests --
+
+    #[test]
+    fn test_extract_response_with_reasoning() {
+        let reasoning = AssistantContent::Reasoning(Reasoning::multi(vec![
+            "Step 1: analyze".to_string(),
+            "Step 2: conclude".to_string(),
+        ]));
+        let text = AssistantContent::text("The answer is 42.");
+
+        let content = OneOrMany::many(vec![reasoning, text]).unwrap();
+        let usage = RigUsage::new();
+        let (text, calls, thinking, finish) = extract_response(&content, &usage);
+
+        assert_eq!(text, Some("The answer is 42.".to_string()));
+        assert!(calls.is_empty());
+        assert_eq!(
+            thinking,
+            Some("Step 1: analyze\nStep 2: conclude".to_string())
+        );
+        assert_eq!(finish, FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_extract_response_no_reasoning() {
+        let content = OneOrMany::one(AssistantContent::text("Just text."));
+        let usage = RigUsage::new();
+        let (_text, _calls, thinking, _finish) = extract_response(&content, &usage);
+        assert!(thinking.is_none());
+    }
+
+    #[test]
+    fn test_extract_response_reasoning_with_tool_calls() {
+        let reasoning = AssistantContent::Reasoning(Reasoning::new("I should search for this."));
+        let tc = AssistantContent::tool_call("call_1", "search", serde_json::json!({"q": "test"}));
+
+        let content = OneOrMany::many(vec![reasoning, tc]).unwrap();
+        let usage = RigUsage::new();
+        let (text, calls, thinking, finish) = extract_response(&content, &usage);
+
+        assert!(text.is_none());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(thinking, Some("I should search for this.".to_string()));
+        assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_extract_response_empty_reasoning_ignored() {
+        let reasoning =
+            AssistantContent::Reasoning(Reasoning::multi(vec!["".to_string(), "".to_string()]));
+        let text = AssistantContent::text("Result");
+
+        let content = OneOrMany::many(vec![reasoning, text]).unwrap();
+        let usage = RigUsage::new();
+        let (_, _, thinking, _) = extract_response(&content, &usage);
+
+        // Empty reasoning strings should be filtered, resulting in None
+        assert!(thinking.is_none());
     }
 }
