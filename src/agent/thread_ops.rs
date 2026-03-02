@@ -118,6 +118,48 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
+        // ── Media attachment extraction ──────────────────────────────
+        // If the message carries binary attachments (images, PDFs, audio),
+        // extract text from each and prepend to the user content so the LLM
+        // sees the extracted information alongside the user's message.
+        let content = if !message.attachments.is_empty() {
+            let pipeline = crate::media::MediaPipeline::new();
+            let mut media_context = String::new();
+            for (idx, attachment) in message.attachments.iter().enumerate() {
+                match pipeline.extract(attachment) {
+                    Ok(extracted) => {
+                        if !media_context.is_empty() {
+                            media_context.push_str("\n\n");
+                        }
+                        media_context.push_str(&extracted);
+                        tracing::debug!(
+                            attachment = idx,
+                            media_type = %attachment.media_type,
+                            size = attachment.size(),
+                            "Extracted text from media attachment"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            attachment = idx,
+                            media_type = %attachment.media_type,
+                            error = %e,
+                            "Failed to extract text from media attachment"
+                        );
+                    }
+                }
+            }
+
+            if media_context.is_empty() {
+                content.to_string()
+            } else {
+                format!("{}\n\n{}", media_context, content)
+            }
+        } else {
+            content.to_string()
+        };
+        let content = content.as_str();
+
         // First check thread state without holding lock during I/O
         let thread_state = {
             let sess = session.lock().await;

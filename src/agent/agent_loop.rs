@@ -246,6 +246,7 @@ pub struct BackgroundTasksHandle {
     pruning_handle: tokio::task::JoinHandle<()>,
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
+    health_monitor: Option<Arc<crate::channels::ChannelHealthMonitor>>,
 }
 
 impl BackgroundTasksHandle {
@@ -502,11 +503,21 @@ impl Agent {
             None
         };
 
+        // ── Channel health monitor ──────────────────────────────────
+        let health_monitor = {
+            let monitor = Arc::new(crate::channels::ChannelHealthMonitor::with_defaults(
+                self.channels.clone(),
+            ));
+            monitor.start().await;
+            Some(monitor)
+        };
+
         BackgroundTasksHandle {
             repair_handle,
             pruning_handle,
             heartbeat_handle,
             routine_handle,
+            health_monitor,
         }
     }
 
@@ -525,6 +536,9 @@ impl Agent {
         if let Some((cron_handle, _)) = handle.routine_handle {
             cron_handle.abort();
         }
+        if let Some(ref monitor) = handle.health_monitor {
+            monitor.stop().await;
+        }
         self.scheduler.stop_all().await;
     }
 
@@ -540,6 +554,24 @@ impl Agent {
 
         // Start background tasks
         let bg = self.start_background_tasks().await;
+
+        // ── Config file watcher ─────────────────────────────────────
+        let config_watcher = {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            let watcher = crate::config::watcher::ConfigWatcher::new(&toml_path);
+            let mut rx = watcher.subscribe();
+            // Spawn a task that logs config change events
+            tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    tracing::info!(
+                        path = %event.path.display(),
+                        "Configuration file changed — restart or hot-reload to apply"
+                    );
+                }
+            });
+            watcher.start().await;
+            Some(watcher)
+        };
 
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = bg.routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
@@ -648,6 +680,9 @@ impl Agent {
         }
 
         // Cleanup
+        if let Some(ref watcher) = config_watcher {
+            watcher.stop().await;
+        }
         self.shutdown_background(bg).await;
         self.channels.shutdown_all().await?;
 
