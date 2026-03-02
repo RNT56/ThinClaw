@@ -701,4 +701,135 @@ mod tests {
         assert_eq!(messages[3].role, Role::User); // call_2 orphaned
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
     }
+
+    #[tokio::test]
+    async fn test_simulated_stream_text_only() {
+        use futures::StreamExt;
+
+        let stream = simulate_stream_from_response(
+            "Hello world, this is a test of streaming.".to_string(),
+            None,
+            vec![],
+            10,
+            20,
+            FinishReason::Stop,
+        );
+
+        let mut chunks: Vec<StreamChunk> = Vec::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(Ok(chunk)) = stream.next().await {
+            chunks.push(chunk);
+        }
+
+        // Should have text chunks + Done
+        assert!(
+            chunks.len() >= 2,
+            "Expected at least 2 chunks, got {}",
+            chunks.len()
+        );
+
+        // All but last should be Text
+        for chunk in &chunks[..chunks.len() - 1] {
+            assert!(
+                matches!(chunk, StreamChunk::Text(_)),
+                "Expected Text, got {:?}",
+                chunk
+            );
+        }
+
+        // Last should be Done
+        match &chunks[chunks.len() - 1] {
+            StreamChunk::Done {
+                input_tokens,
+                output_tokens,
+                finish_reason,
+            } => {
+                assert_eq!(*input_tokens, 10);
+                assert_eq!(*output_tokens, 20);
+                assert_eq!(*finish_reason, FinishReason::Stop);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+
+        // Concatenated text should equal original
+        let all_text: String = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(all_text, "Hello world, this is a test of streaming.");
+    }
+
+    #[tokio::test]
+    async fn test_simulated_stream_with_reasoning_and_tools() {
+        use futures::StreamExt;
+
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "rust"}),
+        };
+        let stream = simulate_stream_from_response(
+            "Result text".to_string(),
+            Some("I need to think about this.".to_string()),
+            vec![tc],
+            5,
+            15,
+            FinishReason::ToolUse,
+        );
+
+        let mut chunks: Vec<StreamChunk> = Vec::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(Ok(chunk)) = stream.next().await {
+            chunks.push(chunk);
+        }
+
+        // Should be: ReasoningDelta, Text, ToolCall, Done (4 chunks)
+        assert!(
+            chunks.len() >= 4,
+            "Expected at least 4 chunks, got {}",
+            chunks.len()
+        );
+
+        // First should be reasoning
+        assert!(
+            matches!(&chunks[0], StreamChunk::ReasoningDelta(r) if r == "I need to think about this."),
+            "Expected ReasoningDelta first, got {:?}",
+            chunks[0]
+        );
+
+        // Tool call should appear before Done
+        let has_tool_call = chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::ToolCall(tc) if tc.name == "search"));
+        assert!(has_tool_call, "Expected ToolCall chunk");
+
+        // Done should carry ToolUse
+        match chunks.last().unwrap() {
+            StreamChunk::Done { finish_reason, .. } => {
+                assert_eq!(*finish_reason, FinishReason::ToolUse);
+            }
+            other => panic!("Expected Done last, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_simulated_stream_empty_content() {
+        use futures::StreamExt;
+
+        let stream =
+            simulate_stream_from_response(String::new(), None, vec![], 0, 0, FinishReason::Stop);
+
+        let mut chunks: Vec<StreamChunk> = Vec::new();
+        let mut stream = std::pin::pin!(stream);
+        while let Some(Ok(chunk)) = stream.next().await {
+            chunks.push(chunk);
+        }
+
+        // Just Done
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Done { .. }));
+    }
 }
