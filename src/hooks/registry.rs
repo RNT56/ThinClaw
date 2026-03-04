@@ -6,6 +6,16 @@ use tokio::sync::RwLock;
 
 use crate::hooks::hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome};
 
+/// Serializable information about a registered hook.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HookInfo {
+    pub name: String,
+    pub hook_points: Vec<String>,
+    pub failure_mode: String,
+    pub timeout_ms: u64,
+    pub priority: u32,
+}
+
 /// A registered hook with its priority.
 struct HookEntry {
     hook: Arc<dyn Hook>,
@@ -70,6 +80,26 @@ impl HookRegistry {
     pub async fn list(&self) -> Vec<String> {
         let hooks = self.hooks.read().await;
         hooks.iter().map(|e| e.hook.name().to_string()).collect()
+    }
+
+    /// List all registered hooks with detailed information.
+    pub async fn list_with_details(&self) -> Vec<HookInfo> {
+        let hooks = self.hooks.read().await;
+        hooks
+            .iter()
+            .map(|e| HookInfo {
+                name: e.hook.name().to_string(),
+                hook_points: e
+                    .hook
+                    .hook_points()
+                    .iter()
+                    .map(|p| p.as_str().to_string())
+                    .collect(),
+                failure_mode: format!("{:?}", e.hook.failure_mode()),
+                timeout_ms: e.hook.timeout().as_millis() as u64,
+                priority: e.priority,
+            })
+            .collect()
     }
 
     /// Run all hooks matching the event's hook point.
@@ -171,7 +201,9 @@ impl Default for HookRegistry {
 /// Extract the primary content string from a hook event.
 fn extract_content(event: &HookEvent) -> String {
     match event {
-        HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => content.clone(),
+        HookEvent::Inbound { content, .. }
+        | HookEvent::Outbound { content, .. }
+        | HookEvent::MessageWrite { content, .. } => content.clone(),
         HookEvent::ToolCall { parameters, .. } => {
             serde_json::to_string(parameters).unwrap_or_default()
         }
@@ -179,6 +211,12 @@ fn extract_content(event: &HookEvent) -> String {
         HookEvent::SessionStart { session_id, .. } | HookEvent::SessionEnd { session_id, .. } => {
             session_id.clone()
         }
+        HookEvent::AgentStart { model, provider } => {
+            format!("{}:{}", provider, model)
+        }
+        HookEvent::LlmInput { user_message, .. } => user_message.clone(),
+        HookEvent::LlmOutput { content, .. } => content.clone(),
+        HookEvent::TranscribeAudio { mime_type, .. } => mime_type.clone(),
     }
 }
 

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::channels::StreamMode;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -275,10 +276,15 @@ impl ChannelsConfig {
             })
             .unwrap_or_default();
 
+        let stream_mode = optional_env("TELEGRAM_STREAM_MODE")?
+            .map(|s| StreamMode::from_str_value(&s))
+            .unwrap_or_default();
+
         Ok(Some(TelegramConfig {
             bot_token,
             owner_id,
             allow_from,
+            stream_mode,
         }))
     }
 }
@@ -300,6 +306,8 @@ pub struct TelegramConfig {
     pub owner_id: Option<i64>,
     /// Allowed user IDs (empty = allow all; "*" = allow all).
     pub allow_from: Vec<String>,
+    /// Stream mode for progressive message rendering.
+    pub stream_mode: StreamMode,
 }
 
 /// Slack channel configuration.
@@ -322,6 +330,8 @@ pub struct DiscordChannelConfig {
     pub guild_id: Option<String>,
     /// Allowed channel IDs (empty = allow all).
     pub allow_from: Vec<String>,
+    /// Stream mode for progressive message rendering.
+    pub stream_mode: StreamMode,
 }
 
 /// iMessage channel configuration (macOS only).
@@ -384,10 +394,15 @@ impl ChannelsConfig {
             })
             .unwrap_or_default();
 
+        let stream_mode = optional_env("DISCORD_STREAM_MODE")?
+            .map(|s| StreamMode::from_str_value(&s))
+            .unwrap_or_default();
+
         Ok(Some(DiscordChannelConfig {
             bot_token,
             guild_id,
             allow_from,
+            stream_mode,
         }))
     }
 

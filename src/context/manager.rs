@@ -237,6 +237,117 @@ impl ContextManager {
             + summary.cancelled;
         summary
     }
+
+    /// Prune stale sessions — removes terminal jobs older than `max_age` and
+    /// stuck jobs older than `stuck_timeout`.
+    ///
+    /// Returns a `PruneResult` summarizing what was cleaned up.
+    pub async fn prune_stale_sessions(
+        &self,
+        max_age: chrono::Duration,
+        stuck_timeout: chrono::Duration,
+    ) -> PruneResult {
+        use crate::context::JobState;
+
+        let now = chrono::Utc::now();
+        let mut to_remove: Vec<Uuid> = Vec::new();
+        let mut terminal_pruned = 0usize;
+        let mut stuck_pruned = 0usize;
+
+        // Identify stale sessions.
+        {
+            let contexts = self.contexts.read().await;
+            for (id, ctx) in contexts.iter() {
+                if ctx.state.is_terminal() {
+                    // Terminal jobs: prune if completed_at is older than max_age.
+                    let completed = ctx.completed_at.unwrap_or(ctx.created_at);
+                    if now.signed_duration_since(completed) > max_age {
+                        to_remove.push(*id);
+                        terminal_pruned += 1;
+                    }
+                } else if matches!(ctx.state, JobState::Completed | JobState::Submitted) {
+                    // Completed/Submitted jobs that aren't being progressed:
+                    // prune if they're older than max_age.
+                    let last_activity = ctx
+                        .transitions
+                        .last()
+                        .map(|t| t.timestamp)
+                        .unwrap_or(ctx.created_at);
+                    if now.signed_duration_since(last_activity) > max_age {
+                        to_remove.push(*id);
+                        terminal_pruned += 1;
+                    }
+                } else if ctx.state == JobState::Stuck {
+                    // Stuck jobs: prune if the last transition is older than stuck_timeout.
+                    let last_activity = ctx
+                        .transitions
+                        .last()
+                        .map(|t| t.timestamp)
+                        .unwrap_or(ctx.created_at);
+                    if now.signed_duration_since(last_activity) > stuck_timeout {
+                        to_remove.push(*id);
+                        stuck_pruned += 1;
+                    }
+                }
+            }
+        }
+
+        // Remove identified sessions.
+        if !to_remove.is_empty() {
+            let mut contexts = self.contexts.write().await;
+            let mut memories = self.memories.write().await;
+            for id in &to_remove {
+                contexts.remove(id);
+                memories.remove(id);
+            }
+            tracing::info!(
+                terminal = terminal_pruned,
+                stuck = stuck_pruned,
+                total = to_remove.len(),
+                "Pruned stale sessions"
+            );
+        }
+
+        PruneResult {
+            terminal_pruned,
+            stuck_pruned,
+            total_pruned: to_remove.len(),
+        }
+    }
+
+    /// Spawn a background pruning loop.
+    ///
+    /// Runs every `interval` and prunes terminal jobs older than `max_age`
+    /// and stuck jobs older than `stuck_timeout`.
+    ///
+    /// Returns a `JoinHandle` for the pruner task.
+    pub fn spawn_pruner(
+        self: &std::sync::Arc<Self>,
+        interval: std::time::Duration,
+        max_age: chrono::Duration,
+        stuck_timeout: chrono::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let manager = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            tracing::info!(
+                interval_secs = interval.as_secs(),
+                max_age_mins = max_age.num_minutes(),
+                stuck_timeout_mins = stuck_timeout.num_minutes(),
+                "Session pruner started"
+            );
+            loop {
+                tokio::time::sleep(interval).await;
+                let result = manager.prune_stale_sessions(max_age, stuck_timeout).await;
+                if result.total_pruned > 0 {
+                    tracing::debug!(
+                        terminal = result.terminal_pruned,
+                        stuck = result.stuck_pruned,
+                        "Session prune cycle complete"
+                    );
+                }
+            }
+        })
+    }
 }
 
 impl Default for ContextManager {
@@ -257,6 +368,17 @@ pub struct ContextSummary {
     pub failed: usize,
     pub stuck: usize,
     pub cancelled: usize,
+}
+
+/// Result of a session pruning operation.
+#[derive(Debug, Default)]
+pub struct PruneResult {
+    /// Number of terminal (completed/failed/cancelled) jobs pruned.
+    pub terminal_pruned: usize,
+    /// Number of stuck jobs pruned (stuck longer than the timeout).
+    pub stuck_pruned: usize,
+    /// Total sessions removed.
+    pub total_pruned: usize,
 }
 
 #[cfg(test)]
@@ -322,5 +444,54 @@ mod tests {
 
         let context = manager.get_context(job_id).await.unwrap();
         assert_eq!(context.state, crate::context::JobState::InProgress);
+    }
+
+    #[tokio::test]
+    async fn test_prune_stale_sessions() {
+        let manager = ContextManager::new(10);
+
+        // Create a job and mark it completed.
+        let old_job = manager.create_job("Old Job", "Desc").await.unwrap();
+        manager
+            .update_context(old_job, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+                    .unwrap();
+                ctx.transition_to(crate::context::JobState::Failed, Some("failed".to_string()))
+                    .unwrap();
+                // Backdate the completed_at to simulate an old job.
+                ctx.completed_at =
+                    Some(chrono::Utc::now() - chrono::Duration::try_hours(2).unwrap());
+            })
+            .await
+            .unwrap();
+
+        // Create a recent active job.
+        let active_job = manager.create_job("Active Job", "Desc").await.unwrap();
+        manager
+            .update_context(active_job, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(manager.all_jobs().await.len(), 2);
+
+        // Prune with max_age of 1 hour — the 2-hour-old completed job should be pruned.
+        let result = manager
+            .prune_stale_sessions(
+                chrono::Duration::try_hours(1).unwrap(),
+                chrono::Duration::try_hours(4).unwrap(),
+            )
+            .await;
+
+        assert_eq!(result.terminal_pruned, 1);
+        assert_eq!(result.stuck_pruned, 0);
+        assert_eq!(result.total_pruned, 1);
+
+        // Only the active job should remain.
+        assert_eq!(manager.all_jobs().await.len(), 1);
+        assert!(manager.get_context(active_job).await.is_ok());
+        assert!(manager.get_context(old_job).await.is_err());
     }
 }

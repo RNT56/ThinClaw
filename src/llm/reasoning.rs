@@ -583,6 +583,199 @@ Respond in JSON format:
         }
     }
 
+    /// Generate a response that may include tool calls, streaming text chunks via a callback.
+    ///
+    /// Behaves identically to `respond_with_tools()` but uses the LLM's streaming
+    /// API. As text chunks arrive, `on_chunk` is called with each delta. The full
+    /// accumulated text is returned in the `RespondOutput` for session recording.
+    ///
+    /// If the LLM returns tool calls instead of text, no streaming occurs and the
+    /// result is returned directly (tool call responses go back to the LLM, not the user).
+    pub async fn respond_with_tools_streaming<F>(
+        &self,
+        context: &ReasoningContext,
+        mut on_chunk: F,
+    ) -> Result<RespondOutput, LlmError>
+    where
+        F: FnMut(&str) + Send,
+    {
+        use futures::StreamExt;
+
+        let system_prompt = self.build_conversation_prompt(context);
+
+        let mut messages = vec![ChatMessage::system(system_prompt)];
+        messages.extend(context.messages.clone());
+
+        // Pre-prompt context diagnostics (same as non-streaming)
+        {
+            let msg_count = messages.len();
+            let char_count: usize = messages.iter().map(|m| m.estimated_chars()).sum();
+            let tool_count = context.available_tools.len();
+            let tool_def_chars: usize = context
+                .available_tools
+                .iter()
+                .map(|t| t.name.len() + t.description.len() + 100)
+                .sum();
+            tracing::debug!(
+                messages = msg_count,
+                est_prompt_chars = char_count + tool_def_chars,
+                tools = tool_count,
+                force_text = context.force_text,
+                streaming = true,
+                "Pre-prompt context diagnostics (streaming)"
+            );
+        }
+
+        let effective_tools = if context.force_text {
+            Vec::new()
+        } else {
+            context.available_tools.clone()
+        };
+
+        // Use streaming completion
+        let mut stream = if !effective_tools.is_empty() {
+            let mut request = ToolCompletionRequest::new(messages, effective_tools)
+                .with_max_tokens(4096)
+                .with_temperature(0.7)
+                .with_tool_choice("auto")
+                .set_thinking(context.thinking);
+            request.metadata = context.metadata.clone();
+            self.llm.complete_stream_with_tools(request).await?
+        } else {
+            let mut request = CompletionRequest::new(messages)
+                .with_max_tokens(4096)
+                .with_temperature(0.7)
+                .set_thinking(context.thinking);
+            request.metadata = context.metadata.clone();
+            self.llm.complete_stream(request).await?
+        };
+
+        // Consume the stream, accumulating text and forwarding chunks
+        let mut accumulated_text = String::new();
+        let mut thinking_content: Option<String> = None;
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut final_usage = TokenUsage::default();
+        let mut _finish_reason = crate::llm::FinishReason::Stop;
+
+        // Accumulator for tool call deltas (index -> partial ToolCall)
+        let mut partial_tool_calls: std::collections::HashMap<u32, (String, String, String)> =
+            std::collections::HashMap::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result? {
+                crate::llm::StreamChunk::Text(text) => {
+                    accumulated_text.push_str(&text);
+                    on_chunk(&text);
+                }
+                crate::llm::StreamChunk::ReasoningDelta(delta) => {
+                    thinking_content
+                        .get_or_insert_with(String::new)
+                        .push_str(&delta);
+                }
+                crate::llm::StreamChunk::ToolCall(tc) => {
+                    tool_calls.push(tc);
+                }
+                crate::llm::StreamChunk::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                } => {
+                    let entry = partial_tool_calls
+                        .entry(index)
+                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                    if !id.is_empty() {
+                        entry.0 = id;
+                    }
+                    if let Some(n) = name {
+                        entry.1.push_str(&n);
+                    }
+                    if let Some(args) = arguments_delta {
+                        entry.2.push_str(&args);
+                    }
+                }
+                crate::llm::StreamChunk::Done {
+                    input_tokens,
+                    output_tokens,
+                    finish_reason: fr,
+                } => {
+                    final_usage = TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    };
+                    _finish_reason = fr;
+                }
+            }
+        }
+
+        // Convert partial tool call deltas to complete ToolCalls
+        for (_idx, (id, name, args)) in partial_tool_calls {
+            if !name.is_empty() {
+                let arguments: serde_json::Value =
+                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
+            }
+        }
+
+        // If tool calls were returned, return them (no streaming to user)
+        if !tool_calls.is_empty() {
+            return Ok(RespondOutput {
+                result: RespondResult::ToolCalls {
+                    tool_calls,
+                    content: if accumulated_text.is_empty() {
+                        None
+                    } else {
+                        Some(clean_response(&accumulated_text))
+                    },
+                },
+                usage: final_usage,
+                thinking_content,
+            });
+        }
+
+        // Clean the accumulated text
+        let cleaned = clean_response(&accumulated_text);
+
+        // Try to recover tool calls from XML-style content (same as non-streaming)
+        if !context.force_text {
+            let recovered = recover_tool_calls_from_content(&cleaned, &context.available_tools);
+            if !recovered.is_empty() {
+                return Ok(RespondOutput {
+                    result: RespondResult::ToolCalls {
+                        tool_calls: recovered,
+                        content: if cleaned.is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        },
+                    },
+                    usage: final_usage,
+                    thinking_content,
+                });
+            }
+        }
+
+        let final_text = if cleaned.trim().is_empty() {
+            tracing::warn!(
+                "Streaming LLM response was empty after cleaning (original len={}), using fallback",
+                accumulated_text.len()
+            );
+            "I'm not sure how to respond to that.".to_string()
+        } else {
+            cleaned
+        };
+
+        Ok(RespondOutput {
+            result: RespondResult::Text(final_text),
+            usage: final_usage,
+            thinking_content,
+        })
+    }
+
     fn build_planning_prompt(&self, context: &ReasoningContext) -> String {
         let tools_desc = if context.available_tools.is_empty() {
             "No tools available.".to_string()

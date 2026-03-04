@@ -23,6 +23,7 @@ use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
+use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::db::Database;
@@ -44,6 +45,8 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Optional SSE broadcast sender for emitting routine lifecycle events.
+    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
 }
 
 impl RoutineEngine {
@@ -64,7 +67,14 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            sse_tx: None,
         }
+    }
+
+    /// Set the SSE broadcast sender for emitting routine lifecycle events.
+    pub fn with_sse_sender(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
+        self.sse_tx = Some(tx);
+        self
     }
 
     /// Refresh the in-memory event trigger cache from DB.
@@ -231,6 +241,7 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            sse_tx: self.sse_tx.clone(),
         };
 
         tokio::spawn(async move {
@@ -263,6 +274,7 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            sse_tx: self.sse_tx.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -310,12 +322,32 @@ struct EngineContext {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    /// Optional SSE broadcast sender for routine lifecycle events.
+    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+}
+
+impl EngineContext {
+    /// Broadcast an SSE event if the sender is available.
+    fn broadcast_sse(&self, event: SseEvent) {
+        if let Some(ref tx) = self.sse_tx {
+            let _ = tx.send(event);
+        }
+    }
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
 async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
+
+    // Broadcast routine start event
+    ctx.broadcast_sse(SseEvent::Status {
+        message: format!(
+            "⏳ Routine '{}' started ({})",
+            routine.name, run.trigger_type
+        ),
+        thread_id: None,
+    });
 
     let result = match &routine.action {
         RoutineAction::Lightweight {
@@ -389,6 +421,27 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         summary.as_deref(),
     )
     .await;
+
+    // Broadcast routine completion event
+    let icon = match status {
+        RunStatus::Ok => "✅",
+        RunStatus::Attention => "🔔",
+        RunStatus::Failed => "❌",
+        RunStatus::Running => "⏳",
+    };
+    ctx.broadcast_sse(SseEvent::Status {
+        message: format!(
+            "{} Routine '{}' completed ({}){}",
+            icon,
+            routine.name,
+            status,
+            summary
+                .as_deref()
+                .map(|s| format!(": {}", &s[..s.len().min(200)]))
+                .unwrap_or_default()
+        ),
+        thread_id: None,
+    });
 }
 
 /// Sanitize a routine name for use in workspace paths.
@@ -442,6 +495,13 @@ async fn execute_full_job(
             "Failed to link run to job: {}", e
         );
     }
+
+    // Broadcast job dispatch event
+    ctx.broadcast_sse(SseEvent::JobStarted {
+        job_id: job_id.to_string(),
+        title: format!("Routine '{}': {}", routine.name, title),
+        browse_url: String::new(),
+    });
 
     tracing::info!(
         routine = %routine.name,

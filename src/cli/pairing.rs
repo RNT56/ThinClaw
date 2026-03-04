@@ -30,6 +30,39 @@ pub enum PairingCommand {
         #[arg(required = true)]
         code: String,
     },
+
+    /// Block a sender on a channel (blocklist takes precedence over allowlist)
+    Block {
+        /// Channel name (e.g., telegram, slack)
+        #[arg(required = true)]
+        channel: String,
+
+        /// Sender ID or username to block
+        #[arg(required = true)]
+        sender: String,
+    },
+
+    /// Unblock a sender on a channel
+    Unblock {
+        /// Channel name (e.g., telegram, slack)
+        #[arg(required = true)]
+        channel: String,
+
+        /// Sender ID or username to unblock
+        #[arg(required = true)]
+        sender: String,
+    },
+
+    /// List blocked senders on a channel
+    Blocked {
+        /// Channel name (e.g., telegram, slack)
+        #[arg(required = true)]
+        channel: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Run pairing CLI command.
@@ -45,6 +78,9 @@ pub fn run_pairing_command_with_store(
     match cmd {
         PairingCommand::List { channel, json } => run_list(store, &channel, json),
         PairingCommand::Approve { channel, code } => run_approve(store, &channel, &code),
+        PairingCommand::Block { channel, sender } => run_block(store, &channel, &sender),
+        PairingCommand::Unblock { channel, sender } => run_unblock(store, &channel, &sender),
+        PairingCommand::Blocked { channel, json } => run_blocked(store, &channel, json),
     }
 }
 
@@ -98,6 +134,49 @@ fn run_approve(store: &PairingStore, channel: &str, code: &str) -> Result<(), St
         ),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn run_block(store: &PairingStore, channel: &str, sender: &str) -> Result<(), String> {
+    store
+        .add_block_from(channel, sender)
+        .map_err(|e| e.to_string())?;
+    println!("Blocked {} sender: {}", channel, sender);
+    Ok(())
+}
+
+fn run_unblock(store: &PairingStore, channel: &str, sender: &str) -> Result<(), String> {
+    let removed = store
+        .remove_block_from(channel, sender)
+        .map_err(|e| e.to_string())?;
+    if removed {
+        println!("Unblocked {} sender: {}", channel, sender);
+    } else {
+        println!("{} sender {} was not blocked.", channel, sender);
+    }
+    Ok(())
+}
+
+fn run_blocked(store: &PairingStore, channel: &str, json: bool) -> Result<(), String> {
+    let blocked = store.read_block_from(channel).map_err(|e| e.to_string())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&blocked).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    if blocked.is_empty() {
+        println!("No blocked senders on {}.", channel);
+        return Ok(());
+    }
+
+    println!("Blocked senders on {} ({}):", channel, blocked.len());
+    for entry in &blocked {
+        println!("  {}", entry);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

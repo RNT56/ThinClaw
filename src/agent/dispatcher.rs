@@ -288,54 +288,131 @@ impl Agent {
                 );
             }
 
+            // ── Choose streaming vs non-streaming LLM call ─────────────
+            let channel_stream_mode = self.channels.stream_mode(&message.channel).await;
+            let use_streaming = channel_stream_mode != crate::channels::StreamMode::None;
+
             let _ = self
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::Thinking("Calling LLM...".into()),
+                    StatusUpdate::Thinking(if use_streaming {
+                        "Streaming response...".into()
+                    } else {
+                        "Calling LLM...".into()
+                    }),
                     &message.metadata,
                 )
                 .await;
 
-            let output = match reasoning.respond_with_tools(&context).await {
-                Ok(output) => output,
-                Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
-                    tracing::warn!(
-                        used,
-                        limit,
-                        iteration,
-                        "Context length exceeded, compacting messages and retrying"
-                    );
+            let output = if use_streaming {
+                // Streaming path: forward text chunks to channel as draft edits
+                let channels = Arc::clone(&self.channels);
+                let channel_name = message.channel.clone();
+                let metadata = message.metadata.clone();
+                let mode = channel_stream_mode;
 
-                    // Compact: keep system messages + last user message + current turn
-                    context_messages = compact_messages_for_retry(&context_messages);
+                // Draft state tracks the in-progress message
+                let draft = Arc::new(tokio::sync::Mutex::new(
+                    crate::channels::DraftReplyState::new(&channel_name),
+                ));
+                let draft_for_stream = Arc::clone(&draft);
 
-                    // Rebuild context with compacted messages
-                    let mut retry_context = ReasoningContext::new()
-                        .with_messages(context_messages.clone())
-                        .with_tools(if force_text {
-                            Vec::new()
-                        } else {
-                            context.available_tools.clone()
-                        })
-                        .with_metadata(context.metadata.clone());
-                    retry_context.force_text = force_text;
+                let stream_result = reasoning
+                    .respond_with_tools_streaming(&context, move |chunk: &str| {
+                        // Fire-and-forget draft update (we're in a sync FnMut callback)
+                        let channels = Arc::clone(&channels);
+                        let ch_name = channel_name.clone();
+                        let md = metadata.clone();
+                        let draft_ref = Arc::clone(&draft_for_stream);
+                        let chunk_owned = chunk.to_string();
 
-                    reasoning
-                        .respond_with_tools(&retry_context)
-                        .await
-                        .map_err(|retry_err| {
-                            tracing::error!(
-                                original_used = used,
-                                original_limit = limit,
-                                retry_error = %retry_err,
-                                "Retry after auto-compaction also failed"
-                            );
-                            // Propagate the actual retry error so callers see the real failure
-                            crate::error::Error::from(retry_err)
-                        })?
+                        tokio::spawn(async move {
+                            let mut d = draft_ref.lock().await;
+                            let should_send = d.append(&chunk_owned);
+                            if should_send {
+                                let display = match mode {
+                                    crate::channels::StreamMode::StatusLine => {
+                                        let word_count = d.accumulated.split_whitespace().count();
+                                        format!("✦ Generating... ({} words)", word_count)
+                                    }
+                                    _ => d.display_text(),
+                                };
+
+                                // Create a temporary draft with display text for sending
+                                let mut send_draft =
+                                    crate::channels::DraftReplyState::new(&ch_name);
+                                send_draft.accumulated = display;
+                                send_draft.message_id = d.message_id.clone();
+                                send_draft.posted = d.posted;
+
+                                match channels.send_draft(&ch_name, &send_draft, &md).await {
+                                    Ok(msg_id) => d.mark_sent(msg_id),
+                                    Err(e) => {
+                                        tracing::debug!("Draft edit failed (non-fatal): {}", e);
+                                    }
+                                }
+                            }
+                        });
+                    })
+                    .await;
+
+                // Send final draft with complete text (remove typing indicator)
+                {
+                    let d = draft.lock().await;
+                    if d.posted && !d.accumulated.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_draft(&message.channel, &d, &message.metadata)
+                            .await;
+                    }
                 }
-                Err(e) => return Err(e.into()),
+
+                match stream_result {
+                    Ok(output) => output,
+                    Err(e) => return Err(e.into()),
+                }
+            } else {
+                // Non-streaming path (original)
+                match reasoning.respond_with_tools(&context).await {
+                    Ok(output) => output,
+                    Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
+                        tracing::warn!(
+                            used,
+                            limit,
+                            iteration,
+                            "Context length exceeded, compacting messages and retrying"
+                        );
+
+                        // Compact: keep system messages + last user message + current turn
+                        context_messages = compact_messages_for_retry(&context_messages);
+
+                        // Rebuild context with compacted messages
+                        let mut retry_context = ReasoningContext::new()
+                            .with_messages(context_messages.clone())
+                            .with_tools(if force_text {
+                                Vec::new()
+                            } else {
+                                context.available_tools.clone()
+                            })
+                            .with_metadata(context.metadata.clone());
+                        retry_context.force_text = force_text;
+
+                        reasoning
+                            .respond_with_tools(&retry_context)
+                            .await
+                            .map_err(|retry_err| {
+                                tracing::error!(
+                                    original_used = used,
+                                    original_limit = limit,
+                                    retry_error = %retry_err,
+                                    "Retry after auto-compaction also failed"
+                                );
+                                crate::error::Error::from(retry_err)
+                            })?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             };
 
             // Record cost and track token usage
@@ -1132,6 +1209,8 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_sender: None,
+            agent_router: None,
         };
 
         Agent::new(

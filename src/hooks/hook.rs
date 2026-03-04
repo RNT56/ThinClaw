@@ -21,6 +21,19 @@ pub enum HookPoint {
     OnSessionEnd,
     /// Transform the final response before completing a turn.
     TransformResponse,
+    /// Before the agent starts (can override model/provider).
+    BeforeAgentStart,
+    /// Before writing a message to a channel.
+    BeforeMessageWrite,
+    /// Before sending a request to the LLM.
+    /// Hooks can inspect/modify the prompt, system message, and model selection.
+    BeforeLlmInput,
+    /// After receiving a response from the LLM.
+    /// Hooks can inspect/modify the response content and track token usage.
+    AfterLlmOutput,
+    /// Before transcribing audio to text.
+    /// Hooks can inspect/modify the audio source or skip transcription.
+    BeforeTranscribeAudio,
 }
 
 impl HookPoint {
@@ -33,6 +46,11 @@ impl HookPoint {
             HookPoint::OnSessionStart => "onSessionStart",
             HookPoint::OnSessionEnd => "onSessionEnd",
             HookPoint::TransformResponse => "transformResponse",
+            HookPoint::BeforeAgentStart => "beforeAgentStart",
+            HookPoint::BeforeMessageWrite => "beforeMessageWrite",
+            HookPoint::BeforeLlmInput => "beforeLlmInput",
+            HookPoint::AfterLlmOutput => "afterLlmOutput",
+            HookPoint::BeforeTranscribeAudio => "beforeTranscribeAudio",
         }
     }
 }
@@ -72,6 +90,59 @@ pub enum HookEvent {
         thread_id: String,
         response: String,
     },
+    /// The agent is about to start. Hooks can override model/provider.
+    AgentStart {
+        /// Current model name.
+        model: String,
+        /// Current provider name.
+        provider: String,
+    },
+    /// A message is about to be written to a channel.
+    MessageWrite {
+        user_id: String,
+        channel: String,
+        content: String,
+        thread_id: Option<String>,
+    },
+    /// A request is about to be sent to the LLM.
+    LlmInput {
+        /// The model being called.
+        model: String,
+        /// The system message (if any).
+        system_message: Option<String>,
+        /// The user prompt / last message being sent.
+        user_message: String,
+        /// Number of messages in the conversation context.
+        message_count: usize,
+        /// User who triggered this LLM call.
+        user_id: String,
+    },
+    /// A response was received from the LLM.
+    LlmOutput {
+        /// The model that responded.
+        model: String,
+        /// The response content.
+        content: String,
+        /// Input tokens consumed.
+        input_tokens: u32,
+        /// Output tokens generated.
+        output_tokens: u32,
+        /// User who triggered this LLM call.
+        user_id: String,
+    },
+    /// Audio is about to be transcribed to text.
+    TranscribeAudio {
+        /// User who sent the audio.
+        user_id: String,
+        /// Channel the audio was received on.
+        channel: String,
+        /// Audio file size in bytes.
+        audio_size_bytes: u64,
+        /// Audio MIME type (e.g. "audio/ogg", "audio/wav").
+        mime_type: String,
+        /// Duration in seconds, if known.
+        duration_secs: Option<f32>,
+    },
 }
 
 impl HookEvent {
@@ -84,6 +155,11 @@ impl HookEvent {
             HookEvent::SessionStart { .. } => HookPoint::OnSessionStart,
             HookEvent::SessionEnd { .. } => HookPoint::OnSessionEnd,
             HookEvent::ResponseTransform { .. } => HookPoint::TransformResponse,
+            HookEvent::AgentStart { .. } => HookPoint::BeforeAgentStart,
+            HookEvent::MessageWrite { .. } => HookPoint::BeforeMessageWrite,
+            HookEvent::LlmInput { .. } => HookPoint::BeforeLlmInput,
+            HookEvent::LlmOutput { .. } => HookPoint::AfterLlmOutput,
+            HookEvent::TranscribeAudio { .. } => HookPoint::BeforeTranscribeAudio,
         }
     }
 
@@ -105,8 +181,20 @@ impl HookEvent {
             HookEvent::ResponseTransform { response, .. } => {
                 *response = modified.to_string();
             }
-            HookEvent::SessionStart { .. } | HookEvent::SessionEnd { .. } => {
-                // Session events don't have modifiable content
+            HookEvent::MessageWrite { content, .. } => {
+                *content = modified.to_string();
+            }
+            HookEvent::LlmInput { user_message, .. } => {
+                *user_message = modified.to_string();
+            }
+            HookEvent::LlmOutput { content, .. } => {
+                *content = modified.to_string();
+            }
+            HookEvent::SessionStart { .. }
+            | HookEvent::SessionEnd { .. }
+            | HookEvent::AgentStart { .. }
+            | HookEvent::TranscribeAudio { .. } => {
+                // These events don't have modifiable content
             }
         }
     }

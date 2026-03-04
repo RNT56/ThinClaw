@@ -16,12 +16,12 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, BrowserTool, CancelJobTool, CreateJobTool, DeviceInfoTool, EchoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    TtsTool, WriteFileTool,
+    ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool, DeviceInfoTool,
+    EchoTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool,
+    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, TtsTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -71,6 +71,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_remove",
     "tts",
     "browser",
+    "canvas",
 ];
 
 /// Registry of available tools.
@@ -212,6 +213,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
         self.register_sync(Arc::new(DeviceInfoTool::new()));
+        self.register_sync(Arc::new(CanvasTool));
 
         // Browser tool with user-local profile dir
         let browser_profile = dirs::data_dir()

@@ -161,7 +161,18 @@ impl SignalChannel {
     }
 
     /// Check whether a sender is in the allowed users list.
+    ///
+    /// Returns `false` if the sender is on the blocklist (blocklist takes precedence).
     fn is_sender_allowed(&self, sender: &str) -> bool {
+        // Check blocklist first (takes precedence)
+        let store = PairingStore::new();
+        if store
+            .is_sender_blocked("signal", sender, None)
+            .unwrap_or(false)
+        {
+            tracing::debug!(sender = %sender, "Signal: sender is blocked, rejecting");
+            return false;
+        }
         if self.config.allow_from.is_empty() {
             return false;
         }
@@ -172,11 +183,14 @@ impl SignalChannel {
     }
 
     /// Check if sender is allowed via config allow_from OR pairing store.
+    ///
+    /// Returns `false` if the sender is on the blocklist (blocklist takes precedence).
     fn is_sender_allowed_with_pairing(&self, sender: &str) -> bool {
         if self.is_sender_allowed(sender) {
             return true;
         }
         let store = PairingStore::new();
+        // Blocklist already checked in is_sender_allowed above
         if let Ok(allowed) = store.read_allow_from("signal") {
             return allowed.iter().any(|entry| entry == "*" || entry == sender);
         }

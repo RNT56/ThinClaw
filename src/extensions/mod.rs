@@ -18,6 +18,7 @@
 
 pub mod discovery;
 pub mod manager;
+pub mod plugin_manifest;
 pub mod registry;
 
 pub use discovery::OnlineDiscovery;

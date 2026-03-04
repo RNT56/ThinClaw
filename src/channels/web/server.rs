@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{AuthState, auth_middleware};
+use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -156,6 +156,8 @@ pub struct GatewayState {
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
     /// Cost guard for token/cost tracking.
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Routine engine for webhook-triggered routine execution.
+    pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Flag set when a restart has been requested via the API.
@@ -185,10 +187,27 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new().route("/api/health", get(health_handler));
+    let public = Router::new()
+        .route("/api/health", get(health_handler))
+        // Webhook trigger endpoint: no auth — uses per-routine HMAC secret validation.
+        .route("/hooks/routine/{id}", post(webhook_routine_trigger_handler));
 
     // Protected routes (require auth)
-    let auth_state = AuthState { token: auth_token };
+    let auth_state = {
+        let (trusted_proxy_header, trusted_proxy_ips) = load_trusted_proxy_config();
+        if trusted_proxy_header.is_some() {
+            tracing::info!(
+                header = ?trusted_proxy_header,
+                trusted_ips = ?trusted_proxy_ips,
+                "Trusted-proxy auth mode enabled"
+            );
+        }
+        AuthState {
+            token: auth_token,
+            trusted_proxy_header,
+            trusted_proxy_ips,
+        }
+    };
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
@@ -2422,6 +2441,183 @@ async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
+}
+
+// --- Webhook trigger endpoint ---
+
+/// Webhook trigger endpoint for routines.
+///
+/// POST /hooks/routine/{id}
+///
+/// This endpoint is **public** (no auth token required). Security is provided
+/// by per-routine HMAC-SHA256 signature verification. If the routine has a
+/// `secret` configured, the caller must provide an `X-Webhook-Signature`
+/// header containing `sha256=<hex-digest>` where the digest is
+/// `HMAC-SHA256(secret, raw-body)`.
+///
+/// Routines without a secret can be triggered by anyone with the URL.
+async fn webhook_routine_trigger_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Enforce 64KB body limit (same as outbound webhook payloads).
+    if body.len() > 65_536 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request body exceeds 64KB limit".to_string(),
+        ));
+    }
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    // Verify this routine is a webhook trigger.
+    let secret = match &routine.trigger {
+        crate::agent::routine::Trigger::Webhook { secret, .. } => secret.clone(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Routine is not a webhook trigger".to_string(),
+            ));
+        }
+    };
+
+    if !routine.enabled {
+        return Err((StatusCode::CONFLICT, "Routine is disabled".to_string()));
+    }
+
+    // Validate HMAC signature if secret is configured.
+    if let Some(ref expected_secret) = secret {
+        let sig_header = headers
+            .get("x-webhook-signature")
+            .and_then(|v| v.to_str().ok())
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                "Missing X-Webhook-Signature header".to_string(),
+            ))?;
+
+        let hex_digest = sig_header.strip_prefix("sha256=").ok_or((
+            StatusCode::BAD_REQUEST,
+            "Signature must use sha256= prefix".to_string(),
+        ))?;
+
+        let expected_digest = hmac_sha256(expected_secret.as_bytes(), &body);
+        if !constant_time_eq(hex_digest.as_bytes(), expected_digest.as_bytes()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Invalid webhook signature".to_string(),
+            ));
+        }
+    }
+
+    // Fire the routine via the engine (if available) or via the message pipeline.
+    if let Some(ref engine) = state.routine_engine {
+        let run_id = engine
+            .fire_manual(routine_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        tracing::info!(
+            routine_id = %routine_id,
+            run_id = %run_id,
+            "Webhook triggered routine",
+        );
+
+        Ok(Json(serde_json::json!({
+            "status": "triggered",
+            "routine_id": routine_id,
+            "run_id": run_id,
+        })))
+    } else {
+        // Fall back to sending through the message pipeline.
+        let prompt = match &routine.action {
+            crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
+            crate::agent::routine::RoutineAction::FullJob {
+                title, description, ..
+            } => format!("{}: {}", title, description),
+        };
+
+        let content = format!("[webhook:{}] {}", routine.name, prompt);
+        let msg = IncomingMessage::new("webhook", &state.user_id, content);
+
+        let tx_guard = state.msg_tx.read().await;
+        let tx = tx_guard.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Channel not started".to_string(),
+        ))?;
+
+        tx.send(msg).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Channel closed".to_string(),
+            )
+        })?;
+
+        Ok(Json(serde_json::json!({
+            "status": "triggered",
+            "routine_id": routine_id,
+        })))
+    }
+}
+
+/// Compute HMAC-SHA256 of `data` with `key`, returning the hex-encoded digest.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    // HMAC-SHA256 per RFC 2104.
+    let block_size = 64;
+    let mut key_padded = vec![0u8; block_size];
+
+    if key.len() > block_size {
+        let hash = Sha256::digest(key);
+        key_padded[..hash.len()].copy_from_slice(&hash);
+    } else {
+        key_padded[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = vec![0x36u8; block_size];
+    let mut opad = vec![0x5cu8; block_size];
+    for i in 0..block_size {
+        ipad[i] ^= key_padded[i];
+        opad[i] ^= key_padded[i];
+    }
+
+    // Inner hash: H(K XOR ipad || data)
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(data);
+    let inner_hash = inner.finalize();
+
+    // Outer hash: H(K XOR opad || inner_hash)
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(inner_hash);
+    let digest = outer.finalize();
+
+    // Hex encode manually (no hex crate needed).
+    digest
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
+}
+
+/// Constant-time comparison to prevent timing attacks on HMAC validation.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 /// Convert a Routine to the trimmed RoutineInfo for list display.

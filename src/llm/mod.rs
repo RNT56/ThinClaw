@@ -9,6 +9,7 @@
 
 pub mod circuit_breaker;
 pub mod costs;
+pub mod discovery;
 pub mod failover;
 mod provider;
 mod reasoning;

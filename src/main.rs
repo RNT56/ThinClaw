@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, NostrChannel, ReplChannel, SignalChannel,
-        WebhookServer, WebhookServerConfig,
+        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, NostrChannel, ReplChannel,
+        SignalChannel, WebhookServer, WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
@@ -18,8 +18,8 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
-        run_status_command, run_tool_command,
+        Cli, Command, run_channels_command, run_gateway_command, run_mcp_command,
+        run_pairing_command, run_service_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -30,6 +30,9 @@ use ironclaw::{
     pairing::PairingStore,
     secrets::SecretsStore,
 };
+
+#[cfg(target_os = "macos")]
+use ironclaw::channels::IMessageChannel;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
@@ -95,6 +98,18 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
+        Some(Command::Gateway(gw_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return run_gateway_command(gw_cmd.clone()).await;
+        }
+        Some(Command::Channels(ch_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return run_channels_command(ch_cmd.clone()).await;
+        }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
@@ -144,6 +159,40 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());
+        }
+        Some(Command::Agents(agent_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            // In standalone CLI mode, create a fresh router.
+            // Runtime agent routing state is in-memory only.
+            let router = ironclaw::agent::AgentRouter::new();
+            ironclaw::cli::run_agents_command(agent_cmd.clone(), &router).await;
+            return Ok(());
+        }
+        Some(Command::Sessions(session_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            // In standalone CLI mode, create a fresh session manager.
+            // Runtime session state is in-memory only.
+            let mgr = std::sync::Arc::new(ironclaw::agent::SessionManager::new());
+            ironclaw::cli::run_sessions_command(session_cmd.clone(), &mgr).await;
+            return Ok(());
+        }
+        Some(Command::Logs(log_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return ironclaw::cli::run_log_command(log_cmd.clone()).await;
+        }
+        Some(Command::Browser(browser_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_browser_command(browser_cmd.clone()).await;
+        }
+        Some(Command::Update(update_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_update_command(update_cmd.clone()).await;
         }
         None | Some(Command::Run) => {
             // Continue to run agent
@@ -403,6 +452,60 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Add Discord channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref discord_config) = config.channels.discord
+    {
+        match DiscordChannel::new(discord_config.clone().into()) {
+            Ok(discord_channel) => {
+                channel_names.push("discord".to_string());
+                channels.add(Box::new(discord_channel)).await;
+                tracing::info!(
+                    guild_id = discord_config.guild_id.as_deref().unwrap_or("all"),
+                    "Discord channel enabled (Gateway WS)"
+                );
+                if discord_config.allow_from.is_empty() {
+                    tracing::info!(
+                        "Discord channel allow_from is empty — accepting messages from all channels."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Discord channel");
+            }
+        }
+    }
+
+    // Add iMessage channel if configured (macOS only) and not CLI-only mode.
+    #[cfg(target_os = "macos")]
+    if !cli.cli_only
+        && let Some(ref imessage_config) = config.channels.imessage
+    {
+        use ironclaw::channels::IMessageConfig;
+
+        let channel_config = IMessageConfig {
+            allow_from: imessage_config.allow_from.clone(),
+            poll_interval_secs: imessage_config.poll_interval_secs,
+            ..IMessageConfig::default()
+        };
+        match IMessageChannel::new(channel_config) {
+            Ok(imessage_channel) => {
+                channel_names.push("imessage".to_string());
+                channels.add(Box::new(imessage_channel)).await;
+                tracing::info!("iMessage channel enabled (chat.db polling)");
+                if imessage_config.allow_from.is_empty() {
+                    tracing::warn!(
+                        "iMessage channel has empty allow_from list — ALL messages will be accepted."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize iMessage channel");
+            }
+        }
+    }
+
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
     if !cli.cli_only
@@ -624,6 +727,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
     }
 
+    // Clone the SSE sender for the routine engine before the extension manager consumes it.
+    let routine_sse_sender = sse_sender.clone();
+
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some(sender) = sse_sender
@@ -644,6 +750,8 @@ async fn main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
+        sse_sender: routine_sse_sender,
+        agent_router: None,
     };
 
     let agent = Agent::new(

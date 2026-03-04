@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
@@ -73,6 +74,10 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// Optional SSE broadcast sender for routine lifecycle events.
+    pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// Optional multi-agent router for workspace isolation & priority-based routing.
+    pub agent_router: Option<Arc<AgentRouter>>,
 }
 
 /// The main agent that coordinates all components.
@@ -88,6 +93,8 @@ pub struct Agent {
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
+    /// Multi-agent router for workspace isolation & routing.
+    pub(super) agent_router: Arc<AgentRouter>,
 }
 
 impl Agent {
@@ -121,6 +128,12 @@ impl Agent {
             deps.hooks.clone(),
         ));
 
+        // Use provided agent router or create a default one.
+        let agent_router = deps
+            .agent_router
+            .clone()
+            .unwrap_or_else(|| Arc::new(AgentRouter::new()));
+
         Self {
             config,
             deps,
@@ -133,6 +146,7 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
+            agent_router,
         }
     }
 
@@ -146,6 +160,11 @@ impl Agent {
     /// Get a reference to the session manager.
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
+    }
+
+    /// Get a reference to the multi-agent router.
+    pub fn agent_router(&self) -> &Arc<AgentRouter> {
+        &self.agent_router
     }
 
     // Convenience accessors
@@ -168,7 +187,8 @@ impl Agent {
         &self.deps.safety
     }
 
-    pub(super) fn tools(&self) -> &Arc<ToolRegistry> {
+    /// Get the tool registry (public for Tauri/API integration).
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
         &self.deps.tools
     }
 
@@ -177,7 +197,8 @@ impl Agent {
         self.deps.workspace.as_ref()
     }
 
-    pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
+    /// Get the hook registry (public for Tauri/API integration).
+    pub fn hooks(&self) -> &Arc<HookRegistry> {
         &self.deps.hooks
     }
 
@@ -193,6 +214,11 @@ impl Agent {
     /// Get the skill catalog (public for Tauri/API integration).
     pub fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
         self.deps.skill_catalog.as_ref()
+    }
+
+    /// Get the extension manager (public for Tauri/API integration).
+    pub fn extension_manager(&self) -> Option<&Arc<ExtensionManager>> {
+        self.deps.extension_manager.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
@@ -376,9 +402,23 @@ impl Agent {
                     // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
                     let notify_user = hb_config.notify_user.clone();
+                    let notify_topic_id = hb_config.notify_topic_id;
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
-                        while let Some(response) = notify_rx.recv().await {
+                        while let Some(mut response) = notify_rx.recv().await {
+                            // Inject forum topic ID for Telegram topic targeting
+                            if let Some(topic_id) = notify_topic_id {
+                                if let serde_json::Value::Object(ref mut map) = response.metadata {
+                                    map.insert(
+                                        "message_thread_id".to_string(),
+                                        serde_json::json!(topic_id),
+                                    );
+                                } else {
+                                    response.metadata = serde_json::json!({
+                                        "message_thread_id": topic_id,
+                                    });
+                                }
+                            }
                             let user = notify_user.as_deref().unwrap_or("default");
 
                             // Try the configured channel first, fall back to
@@ -440,14 +480,21 @@ impl Agent {
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(32);
 
-                    let engine = Arc::new(RoutineEngine::new(
+                    let mut engine = RoutineEngine::new(
                         rt_config.clone(),
                         Arc::clone(store),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
-                    ));
+                    );
+
+                    // Wire SSE broadcasting if available
+                    if let Some(ref sender) = self.deps.sse_sender {
+                        engine = engine.with_sse_sender(sender.clone());
+                    }
+
+                    let engine = Arc::new(engine);
 
                     // Register routine tools
                     self.deps
@@ -577,6 +624,27 @@ impl Agent {
         let routine_engine_for_loop = bg.routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
+        // Hook: BeforeAgentStart — allow hooks to inspect/modify startup config
+        {
+            let event = crate::hooks::HookEvent::AgentStart {
+                model: self.llm().model_name().to_string(),
+                provider: self.config.name.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::error!("BeforeAgentStart hook rejected startup: {}", reason);
+                    return Err(Error::from(crate::error::ChannelError::StartupFailed {
+                        name: "agent".to_string(),
+                        reason: format!("BeforeAgentStart hook rejected: {}", reason),
+                    }));
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeAgentStart hook error (fail-open): {}", err);
+                }
+                Ok(_) => {}
+            }
+        }
+
         tracing::info!("Agent {} ready and listening", self.config.name);
 
         loop {
@@ -733,6 +801,25 @@ impl Agent {
                 message.thread_id.as_deref(),
             )
             .await;
+
+        // Multi-agent routing: determine which agent workspace should handle this message.
+        // Thread ownership is claimed on first interaction (first-responder wins).
+        if let Some(decision) = self
+            .agent_router
+            .route(&message.channel, Some(thread_id), &message.content)
+            .await
+        {
+            tracing::debug!(
+                agent = %decision.agent_id,
+                reason = %decision.reason,
+                thread = %thread_id,
+                "Routed message to agent workspace"
+            );
+            // Claim thread ownership if not already owned
+            self.agent_router
+                .claim_thread(thread_id, &decision.agent_id)
+                .await;
+        }
 
         // Auth mode interception: if the thread is awaiting a token, route
         // the message directly to the credential store. Nothing touches

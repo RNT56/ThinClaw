@@ -544,6 +544,8 @@ impl WorkspaceStore for LibSqlBackend {
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
                     rank: results.len() as u32 + 1,
+                    created_at: None,
+                    embedding: None,
                 });
             }
             results
@@ -589,6 +591,8 @@ impl WorkspaceStore for LibSqlBackend {
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
                     rank: results.len() as u32 + 1,
+                    created_at: None,
+                    embedding: None,
                 });
             }
             results

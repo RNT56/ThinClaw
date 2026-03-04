@@ -1,6 +1,7 @@
-//! Pairing store: pending requests and allowFrom list.
+//! Pairing store: pending requests, allowFrom list, and blockFrom list.
 //!
-//! Stored in ~/.ironclaw/{channel}-pairing.json and {channel}-allowFrom.json.
+//! Stored in ~/.ironclaw/{channel}-pairing.json, {channel}-allowFrom.json,
+//! and {channel}-blockFrom.json.
 
 use std::collections::HashSet;
 use std::fs;
@@ -69,6 +70,13 @@ struct AllowFromStoreFile {
     allow_from: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockFromStoreFile {
+    version: u8,
+    #[serde(rename = "blockFrom")]
+    block_from: Vec<String>,
+}
+
 fn default_pairing_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -107,6 +115,11 @@ fn allow_from_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingSto
 fn approve_attempts_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingStoreError> {
     let key = safe_channel_key(channel)?;
     Ok(base_dir.join(format!("{}-approve-attempts.json", key)))
+}
+
+fn block_from_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingStoreError> {
+    let key = safe_channel_key(channel)?;
+    Ok(base_dir.join(format!("{}-blockFrom.json", key)))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -431,12 +444,19 @@ impl PairingStore {
     }
 
     /// Check if a sender is allowed (by id or username).
+    ///
+    /// Returns `false` if the sender is on the block list, even if they
+    /// appear in the allow list (blocklist takes precedence).
     pub fn is_sender_allowed(
         &self,
         channel: &str,
         id: &str,
         username: Option<&str>,
     ) -> Result<bool, PairingStoreError> {
+        // Blocklist takes precedence
+        if self.is_sender_blocked(channel, id, username)? {
+            return Ok(false);
+        }
         let allow = self.read_allow_from(channel)?;
         let id = id.trim();
         let id_ok = allow.iter().any(|e| e.trim() == id);
@@ -447,6 +467,123 @@ impl PairingStore {
             let u = u.trim().to_lowercase();
             let u_norm = u.strip_prefix('@').unwrap_or(&u);
             if allow.iter().any(|e| {
+                e.trim().to_lowercase() == u || e.trim().to_lowercase() == format!("@{}", u_norm)
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    // ── Block list ────────────────────────────────────────────────────
+
+    /// Read the blockFrom list for a channel.
+    pub fn read_block_from(&self, channel: &str) -> Result<Vec<String>, PairingStoreError> {
+        let path = block_from_path(&self.base_dir, channel)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let file: BlockFromStoreFile =
+            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+                version: 1,
+                block_from: Vec::new(),
+            });
+
+        Ok(file.block_from)
+    }
+
+    /// Add an entry to the blockFrom list for a channel.
+    pub fn add_block_from(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
+        let entry = entry.trim().to_string();
+        if entry.is_empty() {
+            return Ok(());
+        }
+
+        let path = block_from_path(&self.base_dir, channel)?;
+        fs::create_dir_all(path.parent().unwrap())?;
+
+        // Read existing content before opening for write
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut store: BlockFromStoreFile =
+            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+                version: 1,
+                block_from: Vec::new(),
+            });
+
+        let normalized = entry.to_lowercase();
+        if store
+            .block_from
+            .iter()
+            .any(|e| e.to_lowercase() == normalized)
+        {
+            return Ok(());
+        }
+
+        store.block_from.push(entry);
+        let json = serde_json::to_string_pretty(&store)?;
+        fs::write(&path, json)?;
+
+        Ok(())
+    }
+
+    /// Remove an entry from the blockFrom list for a channel.
+    pub fn remove_block_from(&self, channel: &str, entry: &str) -> Result<bool, PairingStoreError> {
+        let entry_lower = entry.trim().to_lowercase();
+        if entry_lower.is_empty() {
+            return Ok(false);
+        }
+
+        let path = block_from_path(&self.base_dir, channel)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut store: BlockFromStoreFile =
+            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+                version: 1,
+                block_from: Vec::new(),
+            });
+
+        let orig_len = store.block_from.len();
+        store
+            .block_from
+            .retain(|e| e.trim().to_lowercase() != entry_lower);
+        let removed = store.block_from.len() != orig_len;
+
+        if removed {
+            let json = serde_json::to_string_pretty(&store)?;
+            fs::write(&path, json)?;
+        }
+
+        Ok(removed)
+    }
+
+    /// Check if a sender is on the block list (by id or username).
+    pub fn is_sender_blocked(
+        &self,
+        channel: &str,
+        id: &str,
+        username: Option<&str>,
+    ) -> Result<bool, PairingStoreError> {
+        let blocked = self.read_block_from(channel)?;
+        if blocked.is_empty() {
+            return Ok(false);
+        }
+        let id = id.trim();
+        if blocked.iter().any(|e| e.trim() == id) {
+            return Ok(true);
+        }
+        if let Some(u) = username {
+            let u = u.trim().to_lowercase();
+            let u_norm = u.strip_prefix('@').unwrap_or(&u);
+            if blocked.iter().any(|e| {
                 e.trim().to_lowercase() == u || e.trim().to_lowercase() == format!("@{}", u_norm)
             }) {
                 return Ok(true);
@@ -703,5 +840,114 @@ mod tests {
         store.upsert_request("telegram", "u1", None).unwrap();
         store.list_pending("").unwrap_err();
         store.upsert_request("", "u1", None).unwrap_err();
+    }
+
+    // ── Block list tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_block_from_empty_by_default() {
+        let (store, _) = test_store();
+        let blocked = store.read_block_from("telegram").unwrap();
+        assert!(blocked.is_empty());
+    }
+
+    #[test]
+    fn test_add_and_read_block_from() {
+        let (store, _) = test_store();
+        store.add_block_from("telegram", "spammer123").unwrap();
+        store.add_block_from("telegram", "baduser456").unwrap();
+        let blocked = store.read_block_from("telegram").unwrap();
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.contains(&"spammer123".to_string()));
+        assert!(blocked.contains(&"baduser456".to_string()));
+    }
+
+    #[test]
+    fn test_add_block_from_deduplicates() {
+        let (store, _) = test_store();
+        store.add_block_from("telegram", "spammer123").unwrap();
+        store.add_block_from("telegram", "SPAMMER123").unwrap(); // case-insensitive dupe
+        let blocked = store.read_block_from("telegram").unwrap();
+        assert_eq!(blocked.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_block_from() {
+        let (store, _) = test_store();
+        store.add_block_from("telegram", "spammer123").unwrap();
+        store.add_block_from("telegram", "other").unwrap();
+
+        let removed = store.remove_block_from("telegram", "spammer123").unwrap();
+        assert!(removed);
+        let blocked = store.read_block_from("telegram").unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0], "other");
+
+        let not_found = store.remove_block_from("telegram", "nonexistent").unwrap();
+        assert!(!not_found);
+    }
+
+    #[test]
+    fn test_remove_block_from_no_file() {
+        let (store, _) = test_store();
+        // No block file exists yet — should return false, not error.
+        let removed = store.remove_block_from("telegram", "nobody").unwrap();
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_blocklist_takes_precedence_over_allowlist() {
+        let (store, _) = test_store();
+        // Add user to allowlist via approve
+        let r = store.upsert_request("telegram", "user123", None).unwrap();
+        store.approve("telegram", &r.code).unwrap();
+        // Confirm they're allowed
+        assert!(
+            store
+                .is_sender_allowed("telegram", "user123", None)
+                .unwrap()
+        );
+
+        // Now block them
+        store.add_block_from("telegram", "user123").unwrap();
+        // Blocklist takes precedence — should NOT be allowed
+        assert!(
+            !store
+                .is_sender_allowed("telegram", "user123", None)
+                .unwrap()
+        );
+        // And explicitly blocked
+        assert!(
+            store
+                .is_sender_blocked("telegram", "user123", None)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_is_sender_blocked_by_username() {
+        let (store, _) = test_store();
+        store.add_block_from("telegram", "@badbot").unwrap();
+        assert!(
+            store
+                .is_sender_blocked("telegram", "other_id", Some("badbot"))
+                .unwrap()
+        );
+        assert!(
+            store
+                .is_sender_blocked("telegram", "other_id", Some("@badbot"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .is_sender_blocked("telegram", "other_id", Some("goodbot"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_is_sender_blocked_empty_list() {
+        let (store, _) = test_store();
+        assert!(!store.is_sender_blocked("telegram", "anyone", None).unwrap());
     }
 }

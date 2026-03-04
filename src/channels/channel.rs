@@ -1,6 +1,7 @@
 //! Channel trait and message types.
 
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -160,6 +161,91 @@ pub enum StatusUpdate {
     },
 }
 
+// ── Streaming draft replies ───────────────────────────────────────────
+
+/// Per-channel streaming mode for partial reply rendering.
+///
+/// Configurable via `CHANNEL_STREAM_MODE` env var or per-channel config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamMode {
+    /// No streaming — wait for the full response, then send once.
+    #[default]
+    None,
+    /// Send-then-edit: post an initial message, then edit it as chunks arrive.
+    /// The first version is "\u2726 typing..." and updates accumulate.
+    EditFirst,
+    /// Status line: send a single updating status line that shows the
+    /// current assistant state (like a progress bar), then a final message.
+    StatusLine,
+}
+
+impl StreamMode {
+    /// Parse from a string value (env var or config).
+    pub fn from_str_value(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "edit" | "edit_first" | "editfirst" => Self::EditFirst,
+            "status" | "status_line" | "statusline" => Self::StatusLine,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Minimum interval between draft edits (to avoid Discord/Slack rate limits).
+const DRAFT_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Tracks the state of an in-progress streaming draft reply.
+#[derive(Debug)]
+pub struct DraftReplyState {
+    /// The message ID of the draft we're editing (platform-specific).
+    pub message_id: Option<String>,
+    /// Channel ID / conversation target.
+    pub channel_id: String,
+    /// Accumulated text so far.
+    pub accumulated: String,
+    /// When the last edit was sent.
+    pub last_edit_at: Instant,
+    /// Whether the initial placeholder has been posted.
+    pub posted: bool,
+}
+
+impl DraftReplyState {
+    /// Create a new draft state for a channel.
+    pub fn new(channel_id: impl Into<String>) -> Self {
+        Self {
+            message_id: None,
+            channel_id: channel_id.into(),
+            accumulated: String::new(),
+            last_edit_at: Instant::now() - DRAFT_DEBOUNCE, // allow immediate first edit
+            posted: false,
+        }
+    }
+
+    /// Append a chunk and return true if enough time has passed to send an edit.
+    pub fn append(&mut self, chunk: &str) -> bool {
+        self.accumulated.push_str(chunk);
+        self.last_edit_at.elapsed() >= DRAFT_DEBOUNCE
+    }
+
+    /// Mark that an edit was just sent.
+    pub fn mark_sent(&mut self, message_id: Option<String>) {
+        self.last_edit_at = Instant::now();
+        self.posted = true;
+        if let Some(id) = message_id {
+            self.message_id = Some(id);
+        }
+    }
+
+    /// Get the current accumulated text with a typing indicator.
+    pub fn display_text(&self) -> String {
+        format!("{} \u{2726}", self.accumulated)
+    }
+
+    /// Get the final accumulated text (no typing indicator).
+    pub fn final_text(&self) -> &str {
+        &self.accumulated
+    }
+}
+
 /// Trait for message channels.
 ///
 /// Channels receive messages from external sources and convert them to
@@ -213,11 +299,68 @@ pub trait Channel: Send + Sync {
         Ok(())
     }
 
+    /// Send a streaming draft update for progressive message rendering.
+    ///
+    /// Channels that support message editing (Slack, Discord) can override this
+    /// to post an initial placeholder and then edit it as chunks arrive.
+    ///
+    /// Returns the platform message ID (for subsequent edits).
+    async fn send_draft(
+        &self,
+        _draft: &DraftReplyState,
+        _metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        Ok(None)
+    }
+
+    /// Get the stream mode for this channel.
+    ///
+    /// Default: StreamMode::None (no streaming drafts).
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::None
+    }
+
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;
 
+    /// React to a message with an emoji.
+    ///
+    /// Default implementation does nothing (for channels that don't support reactions).
+    async fn react(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a poll to a chat.
+    ///
+    /// Default implementation does nothing (for channels that don't support polls).
+    async fn poll(
+        &self,
+        _chat_id: &str,
+        _question: &str,
+        _options: &[String],
+        _is_anonymous: bool,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
     /// Gracefully shut down the channel.
     async fn shutdown(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a typing indicator to a chat.
+    ///
+    /// Platforms like Telegram, Discord, and Slack show a "... is typing"
+    /// indicator. The `chat_id` is channel-specific (e.g. Telegram chat ID,
+    /// Discord channel ID).
+    ///
+    /// Default implementation does nothing (for channels without typing support).
+    async fn send_typing(&self, _chat_id: &str) -> Result<(), ChannelError> {
         Ok(())
     }
 }

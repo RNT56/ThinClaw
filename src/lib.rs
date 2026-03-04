@@ -56,6 +56,7 @@ pub mod evaluation;
 pub mod extensions;
 pub mod history;
 pub mod hooks;
+pub mod i18n;
 pub mod llm;
 pub mod media;
 pub mod observability;

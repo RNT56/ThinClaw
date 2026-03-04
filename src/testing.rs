@@ -295,6 +295,8 @@ impl TestHarnessBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            sse_sender: None,
+            agent_router: None,
         };
 
         TestHarness {

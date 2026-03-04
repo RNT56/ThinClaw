@@ -108,6 +108,14 @@ pub struct ActivationCriteria {
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// Conditions under which this skill should be used.
+    /// If non-empty, at least one must match (case-insensitive substring) for the skill to activate.
+    #[serde(default)]
+    pub use_when: Vec<String>,
+    /// Conditions under which this skill should NOT be used.
+    /// If any matches (case-insensitive substring), the skill is excluded.
+    #[serde(default)]
+    pub dont_use_when: Vec<String>,
 }
 
 impl ActivationCriteria {
@@ -121,6 +129,32 @@ impl ActivationCriteria {
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);
+        self.use_when.truncate(MAX_KEYWORDS_PER_SKILL);
+        self.dont_use_when.truncate(MAX_KEYWORDS_PER_SKILL);
+    }
+
+    /// Check if the skill should be excluded based on `dont_use_when` patterns.
+    /// Returns `true` if the message matches any exclusion pattern.
+    pub fn is_excluded_by_routing(&self, message: &str) -> bool {
+        if self.dont_use_when.is_empty() {
+            return false;
+        }
+        let msg_lower = message.to_lowercase();
+        self.dont_use_when
+            .iter()
+            .any(|cond| msg_lower.contains(&cond.to_lowercase()))
+    }
+
+    /// Check if the skill matches `use_when` routing conditions.
+    /// Returns `true` if `use_when` is empty (no restriction) or at least one matches.
+    pub fn matches_use_when(&self, message: &str) -> bool {
+        if self.use_when.is_empty() {
+            return true;
+        }
+        let msg_lower = message.to_lowercase();
+        self.use_when
+            .iter()
+            .any(|cond| msg_lower.contains(&cond.to_lowercase()))
     }
 }
 

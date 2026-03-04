@@ -11,10 +11,12 @@
 //! - Context compaction for long conversations
 
 mod agent_loop;
+pub mod agent_router;
 mod commands;
 pub mod compaction;
 pub mod context_monitor;
 pub mod cost_guard;
+pub mod cron_stagger;
 mod dispatcher;
 mod heartbeat;
 pub mod job_monitor;
@@ -33,8 +35,10 @@ pub mod worker;
 
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps, BackgroundTasksHandle};
+pub use agent_router::{AgentRouter, AgentWorkspace, RoutingDecision, RoutingReason};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
+pub use cron_stagger::{CronGate, FinishedRunPayload, StaggerConfig};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};

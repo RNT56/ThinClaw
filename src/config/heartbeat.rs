@@ -13,6 +13,8 @@ pub struct HeartbeatConfig {
     pub notify_channel: Option<String>,
     /// User ID to notify on heartbeat findings.
     pub notify_user: Option<String>,
+    /// Telegram forum topic ID for topic-targeted messages.
+    pub notify_topic_id: Option<i64>,
 }
 
 impl Default for HeartbeatConfig {
@@ -22,6 +24,7 @@ impl Default for HeartbeatConfig {
             interval_secs: 1800, // 30 minutes
             notify_channel: None,
             notify_user: None,
+            notify_topic_id: None,
         }
     }
 }
@@ -38,6 +41,8 @@ impl HeartbeatConfig {
                 .or_else(|| settings.heartbeat.notify_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
                 .or_else(|| settings.heartbeat.notify_user.clone()),
+            notify_topic_id: optional_env("HEARTBEAT_NOTIFY_TOPIC_ID")?
+                .and_then(|s| s.parse::<i64>().ok()),
         })
     }
 }

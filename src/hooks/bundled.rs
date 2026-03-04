@@ -21,13 +21,18 @@ const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_WEBHOOK_MAX_IN_FLIGHT: usize = 32;
 const MAX_HOOK_TIMEOUT_MS: u64 = 30_000;
 
-const ALL_HOOK_POINTS: [HookPoint; 6] = [
+const ALL_HOOK_POINTS: [HookPoint; 11] = [
     HookPoint::BeforeInbound,
     HookPoint::BeforeToolCall,
     HookPoint::BeforeOutbound,
     HookPoint::OnSessionStart,
     HookPoint::OnSessionEnd,
     HookPoint::TransformResponse,
+    HookPoint::BeforeAgentStart,
+    HookPoint::BeforeMessageWrite,
+    HookPoint::BeforeLlmInput,
+    HookPoint::AfterLlmOutput,
+    HookPoint::BeforeTranscribeAudio,
 ];
 
 /// Errors while parsing or compiling declarative hook bundles.
@@ -515,6 +520,30 @@ enum OutboundWebhookEventSummary {
     ResponseTransform {
         response_length: usize,
     },
+    AgentStart {
+        model: String,
+        provider: String,
+    },
+    MessageWrite {
+        channel: String,
+        content_length: usize,
+    },
+    LlmInput {
+        model: String,
+        message_length: usize,
+        message_count: usize,
+    },
+    LlmOutput {
+        model: String,
+        content_length: usize,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    TranscribeAudio {
+        channel: String,
+        audio_size_bytes: u64,
+        mime_type: String,
+    },
 }
 
 #[async_trait]
@@ -634,6 +663,48 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
                 response_length: response.len(),
             }
         }
+        HookEvent::AgentStart { model, provider } => OutboundWebhookEventSummary::AgentStart {
+            model: model.clone(),
+            provider: provider.clone(),
+        },
+        HookEvent::MessageWrite {
+            channel, content, ..
+        } => OutboundWebhookEventSummary::MessageWrite {
+            channel: channel.clone(),
+            content_length: content.len(),
+        },
+        HookEvent::LlmInput {
+            model,
+            user_message,
+            message_count,
+            ..
+        } => OutboundWebhookEventSummary::LlmInput {
+            model: model.clone(),
+            message_length: user_message.len(),
+            message_count: *message_count,
+        },
+        HookEvent::LlmOutput {
+            model,
+            content,
+            input_tokens,
+            output_tokens,
+            ..
+        } => OutboundWebhookEventSummary::LlmOutput {
+            model: model.clone(),
+            content_length: content.len(),
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+        },
+        HookEvent::TranscribeAudio {
+            channel,
+            audio_size_bytes,
+            mime_type,
+            ..
+        } => OutboundWebhookEventSummary::TranscribeAudio {
+            channel: channel.clone(),
+            audio_size_bytes: *audio_size_bytes,
+            mime_type: mime_type.clone(),
+        },
     }
 }
 
@@ -879,13 +950,20 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::Outbound { user_id, .. }
         | HookEvent::SessionStart { user_id, .. }
         | HookEvent::SessionEnd { user_id, .. }
-        | HookEvent::ResponseTransform { user_id, .. } => user_id,
+        | HookEvent::ResponseTransform { user_id, .. }
+        | HookEvent::MessageWrite { user_id, .. }
+        | HookEvent::LlmInput { user_id, .. }
+        | HookEvent::LlmOutput { user_id, .. }
+        | HookEvent::TranscribeAudio { user_id, .. } => user_id,
+        HookEvent::AgentStart { .. } => "system",
     }
 }
 
 fn extract_primary_content(event: &HookEvent) -> String {
     match event {
-        HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => content.clone(),
+        HookEvent::Inbound { content, .. }
+        | HookEvent::Outbound { content, .. }
+        | HookEvent::MessageWrite { content, .. } => content.clone(),
         HookEvent::ToolCall { parameters, .. } => {
             serde_json::to_string(parameters).unwrap_or_default()
         }
@@ -893,6 +971,12 @@ fn extract_primary_content(event: &HookEvent) -> String {
             session_id.clone()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
+        HookEvent::AgentStart { model, provider } => {
+            format!("{}:{}", provider, model)
+        }
+        HookEvent::LlmInput { user_message, .. } => user_message.clone(),
+        HookEvent::LlmOutput { content, .. } => content.clone(),
+        HookEvent::TranscribeAudio { mime_type, .. } => mime_type.clone(),
     }
 }
 

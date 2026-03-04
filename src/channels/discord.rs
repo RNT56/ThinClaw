@@ -30,7 +30,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
-use super::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use super::{
+    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    StreamMode,
+};
 use crate::error::ChannelError;
 
 /// Channel name constant.
@@ -56,6 +59,19 @@ pub struct DiscordConfig {
     pub guild_id: Option<String>,
     /// Allowed channel IDs (empty = allow all).
     pub allow_from: Vec<String>,
+    /// Stream mode for progressive message rendering.
+    pub stream_mode: StreamMode,
+}
+
+impl From<crate::config::DiscordChannelConfig> for DiscordConfig {
+    fn from(c: crate::config::DiscordChannelConfig) -> Self {
+        Self {
+            bot_token: c.bot_token,
+            guild_id: c.guild_id,
+            allow_from: c.allow_from,
+            stream_mode: c.stream_mode,
+        }
+    }
 }
 
 // ── Discord Gateway types ───────────────────────────────────────────
@@ -188,6 +204,72 @@ impl DiscordChannel {
                     reason: format!("Discord API: {body}"),
                 });
             }
+        }
+
+        Ok(())
+    }
+
+    /// Send a new message and return its message ID.
+    async fn send_message_with_id(
+        client: &Client,
+        bot_token: &str,
+        channel_id: &str,
+        text: &str,
+    ) -> Result<String, ChannelError> {
+        let resp = client
+            .post(format!("{API_BASE}/channels/{channel_id}/messages"))
+            .header("Authorization", format!("Bot {bot_token}"))
+            .json(&serde_json::json!({ "content": text }))
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("POST message: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("Discord API: {body}"),
+            });
+        }
+
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Ok(body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Edit an existing message.
+    async fn edit_message(
+        client: &Client,
+        bot_token: &str,
+        channel_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Result<(), ChannelError> {
+        let resp = client
+            .patch(format!(
+                "{API_BASE}/channels/{channel_id}/messages/{message_id}"
+            ))
+            .header("Authorization", format!("Bot {bot_token}"))
+            .json(&serde_json::json!({ "content": text }))
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("PATCH message: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("Discord API edit: {body}"),
+            });
         }
 
         Ok(())
@@ -435,9 +517,10 @@ impl Channel for DiscordChannel {
 
                             // Guild filter
                             if let Some(ref target_guild) = guild_id
-                                && msg.guild_id.as_deref() != Some(target_guild.as_str()) {
-                                    continue;
-                                }
+                                && msg.guild_id.as_deref() != Some(target_guild.as_str())
+                            {
+                                continue;
+                            }
 
                             // Channel allow-list
                             if !allow_from.is_empty()
@@ -554,6 +637,43 @@ impl Channel for DiscordChannel {
     ) -> Result<(), ChannelError> {
         let bot_token = self.config.bot_token.expose_secret();
         Self::send_message(&self.client, bot_token, user_id, &response.content).await
+    }
+
+    async fn send_draft(
+        &self,
+        draft: &DraftReplyState,
+        metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        let channel_id = match metadata.get("channel_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let bot_token = self.config.bot_token.expose_secret();
+        let text = if draft.accumulated.len() > MAX_MESSAGE_LENGTH {
+            // Truncate to fit Discord limits
+            let cutoff = draft.accumulated[..MAX_MESSAGE_LENGTH - 20]
+                .rfind(' ')
+                .unwrap_or(MAX_MESSAGE_LENGTH - 20);
+            format!("{}...", &draft.accumulated[..cutoff])
+        } else {
+            draft.display_text()
+        };
+
+        if let Some(ref msg_id) = draft.message_id {
+            // Edit existing message
+            Self::edit_message(&self.client, bot_token, channel_id, msg_id, &text).await?;
+            Ok(Some(msg_id.clone()))
+        } else {
+            // Post new message
+            let msg_id =
+                Self::send_message_with_id(&self.client, bot_token, channel_id, &text).await?;
+            Ok(Some(msg_id))
+        }
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        self.config.stream_mode
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {

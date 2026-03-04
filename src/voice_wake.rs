@@ -168,7 +168,8 @@ impl VoiceWakeRuntime {
     /// Main detection loop.
     ///
     /// When the `voice` feature is enabled, captures audio via `cpal` and
-    /// performs RMS energy detection. Otherwise, runs as a polling placeholder.
+    /// performs detection using the configured backend. Otherwise, runs as
+    /// a polling placeholder.
     async fn detection_loop(
         running: Arc<AtomicBool>,
         event_tx: mpsc::Sender<VoiceWakeEvent>,
@@ -182,7 +183,20 @@ impl VoiceWakeRuntime {
 
         #[cfg(feature = "voice")]
         {
-            Self::detection_loop_cpal(running, event_tx, config).await;
+            match &config.backend {
+                WakeBackend::EnergyDetector => {
+                    Self::detection_loop_cpal(running, event_tx, config).await;
+                }
+                WakeBackend::SherpaOnnx { model_path } => {
+                    Self::detection_loop_sherpa(
+                        running,
+                        event_tx,
+                        config.clone(),
+                        model_path.clone(),
+                    )
+                    .await;
+                }
+            }
         }
 
         #[cfg(not(feature = "voice"))]
@@ -322,6 +336,249 @@ impl VoiceWakeRuntime {
         let _ = audio_handle.join();
 
         let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
+    }
+
+    /// Sherpa-ONNX keyword spotting detection loop.
+    ///
+    /// Captures audio via cpal and pipes raw PCM frames to the
+    /// `sherpa-onnx-keyword-spotter` subprocess for real-time keyword
+    /// detection. Three threads coordinate:
+    ///
+    /// 1. **Audio thread** (OS thread): cpal capture → `pcm_tx` channel
+    /// 2. **Feed thread** (OS thread): `pcm_rx` → child stdin (f32→i16 PCM)
+    /// 3. **Stdout thread** (OS thread): reads child stdout for keyword matches
+    ///
+    /// Falls back to energy-based detection when the Sherpa binary or model
+    /// is not available.
+    #[cfg(feature = "voice")]
+    async fn detection_loop_sherpa(
+        running: Arc<AtomicBool>,
+        event_tx: mpsc::Sender<VoiceWakeEvent>,
+        config: VoiceWakeConfig,
+        model_path: String,
+    ) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Verify the Sherpa binary and model are available.
+        if !Self::sherpa_available() {
+            tracing::warn!(
+                "sherpa-onnx-keyword-spotter not found in PATH; \
+                 falling back to energy-based detection"
+            );
+            return Self::detection_loop_cpal(running, event_tx, config).await;
+        }
+
+        if !std::path::Path::new(&model_path).exists() {
+            tracing::warn!(
+                model_path = %model_path,
+                "Sherpa-ONNX model directory not found; falling back to energy-based detection"
+            );
+            return Self::detection_loop_cpal(running, event_tx, config).await;
+        }
+
+        // PCM audio channel: cpal audio thread → Sherpa feeder thread.
+        let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<f32>>(128);
+
+        // --- Thread 1: cpal audio capture ---
+        let audio_running = running.clone();
+        let audio_event_tx = event_tx.clone();
+        let sample_rate = config.sample_rate;
+        let audio_handle = std::thread::spawn(move || {
+            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+            let host = cpal::default_host();
+            let device = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                        message: "No audio input device found".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            let stream_config = cpal::StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            };
+
+            let stream = match device.build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let _ = pcm_tx.try_send(data.to_vec());
+                },
+                move |err| {
+                    tracing::error!("Audio stream error: {}", err);
+                },
+                None,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                        message: format!("Failed to build audio stream: {}", e),
+                    });
+                    return;
+                }
+            };
+
+            let _ = stream.play();
+            while audio_running.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            drop(stream);
+        });
+
+        // Spawn Sherpa-ONNX keyword spotter subprocess.
+        let keywords_file = std::path::Path::new(&model_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("keywords.txt");
+
+        let mut child = match Command::new("sherpa-onnx-keyword-spotter")
+            .args([
+                "--encoder",
+                &format!(
+                    "{}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+                    model_path
+                ),
+                "--decoder",
+                &format!(
+                    "{}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+                    model_path
+                ),
+                "--joiner",
+                &format!("{}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx", model_path),
+                "--tokens",
+                &format!("{}/tokens.txt", model_path),
+                "--keywords-file",
+                &keywords_file.to_string_lossy(),
+                "--provider",
+                "cpu",
+                "--num-threads",
+                "2",
+                "--sample-rate",
+                &sample_rate.to_string(),
+                "--read-stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to spawn sherpa-onnx: {}", e);
+                let _ = event_tx
+                    .send(VoiceWakeEvent::Error {
+                        message: format!("Sherpa-ONNX spawn failed: {}", e),
+                    })
+                    .await;
+                running.store(false, Ordering::Relaxed);
+                let _ = audio_handle.join();
+                return;
+            }
+        };
+
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+
+        // --- Thread 2: stdin feeder (pcm_rx → child stdin) ---
+        let feed_running = running.clone();
+        let feed_handle = std::thread::spawn(move || {
+            while feed_running.load(Ordering::Relaxed) {
+                match pcm_rx.blocking_recv() {
+                    Some(samples) => {
+                        // Convert f32 PCM to i16 PCM bytes (Sherpa expects raw 16-bit PCM).
+                        let mut buf = Vec::with_capacity(samples.len() * 2);
+                        for sample in &samples {
+                            let clamped = sample.clamp(-1.0, 1.0);
+                            let i16_val = (clamped * 32767.0) as i16;
+                            buf.extend_from_slice(&i16_val.to_le_bytes());
+                        }
+                        if stdin.write_all(&buf).is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            drop(stdin); // Close stdin to signal EOF to the child.
+        });
+
+        // --- Thread 3: stdout reader (child stdout → wake events) ---
+        let stdout_running = running.clone();
+        let stdout_event_tx = event_tx.clone();
+        let wake_word = config.wake_word.to_lowercase();
+        let stdout_handle = std::thread::spawn(move || {
+            use std::io::BufRead;
+
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                if !stdout_running.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+
+                // Sherpa-ONNX outputs detected keywords in the format:
+                //   keyword_detected: <keyword> <timestamp>
+                // The exact format varies by version; we check if the line
+                // contains our wake word (case-insensitive).
+                let lower = line.to_lowercase();
+                if lower.contains(&wake_word) || lower.contains("keyword_detected") {
+                    tracing::info!(raw_output = %line, "Sherpa-ONNX keyword detection");
+                    let _ = stdout_event_tx.blocking_send(VoiceWakeEvent::WakeWordDetected {
+                        confidence: 0.9, // Sherpa doesn't always report confidence.
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    });
+                }
+            }
+        });
+
+        // Wait for stop signal or child process exit.
+        while running.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::info!(
+                        exit_code = ?status.code(),
+                        "Sherpa-ONNX keyword spotter exited"
+                    );
+                    break;
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::error!("Error checking Sherpa process: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Cleanup: signal all threads to stop, kill child, join threads.
+        running.store(false, Ordering::Relaxed);
+        let _ = child.kill();
+        let _ = feed_handle.join();
+        let _ = stdout_handle.join();
+        let _ = audio_handle.join();
+
+        let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
+    }
+
+    /// Check if the Sherpa-ONNX keyword spotter binary is available.
+    pub fn sherpa_available() -> bool {
+        std::process::Command::new("sherpa-onnx-keyword-spotter")
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success() || s.code() == Some(1)) // --help may return 1
+            .unwrap_or(false)
     }
 }
 

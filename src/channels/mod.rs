@@ -27,6 +27,7 @@
 //! WASM channels allow dynamic loading of channel implementations at runtime.
 //! See the [`wasm`] module for details.
 
+pub mod canvas_gateway;
 mod channel;
 mod discord;
 pub mod health_monitor;
@@ -43,12 +44,15 @@ pub mod wasm;
 pub mod web;
 mod webhook_server;
 
-pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+pub use channel::{
+    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    StreamMode,
+};
 pub use discord::DiscordChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
-pub use imessage::IMessageChannel;
+pub use imessage::{IMessageChannel, IMessageConfig};
 pub use manager::ChannelManager;
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;

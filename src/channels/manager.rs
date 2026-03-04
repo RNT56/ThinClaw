@@ -217,6 +217,34 @@ impl ChannelManager {
     pub async fn channel_names(&self) -> Vec<String> {
         self.channels.read().await.keys().cloned().collect()
     }
+
+    /// Get the stream mode for a specific channel.
+    ///
+    /// Returns `StreamMode::None` if the channel is not found.
+    pub async fn stream_mode(&self, channel_name: &str) -> crate::channels::StreamMode {
+        let channels = self.channels.read().await;
+        channels
+            .get(channel_name)
+            .map(|c| c.stream_mode())
+            .unwrap_or_default()
+    }
+
+    /// Send a streaming draft update to a specific channel.
+    ///
+    /// Returns the platform message ID for subsequent edits.
+    pub async fn send_draft(
+        &self,
+        channel_name: &str,
+        draft: &crate::channels::DraftReplyState,
+        metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.send_draft(draft, metadata).await
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl Default for ChannelManager {

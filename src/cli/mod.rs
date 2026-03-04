@@ -7,14 +7,21 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
+//! - Managing agent workspaces (`agents add`, `agents list`, `agents remove`)
+//! - Listing sessions (`sessions list`, `sessions show`, `sessions prune`)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+pub mod agents;
+mod browser;
+mod channels;
 mod completion;
 mod config;
 mod cron;
 mod doctor;
+mod gateway;
+mod logs;
 mod mcp;
 pub mod memory;
 mod message;
@@ -23,13 +30,20 @@ mod pairing;
 mod registry;
 #[cfg(feature = "repl")]
 mod service;
+pub mod sessions;
 pub mod status;
 mod tool;
+mod update;
 
+pub use agents::{AgentCommand, run_agents_command};
+pub use browser::{BrowserCommand, run_browser_command};
+pub use channels::{ChannelCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command};
 pub use doctor::run_doctor_command;
+pub use gateway::{GatewayCommand, run_gateway_command};
+pub use logs::{LogCommand, run_log_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
@@ -40,8 +54,10 @@ pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_
 pub use registry::{RegistryCommand, run_registry_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
+pub use sessions::{SessionCommand, run_sessions_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+pub use update::{UpdateCommand, run_update_command};
 
 use clap::{Parser, Subcommand};
 
@@ -100,6 +116,14 @@ pub enum Command {
     #[command(subcommand)]
     Cron(CronCommand),
 
+    /// Manage the web gateway
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
+
+    /// Manage messaging channels
+    #[command(subcommand)]
+    Channels(ChannelCommand),
+
     /// Manage WASM tools
     #[command(subcommand)]
     Tool(ToolCommand),
@@ -124,6 +148,14 @@ pub enum Command {
     #[command(subcommand)]
     Pairing(PairingCommand),
 
+    /// Manage agent workspaces (register, list, remove agents)
+    #[command(subcommand)]
+    Agents(AgentCommand),
+
+    /// Manage active sessions (list, show, prune)
+    #[command(subcommand)]
+    Sessions(SessionCommand),
+
     /// Manage OS service (launchd / systemd)
     #[cfg(feature = "repl")]
     #[command(subcommand)]
@@ -134,6 +166,18 @@ pub enum Command {
 
     /// Show system health and diagnostics
     Status,
+
+    /// Query and filter logs
+    #[command(subcommand)]
+    Logs(LogCommand),
+
+    /// Browser automation (headless Chrome)
+    #[command(subcommand)]
+    Browser(BrowserCommand),
+
+    /// Check for updates and self-update
+    #[command(subcommand)]
+    Update(UpdateCommand),
 
     /// Generate shell completion scripts
     Completion(Completion),

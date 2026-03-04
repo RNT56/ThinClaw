@@ -3,6 +3,12 @@
 //! Every OAuth flow in the codebase (WASM tool auth, MCP server auth, NEAR AI login)
 //! uses the same callback port, landing page, and listener logic from this module.
 //!
+//! # Supported Providers
+//!
+//! - **Google** (Desktop App): Calendar, Drive, Gmail, Sheets, etc.
+//! - **GitHub** (OAuth App): GitHub API access for code, issues, PRs.
+//! - **Notion** (Integration): Notion workspace access.
+//!
 //! # Built-in Credentials
 //!
 //! Many CLI tools (gcloud, rclone, gdrive) ship with default OAuth credentials
@@ -40,6 +46,29 @@ const GOOGLE_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_SEC
     None => "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",
 };
 
+/// GitHub OAuth App credentials.
+/// For "installed app" pattern (non-web), client_secret is semi-public.
+/// Override at compile time with IRONCLAW_GITHUB_CLIENT_ID / IRONCLAW_GITHUB_CLIENT_SECRET.
+const GITHUB_CLIENT_ID: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_ID") {
+    Some(v) => v,
+    None => "Ov23liIronClawGHApp01",
+};
+const GITHUB_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_SECRET") {
+    Some(v) => v,
+    None => "ironclaw_gh_default_secret_placeholder",
+};
+
+/// Notion Integration credentials.
+/// Override at compile time with IRONCLAW_NOTION_CLIENT_ID / IRONCLAW_NOTION_CLIENT_SECRET.
+const NOTION_CLIENT_ID: &str = match option_env!("IRONCLAW_NOTION_CLIENT_ID") {
+    Some(v) => v,
+    None => "ironclaw-notion-integration",
+};
+const NOTION_CLIENT_SECRET: &str = match option_env!("IRONCLAW_NOTION_CLIENT_SECRET") {
+    Some(v) => v,
+    None => "ironclaw_notion_default_secret_placeholder",
+};
+
 /// Returns built-in OAuth credentials for a provider, keyed by secret_name.
 ///
 /// The secret_name comes from the tool's capabilities.json `auth.secret_name` field.
@@ -49,6 +78,14 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
         "google_oauth_token" => Some(OAuthCredentials {
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
+        }),
+        "github_oauth_token" => Some(OAuthCredentials {
+            client_id: GITHUB_CLIENT_ID,
+            client_secret: GITHUB_CLIENT_SECRET,
+        }),
+        "notion_oauth_token" => Some(OAuthCredentials {
+            client_id: NOTION_CLIENT_ID,
+            client_secret: NOTION_CLIENT_SECRET,
         }),
         _ => None,
     }
@@ -480,6 +517,24 @@ mod tests {
     #[test]
     fn test_google_returns_based_on_compile_env() {
         let creds = builtin_credentials("google_oauth_token");
+        assert!(creds.is_some());
+        let creds = creds.unwrap();
+        assert!(!creds.client_id.is_empty());
+        assert!(!creds.client_secret.is_empty());
+    }
+
+    #[test]
+    fn test_github_returns_credentials() {
+        let creds = builtin_credentials("github_oauth_token");
+        assert!(creds.is_some());
+        let creds = creds.unwrap();
+        assert!(!creds.client_id.is_empty());
+        assert!(!creds.client_secret.is_empty());
+    }
+
+    #[test]
+    fn test_notion_returns_credentials() {
+        let creds = builtin_credentials("notion_oauth_token");
         assert!(creds.is_some());
         let creds = creds.unwrap();
         assert!(!creds.client_id.is_empty());

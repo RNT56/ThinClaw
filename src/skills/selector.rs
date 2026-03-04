@@ -51,6 +51,25 @@ pub fn prefilter_skills<'a>(
 
     let mut scored: Vec<ScoredSkill<'a>> = available_skills
         .iter()
+        .filter(|skill| {
+            // Routing block: dont_use_when excludes the skill
+            if skill.manifest.activation.is_excluded_by_routing(message) {
+                tracing::debug!(
+                    skill = skill.name(),
+                    "Excluded by dont_use_when routing block"
+                );
+                return false;
+            }
+            // Routing block: use_when must match if specified
+            if !skill.manifest.activation.matches_use_when(message) {
+                tracing::debug!(
+                    skill = skill.name(),
+                    "Skipped: no use_when condition matched"
+                );
+                return false;
+            }
+            true
+        })
         .filter_map(|skill| {
             let score = score_skill(skill, &message_lower, message);
             if score > 0 {
@@ -161,6 +180,8 @@ mod tests {
                     patterns: pattern_strings,
                     tags: tag_vec,
                     max_context_tokens: 1000,
+                    use_when: vec![],
+                    dont_use_when: vec![],
                 },
                 metadata: None,
             },
@@ -172,6 +193,19 @@ mod tests {
             lowercased_keywords,
             lowercased_tags,
         }
+    }
+
+    fn make_skill_with_routing(
+        name: &str,
+        keywords: &[&str],
+        use_when: &[&str],
+        dont_use_when: &[&str],
+    ) -> LoadedSkill {
+        let mut skill = make_skill(name, keywords, &[], &[]);
+        skill.manifest.activation.use_when = use_when.iter().map(|s| s.to_string()).collect();
+        skill.manifest.activation.dont_use_when =
+            dont_use_when.iter().map(|s| s.to_string()).collect();
+        skill
     }
 
     #[test]
@@ -367,5 +401,72 @@ mod tests {
         let skills = vec![skill, skill2];
         let result = prefilter_skills("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
+    }
+
+    // ── Routing block tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_dont_use_when_excludes_skill() {
+        let skill = make_skill_with_routing("writing", &["write"], &[], &["code", "programming"]);
+        let skills = vec![skill];
+        // Message contains "code" → skill should be excluded
+        let result = prefilter_skills(
+            "write some code for me",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_dont_use_when_allows_when_no_match() {
+        let skill = make_skill_with_routing("writing", &["write"], &[], &["code", "programming"]);
+        let skills = vec![skill];
+        // No exclusion match → skill should be included
+        let result = prefilter_skills(
+            "write an email to my boss",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_use_when_requires_match() {
+        let skill = make_skill_with_routing("writing", &["write"], &["formal", "business"], &[]);
+        let skills = vec![skill];
+        // Message doesn't contain "formal" or "business" → excluded
+        let result = prefilter_skills("write a joke for me", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_use_when_matches() {
+        let skill = make_skill_with_routing("writing", &["write"], &["formal", "business"], &[]);
+        let skills = vec![skill];
+        // Message contains "business" → included
+        let result = prefilter_skills(
+            "write a business proposal",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_both_routing_blocks() {
+        let skill = make_skill_with_routing("writing", &["write"], &["email"], &["spam"]);
+        let skills = vec![skill];
+        // Has "email" (use_when match) but also "spam" (dont_use_when match) → excluded
+        let result = prefilter_skills(
+            "write email about spam filtering",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(result.is_empty());
     }
 }

@@ -12,7 +12,10 @@ use uuid::Uuid;
 use crate::error::WorkspaceError;
 
 use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
-use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+use crate::workspace::search::{
+    RankedResult, SearchConfig, SearchResult, apply_temporal_decay, expand_query_keywords,
+    mmr_rerank, reciprocal_rank_fusion,
+};
 
 /// Database repository for workspace operations.
 pub struct Repository {
@@ -389,6 +392,9 @@ impl Repository {
     // ==================== Search Operations ====================
 
     /// Perform hybrid search combining FTS and vector similarity.
+    ///
+    /// Pipeline: query expansion → FTS + vector search → RRF fusion →
+    /// temporal decay (if configured) → MMR re-ranking (if configured).
     pub async fn hybrid_search(
         &self,
         user_id: &str,
@@ -397,17 +403,36 @@ impl Repository {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        // Expand query with morphological variants for better FTS recall.
+        let expanded_query = if config.use_fts {
+            let keywords = expand_query_keywords(query);
+            if keywords.is_empty() {
+                query.to_string()
+            } else {
+                keywords.join(" | ")
+            }
+        } else {
+            query.to_string()
+        };
+
         let fts_results = if config.use_fts {
-            self.fts_search(user_id, agent_id, query, config.pre_fusion_limit)
+            self.fts_search(user_id, agent_id, &expanded_query, config.pre_fusion_limit)
                 .await?
         } else {
             Vec::new()
         };
 
+        let need_embeddings = config.enable_mmr;
         let vector_results = if config.use_vector {
             if let Some(embedding) = embedding {
-                self.vector_search(user_id, agent_id, embedding, config.pre_fusion_limit)
-                    .await?
+                self.vector_search(
+                    user_id,
+                    agent_id,
+                    embedding,
+                    config.pre_fusion_limit,
+                    need_embeddings,
+                )
+                .await?
             } else {
                 Vec::new()
             }
@@ -415,10 +440,42 @@ impl Repository {
             Vec::new()
         };
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        // Collect timestamps and embeddings from raw results before fusion
+        // (RRF discards them, so we capture them here).
+        let mut doc_timestamps = std::collections::HashMap::new();
+        let mut chunk_embeddings = std::collections::HashMap::new();
+
+        for r in fts_results.iter().chain(vector_results.iter()) {
+            if let Some(ts) = r.created_at {
+                doc_timestamps.entry(r.document_id).or_insert(ts);
+            }
+            if let Some(ref emb) = r.embedding {
+                chunk_embeddings
+                    .entry(r.chunk_id)
+                    .or_insert_with(|| emb.clone());
+            }
+        }
+
+        let mut results = reciprocal_rank_fusion(fts_results, vector_results, config);
+
+        // Apply temporal decay if configured.
+        if let Some(half_life) = config.temporal_decay_half_life_days
+            && !doc_timestamps.is_empty()
+        {
+            apply_temporal_decay(&mut results, half_life, &doc_timestamps);
+        }
+
+        // Apply MMR diversity re-ranking if configured.
+        if config.enable_mmr && !chunk_embeddings.is_empty() {
+            results = mmr_rerank(results, &chunk_embeddings, config.mmr_lambda, config.limit);
+        }
+
+        Ok(results)
     }
 
     /// Full-text search using PostgreSQL ts_rank_cd.
+    ///
+    /// The query may contain `|` for OR-expanded terms from `expand_query_keywords`.
     async fn fts_search(
         &self,
         user_id: &str,
@@ -432,7 +489,8 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, c.content,
-                       ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank
+                       ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank,
+                       c.created_at
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
@@ -455,33 +513,57 @@ impl Repository {
                 document_id: row.get("document_id"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
+                created_at: row.get("created_at"),
+                embedding: None,
             })
             .collect())
     }
 
     /// Vector similarity search using pgvector cosine distance.
+    ///
+    /// When `include_embeddings` is true, the embedding vectors are returned
+    /// in each `RankedResult` for downstream MMR re-ranking.
     async fn vector_search(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
         embedding: &[f32],
         limit: usize,
+        include_embeddings: bool,
     ) -> Result<Vec<RankedResult>, WorkspaceError> {
         let conn = self.conn().await?;
         let embedding_vec = Vector::from(embedding.to_vec());
 
+        // When MMR is enabled we also need the raw embedding vectors.
+        let query_sql = if include_embeddings {
+            r#"
+            SELECT c.id as chunk_id, c.document_id, c.content,
+                   1 - (c.embedding <=> $3) as similarity,
+                   c.created_at, c.embedding
+            FROM memory_chunks c
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+              AND c.embedding IS NOT NULL
+            ORDER BY c.embedding <=> $3
+            LIMIT $4
+            "#
+        } else {
+            r#"
+            SELECT c.id as chunk_id, c.document_id, c.content,
+                   1 - (c.embedding <=> $3) as similarity,
+                   c.created_at
+            FROM memory_chunks c
+            JOIN memory_documents d ON d.id = c.document_id
+            WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+              AND c.embedding IS NOT NULL
+            ORDER BY c.embedding <=> $3
+            LIMIT $4
+            "#
+        };
+
         let rows = conn
             .query(
-                r#"
-                SELECT c.id as chunk_id, c.document_id, c.content,
-                       1 - (c.embedding <=> $3) as similarity
-                FROM memory_chunks c
-                JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
-                  AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> $3
-                LIMIT $4
-                "#,
+                query_sql,
                 &[&user_id, &agent_id, &embedding_vec, &(limit as i64)],
             )
             .await
@@ -492,11 +574,22 @@ impl Repository {
         Ok(rows
             .iter()
             .enumerate()
-            .map(|(i, row)| RankedResult {
-                chunk_id: row.get("chunk_id"),
-                document_id: row.get("document_id"),
-                content: row.get("content"),
-                rank: (i + 1) as u32,
+            .map(|(i, row)| {
+                let emb = if include_embeddings {
+                    row.try_get::<_, Vector>("embedding")
+                        .ok()
+                        .map(|v| v.to_vec())
+                } else {
+                    None
+                };
+                RankedResult {
+                    chunk_id: row.get("chunk_id"),
+                    document_id: row.get("document_id"),
+                    content: row.get("content"),
+                    rank: (i + 1) as u32,
+                    created_at: row.get("created_at"),
+                    embedding: emb,
+                }
             })
             .collect())
     }

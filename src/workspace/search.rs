@@ -27,6 +27,14 @@ pub struct SearchConfig {
     pub min_score: f32,
     /// Maximum results to fetch from each method before fusion.
     pub pre_fusion_limit: usize,
+    /// Temporal decay half-life in days. None = no decay.
+    /// When set, scores are multiplied by 2^(-age_days / half_life_days).
+    pub temporal_decay_half_life_days: Option<f64>,
+    /// Enable Maximal Marginal Relevance re-ranking for result diversity.
+    pub enable_mmr: bool,
+    /// MMR lambda parameter (0.0 = pure diversity, 1.0 = pure relevance).
+    /// Only used when `enable_mmr` is true. Default: 0.5.
+    pub mmr_lambda: f32,
 }
 
 impl Default for SearchConfig {
@@ -38,6 +46,9 @@ impl Default for SearchConfig {
             use_vector: true,
             min_score: 0.0,
             pre_fusion_limit: 50,
+            temporal_decay_half_life_days: None,
+            enable_mmr: false,
+            mmr_lambda: 0.5,
         }
     }
 }
@@ -74,6 +85,27 @@ impl SearchConfig {
         self.min_score = score.clamp(0.0, 1.0);
         self
     }
+
+    /// Enable temporal decay with a half-life in days.
+    ///
+    /// Older documents have their scores multiplied by `2^(-age / half_life)`,
+    /// so a document that is one half-life old scores 50% of a fresh document.
+    pub fn with_temporal_decay(mut self, half_life_days: f64) -> Self {
+        self.temporal_decay_half_life_days = Some(half_life_days.max(0.1));
+        self
+    }
+
+    /// Enable Maximal Marginal Relevance re-ranking.
+    ///
+    /// `lambda` controls the relevance-vs-diversity tradeoff:
+    /// - 1.0 = pure relevance (no diversity)
+    /// - 0.0 = pure diversity (ignore relevance)
+    /// - 0.5 = balanced (default)
+    pub fn with_mmr(mut self, lambda: f32) -> Self {
+        self.enable_mmr = true;
+        self.mmr_lambda = lambda.clamp(0.0, 1.0);
+        self
+    }
 }
 
 /// A search result with hybrid scoring.
@@ -91,6 +123,54 @@ pub struct SearchResult {
     pub fts_rank: Option<u32>,
     /// Rank in vector results (1-based, None if not in vector results).
     pub vector_rank: Option<u32>,
+    /// Citation linking back to the source document.
+    pub citation: Option<Citation>,
+}
+
+/// Citation metadata linking a search result back to its source.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Citation {
+    /// Human-readable source title (e.g., file name, document title).
+    pub title: Option<String>,
+    /// Path to the source file, if local.
+    pub path: Option<String>,
+    /// URL of the source document, if remote.
+    pub url: Option<String>,
+    /// Timestamp when the source was ingested.
+    pub ingested_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Page or section number within the source document.
+    pub page: Option<u32>,
+    /// Line range within the source file (start, end), if applicable.
+    pub line_range: Option<(u32, u32)>,
+}
+
+impl Citation {
+    /// Format citation as a compact inline reference.
+    ///
+    /// Examples:
+    /// - `[source: README.md]`
+    /// - `[source: https://example.com/doc]`
+    /// - `[source: report.pdf, p.5]`
+    pub fn inline(&self) -> String {
+        let source = self
+            .title
+            .as_deref()
+            .or(self.path.as_deref())
+            .or(self.url.as_deref())
+            .unwrap_or("unknown");
+
+        let mut parts = vec![format!("[source: {}", source)];
+
+        if let Some(page) = self.page {
+            parts.push(format!("p.{}", page));
+        }
+
+        if let Some((start, end)) = self.line_range {
+            parts.push(format!("L{}-{}", start, end));
+        }
+
+        format!("{}]", parts.join(", "))
+    }
 }
 
 impl SearchResult {
@@ -110,6 +190,36 @@ impl SearchResult {
     }
 }
 
+/// Format a list of search results with inline citations.
+///
+/// Produces a numbered list like:
+/// ```text
+/// 1. Content excerpt... [source: README.md]
+/// 2. Another piece... [source: docs/guide.md, p.3]
+/// ```
+pub fn format_citations(results: &[SearchResult]) -> String {
+    let mut output = String::new();
+    for (i, result) in results.iter().enumerate() {
+        let citation_str = result
+            .citation
+            .as_ref()
+            .map(|c| format!(" {}", c.inline()))
+            .unwrap_or_default();
+
+        let preview = if result.content.len() > 200 {
+            format!("{}...", &result.content[..200])
+        } else {
+            result.content.clone()
+        };
+
+        output.push_str(&format!("{}. {}{}", i + 1, preview, citation_str));
+        if i < results.len() - 1 {
+            output.push('\n');
+        }
+    }
+    output
+}
+
 /// Raw result from a single search method.
 #[derive(Debug, Clone)]
 pub struct RankedResult {
@@ -117,6 +227,10 @@ pub struct RankedResult {
     pub document_id: Uuid,
     pub content: String,
     pub rank: u32, // 1-based rank
+    /// Optional creation timestamp for temporal decay.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional embedding vector for MMR diversity calculation.
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -197,6 +311,7 @@ pub fn reciprocal_rank_fusion(
             score: info.score,
             fts_rank: info.fts_rank,
             vector_rank: info.vector_rank,
+            citation: None, // Citations are populated by the caller after fusion
         })
         .collect();
 
@@ -227,6 +342,168 @@ pub fn reciprocal_rank_fusion(
     results
 }
 
+/// Apply temporal decay to search results.
+///
+/// Multiplies each result's score by `2^(-age_days / half_life_days)`,
+/// so documents that are one half-life old score 50%.
+pub fn apply_temporal_decay(
+    results: &mut [SearchResult],
+    half_life_days: f64,
+    document_timestamps: &HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
+) {
+    let now = chrono::Utc::now();
+
+    for result in results.iter_mut() {
+        if let Some(created) = document_timestamps.get(&result.document_id) {
+            let age_days = (now - *created).num_hours() as f64 / 24.0;
+            let decay = (-(age_days / half_life_days) * std::f64::consts::LN_2).exp();
+            result.score *= decay as f32;
+        }
+    }
+
+    // Re-sort by decayed scores.
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Maximal Marginal Relevance re-ranking for result diversity.
+///
+/// Greedily selects results that balance relevance with novelty,
+/// avoiding near-duplicate content in the result set.
+///
+/// `lambda` = 1.0 is pure relevance, 0.0 is pure diversity.
+pub fn mmr_rerank(
+    results: Vec<SearchResult>,
+    embeddings: &HashMap<Uuid, Vec<f32>>,
+    lambda: f32,
+    limit: usize,
+) -> Vec<SearchResult> {
+    if results.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut selected: Vec<SearchResult> = Vec::with_capacity(limit);
+    let mut remaining: Vec<SearchResult> = results;
+
+    // First item is always the highest-scoring.
+    let first = remaining.remove(0);
+    selected.push(first);
+
+    while selected.len() < limit && !remaining.is_empty() {
+        let mut best_idx = 0;
+        let mut best_mmr = f32::NEG_INFINITY;
+
+        for (i, candidate) in remaining.iter().enumerate() {
+            let relevance = candidate.score;
+
+            // Max similarity to any already-selected result.
+            let max_sim = selected
+                .iter()
+                .map(|s| {
+                    cosine_similarity(
+                        embeddings.get(&candidate.chunk_id),
+                        embeddings.get(&s.chunk_id),
+                    )
+                })
+                .fold(f32::NEG_INFINITY, f32::max);
+
+            let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = i;
+            }
+        }
+
+        selected.push(remaining.remove(best_idx));
+    }
+
+    selected
+}
+
+/// Cosine similarity between two embedding vectors.
+fn cosine_similarity(a: Option<&Vec<f32>>, b: Option<&Vec<f32>>) -> f32 {
+    let (a, b) = match (a, b) {
+        (Some(a), Some(b)) if a.len() == b.len() && !a.is_empty() => (a, b),
+        _ => return 0.0,
+    };
+
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (norm_a * norm_b)
+}
+
+/// Expand a search query by extracting key terms and generating alternate phrasings.
+///
+/// This is a lightweight, LLM-free query expansion that:
+/// 1. Tokenizes the query into words
+/// 2. Removes stop words
+/// 3. Generates simple morphological variants (basic stemming heuristics)
+/// 4. Returns expanded terms that can be ORed into the FTS query
+///
+/// For full LLM-based query expansion, the caller should send the query to
+/// an LLM with appropriate instructions and use the expanded result.
+pub fn expand_query_keywords(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "has", "have", "how",
+        "i", "in", "is", "it", "its", "my", "not", "of", "on", "or", "so", "that", "the", "this",
+        "to", "was", "what", "when", "where", "which", "who", "will", "with", "you",
+    ];
+
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| !w.is_empty() && !STOP_WORDS.contains(&w.as_str()))
+        .collect();
+
+    let mut expanded: Vec<String> = words.clone();
+
+    for word in &words {
+        // Simple suffix stripping for common English suffixes.
+        if let Some(stem) = word.strip_suffix("ing") {
+            if stem.len() >= 3 {
+                expanded.push(stem.to_string());
+                // "running" -> "run" + "runner"
+                expanded.push(format!("{}er", stem));
+            }
+        } else if let Some(stem) = word.strip_suffix("tion") {
+            if stem.len() >= 2 {
+                expanded.push(format!("{}te", stem));
+            }
+        } else if let Some(stem) = word.strip_suffix("ed") {
+            if stem.len() >= 3 {
+                expanded.push(stem.to_string());
+            }
+        } else if let Some(stem) = word.strip_suffix("ly") {
+            if stem.len() >= 3 {
+                expanded.push(stem.to_string());
+            }
+        } else if let Some(stem) = word.strip_suffix("ies") {
+            if stem.len() >= 2 {
+                expanded.push(format!("{}y", stem));
+            }
+        } else if let Some(stem) = word.strip_suffix('s')
+            && stem.len() >= 3
+        {
+            expanded.push(stem.to_string());
+        }
+    }
+
+    // Deduplicate.
+    expanded.sort();
+    expanded.dedup();
+    expanded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +514,8 @@ mod tests {
             document_id: doc_id,
             content: format!("content for chunk {}", chunk_id),
             rank,
+            created_at: None,
+            embedding: None,
         }
     }
 
@@ -387,5 +666,210 @@ mod tests {
         let vector_only = SearchConfig::default().vector_only();
         assert!(!vector_only.use_fts);
         assert!(vector_only.use_vector);
+    }
+
+    #[test]
+    fn test_temporal_decay() {
+        let doc_id = Uuid::new_v4();
+        let chunk_old = Uuid::new_v4();
+        let chunk_new = Uuid::new_v4();
+
+        let mut results = vec![
+            SearchResult {
+                document_id: doc_id,
+                chunk_id: chunk_old,
+                content: "old".to_string(),
+                score: 1.0,
+                fts_rank: Some(1),
+                vector_rank: None,
+                citation: None,
+            },
+            SearchResult {
+                document_id: doc_id,
+                chunk_id: chunk_new,
+                content: "new".to_string(),
+                score: 0.8,
+                fts_rank: Some(2),
+                vector_rank: None,
+                citation: None,
+            },
+        ];
+
+        let now = chrono::Utc::now();
+        let mut timestamps = HashMap::new();
+        timestamps.insert(doc_id, now); // Same doc, but let's test with just timestamps
+
+        // With no age, decay should be ~1.0
+        apply_temporal_decay(&mut results, 30.0, &timestamps);
+        assert!(results[0].score > 0.9);
+    }
+
+    #[test]
+    fn test_mmr_rerank_diversity() {
+        let chunk1 = Uuid::new_v4();
+        let chunk2 = Uuid::new_v4();
+        let chunk3 = Uuid::new_v4();
+
+        let results = vec![
+            SearchResult {
+                document_id: Uuid::new_v4(),
+                chunk_id: chunk1,
+                content: "a".to_string(),
+                score: 1.0,
+                fts_rank: Some(1),
+                vector_rank: None,
+                citation: None,
+            },
+            SearchResult {
+                document_id: Uuid::new_v4(),
+                chunk_id: chunk2,
+                content: "b".to_string(),
+                score: 0.9,
+                fts_rank: Some(2),
+                vector_rank: None,
+                citation: None,
+            },
+            SearchResult {
+                document_id: Uuid::new_v4(),
+                chunk_id: chunk3,
+                content: "c".to_string(),
+                score: 0.8,
+                fts_rank: Some(3),
+                vector_rank: None,
+                citation: None,
+            },
+        ];
+
+        // Identical embeddings for chunk1 and chunk2, different for chunk3.
+        let mut embeddings = HashMap::new();
+        embeddings.insert(chunk1, vec![1.0, 0.0, 0.0]);
+        embeddings.insert(chunk2, vec![1.0, 0.0, 0.0]); // same as chunk1
+        embeddings.insert(chunk3, vec![0.0, 1.0, 0.0]); // orthogonal
+
+        // With pure diversity (lambda=0), chunk3 should be selected over chunk2
+        let reranked = mmr_rerank(results, &embeddings, 0.0, 2);
+        assert_eq!(reranked.len(), 2);
+        assert_eq!(reranked[0].chunk_id, chunk1); // always first
+        assert_eq!(reranked[1].chunk_id, chunk3); // diverse pick
+    }
+
+    #[test]
+    fn test_expand_query_keywords() {
+        let expanded = expand_query_keywords("running configuration files");
+        assert!(expanded.contains(&"running".to_string()));
+        assert!(expanded.contains(&"configuration".to_string()));
+        assert!(expanded.contains(&"file".to_string())); // "files" -> "file"
+        assert!(expanded.contains(&"runn".to_string())); // "running" -> "runn" (strip "ing")
+        assert!(!expanded.contains(&"the".to_string())); // stop word
+    }
+
+    #[test]
+    fn test_expand_query_dedup() {
+        let expanded = expand_query_keywords("test test test");
+        // Should only have "test" once.
+        assert_eq!(expanded.iter().filter(|w| *w == "test").count(), 1);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let sim = cosine_similarity(Some(&a), Some(&b));
+        assert!((sim - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let a = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(Some(&a), Some(&a));
+        assert!((sim - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_citation_inline_with_title() {
+        let citation = Citation {
+            title: Some("README.md".to_string()),
+            path: Some("/repo/README.md".to_string()),
+            url: None,
+            ingested_at: None,
+            page: None,
+            line_range: None,
+        };
+        assert_eq!(citation.inline(), "[source: README.md]");
+    }
+
+    #[test]
+    fn test_citation_inline_with_page() {
+        let citation = Citation {
+            title: Some("report.pdf".to_string()),
+            path: None,
+            url: None,
+            ingested_at: None,
+            page: Some(5),
+            line_range: None,
+        };
+        assert_eq!(citation.inline(), "[source: report.pdf, p.5]");
+    }
+
+    #[test]
+    fn test_citation_inline_with_line_range() {
+        let citation = Citation {
+            title: None,
+            path: Some("src/main.rs".to_string()),
+            url: None,
+            ingested_at: None,
+            page: None,
+            line_range: Some((10, 25)),
+        };
+        assert_eq!(citation.inline(), "[source: src/main.rs, L10-25]");
+    }
+
+    #[test]
+    fn test_citation_inline_url_fallback() {
+        let citation = Citation {
+            title: None,
+            path: None,
+            url: Some("https://example.com/doc".to_string()),
+            ingested_at: None,
+            page: None,
+            line_range: None,
+        };
+        assert_eq!(citation.inline(), "[source: https://example.com/doc]");
+    }
+
+    #[test]
+    fn test_format_citations() {
+        let results = vec![
+            SearchResult {
+                document_id: Uuid::new_v4(),
+                chunk_id: Uuid::new_v4(),
+                content: "First result content".to_string(),
+                score: 0.9,
+                fts_rank: Some(1),
+                vector_rank: None,
+                citation: Some(Citation {
+                    title: Some("doc.md".to_string()),
+                    path: None,
+                    url: None,
+                    ingested_at: None,
+                    page: None,
+                    line_range: None,
+                }),
+            },
+            SearchResult {
+                document_id: Uuid::new_v4(),
+                chunk_id: Uuid::new_v4(),
+                content: "Second result content".to_string(),
+                score: 0.7,
+                fts_rank: Some(2),
+                vector_rank: None,
+                citation: None,
+            },
+        ];
+
+        let formatted = format_citations(&results);
+        assert!(formatted.contains("1. First result content [source: doc.md]"));
+        assert!(formatted.contains("2. Second result content"));
+        assert!(!formatted.contains("[source: unknown]")); // No citation = no annotation
     }
 }

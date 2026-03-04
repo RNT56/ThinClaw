@@ -42,6 +42,8 @@
 //! - Commands run directly on host with scrubbed environment
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
 //! - API keys, session tokens, and credentials are NOT inherited
+//! - LD_PRELOAD/DYLD_INSERT_LIBRARIES injection blocked
+//! - Optional safe-bins-only mode (IRONCLAW_SAFE_BINS_ONLY=true)
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -194,6 +196,190 @@ const SAFE_ENV_VARS: &[&str] = &[
     "ProgramFiles(x86)",
     "WINDIR",
 ];
+
+/// Environment variables that indicate library injection attacks.
+///
+/// Commands that set these variables are blocked because they can be used to
+/// hijack any process by preloading attacker-controlled shared libraries.
+/// This covers both Linux (LD_*) and macOS (DYLD_*) variants.
+const DANGEROUS_ENV_VARS: &[&str] = &[
+    // Linux
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    // macOS
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+];
+
+/// Safe binaries allowed when `IRONCLAW_SAFE_BINS_ONLY=true`.
+///
+/// When this mode is active, only commands whose first token (the binary name)
+/// matches one of these entries are allowed. Additional binaries can be added
+/// via the `IRONCLAW_EXTRA_BINS` env var (comma-separated).
+const SAFE_BINS: &[&str] = &[
+    // File inspection
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "wc",
+    "file",
+    "stat",
+    "find",
+    "tree",
+    "du",
+    "df",
+    // Text processing
+    "grep",
+    "rg",
+    "ag",
+    "awk",
+    "sed",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "diff",
+    "patch",
+    "jq",
+    "yq",
+    // Build tools
+    "cargo",
+    "rustc",
+    "rustfmt",
+    "clippy-driver",
+    "npm",
+    "npx",
+    "node",
+    "yarn",
+    "pnpm",
+    "bun",
+    "deno",
+    "python3",
+    "python",
+    "pip3",
+    "pip",
+    "uv",
+    "go",
+    "make",
+    "cmake",
+    "gcc",
+    "g++",
+    "clang",
+    "clang++",
+    // Version control
+    "git",
+    // Shell utilities
+    "echo",
+    "printf",
+    "date",
+    "which",
+    "whereis",
+    "whoami",
+    "env",
+    "printenv",
+    "true",
+    "false",
+    "test",
+    "mkdir",
+    "cp",
+    "mv",
+    "touch",
+    "ln",
+    // Networking (read-only)
+    "curl",
+    "wget",
+    "ping",
+    "dig",
+    "nslookup",
+    // Archival
+    "tar",
+    "zip",
+    "unzip",
+    "gzip",
+    "gunzip",
+    // Container
+    "docker",
+    "podman",
+    // Documentation
+    "man",
+];
+
+/// Check whether safe-bins-only mode is enabled.
+fn is_safe_bins_only() -> bool {
+    std::env::var("IRONCLAW_SAFE_BINS_ONLY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// Extract the binary name from a command string (first token, basename only).
+fn extract_binary_name(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+    // Skip leading env assignments (e.g., "FOO=bar command")
+    let mut tokens = trimmed.split_whitespace();
+    for token in tokens.by_ref() {
+        if !token.contains('=') {
+            // This is the actual command — extract basename
+            let basename = token.rsplit('/').next().unwrap_or(token);
+            return Some(basename.to_string());
+        }
+    }
+    None
+}
+
+/// Detect library injection via environment variable manipulation.
+///
+/// Returns a reason string if the command sets any dangerous env vars
+/// (LD_PRELOAD, DYLD_INSERT_LIBRARIES, etc.).
+pub fn detect_library_injection(cmd: &str) -> Option<&'static str> {
+    let upper = cmd.to_uppercase();
+    for var in DANGEROUS_ENV_VARS {
+        // Match patterns: VAR=value, export VAR=, env VAR=, set VAR=
+        let var_assign = format!("{var}=");
+        let var_export = format!("export {var}");
+        if upper.contains(var_assign.as_str()) || upper.contains(var_export.as_str()) {
+            return Some("library injection via environment variable");
+        }
+    }
+    None
+}
+
+/// Check whether a command's binary is in the safe bins allowlist.
+///
+/// Returns None if allowed, Some(reason) if blocked.
+fn check_safe_bins(cmd: &str) -> Option<String> {
+    if !is_safe_bins_only() {
+        return None;
+    }
+
+    let binary = match extract_binary_name(cmd) {
+        Some(b) => b,
+        None => return Some("could not determine binary name".to_string()),
+    };
+
+    // Check built-in list
+    if SAFE_BINS.contains(&binary.as_str()) {
+        return None;
+    }
+
+    // Check user-extended list
+    if let Ok(extra) = std::env::var("IRONCLAW_EXTRA_BINS") {
+        let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
+        if extras.contains(&binary.as_str()) {
+            return None;
+        }
+    }
+
+    Some(format!(
+        "binary '{}' not in safe bins allowlist (set IRONCLAW_EXTRA_BINS to extend)",
+        binary
+    ))
+}
 
 /// Check whether a shell command contains patterns that must never be auto-approved.
 ///
@@ -599,6 +785,24 @@ impl ShellTool {
         if let Some(reason) = detect_command_injection(cmd) {
             return Err(ToolError::NotAuthorized(format!(
                 "Command injection detected ({}): {}",
+                reason,
+                truncate_for_error(cmd)
+            )));
+        }
+
+        // Check for library injection (LD_PRELOAD, DYLD_INSERT_LIBRARIES, etc.)
+        if let Some(reason) = detect_library_injection(cmd) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Security violation ({}): {}",
+                reason,
+                truncate_for_error(cmd)
+            )));
+        }
+
+        // Check safe bins allowlist (when IRONCLAW_SAFE_BINS_ONLY=true)
+        if let Some(reason) = check_safe_bins(cmd) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Blocked by safe bins policy ({}): {}",
                 reason,
                 truncate_for_error(cmd)
             )));
@@ -1259,5 +1463,90 @@ mod tests {
             matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("injection")),
             "Expected NotAuthorized with injection message, got: {result:?}"
         );
+    }
+
+    // ── Library injection detection tests ──────────────────────────────
+
+    #[test]
+    fn test_library_injection_ld_preload() {
+        assert!(detect_library_injection("LD_PRELOAD=/tmp/evil.so ./app").is_some());
+        assert!(detect_library_injection("export LD_PRELOAD=/tmp/evil.so").is_some());
+        assert!(detect_library_injection("env LD_PRELOAD=/tmp/evil.so cargo test").is_some());
+    }
+
+    #[test]
+    fn test_library_injection_dyld() {
+        assert!(detect_library_injection("DYLD_INSERT_LIBRARIES=/tmp/evil.dylib ./app").is_some());
+        assert!(detect_library_injection("export DYLD_LIBRARY_PATH=/tmp/evil").is_some());
+        assert!(detect_library_injection("DYLD_FRAMEWORK_PATH=/tmp ./app").is_some());
+    }
+
+    #[test]
+    fn test_library_injection_ld_library_path() {
+        assert!(detect_library_injection("LD_LIBRARY_PATH=/tmp/evil ldconfig").is_some());
+        assert!(detect_library_injection("LD_AUDIT=/tmp/evil.so ./app").is_some());
+    }
+
+    #[test]
+    fn test_library_injection_safe_commands() {
+        // Normal commands should not trigger
+        assert!(detect_library_injection("cargo build --release").is_none());
+        assert!(detect_library_injection("echo $LD_PRELOAD").is_none()); // reading, not setting
+        assert!(detect_library_injection("npm install").is_none());
+        assert!(detect_library_injection("ls -la").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_library_injection_blocked_at_execution() {
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "LD_PRELOAD=/tmp/evil.so ./target/release/app"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("library injection")),
+            "Expected NotAuthorized with library injection message, got: {result:?}"
+        );
+    }
+
+    // ── Binary name extraction tests ──────────────────────────────────
+
+    #[test]
+    fn test_extract_binary_name() {
+        assert_eq!(
+            extract_binary_name("cargo build"),
+            Some("cargo".to_string())
+        );
+        assert_eq!(
+            extract_binary_name("/usr/bin/git status"),
+            Some("git".to_string())
+        );
+        assert_eq!(
+            extract_binary_name("FOO=bar cargo test"),
+            Some("cargo".to_string())
+        );
+        assert_eq!(
+            extract_binary_name("  echo hello  "),
+            Some("echo".to_string())
+        );
+        assert_eq!(
+            extract_binary_name("A=1 B=2 python3 script.py"),
+            Some("python3".to_string())
+        );
+        assert_eq!(extract_binary_name(""), None);
+    }
+
+    // ── Safe bins allowlist tests ─────────────────────────────────────
+
+    #[test]
+    fn test_safe_bins_disabled_by_default() {
+        // When IRONCLAW_SAFE_BINS_ONLY is not set, everything passes
+        assert!(check_safe_bins("rm -rf /tmp").is_none());
+        assert!(check_safe_bins("ruby script.rb").is_none());
     }
 }

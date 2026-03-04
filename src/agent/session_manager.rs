@@ -29,6 +29,8 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<Mutex<Session>>>>,
     thread_map: RwLock<HashMap<ThreadKey, Uuid>>,
     undo_managers: RwLock<HashMap<Uuid, Arc<Mutex<UndoManager>>>>,
+    /// Thread ownership: maps thread UUID → owner agent/channel name.
+    thread_owners: RwLock<HashMap<Uuid, String>>,
     hooks: Option<Arc<HookRegistry>>,
 }
 
@@ -39,6 +41,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             thread_map: RwLock::new(HashMap::new()),
             undo_managers: RwLock::new(HashMap::new()),
+            thread_owners: RwLock::new(HashMap::new()),
             hooks: None,
         }
     }
@@ -243,6 +246,29 @@ impl SessionManager {
         mgr
     }
 
+    /// Set the owner of a thread. Returns `true` if ownership was set,
+    /// `false` if the thread was already owned (first-responder wins).
+    pub async fn set_thread_owner(&self, thread_id: Uuid, owner: &str) -> bool {
+        let mut owners = self.thread_owners.write().await;
+        if owners.contains_key(&thread_id) {
+            return false; // Already owned
+        }
+        owners.insert(thread_id, owner.to_string());
+        true
+    }
+
+    /// Get the owner of a thread, if any.
+    pub async fn get_thread_owner(&self, thread_id: Uuid) -> Option<String> {
+        let owners = self.thread_owners.read().await;
+        owners.get(&thread_id).cloned()
+    }
+
+    /// Check if a thread is owned by a specific agent.
+    pub async fn is_thread_owned_by(&self, thread_id: Uuid, owner: &str) -> bool {
+        let owners = self.thread_owners.read().await;
+        owners.get(&thread_id).map(|o| o == owner).unwrap_or(false)
+    }
+
     /// Remove sessions that have been idle for longer than the given duration.
     ///
     /// Returns the number of sessions pruned.
@@ -331,6 +357,14 @@ impl SessionManager {
             }
         }
 
+        // Clean up thread ownership for stale threads
+        {
+            let mut thread_owners = self.thread_owners.write().await;
+            for thread_id in &stale_thread_ids {
+                thread_owners.remove(thread_id);
+            }
+        }
+
         if count > 0 {
             tracing::info!(
                 "Pruned {} stale session(s) (idle > {}s)",
@@ -340,6 +374,88 @@ impl SessionManager {
         }
 
         count
+    }
+
+    /// List all active sessions as a summary suitable for CLI display.
+    ///
+    /// Returns a vec of JSON values with user_id, channel, thread_count, last_active, and owner.
+    pub async fn list_sessions(&self) -> Vec<serde_json::Value> {
+        let sessions = self.sessions.read().await;
+        let thread_owners = self.thread_owners.read().await;
+        let mut result = Vec::new();
+
+        for (user_id, session_arc) in sessions.iter() {
+            let session = session_arc.lock().await;
+            let thread_count = session.threads.len();
+
+            // Determine the last activity across all threads
+            let last_active = session
+                .threads
+                .values()
+                .filter_map(|t| t.turns.last().map(|_| "active"))
+                .next()
+                .unwrap_or("idle");
+
+            // Check if threads have owners
+            let owner = session
+                .threads
+                .keys()
+                .find_map(|tid| thread_owners.get(tid))
+                .cloned()
+                .unwrap_or_else(|| "—".to_string());
+
+            result.push(serde_json::json!({
+                "user_id": user_id,
+                "channel": session.threads.keys().next()
+                    .map(|_| user_id.split('@').last().unwrap_or("unknown"))
+                    .unwrap_or("unknown"),
+                "thread_count": thread_count,
+                "last_active": last_active,
+                "owner": owner,
+            }));
+        }
+
+        result
+    }
+
+    /// Describe a specific session with thread-level detail.
+    ///
+    /// Returns `None` if no session exists for the given user.
+    pub async fn describe_session(
+        &self,
+        user_id: &str,
+        _channel: &str,
+    ) -> Option<serde_json::Value> {
+        let sessions = self.sessions.read().await;
+        let session_arc = sessions.get(user_id)?;
+        let session = session_arc.lock().await;
+        let thread_owners = self.thread_owners.read().await;
+
+        let threads: Vec<serde_json::Value> = session
+            .threads
+            .iter()
+            .map(|(tid, thread)| {
+                let owner = thread_owners
+                    .get(tid)
+                    .cloned()
+                    .unwrap_or_else(|| "(unowned)".to_string());
+                let msg_count = thread.turns.len();
+                let state = format!("{:?}", thread.state);
+
+                serde_json::json!({
+                    "thread_id": tid.to_string(),
+                    "owner": owner,
+                    "state": state,
+                    "message_count": msg_count,
+                })
+            })
+            .collect();
+
+        Some(serde_json::json!({
+            "user_id": user_id,
+            "thread_count": threads.len(),
+            "threads": threads,
+        }))
     }
 }
 

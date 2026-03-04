@@ -92,6 +92,7 @@ impl GatewayChannel {
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
+            routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
         });
@@ -126,6 +127,7 @@ impl GatewayChannel {
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
+            routine_engine: self.state.routine_engine.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
         };
@@ -224,6 +226,15 @@ impl GatewayChannel {
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
         self.rebuild_state(|s| s.cost_guard = Some(cg));
+        self
+    }
+
+    /// Inject the routine engine for webhook-triggered routine execution.
+    pub fn with_routine_engine(
+        mut self,
+        engine: Arc<crate::agent::routine_engine::RoutineEngine>,
+    ) -> Self {
+        self.rebuild_state(|s| s.routine_engine = Some(engine));
         self
     }
 

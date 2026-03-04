@@ -10,6 +10,7 @@
 pub mod builder;
 pub mod builtin;
 pub mod mcp;
+pub mod policy;
 pub mod rate_limiter;
 pub mod wasm;
 

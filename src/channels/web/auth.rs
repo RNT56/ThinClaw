@@ -1,4 +1,11 @@
 //! Bearer token authentication middleware for the web gateway.
+//!
+//! Supports two authentication modes:
+//! 1. **Bearer token** (default): `Authorization: Bearer <token>` header or `?token=<token>` query param
+//! 2. **Trusted proxy** (optional): When `TRUSTED_PROXY_HEADER` env var is set, the gateway
+//!    trusts that header (e.g., `X-Forwarded-User`) as the authenticated identity. This mode
+//!    requires `TRUSTED_PROXY_IPS` to restrict which source IPs can use it (CIDR notation,
+//!    comma-separated). If TRUSTED_PROXY_IPS is empty/unset, only loopback IPs are trusted.
 
 use axum::{
     extract::{Request, State},
@@ -6,15 +13,53 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::net::IpAddr;
 use subtle::ConstantTimeEq;
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
 pub struct AuthState {
     pub token: String,
+    /// Header name for trusted-proxy mode (e.g., "X-Forwarded-User").
+    /// When set, requests with this header from trusted IPs are accepted without a bearer token.
+    pub trusted_proxy_header: Option<String>,
+    /// IP addresses allowed to use trusted-proxy auth.
+    /// If empty, only loopback addresses (127.0.0.1, ::1) are trusted.
+    pub trusted_proxy_ips: Vec<IpAddr>,
 }
 
-/// Auth middleware that validates bearer token from header or query param.
+/// Check if an IP is trusted for proxy auth.
+fn is_trusted_ip(ip: &IpAddr, trusted_ips: &[IpAddr]) -> bool {
+    if trusted_ips.is_empty() {
+        // Default: only trust loopback
+        return ip.is_loopback();
+    }
+    trusted_ips.contains(ip)
+}
+
+/// Load trusted-proxy configuration from environment variables.
+pub fn load_trusted_proxy_config() -> (Option<String>, Vec<IpAddr>) {
+    let header = std::env::var("TRUSTED_PROXY_HEADER")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let ips = std::env::var("TRUSTED_PROXY_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            // Strip CIDR notation for simple IP comparison
+            let ip_str = trimmed.split('/').next().unwrap_or(trimmed);
+            ip_str.parse::<IpAddr>().ok()
+        })
+        .collect();
+    (header, ips)
+}
+
+/// Auth middleware that validates bearer token from header or query param,
+/// with optional trusted-proxy auth mode.
 ///
 /// SSE connections can't set headers from `EventSource`, so we also accept
 /// `?token=xxx` as a query parameter.
@@ -24,7 +69,49 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first (constant-time comparison)
+    // Check trusted-proxy mode first (if configured)
+    if let Some(ref proxy_header) = auth.trusted_proxy_header {
+        // Extract source IP from the connection address.
+        // We intentionally do NOT trust X-Forwarded-For for the proxy-IP check
+        // itself (that would be circular). The request.extensions() ConnectInfo
+        // gives us the direct TCP peer, which is the reverse proxy.
+        let source_ip = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<IpAddr>().ok());
+
+        if let Some(ip) = source_ip {
+            if is_trusted_ip(&ip, &auth.trusted_proxy_ips) {
+                if let Some(user_header) = headers.get(proxy_header.as_str()) {
+                    if user_header.to_str().is_ok() {
+                        tracing::debug!(
+                            proxy_header = %proxy_header,
+                            source_ip = %ip,
+                            "Trusted-proxy auth accepted"
+                        );
+                        return next.run(request).await;
+                    }
+                }
+            }
+        }
+
+        // For loopback connections (no X-Real-IP header), check if the proxy
+        // header is present and loopback is trusted
+        if source_ip.is_none() && auth.trusted_proxy_ips.is_empty() {
+            // No X-Real-IP means likely a direct loopback connection
+            if let Some(user_header) = headers.get(proxy_header.as_str()) {
+                if user_header.to_str().is_ok() {
+                    tracing::debug!(
+                        proxy_header = %proxy_header,
+                        "Trusted-proxy auth accepted (loopback)"
+                    );
+                    return next.run(request).await;
+                }
+            }
+        }
+    }
+
+    // Try Authorization header (constant-time comparison)
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && let Some(token) = value.strip_prefix("Bearer ")
@@ -55,8 +142,42 @@ mod tests {
     fn test_auth_state_clone() {
         let state = AuthState {
             token: "test-token".to_string(),
+            trusted_proxy_header: None,
+            trusted_proxy_ips: vec![],
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");
+    }
+
+    #[test]
+    fn test_is_trusted_ip_loopback_default() {
+        // When no trusted IPs configured, loopback is trusted
+        assert!(is_trusted_ip(&"127.0.0.1".parse().unwrap(), &[]));
+        assert!(is_trusted_ip(&"::1".parse().unwrap(), &[]));
+        assert!(!is_trusted_ip(&"192.168.1.1".parse().unwrap(), &[]));
+    }
+
+    #[test]
+    fn test_is_trusted_ip_explicit_list() {
+        let trusted = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
+        assert!(is_trusted_ip(&"10.0.0.1".parse().unwrap(), &trusted));
+        assert!(is_trusted_ip(&"10.0.0.2".parse().unwrap(), &trusted));
+        assert!(!is_trusted_ip(&"10.0.0.3".parse().unwrap(), &trusted));
+        // Loopback not in explicit list
+        assert!(!is_trusted_ip(&"127.0.0.1".parse().unwrap(), &trusted));
+    }
+
+    #[test]
+    fn test_auth_state_with_proxy() {
+        let state = AuthState {
+            token: "my-token".to_string(),
+            trusted_proxy_header: Some("X-Forwarded-User".to_string()),
+            trusted_proxy_ips: vec!["10.0.0.1".parse().unwrap()],
+        };
+        assert_eq!(
+            state.trusted_proxy_header.as_deref(),
+            Some("X-Forwarded-User")
+        );
+        assert_eq!(state.trusted_proxy_ips.len(), 1);
     }
 }

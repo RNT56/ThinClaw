@@ -10,6 +10,6 @@ mod manager;
 mod memory;
 mod state;
 
-pub use manager::ContextManager;
+pub use manager::{ContextManager, PruneResult};
 pub use memory::{ActionRecord, ConversationMemory, Memory};
 pub use state::{JobContext, JobState, StateTransition};

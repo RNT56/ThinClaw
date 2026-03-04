@@ -79,14 +79,14 @@ impl PdfExtractor {
                     }
 
                     // Extract text from Tj operator: (text) Tj
-                    if bytes[pos] == b'(' {
-                        if let Some((text, end)) = extract_parenthesized(&content, pos) {
-                            if !text.is_empty() {
-                                extracted.push_str(&text);
-                            }
-                            pos = end;
-                            continue;
+                    if bytes[pos] == b'('
+                        && let Some((text, end)) = extract_parenthesized(&content, pos)
+                    {
+                        if !text.is_empty() {
+                            extracted.push_str(&text);
                         }
+                        pos = end;
+                        continue;
                     }
 
                     pos += 1;
