@@ -353,7 +353,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     // OpenClaw gateway poll
     useEffect(() => {
-        if (!isOpenClawMode) { setOpenClawGatewayRunning(false); return; }
+        // Always poll gateway status — even when the user is on another tab.
+        // This prevents the OpenClawChatView from losing its event listener
+        // and state when switching tabs (since gatewayRunning going false→true
+        // triggers a full re-subscribe that can miss in-flight events).
         const checkStatus = async () => {
             try {
                 const status = await openclawApi.getOpenClawStatus();
@@ -365,7 +368,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         checkStatus();
         const interval = setInterval(checkStatus, 5000);
         return () => clearInterval(interval);
-    }, [isOpenClawMode]);
+    }, []);
 
     // Image generation progress listener
     useEffect(() => {
@@ -792,6 +795,24 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             }
         }
     }, [isRecording, sttRunning, currentSttModelPath, startRecording, stopRecording]);
+
+    // Push-to-talk: listen for global hotkey from backend
+    useEffect(() => {
+        const unlistenPromise = listen<string>('ptt_toggle', () => {
+            handleMicClick();
+        });
+        return () => { unlistenPromise.then(unlisten => unlisten()); };
+    }, [handleMicClick]);
+
+    // Voice wake: listen for transcription events from VoiceWakeOverlay
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const text = (e as CustomEvent<string>).detail;
+            if (text) setInput(prev => (prev ? prev + ' ' + text : text));
+        };
+        window.addEventListener('voice-wake-transcription', handler);
+        return () => window.removeEventListener('voice-wake-transcription', handler);
+    }, [setInput]);
 
     const handleCancelGeneration = useCallback(async () => {
         try { await cancelGeneration(); toast.info('Stopping generation...'); }

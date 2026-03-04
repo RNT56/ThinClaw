@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tauri::{AppHandle, Emitter, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
@@ -91,6 +91,54 @@ impl TauriChannel {
         }
     }
 
+    /// Set tray icon to active state (with dot badge) and schedule auto-reset.
+    fn set_tray_active(&self) {
+        if let Some(tray_state) = self
+            .app_handle
+            .try_state::<std::sync::Arc<crate::TrayState>>()
+        {
+            let _ = tray_state
+                .tray
+                .set_icon(Some(tray_state.active_icon.clone()));
+            let _ = tray_state.tray.set_tooltip(Some("Scrappy — processing..."));
+
+            // Cancel previous reset timer and schedule a new one
+            let tray_arc = std::sync::Arc::clone(&tray_state);
+            tokio::spawn(async move {
+                // Cancel previous reset
+                if let Some(prev) = tray_arc.reset_handle.lock().await.take() {
+                    prev.abort();
+                }
+                // Schedule reset after 3 seconds of no activity
+                let tray_reset = std::sync::Arc::clone(&tray_arc);
+                let handle = tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let _ = tray_reset.tray.set_icon(Some(tray_reset.idle_icon.clone()));
+                    let _ = tray_reset.tray.set_tooltip(Some("Scrappy"));
+                });
+                *tray_arc.reset_handle.lock().await = Some(handle);
+            });
+        }
+    }
+
+    /// Set tray icon to idle state immediately.
+    fn set_tray_idle(&self) {
+        if let Some(tray_state) = self
+            .app_handle
+            .try_state::<std::sync::Arc<crate::TrayState>>()
+        {
+            // Cancel any pending reset timer
+            let tray_arc = std::sync::Arc::clone(&tray_state);
+            tokio::spawn(async move {
+                if let Some(prev) = tray_arc.reset_handle.lock().await.take() {
+                    prev.abort();
+                }
+                let _ = tray_arc.tray.set_icon(Some(tray_arc.idle_icon.clone()));
+                let _ = tray_arc.tray.set_tooltip(Some("Scrappy"));
+            });
+        }
+    }
+
     /// Get the most recently activated session key (fallback for routing).
     async fn most_recent_session(&self) -> String {
         let sessions = self.active_sessions.read().await;
@@ -147,6 +195,9 @@ impl Channel for TauriChannel {
         };
         self.emit_ui_event(&event);
 
+        // Reset tray icon to idle when response is sent
+        self.set_tray_idle();
+
         Ok(())
     }
 
@@ -175,6 +226,14 @@ impl Channel for TauriChannel {
             .get("message_id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+
+        // Animate tray icon on activity events
+        if matches!(
+            &status,
+            StatusUpdate::Thinking(_) | StatusUpdate::ToolStarted { .. }
+        ) {
+            self.set_tray_active();
+        }
 
         if let Some(event) = status_to_ui_event(status, &resolved_session, run_id, message_id) {
             self.emit_ui_event(&event);

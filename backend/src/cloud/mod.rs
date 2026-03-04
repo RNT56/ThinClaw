@@ -173,8 +173,25 @@ impl CloudManager {
                                     inner.provider = Some(provider);
                                     inner.provider_config = Some(config);
                                 }
-                                Err(e) => {
-                                    warn!("[cloud] Failed to create provider on init: {}", e);
+                                Err(_) => {
+                                    // OAuth providers (gdrive, dropbox, onedrive) can't be
+                                    // created from config alone — reconstruct from Keychain tokens.
+                                    match Self::create_oauth_provider(&config) {
+                                        Ok(Some(provider)) => {
+                                            inner.provider = Some(provider);
+                                            inner.provider_config = Some(config);
+                                            info!("[cloud] OAuth provider restored from Keychain");
+                                        }
+                                        Ok(None) => {
+                                            warn!("[cloud] Non-OAuth provider failed to init");
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "[cloud] Failed to restore OAuth provider: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -244,6 +261,21 @@ impl CloudManager {
 
         info!("[cloud] Provider configured: {}", status.provider_name);
         Ok(status)
+    }
+
+    /// Set a pre-constructed provider (used by OAuth flows).
+    ///
+    /// Unlike `configure_provider`, this skips the factory and takes
+    /// an already-authenticated provider.
+    pub async fn set_provider(
+        &self,
+        provider: Box<dyn CloudProvider>,
+        config: CloudProviderConfig,
+    ) {
+        let mut inner = self.inner.write().await;
+        info!("[cloud] Provider set directly: {}", provider.name());
+        inner.provider = Some(provider);
+        inner.provider_config = Some(config);
     }
 
     /// Test the current provider connection.
@@ -355,8 +387,13 @@ impl CloudManager {
             inner.migration_in_progress = false;
             inner.cancel_flag = None;
             if result.is_ok() {
+                let pt = inner
+                    .provider_config
+                    .as_ref()
+                    .map(|c| c.provider_type.clone())
+                    .unwrap_or_else(|| "s3".to_string());
                 inner.mode = StorageMode::Cloud {
-                    provider_type: "s3".to_string(),
+                    provider_type: pt,
                     provider_name: inner
                         .provider
                         .as_ref()
@@ -474,5 +511,62 @@ impl CloudManager {
             }
             Err(e) => Err(format!("Keychain error: {}", e)),
         }
+    }
+
+    /// Try to create an OAuth provider from Keychain tokens.
+    ///
+    /// Returns `Ok(None)` if the provider type isn't an OAuth provider.
+    /// Returns `Ok(Some(provider))` if tokens were found and provider created.
+    fn create_oauth_provider(
+        config: &CloudProviderConfig,
+    ) -> Result<Option<Box<dyn CloudProvider>>, String> {
+        use oauth::{OAuthConfig, OAuthManager};
+
+        let provider_type = config.provider_type.as_str();
+
+        let client_id = match provider_type {
+            "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
+                .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
+            "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
+                .unwrap_or_else(|_| "scrappy_desktop_app".to_string()),
+            "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
+                .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+            _ => return Ok(None), // Not an OAuth provider
+        };
+
+        let oauth_config = match provider_type {
+            "gdrive" => OAuthConfig::google_drive(client_id),
+            "dropbox" => OAuthConfig::dropbox(client_id),
+            "onedrive" => OAuthConfig::onedrive(client_id),
+            _ => unreachable!(),
+        };
+
+        let oauth = OAuthManager::new(oauth_config);
+
+        // Check if tokens exist in Keychain
+        match oauth.load_tokens_from_keychain() {
+            Ok(Some(_)) => { /* tokens exist, proceed */ }
+            Ok(None) => {
+                return Err(format!(
+                    "No OAuth tokens in Keychain for {}. Please re-authenticate.",
+                    provider_type
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to load OAuth tokens for {}: {}",
+                    provider_type, e
+                ));
+            }
+        }
+
+        let provider: Box<dyn CloudProvider> = match provider_type {
+            "gdrive" => Box::new(providers::gdrive::GDriveProvider::new(oauth)),
+            "dropbox" => Box::new(providers::dropbox::DropboxProvider::new(oauth)),
+            "onedrive" => Box::new(providers::onedrive::OneDriveProvider::new(oauth)),
+            _ => unreachable!(),
+        };
+
+        Ok(Some(provider))
     }
 }

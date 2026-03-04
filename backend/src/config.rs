@@ -85,6 +85,11 @@ pub struct UserConfig {
     #[serde(default = "default_spotlight_shortcut")]
     pub spotlight_shortcut: String,
 
+    /// Global keyboard shortcut for push-to-talk.
+    /// Press to start recording, release to stop and transcribe.
+    #[serde(default = "default_ptt_shortcut")]
+    pub ptt_shortcut: String,
+
     #[serde(default)]
     pub disabled_providers: Vec<String>,
 
@@ -173,6 +178,7 @@ impl Default for UserConfig {
             mlock: false,
             quantize_kv: false,
             spotlight_shortcut: default_spotlight_shortcut(),
+            ptt_shortcut: default_ptt_shortcut(),
             disabled_providers: vec![],
             mcp_base_url: default_mcp_base_url(),
             mcp_auth_token: default_mcp_auth_token(),
@@ -240,6 +246,10 @@ fn default_true() -> bool {
 
 fn default_spotlight_shortcut() -> String {
     "Command+Shift+K".to_string()
+}
+
+fn default_ptt_shortcut() -> String {
+    "Command+Shift+V".to_string()
 }
 
 fn default_mcp_cache_ttl() -> u32 {

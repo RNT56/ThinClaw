@@ -55,6 +55,25 @@ pub struct S3ConfigInput {
     pub root: Option<String>,
 }
 
+/// WebDAV provider configuration input from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct WebDavConfigInput {
+    pub endpoint: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub root: Option<String>,
+}
+
+/// SFTP provider configuration input from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct SftpConfigInput {
+    pub endpoint: String,
+    pub username: Option<String>,
+    /// Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
+    pub key_or_password: Option<String>,
+    pub root: Option<String>,
+}
+
 /// Connection test result for the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct ConnectionTestResult {
@@ -63,6 +82,15 @@ pub struct ConnectionTestResult {
     pub storage_used: f64,
     pub storage_available: Option<f64>,
     pub error: Option<String>,
+}
+
+/// OAuth flow start result for the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct OAuthStartResult {
+    /// The authorization URL to open in the user's browser.
+    pub auth_url: String,
+    /// The PKCE code verifier — must be passed back in `cloud_oauth_complete`.
+    pub code_verifier: String,
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -93,17 +121,195 @@ pub async fn cloud_test_connection(
         root: config.root,
     };
 
-    match cloud.configure_provider(provider_config).await {
-        Ok(status) => Ok(ConnectionTestResult {
-            connected: status.connected,
-            provider_name: status.provider_name,
-            storage_used: status.storage_used as f64,
-            storage_available: status.storage_available.map(|v| v as f64),
-            error: None,
-        }),
+    test_provider(cloud, provider_config).await
+}
+
+/// Configure and test iCloud Drive storage.
+///
+/// iCloud requires no configuration — it uses the native macOS container.
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_test_icloud(
+    cloud: State<'_, CloudManager>,
+) -> Result<ConnectionTestResult, String> {
+    let provider_config = CloudProviderConfig {
+        provider_type: "icloud".to_string(),
+        endpoint: None,
+        bucket: None,
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        root: None,
+    };
+
+    test_provider(cloud, provider_config).await
+}
+
+/// Configure and test a WebDAV provider.
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_test_webdav(
+    cloud: State<'_, CloudManager>,
+    config: WebDavConfigInput,
+) -> Result<ConnectionTestResult, String> {
+    let provider_config = CloudProviderConfig {
+        provider_type: "webdav".to_string(),
+        endpoint: Some(config.endpoint),
+        bucket: None,
+        region: None,
+        access_key_id: config.username,
+        secret_access_key: config.password,
+        root: config.root,
+    };
+
+    test_provider(cloud, provider_config).await
+}
+
+/// Configure and test an SFTP provider.
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_test_sftp(
+    cloud: State<'_, CloudManager>,
+    config: SftpConfigInput,
+) -> Result<ConnectionTestResult, String> {
+    let provider_config = CloudProviderConfig {
+        provider_type: "sftp".to_string(),
+        endpoint: Some(config.endpoint),
+        bucket: None,
+        region: None,
+        access_key_id: config.username,
+        secret_access_key: config.key_or_password,
+        root: config.root,
+    };
+
+    test_provider(cloud, provider_config).await
+}
+
+/// Start the OAuth 2.0 PKCE flow for a cloud provider.
+///
+/// Returns the authorization URL and PKCE code verifier.
+/// The frontend should:
+/// 1. Open the `auth_url` in the system browser
+/// 2. Listen for the redirect on `http://localhost:11434/callback` (or similar)
+/// 3. Pass the received `code` + `code_verifier` to `cloud_oauth_complete()`
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_oauth_start(provider: String) -> Result<OAuthStartResult, String> {
+    use super::oauth::{OAuthConfig, OAuthManager};
+
+    let client_id = match provider.as_str() {
+        "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
+            .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
+        "dropbox" => {
+            std::env::var("DROPBOX_CLIENT_ID").unwrap_or_else(|_| "scrappy_desktop_app".to_string())
+        }
+        "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
+            .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+        other => return Err(format!("OAuth not supported for provider: {}", other)),
+    };
+
+    let config = match provider.as_str() {
+        "gdrive" => OAuthConfig::google_drive(client_id),
+        "dropbox" => OAuthConfig::dropbox(client_id),
+        "onedrive" => OAuthConfig::onedrive(client_id),
+        _ => unreachable!(),
+    };
+
+    let oauth = OAuthManager::new(config);
+    let (auth_url, code_verifier) = oauth.authorize_url();
+
+    info!("[cloud/oauth] Started {} OAuth flow", provider);
+
+    Ok(OAuthStartResult {
+        auth_url,
+        code_verifier,
+    })
+}
+
+/// Complete the OAuth 2.0 flow by exchanging the authorization code for tokens.
+///
+/// On success, the provider is configured and a connection test is performed.
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_oauth_complete(
+    cloud: State<'_, CloudManager>,
+    provider: String,
+    code: String,
+    code_verifier: String,
+) -> Result<ConnectionTestResult, String> {
+    use super::oauth::{OAuthConfig, OAuthManager};
+    use super::provider::CloudProvider;
+
+    let client_id = match provider.as_str() {
+        "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
+            .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
+        "dropbox" => {
+            std::env::var("DROPBOX_CLIENT_ID").unwrap_or_else(|_| "scrappy_desktop_app".to_string())
+        }
+        "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
+            .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+        other => return Err(format!("OAuth not supported for provider: {}", other)),
+    };
+
+    let config = match provider.as_str() {
+        "gdrive" => OAuthConfig::google_drive(client_id),
+        "dropbox" => OAuthConfig::dropbox(client_id),
+        "onedrive" => OAuthConfig::onedrive(client_id),
+        _ => unreachable!(),
+    };
+
+    let oauth = OAuthManager::new(config);
+
+    // Exchange code for tokens
+    let tokens = oauth
+        .exchange_code(&code, &code_verifier)
+        .await
+        .map_err(|e| format!("OAuth token exchange failed: {}", e))?;
+
+    // Save tokens to Keychain
+    oauth
+        .save_tokens_to_keychain(&tokens)
+        .map_err(|e| format!("Failed to save OAuth tokens: {}", e))?;
+
+    info!(
+        "[cloud/oauth] {} OAuth flow completed, tokens saved",
+        provider
+    );
+
+    // Create the provider and test connection
+    let boxed_provider: Box<dyn CloudProvider> = match provider.as_str() {
+        "gdrive" => Box::new(super::providers::gdrive::GDriveProvider::new(oauth)),
+        "dropbox" => Box::new(super::providers::dropbox::DropboxProvider::new(oauth)),
+        "onedrive" => Box::new(super::providers::onedrive::OneDriveProvider::new(oauth)),
+        _ => unreachable!(),
+    };
+
+    match boxed_provider.test_connection().await {
+        Ok(status) => {
+            // Store the provider in CloudManager
+            let provider_config = CloudProviderConfig {
+                provider_type: provider.clone(),
+                endpoint: None,
+                bucket: None,
+                region: None,
+                access_key_id: None,
+                secret_access_key: None,
+                root: None,
+            };
+            // Update CloudManager's inner state with this provider
+            cloud.set_provider(boxed_provider, provider_config).await;
+
+            Ok(ConnectionTestResult {
+                connected: status.connected,
+                provider_name: status.provider_name,
+                storage_used: status.storage_used as f64,
+                storage_available: status.storage_available.map(|v| v as f64),
+                error: None,
+            })
+        }
         Err(e) => Ok(ConnectionTestResult {
             connected: false,
-            provider_name: "Unknown".to_string(),
+            provider_name: provider,
             storage_used: 0.0,
             storage_available: None,
             error: Some(e.to_string()),
@@ -216,6 +422,31 @@ pub struct StorageCategory {
     pub id: String,
     pub label: String,
     pub size_bytes: f64,
+}
+
+// ── Private Helpers ──────────────────────────────────────────────────────────
+
+/// Shared helper for testing a provider connection.
+async fn test_provider(
+    cloud: State<'_, CloudManager>,
+    config: CloudProviderConfig,
+) -> Result<ConnectionTestResult, String> {
+    match cloud.configure_provider(config).await {
+        Ok(status) => Ok(ConnectionTestResult {
+            connected: status.connected,
+            provider_name: status.provider_name,
+            storage_used: status.storage_used as f64,
+            storage_available: status.storage_available.map(|v| v as f64),
+            error: None,
+        }),
+        Err(e) => Ok(ConnectionTestResult {
+            connected: false,
+            provider_name: "Unknown".to_string(),
+            storage_used: 0.0,
+            storage_available: None,
+            error: Some(e.to_string()),
+        }),
+    }
 }
 
 /// Recursively calculate directory size.

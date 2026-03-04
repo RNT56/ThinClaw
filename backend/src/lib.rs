@@ -91,12 +91,21 @@ pub mod web_search;
 
 use sidecar::SidecarManager;
 use std::str::FromStr;
+use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+/// Managed state for tray icon animation.
+struct TrayState {
+    tray: tauri::tray::TrayIcon,
+    idle_icon: tauri::image::Image<'static>,
+    active_icon: tauri::image::Image<'static>,
+    reset_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -221,6 +230,8 @@ pub fn run() {
         openclaw::commands::openclaw_cron_list,
         openclaw::commands::openclaw_cron_run,
         openclaw::commands::openclaw_cron_history,
+        openclaw::commands::openclaw_cron_lint,
+        openclaw::commands::openclaw_channels_list,
         openclaw::commands::openclaw_skills_list,
         openclaw::commands::openclaw_skills_status,
         openclaw::commands::openclaw_skills_toggle,
@@ -258,6 +269,22 @@ pub fn run() {
         openclaw::commands::openclaw_agents_list,
         openclaw::commands::openclaw_canvas_push,
         openclaw::commands::openclaw_canvas_navigate,
+        // New feature commands
+        openclaw::commands::openclaw_set_thinking,
+        openclaw::commands::openclaw_memory_search,
+        openclaw::commands::openclaw_export_session,
+        // Hooks & extensions management
+        openclaw::commands::openclaw_hooks_list,
+        openclaw::commands::openclaw_extensions_list,
+        openclaw::commands::openclaw_extension_activate,
+        openclaw::commands::openclaw_extension_remove,
+        // Diagnostics & tools
+        openclaw::commands::openclaw_diagnostics,
+        openclaw::commands::openclaw_tools_list,
+        // Pairing & compaction
+        openclaw::commands::openclaw_pairing_list,
+        openclaw::commands::openclaw_pairing_approve,
+        openclaw::commands::openclaw_compact_session,
         permissions::get_permission_status,
         permissions::request_permission,
         toggle_spotlight,
@@ -281,6 +308,11 @@ pub fn run() {
         // Cloud Storage
         cloud::commands::cloud_get_status,
         cloud::commands::cloud_test_connection,
+        cloud::commands::cloud_test_icloud,
+        cloud::commands::cloud_test_webdav,
+        cloud::commands::cloud_test_sftp,
+        cloud::commands::cloud_oauth_start,
+        cloud::commands::cloud_oauth_complete,
         cloud::commands::cloud_migrate_to_cloud,
         cloud::commands::cloud_migrate_to_local,
         cloud::commands::cloud_cancel_migration,
@@ -301,22 +333,38 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         let config_manager = app.state::<config::ConfigManager>();
-                        let _sc_str = config_manager.get_config().spotlight_shortcut;
+                        let config = config_manager.get_config();
 
-                        // If the shortcut matches "Command+Shift+K" (or whatever is in config)
-                        // In a real app we'd compare the shortcut object or its string representation.
-                        // For now, let's just trigger toggle_spotlight if ANY registered shortcut is pressed,
-                        // or check if it matches our intended one.
-                        toggle_spotlight(app.clone());
+                        // Parse both shortcuts for comparison
+                        let spotlight_sc = Shortcut::from_str(&config.spotlight_shortcut)
+                            .unwrap_or(Shortcut::new(
+                                Some(Modifiers::SUPER | Modifiers::SHIFT),
+                                Code::KeyK,
+                            ));
+                        let ptt_sc = Shortcut::from_str(&config.ptt_shortcut).unwrap_or(
+                            Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV),
+                        );
+
+                        if shortcut == &ptt_sc {
+                            // Push-to-talk: emit event to frontend
+                            let _ = app.emit("ptt_toggle", "pressed");
+                        } else if shortcut == &spotlight_sc {
+                            toggle_spotlight(app.clone());
+                        } else {
+                            // Fallback: toggle spotlight for unknown shortcuts
+                            toggle_spotlight(app.clone());
+                        }
                     }
                 })
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             specta_builder.mount_events(app);
@@ -568,7 +616,7 @@ pub fn run() {
                 ))
                 .expect("failed to load tray icon");
 
-                let _ = TrayIconBuilder::new()
+                let tray_result = TrayIconBuilder::new()
                     .icon(tray_icon)
                     .menu(&menu)
                     .show_menu_on_left_click(false)
@@ -596,18 +644,47 @@ pub fn run() {
                         }
                     })
                     .build(&app);
+
+                // Store tray handle for animated icon switching
+                if let Ok(tray) = &tray_result {
+                    let active_icon = tauri::image::Image::from_bytes(include_bytes!(
+                        "../icons/tray-icon-activeTemplate.png"
+                    ))
+                    .expect("failed to load active tray icon");
+
+                    let idle_icon_copy = tauri::image::Image::from_bytes(include_bytes!(
+                        "../icons/tray-iconTemplate.png"
+                    ))
+                    .expect("failed to load idle tray icon");
+
+                    let tray_state = TrayState {
+                        tray: tray.clone(),
+                        idle_icon: idle_icon_copy,
+                        active_icon,
+                        reset_handle: tokio::sync::Mutex::new(None),
+                    };
+                    app.manage(Arc::new(tray_state));
+                }
             }
         }
 
-        // 3. Global Shortcut
+        // 3. Global Shortcuts
         let config_manager = app.state::<config::ConfigManager>();
-        let shortcut_str = config_manager.get_config().spotlight_shortcut;
+        let config = config_manager.get_config();
 
-        if let Ok(shortcut) = Shortcut::from_str(&shortcut_str) {
+        // Register spotlight shortcut
+        if let Ok(shortcut) = Shortcut::from_str(&config.spotlight_shortcut) {
             let _ = app.global_shortcut().register(shortcut);
         } else {
-            // Fallback
             let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
+            let _ = app.global_shortcut().register(shortcut);
+        }
+
+        // Register PTT shortcut
+        if let Ok(shortcut) = Shortcut::from_str(&config.ptt_shortcut) {
+            let _ = app.global_shortcut().register(shortcut);
+        } else {
+            let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV);
             let _ = app.global_shortcut().register(shortcut);
         }
     }

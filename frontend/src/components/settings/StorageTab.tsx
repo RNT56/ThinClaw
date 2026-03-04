@@ -1,15 +1,16 @@
 /**
  * A5-1: StorageTab — Cloud Storage settings page.
  * Includes: storage mode toggle, storage breakdown, provider picker,
- * S3 config form, migration progress dialog, recovery key panel.
+ * config forms for all 7 providers, migration progress, recovery key.
  */
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
     Cloud, HardDrive, Shield, CheckCircle2, XCircle,
     Loader2, RefreshCw, AlertTriangle, Copy, Eye, EyeOff, Key,
-    Upload, Download, Info, X, Wifi, Lock,
-    Server, FolderOpen, Database, ImageIcon, FileText, Box, Cpu
+    Upload, Download, Info, X, Wifi, Lock, Globe, Terminal,
+    Server, FolderOpen, Database, ImageIcon, FileText, Box, Cpu, ExternalLink
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -17,6 +18,9 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
     useCloudStatus,
     type S3ConfigInput,
+    type WebDavConfigInput,
+    type SftpConfigInput,
+    type OAuthStartResult,
     type ConnectionTestResult,
     type MigrationProgress,
     PHASE_LABELS,
@@ -28,33 +32,32 @@ import {
 
 function formatBytes(bytes: number): string {
     if (bytes === 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(Math.floor(Math.log2(bytes) / 10), 4);
-    return `${(bytes / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 function formatSpeed(bps: number): string {
     if (bps === 0) return '—';
-    if (bps >= 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
-    if (bps >= 1024) return `${(bps / 1024).toFixed(0)} KB/s`;
-    return `${bps} B/s`;
+    return formatBytes(bps) + '/s';
 }
 
 function formatEta(seconds: number | null): string {
     if (seconds == null || seconds <= 0) return '—';
-    if (seconds < 60) return `${seconds}s`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+    if (seconds < 60) return `${Math.ceil(seconds)}s`;
+    return `${Math.ceil(seconds / 60)}m`;
 }
 
 // ── Category icons + colors ──────────────────────────────────────────────
 
-const CATEGORY_META: Record<string, { icon: React.ElementType; color: string }> = {
-    database: { icon: Database, color: 'bg-violet-500' },
+const CATEGORY_META: Record<string, { icon: typeof Cloud; color: string }> = {
+    generated: { icon: ImageIcon, color: 'bg-purple-500' },
     documents: { icon: FileText, color: 'bg-blue-500' },
     images: { icon: ImageIcon, color: 'bg-emerald-500' },
-    generated: { icon: ImageIcon, color: 'bg-teal-500' },
-    vectors: { icon: Cpu, color: 'bg-amber-500' },
+    database: { icon: Database, color: 'bg-amber-500' },
+    ironclaw_db: { icon: Cpu, color: 'bg-orange-500' },
+    vectors: { icon: FolderOpen, color: 'bg-cyan-500' },
     previews: { icon: ImageIcon, color: 'bg-pink-500' },
     openclaw: { icon: Box, color: 'bg-rose-500' },
 };
@@ -68,47 +71,40 @@ function StorageBreakdown({
     breakdown: { id: string; label: string; size_bytes: number }[];
     totalSize: number;
 }) {
-    if (breakdown.length === 0) return null;
-
-    // Sort by size desc
-    const sorted = [...breakdown].sort((a, b) => b.size_bytes - a.size_bytes);
-
     return (
         <div className="space-y-4">
-            <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">
-                    Storage Breakdown
-                </h3>
-                <span className="text-sm font-bold text-foreground">{formatBytes(totalSize)} total</span>
-            </div>
+            <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground/60">
+                Storage Breakdown
+            </h3>
 
             {/* Stacked bar */}
-            <div className="h-4 rounded-full overflow-hidden flex bg-muted/30 border border-border/30">
-                {sorted.filter(c => c.size_bytes > 0).map(cat => {
-                    const pct = totalSize > 0 ? (cat.size_bytes / totalSize) * 100 : 0;
-                    const meta = CATEGORY_META[cat.id] ?? { color: 'bg-gray-500' };
+            <div className="h-4 rounded-full bg-muted/30 overflow-hidden flex border border-border/30">
+                {breakdown.map(c => {
+                    const pct = totalSize > 0 ? (c.size_bytes / totalSize) * 100 : 0;
+                    if (pct < 0.5) return null;
+                    const meta = CATEGORY_META[c.id];
                     return (
                         <div
-                            key={cat.id}
-                            className={cn(meta.color, 'transition-all duration-500 first:rounded-l-full last:rounded-r-full')}
-                            style={{ width: `${Math.max(pct, 1)}%` }}
-                            title={`${cat.label}: ${formatBytes(cat.size_bytes)} (${pct.toFixed(1)}%)`}
+                            key={c.id}
+                            className={cn('h-full transition-all duration-500', meta?.color ?? 'bg-muted')}
+                            style={{ width: `${pct}%` }}
+                            title={`${c.label}: ${formatBytes(c.size_bytes)} (${pct.toFixed(1)}%)`}
                         />
                     );
                 })}
             </div>
 
             {/* Legend */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {sorted.filter(c => c.size_bytes > 0).map(cat => {
-                    const meta = CATEGORY_META[cat.id] ?? { icon: FolderOpen, color: 'bg-gray-500' };
-                    const Icon = meta.icon;
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
+                {breakdown.map(c => {
+                    const meta = CATEGORY_META[c.id];
+                    const Icon = meta?.icon ?? Box;
                     return (
-                        <div key={cat.id} className="flex items-center gap-2 text-xs">
-                            <div className={cn('w-2.5 h-2.5 rounded-sm shrink-0', meta.color)} />
+                        <div key={c.id} className="flex items-center gap-2 text-xs">
+                            <div className={cn('w-2.5 h-2.5 rounded-full shrink-0', meta?.color ?? 'bg-muted')} />
                             <Icon className="w-3 h-3 text-muted-foreground shrink-0" />
-                            <span className="text-muted-foreground truncate">{cat.label}</span>
-                            <span className="ml-auto font-mono text-foreground font-medium">{formatBytes(cat.size_bytes)}</span>
+                            <span className="text-muted-foreground truncate">{c.label}</span>
+                            <span className="ml-auto font-bold text-foreground whitespace-nowrap">{formatBytes(c.size_bytes)}</span>
                         </div>
                     );
                 })}
@@ -128,168 +124,335 @@ function S3ConfigForm({
 }) {
     const [endpoint, setEndpoint] = useState('');
     const [bucket, setBucket] = useState('');
-    const [region, setRegion] = useState('auto');
+    const [region, setRegion] = useState('');
     const [accessKey, setAccessKey] = useState('');
     const [secretKey, setSecretKey] = useState('');
-    const [root, setRoot] = useState('scrappy-data');
+    const [root, setRoot] = useState('');
     const [showSecret, setShowSecret] = useState(false);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!bucket || !accessKey || !secretKey) return;
         await onTestConnection({
-            endpoint: endpoint || null,
-            bucket,
-            region: region || null,
-            access_key_id: accessKey,
-            secret_access_key: secretKey,
-            root: root || null,
+            endpoint: endpoint.trim() || null,
+            bucket: bucket.trim(),
+            region: region.trim() || null,
+            access_key_id: accessKey.trim(),
+            secret_access_key: secretKey.trim(),
+            root: root.trim() || null,
         });
     };
 
-    const presets = [
-        { label: 'Custom S3', endpoint: '', hint: 'Any S3-compatible endpoint' },
-        { label: 'Cloudflare R2', endpoint: 'https://<account-id>.r2.cloudflarestorage.com', hint: 'R2 — no egress fees' },
-        { label: 'Backblaze B2', endpoint: 'https://s3.<region>.backblazeb2.com', hint: 'B2 S3 API' },
-        { label: 'Wasabi', endpoint: 'https://s3.<region>.wasabisys.com', hint: 'No egress, $6.99/TB/mo' },
-    ];
-
     return (
-        <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Presets */}
-            <div className="space-y-2">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                    Provider Preset
-                </label>
-                <div className="flex flex-wrap gap-2">
-                    {presets.map(p => (
-                        <button
-                            key={p.label}
-                            type="button"
-                            onClick={() => setEndpoint(p.endpoint)}
-                            className={cn(
-                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
-                                endpoint === p.endpoint
-                                    ? 'border-primary bg-primary/10 text-primary'
-                                    : 'border-border/50 bg-muted/30 text-muted-foreground hover:bg-muted/60'
-                            )}
-                            title={p.hint}
-                        >
-                            {p.label}
-                        </button>
-                    ))}
-                </div>
-            </div>
-
-            <div className="grid gap-4">
-                <div className="space-y-1.5">
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2 space-y-1.5">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                        Endpoint URL <span className="text-muted-foreground/40">(blank for AWS)</span>
+                        Endpoint URL <span className="text-muted-foreground/40">(leave empty for AWS)</span>
                     </label>
                     <input
-                        type="url"
+                        type="text"
                         value={endpoint}
                         onChange={e => setEndpoint(e.target.value)}
-                        placeholder="https://s3.amazonaws.com or custom endpoint"
+                        placeholder="https://your-r2-account.r2.cloudflarestorage.com"
                         className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
                     />
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                            Bucket *
-                        </label>
-                        <input
-                            type="text"
-                            value={bucket}
-                            onChange={e => setBucket(e.target.value)}
-                            placeholder="my-scrappy-backup"
-                            required
-                            className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                        />
-                    </div>
-                    <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                            Region
-                        </label>
-                        <input
-                            type="text"
-                            value={region}
-                            onChange={e => setRegion(e.target.value)}
-                            placeholder="auto"
-                            className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                        />
-                    </div>
-                </div>
-
                 <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                        Access Key ID *
-                    </label>
-                    <input
-                        type="text"
-                        value={accessKey}
-                        onChange={e => setAccessKey(e.target.value)}
-                        placeholder="AKIA..."
-                        required
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                    />
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Bucket *</label>
+                    <input type="text" value={bucket} onChange={e => setBucket(e.target.value)} placeholder="my-scrappy-backup" required
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
                 </div>
-
                 <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                        Secret Access Key *
-                    </label>
-                    <div className="relative">
-                        <input
-                            type={showSecret ? 'text' : 'password'}
-                            value={secretKey}
-                            onChange={e => setSecretKey(e.target.value)}
-                            placeholder="wJal..."
-                            required
-                            className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 pr-12 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowSecret(!showSecret)}
-                            className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                            {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                    </div>
-                </div>
-
-                <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                        Root Path <span className="text-muted-foreground/40">(prefix inside bucket)</span>
-                    </label>
-                    <input
-                        type="text"
-                        value={root}
-                        onChange={e => setRoot(e.target.value)}
-                        placeholder="scrappy-data"
-                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                    />
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Region</label>
+                    <input type="text" value={region} onChange={e => setRegion(e.target.value)} placeholder="auto"
+                        className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
                 </div>
             </div>
 
+            <InputField label="Access Key ID *" value={accessKey} onChange={setAccessKey} placeholder="AKIA..." required />
+            <SecretField label="Secret Access Key *" value={secretKey} onChange={setSecretKey} show={showSecret} onToggle={() => setShowSecret(!showSecret)} placeholder="wJal..." required />
+            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="scrappy-data" sublabel="(prefix inside bucket)" />
+
+            <TestButton testing={testing} disabled={!bucket || !accessKey || !secretKey} />
+        </form>
+    );
+}
+
+// ── WebDAV Config Form ─────────────────────────────────────────────────
+
+function WebDavConfigForm({
+    onTestConnection,
+    testing,
+}: {
+    onTestConnection: (config: WebDavConfigInput) => Promise<void>;
+    testing: boolean;
+}) {
+    const [endpoint, setEndpoint] = useState('');
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [root, setRoot] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        await onTestConnection({
+            endpoint: endpoint.trim(),
+            username: username.trim() || null,
+            password: password.trim() || null,
+            root: root.trim() || null,
+        });
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <InputField label="WebDAV URL *" value={endpoint} onChange={setEndpoint}
+                placeholder="https://cloud.example.com/remote.php/dav/files/user/" required />
+            <InputField label="Username" value={username} onChange={setUsername} placeholder="admin" />
+            <SecretField label="Password" value={password} onChange={setPassword} show={showPassword}
+                onToggle={() => setShowPassword(!showPassword)} placeholder="•••••" />
+            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="scrappy/" sublabel="(folder on server)" />
+            <TestButton testing={testing} disabled={!endpoint} />
+        </form>
+    );
+}
+
+// ── SFTP Config Form ───────────────────────────────────────────────────
+
+function SftpConfigForm({
+    onTestConnection,
+    testing,
+}: {
+    onTestConnection: (config: SftpConfigInput) => Promise<void>;
+    testing: boolean;
+}) {
+    const [endpoint, setEndpoint] = useState('');
+    const [username, setUsername] = useState('');
+    const [keyOrPassword, setKeyOrPassword] = useState('');
+    const [root, setRoot] = useState('');
+    const [showKey, setShowKey] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        await onTestConnection({
+            endpoint: endpoint.trim(),
+            username: username.trim() || null,
+            key_or_password: keyOrPassword.trim() || null,
+            root: root.trim() || null,
+        });
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <InputField label="Host:Port *" value={endpoint} onChange={setEndpoint}
+                placeholder="sftp://server.example.com:22" required />
+            <InputField label="SSH Username" value={username} onChange={setUsername} placeholder="deploy" />
+            <SecretField label="SSH Key Path" value={keyOrPassword} onChange={setKeyOrPassword}
+                show={showKey} onToggle={() => setShowKey(!showKey)} placeholder="~/.ssh/id_rsa"
+                sublabel="(path to private key)" />
+            <InputField label="Remote Path" value={root} onChange={setRoot} placeholder="scrappy/" sublabel="(directory on server)" />
+            <TestButton testing={testing} disabled={!endpoint} />
+        </form>
+    );
+}
+
+// ── OAuth Provider Card ────────────────────────────────────────────────
+
+function OAuthProviderCard({
+    provider,
+    providerName,
+    testing,
+    onResult,
+}: {
+    provider: 'gdrive' | 'dropbox' | 'onedrive';
+    providerName: string;
+    testing: boolean;
+    onResult: (result: ConnectionTestResult) => void;
+}) {
+    const [loading, setLoading] = useState(false);
+
+    const handleSignIn = async () => {
+        setLoading(true);
+        try {
+            // Step 1: Start OAuth flow — get auth URL + code verifier
+            const startResult = await invoke<OAuthStartResult>('cloud_oauth_start', { provider });
+
+            // Step 2: Open auth URL in system browser
+            try {
+                await openUrl(startResult.auth_url);
+            } catch {
+                // Fallback: copy to clipboard
+                await navigator.clipboard.writeText(startResult.auth_url);
+                toast.info('Auth URL copied to clipboard. Please open it in your browser.');
+            }
+
+            // Step 3: Prompt user for authorization code
+            // In production, this would use a localhost redirect listener.
+            // For now, use a prompt dialog.
+            const code = window.prompt(
+                `After authorizing in your browser, paste the authorization code here:`
+            );
+
+            if (!code?.trim()) {
+                toast.info('Sign-in cancelled');
+                setLoading(false);
+                return;
+            }
+
+            // Step 4: Exchange code for tokens + test connection
+            const result = await invoke<ConnectionTestResult>('cloud_oauth_complete', {
+                provider,
+                code: code.trim(),
+                codeVerifier: startResult.code_verifier,
+            });
+
+            onResult(result);
+
+            if (result.connected) {
+                toast.success(`Connected to ${result.provider_name}!`);
+            } else {
+                toast.error(result.error ?? 'Connection failed');
+            }
+        } catch (e) {
+            toast.error(`${providerName} sign-in failed: ${String(e)}`);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="space-y-4">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+                Sign in with your {providerName} account to use it as cloud storage.
+                Your data is encrypted before upload — {providerName} only sees encrypted blobs.
+            </p>
             <button
-                type="submit"
-                disabled={testing || !bucket || !accessKey || !secretKey}
+                onClick={handleSignIn}
+                disabled={loading || testing}
                 className={cn(
-                    'w-full h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider',
-                    'flex items-center justify-center gap-2 shadow-sm hover:bg-primary/90 transition-all hover:translate-y-[-1px]',
-                    (testing || !bucket || !accessKey || !secretKey) && 'opacity-50 cursor-not-allowed transform-none'
+                    'w-full h-11 rounded-xl font-bold text-xs uppercase tracking-wider',
+                    'flex items-center justify-center gap-2 shadow-sm transition-all hover:translate-y-[-1px]',
+                    'bg-primary text-primary-foreground hover:bg-primary/90',
+                    (loading || testing) && 'opacity-50 cursor-not-allowed transform-none'
                 )}
             >
-                {testing ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" /> Testing Connection...</>
+                {loading ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Connecting…</>
                 ) : (
-                    <><Wifi className="w-4 h-4" /> Test Connection</>
+                    <><ExternalLink className="w-4 h-4" /> Sign in with {providerName}</>
                 )}
             </button>
-        </form>
+        </div>
+    );
+}
+
+// ── iCloud Connect Card ────────────────────────────────────────────────
+
+function ICloudConnectCard({
+    testing,
+    onResult,
+}: {
+    testing: boolean;
+    onResult: (result: ConnectionTestResult) => void;
+}) {
+    const [loading, setLoading] = useState(false);
+
+    const handleConnect = async () => {
+        setLoading(true);
+        try {
+            const result = await invoke<ConnectionTestResult>('cloud_test_icloud');
+            onResult(result);
+            if (result.connected) {
+                toast.success('Connected to iCloud Drive!');
+            } else {
+                toast.error(result.error ?? 'iCloud not available');
+            }
+        } catch (e) {
+            toast.error('iCloud test failed: ' + String(e));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="space-y-4">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+                Uses your Mac's native iCloud Drive — no configuration needed.
+                Make sure iCloud Drive is enabled in System Settings.
+            </p>
+            <button
+                onClick={handleConnect}
+                disabled={loading || testing}
+                className={cn(
+                    'w-full h-11 rounded-xl font-bold text-xs uppercase tracking-wider',
+                    'flex items-center justify-center gap-2 shadow-sm transition-all hover:translate-y-[-1px]',
+                    'bg-gradient-to-r from-sky-500 to-blue-500 text-white hover:from-sky-400 hover:to-blue-400',
+                    (loading || testing) && 'opacity-50 cursor-not-allowed transform-none'
+                )}
+            >
+                {loading ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Checking iCloud…</>
+                ) : (
+                    <><Cloud className="w-4 h-4" /> Connect iCloud Drive</>
+                )}
+            </button>
+        </div>
+    );
+}
+
+// ── Shared form components ─────────────────────────────────────────────
+
+function InputField({ label, value, onChange, placeholder, required, sublabel }: {
+    label: string; value: string; onChange: (v: string) => void; placeholder: string;
+    required?: boolean; sublabel?: string;
+}) {
+    return (
+        <div className="space-y-1.5">
+            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                {label} {sublabel && <span className="text-muted-foreground/40">{sublabel}</span>}
+            </label>
+            <input type="text" value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} required={required}
+                className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+        </div>
+    );
+}
+
+function SecretField({ label, value, onChange, placeholder, show, onToggle, required, sublabel }: {
+    label: string; value: string; onChange: (v: string) => void; placeholder: string;
+    show: boolean; onToggle: () => void; required?: boolean; sublabel?: string;
+}) {
+    return (
+        <div className="space-y-1.5">
+            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                {label} {sublabel && <span className="text-muted-foreground/40">{sublabel}</span>}
+            </label>
+            <div className="relative">
+                <input type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} required={required}
+                    className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 pr-12 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                <button type="button" onClick={onToggle} className="absolute right-3 top-2.5 text-muted-foreground hover:text-foreground transition-colors">
+                    {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function TestButton({ testing, disabled }: { testing: boolean; disabled?: boolean }) {
+    return (
+        <button
+            type="submit"
+            disabled={testing || disabled}
+            className={cn(
+                'w-full h-11 rounded-xl bg-primary text-primary-foreground font-bold text-xs uppercase tracking-wider',
+                'flex items-center justify-center gap-2 shadow-sm hover:bg-primary/90 transition-all hover:translate-y-[-1px]',
+                (testing || disabled) && 'opacity-50 cursor-not-allowed transform-none'
+            )}
+        >
+            {testing ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> Testing Connection…</>
+            ) : (
+                <><Wifi className="w-4 h-4" /> Test Connection</>
+            )}
+        </button>
     );
 }
 
@@ -394,24 +557,16 @@ function MigrationProgressDialog({
                             const isDone = i < currentIdx || isComplete;
                             const isCurrent = i === currentIdx && !isComplete && !hasError;
                             const label = PHASE_LABELS[phase] ?? phase;
-
                             return (
-                                <div
-                                    key={phase}
-                                    className={cn(
-                                        'flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-all',
-                                        isDone ? 'text-muted-foreground/60' :
-                                            isCurrent ? 'bg-primary/5 text-foreground font-medium' :
-                                                'text-muted-foreground/30'
-                                    )}
-                                >
-                                    {isDone ? (
-                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                                    ) : isCurrent ? (
-                                        <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />
-                                    ) : (
-                                        <div className="w-3.5 h-3.5 rounded-full border border-border/50 shrink-0" />
-                                    )}
+                                <div key={phase} className={cn(
+                                    'flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-all',
+                                    isDone ? 'text-muted-foreground/60' :
+                                        isCurrent ? 'bg-primary/5 text-foreground font-medium' :
+                                            'text-muted-foreground/30'
+                                )}>
+                                    {isDone ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" /> :
+                                        isCurrent ? <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" /> :
+                                            <div className="w-3.5 h-3.5 rounded-full border border-border/50 shrink-0" />}
                                     <span>{label}</span>
                                 </div>
                             );
@@ -523,40 +678,27 @@ function RecoveryKeyPanel() {
                         {recoveryKey}
                     </div>
                     <div className="flex gap-2">
-                        <button
-                            onClick={handleCopy}
-                            className="flex items-center gap-1.5 px-3 h-8 rounded-lg text-xs font-medium border border-border/50 hover:bg-accent/50 transition-all"
-                        >
+                        <button onClick={handleCopy} className="flex items-center gap-1.5 px-3 h-8 rounded-lg text-xs font-medium border border-border/50 hover:bg-accent/50 transition-all">
                             <Copy className="w-3.5 h-3.5" /> Copy
                         </button>
-                        <button
-                            onClick={() => { setShowKey(false); setRecoveryKey(null); }}
-                            className="flex items-center gap-1.5 px-3 h-8 rounded-lg text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-all"
-                        >
+                        <button onClick={() => { setShowKey(false); setRecoveryKey(null); }} className="flex items-center gap-1.5 px-3 h-8 rounded-lg text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-all">
                             <EyeOff className="w-3.5 h-3.5" /> Hide
                         </button>
                     </div>
                 </div>
             ) : (
                 <div className="flex gap-2">
-                    <button
-                        onClick={handleGetKey}
-                        disabled={loading}
-                        className={cn(
-                            'flex items-center gap-1.5 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider',
-                            'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20',
-                            'hover:bg-amber-500/20 transition-all',
-                            loading && 'opacity-50 cursor-wait'
-                        )}
-                    >
+                    <button onClick={handleGetKey} disabled={loading} className={cn(
+                        'flex items-center gap-1.5 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider',
+                        'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20',
+                        'hover:bg-amber-500/20 transition-all',
+                        loading && 'opacity-50 cursor-wait'
+                    )}>
                         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
                         Show Recovery Key
                     </button>
-                    <button
-                        onClick={() => setShowImport(!showImport)}
-                        className="flex items-center gap-1.5 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider
-                            border border-border/50 text-muted-foreground hover:bg-muted/50 transition-all"
-                    >
+                    <button onClick={() => setShowImport(!showImport)} className="flex items-center gap-1.5 px-4 h-9 rounded-xl text-xs font-bold uppercase tracking-wider
+                        border border-border/50 text-muted-foreground hover:bg-muted/50 transition-all">
                         <Key className="w-3.5 h-3.5" /> Import Key
                     </button>
                 </div>
@@ -564,29 +706,15 @@ function RecoveryKeyPanel() {
 
             <AnimatePresence>
                 {showImport && (
-                    <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="overflow-hidden"
-                    >
+                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                         <div className="flex gap-2 pt-2">
-                            <input
-                                type="text"
-                                value={importKey}
-                                onChange={e => setImportKey(e.target.value)}
-                                placeholder="Paste your recovery key here…"
-                                className="flex-1 h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all"
-                            />
-                            <button
-                                onClick={handleImport}
-                                disabled={importing || !importKey.trim()}
-                                className={cn(
-                                    'px-4 h-10 rounded-xl bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider',
-                                    'hover:bg-primary/90 transition-all shadow-sm',
-                                    (importing || !importKey.trim()) && 'opacity-50 cursor-not-allowed'
-                                )}
-                            >
+                            <input type="text" value={importKey} onChange={e => setImportKey(e.target.value)} placeholder="Paste your recovery key here…"
+                                className="flex-1 h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
+                            <button onClick={handleImport} disabled={importing || !importKey.trim()} className={cn(
+                                'px-4 h-10 rounded-xl bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider',
+                                'hover:bg-primary/90 transition-all shadow-sm',
+                                (importing || !importKey.trim()) && 'opacity-50 cursor-not-allowed'
+                            )}>
                                 {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Import'}
                             </button>
                         </div>
@@ -620,11 +748,11 @@ const PROVIDERS = [
     {
         id: 'icloud',
         name: 'iCloud Drive',
-        description: 'Apple iCloud — native macOS integration',
+        description: 'Apple iCloud — native macOS integration, zero config',
         icon: Cloud,
         color: 'text-sky-500',
         gradient: 'from-sky-500/20 to-cyan-500/10',
-        available: false,
+        available: true,
     },
     {
         id: 'gdrive',
@@ -633,7 +761,7 @@ const PROVIDERS = [
         icon: Cloud,
         color: 'text-amber-500',
         gradient: 'from-amber-500/20 to-yellow-500/10',
-        available: false,
+        available: true,
     },
     {
         id: 'dropbox',
@@ -642,9 +770,74 @@ const PROVIDERS = [
         icon: Cloud,
         color: 'text-blue-600',
         gradient: 'from-blue-600/20 to-indigo-500/10',
-        available: false,
+        available: true,
+    },
+    {
+        id: 'onedrive',
+        name: 'OneDrive',
+        description: 'Microsoft OneDrive via OAuth — free 5 GB tier',
+        icon: Cloud,
+        color: 'text-indigo-500',
+        gradient: 'from-indigo-500/20 to-purple-500/10',
+        available: true,
+    },
+    {
+        id: 'webdav',
+        name: 'WebDAV',
+        description: 'Nextcloud, ownCloud, Synology NAS, or any WebDAV server',
+        icon: Globe,
+        color: 'text-teal-500',
+        gradient: 'from-teal-500/20 to-emerald-500/10',
+        available: true,
+    },
+    {
+        id: 'sftp',
+        name: 'SFTP',
+        description: 'Any Linux server, NAS, or cloud VM with SSH access',
+        icon: Terminal,
+        color: 'text-slate-500',
+        gradient: 'from-slate-500/20 to-gray-500/10',
+        available: true,
     },
 ];
+
+// ── Helper: which form to render ─────────────────────────────────────────
+
+function ProviderConfigPanel({
+    providerId,
+    testing,
+    onS3Test,
+    onWebDavTest,
+    onSftpTest,
+    onResult,
+}: {
+    providerId: string;
+    testing: boolean;
+    onS3Test: (config: S3ConfigInput) => Promise<void>;
+    onWebDavTest: (config: WebDavConfigInput) => Promise<void>;
+    onSftpTest: (config: SftpConfigInput) => Promise<void>;
+    onResult: (result: ConnectionTestResult) => void;
+}) {
+    const meta = PROVIDERS.find(p => p.id === providerId);
+    const Icon = meta?.icon ?? Cloud;
+
+    return (
+        <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-sm space-y-5">
+            <h3 className="font-bold text-base flex items-center gap-2">
+                <Icon className={cn('w-4 h-4', meta?.color ?? 'text-primary')} />
+                {meta?.name ?? providerId} Connection
+            </h3>
+
+            {providerId === 's3' && <S3ConfigForm onTestConnection={onS3Test} testing={testing} />}
+            {providerId === 'icloud' && <ICloudConnectCard testing={testing} onResult={onResult} />}
+            {providerId === 'gdrive' && <OAuthProviderCard provider="gdrive" providerName="Google Drive" testing={testing} onResult={onResult} />}
+            {providerId === 'dropbox' && <OAuthProviderCard provider="dropbox" providerName="Dropbox" testing={testing} onResult={onResult} />}
+            {providerId === 'onedrive' && <OAuthProviderCard provider="onedrive" providerName="Microsoft OneDrive" testing={testing} onResult={onResult} />}
+            {providerId === 'webdav' && <WebDavConfigForm onTestConnection={onWebDavTest} testing={testing} />}
+            {providerId === 'sftp' && <SftpConfigForm onTestConnection={onSftpTest} testing={testing} />}
+        </div>
+    );
+}
 
 // ── A5-1: Main StorageTab Component ──────────────────────────────────────
 
@@ -667,7 +860,7 @@ export function StorageTab() {
         }
     }, [isMigrating, migrationProgress]);
 
-    const handleTestConnection = async (config: S3ConfigInput) => {
+    const handleS3TestConnection = async (config: S3ConfigInput) => {
         setTesting(true);
         setTestResult(null);
         try {
@@ -683,6 +876,46 @@ export function StorageTab() {
         } finally {
             setTesting(false);
         }
+    };
+
+    const handleWebDavTestConnection = async (config: WebDavConfigInput) => {
+        setTesting(true);
+        setTestResult(null);
+        try {
+            const result = await invoke<ConnectionTestResult>('cloud_test_webdav', { config });
+            setTestResult(result);
+            if (result.connected) {
+                toast.success(`Connected to ${result.provider_name}!`);
+            } else {
+                toast.error(result.error ?? 'Connection failed');
+            }
+        } catch (e) {
+            toast.error('WebDAV connection test failed: ' + String(e));
+        } finally {
+            setTesting(false);
+        }
+    };
+
+    const handleSftpTestConnection = async (config: SftpConfigInput) => {
+        setTesting(true);
+        setTestResult(null);
+        try {
+            const result = await invoke<ConnectionTestResult>('cloud_test_sftp', { config });
+            setTestResult(result);
+            if (result.connected) {
+                toast.success(`Connected to ${result.provider_name}!`);
+            } else {
+                toast.error(result.error ?? 'Connection failed');
+            }
+        } catch (e) {
+            toast.error('SFTP connection test failed: ' + String(e));
+        } finally {
+            setTesting(false);
+        }
+    };
+
+    const handleOAuthResult = (result: ConnectionTestResult) => {
+        setTestResult(result);
     };
 
     const handleMigrateToCloud = async () => {
@@ -866,9 +1099,9 @@ export function StorageTab() {
                 </div>
             )}
 
-            {/* ── S3 Config Form ───────────────────────────────────────── */}
+            {/* ── Provider Config Panel ─────────────────────────────────── */}
             <AnimatePresence>
-                {selectedProvider === 's3' && isLocal && (
+                {selectedProvider && isLocal && (
                     <motion.div
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
@@ -876,64 +1109,66 @@ export function StorageTab() {
                         transition={{ duration: 0.3 }}
                         className="overflow-hidden"
                     >
-                        <div className="p-6 rounded-2xl border border-border/50 bg-card/40 shadow-sm space-y-5">
-                            <h3 className="font-bold text-base flex items-center gap-2">
-                                <Server className="w-4 h-4 text-blue-500" />
-                                S3 Connection
-                            </h3>
-                            <S3ConfigForm onTestConnection={handleTestConnection} testing={testing} />
+                        <ProviderConfigPanel
+                            providerId={selectedProvider}
+                            testing={testing}
+                            onS3Test={handleS3TestConnection}
+                            onWebDavTest={handleWebDavTestConnection}
+                            onSftpTest={handleSftpTestConnection}
+                            onResult={handleOAuthResult}
+                        />
 
-                            {/* Connection test result */}
-                            <AnimatePresence>
-                                {testResult && (
-                                    <motion.div
-                                        initial={{ height: 0, opacity: 0 }}
-                                        animate={{ height: 'auto', opacity: 1 }}
-                                        exit={{ height: 0, opacity: 0 }}
-                                    >
-                                        <div className={cn(
-                                            'p-4 rounded-xl border',
-                                            testResult.connected
-                                                ? 'bg-emerald-500/5 border-emerald-500/20'
-                                                : 'bg-rose-500/5 border-rose-500/20'
-                                        )}>
-                                            <div className="flex items-center gap-2 mb-2">
-                                                {testResult.connected ? (
-                                                    <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                                                ) : (
-                                                    <XCircle className="w-4 h-4 text-rose-500" />
-                                                )}
-                                                <span className="font-bold text-sm">
-                                                    {testResult.connected ? `Connected to ${testResult.provider_name}` : 'Connection Failed'}
-                                                </span>
-                                            </div>
-                                            {testResult.connected && (
-                                                <p className="text-xs text-muted-foreground">
-                                                    Storage: {formatBytes(testResult.storage_used)} used
-                                                    {testResult.storage_available != null && ` / ${formatBytes(testResult.storage_available)} available`}
-                                                </p>
+                        {/* Connection test result */}
+                        <AnimatePresence>
+                            {testResult && (
+                                <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    className="mt-4"
+                                >
+                                    <div className={cn(
+                                        'p-4 rounded-xl border',
+                                        testResult.connected
+                                            ? 'bg-emerald-500/5 border-emerald-500/20'
+                                            : 'bg-rose-500/5 border-rose-500/20'
+                                    )}>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            {testResult.connected ? (
+                                                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                                            ) : (
+                                                <XCircle className="w-4 h-4 text-rose-500" />
                                             )}
-                                            {testResult.error && (
-                                                <p className="text-xs text-rose-600 dark:text-rose-400 mt-1">{testResult.error}</p>
-                                            )}
-
-                                            {/* Migrate button */}
-                                            {testResult.connected && (
-                                                <button
-                                                    onClick={handleMigrateToCloud}
-                                                    className="mt-4 w-full h-11 rounded-xl bg-gradient-to-r from-blue-500 to-sky-500 text-white font-bold text-xs uppercase tracking-wider
-                                                        flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30
-                                                        hover:translate-y-[-1px] transition-all"
-                                                >
-                                                    <Upload className="w-4 h-4" />
-                                                    Migrate to Cloud
-                                                </button>
-                                            )}
+                                            <span className="font-bold text-sm">
+                                                {testResult.connected ? `Connected to ${testResult.provider_name}` : 'Connection Failed'}
+                                            </span>
                                         </div>
-                                    </motion.div>
-                                )}
-                            </AnimatePresence>
-                        </div>
+                                        {testResult.connected && (
+                                            <p className="text-xs text-muted-foreground">
+                                                Storage: {formatBytes(testResult.storage_used)} used
+                                                {testResult.storage_available != null && ` / ${formatBytes(testResult.storage_available)} available`}
+                                            </p>
+                                        )}
+                                        {testResult.error && (
+                                            <p className="text-xs text-rose-600 dark:text-rose-400 mt-1">{testResult.error}</p>
+                                        )}
+
+                                        {/* Migrate button */}
+                                        {testResult.connected && (
+                                            <button
+                                                onClick={handleMigrateToCloud}
+                                                className="mt-4 w-full h-11 rounded-xl bg-gradient-to-r from-blue-500 to-sky-500 text-white font-bold text-xs uppercase tracking-wider
+                                                    flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30
+                                                    hover:translate-y-[-1px] transition-all"
+                                            >
+                                                <Upload className="w-4 h-4" />
+                                                Migrate to Cloud
+                                            </button>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
                     </motion.div>
                 )}
             </AnimatePresence>

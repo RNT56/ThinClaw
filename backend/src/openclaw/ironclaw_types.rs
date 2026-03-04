@@ -23,11 +23,11 @@ pub fn status_to_ui_event(
     let run_id = run_id.map(|s| s.to_string());
 
     match status {
-        StatusUpdate::Thinking(_text) => Some(UiEvent::RunStatus {
+        StatusUpdate::Thinking(text) => Some(UiEvent::AssistantInternal {
             session_key,
             run_id,
-            status: "in_flight".into(),
-            error: None,
+            message_id: message_id.to_string(),
+            text,
         }),
 
         StatusUpdate::StreamChunk(delta) => Some(UiEvent::AssistantDelta {

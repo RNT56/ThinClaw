@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { ChatProvider, useChatLayout } from './ChatProvider';
 import { Sidebar } from './Sidebar';
 import { ChatView } from './views/ChatView';
@@ -24,41 +24,39 @@ function ChatLayoutShell() {
 
             {/* Main content area — switches between modes */}
             <div className="flex-1 flex flex-col relative h-full overflow-hidden">
-                <AnimatePresence mode="wait">
-                    {isOpenClawMode ? (
-                        <motion.div
-                            key="openclaw-area"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="flex-1 flex flex-col h-full overflow-hidden"
-                        >
-                            <OpenClawView />
-                        </motion.div>
-                    ) : isImagineMode ? (
-                        <motion.div
-                            key="imagine-area"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="flex-1 flex flex-col h-full overflow-hidden"
-                        >
-                            <ImagineView />
-                        </motion.div>
-                    ) : isSettingsMode ? (
-                        <motion.div
-                            key="settings-area"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="flex-1 h-full overflow-hidden"
-                        >
-                            <SettingsView />
-                        </motion.div>
-                    ) : (
-                        <ChatView key="chat-area" />
-                    )}
-                </AnimatePresence>
+                {/* OpenClaw — always mounted to preserve chat state */}
+                <div
+                    className="flex-1 flex flex-col h-full overflow-hidden"
+                    style={{ display: isOpenClawMode ? undefined : 'none' }}
+                >
+                    <OpenClawView />
+                </div>
+
+                {/* Imagine — always mounted to preserve generation state */}
+                <div
+                    className="flex-1 flex flex-col h-full overflow-hidden"
+                    style={{ display: isImagineMode ? undefined : 'none' }}
+                >
+                    <ImagineView />
+                </div>
+
+                {/* Settings — conditionally rendered (no state to preserve) */}
+                {isSettingsMode && (
+                    <motion.div
+                        key="settings-area"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="flex-1 h-full overflow-hidden"
+                    >
+                        <SettingsView />
+                    </motion.div>
+                )}
+
+                {/* Chat — shown when no other mode is active */}
+                {!isOpenClawMode && !isImagineMode && !isSettingsMode && (
+                    <ChatView key="chat-area" />
+                )}
             </div>
 
             {/* Global floating canvas window */}

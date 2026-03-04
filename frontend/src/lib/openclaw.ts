@@ -396,6 +396,41 @@ export async function getOpenClawCronHistory(key: string, limit: number): Promis
     return invoke('openclaw_cron_history', { key, limit });
 }
 
+// ============================================================================
+// Channel listing
+// ============================================================================
+
+export interface ChannelInfo {
+    id: string;
+    name: string;
+    type: 'wasm' | 'native' | 'builtin';
+    enabled: boolean;
+    stream_mode: string;
+}
+
+export interface ChannelsListResponse {
+    channels: ChannelInfo[];
+}
+
+export async function getOpenClawChannelsList(): Promise<ChannelsListResponse> {
+    return invoke('openclaw_channels_list');
+}
+
+// ============================================================================
+// Cron expression linting
+// ============================================================================
+
+export interface CronLintResult {
+    valid: boolean;
+    expression: string;
+    next_fire_times: string[];
+    checked_at: string;
+}
+
+export async function lintCronExpression(expression: string): Promise<CronLintResult> {
+    return invoke('openclaw_cron_lint', { expression });
+}
+
 export async function getOpenClawSkillsList(): Promise<Skill[]> {
     return invoke('openclaw_skills_list');
 }
@@ -622,4 +657,238 @@ export async function dispatchCanvasEvent(
 
 export async function syncLocalLlm(): Promise<void> {
     return invoke('openclaw_sync_local_llm');
+}
+
+// ============================================================================
+// New Feature API Functions
+// ============================================================================
+
+export interface ThinkingConfigResult {
+    enabled: boolean;
+    budget_tokens: number | null;
+}
+
+/**
+ * Set thinking mode natively via IronClaw's ThinkingConfig.
+ *
+ * This replaces the old localStorage hack that prepended
+ * "Think step by step" to messages.
+ */
+export async function setThinking(
+    enabled: boolean,
+    budgetTokens?: number
+): Promise<ThinkingConfigResult> {
+    return invoke('openclaw_set_thinking', {
+        enabled,
+        budgetTokens: budgetTokens ?? null,
+    });
+}
+
+export interface MemorySearchResult {
+    path: string;
+    snippet: string;
+    score: number;
+}
+
+export interface MemorySearchResponse {
+    results: MemorySearchResult[];
+    query: string;
+    total: number;
+}
+
+/**
+ * Search workspace memory using IronClaw's hybrid BM25+vector search.
+ * Falls back to simple text search if vector search is unavailable.
+ */
+export async function searchMemory(
+    query: string,
+    limit?: number
+): Promise<MemorySearchResponse> {
+    return invoke('openclaw_memory_search', { query, limit: limit ?? null });
+}
+
+export interface SessionExportResponse {
+    transcript: string;
+    session_key: string;
+    message_count: number;
+}
+
+/**
+ * Export a session's full history as a markdown transcript.
+ */
+export async function exportSession(sessionKey: string): Promise<SessionExportResponse> {
+    return invoke('openclaw_export_session', { sessionKey });
+}
+
+// ============================================================================
+// Hooks & Extensions Management
+// ============================================================================
+
+export interface HookInfoItem {
+    name: string;
+    hook_points: string[];
+    failure_mode: string;
+    timeout_ms: number;
+    priority: number;
+}
+
+export interface HooksListResponse {
+    hooks: HookInfoItem[];
+    total: number;
+}
+
+/** List all registered lifecycle hooks. */
+export async function listHooks(): Promise<HooksListResponse> {
+    return invoke('openclaw_hooks_list');
+}
+
+export interface ExtensionInfoItem {
+    name: string;
+    kind: string;
+    description: string | null;
+    active: boolean;
+    authenticated: boolean;
+    tools: string[];
+    needs_setup: boolean;
+    activation_status: string | null;
+    activation_error: string | null;
+}
+
+export interface ExtensionsListResponse {
+    extensions: ExtensionInfoItem[];
+    total: number;
+}
+
+export interface ExtensionActionResponse {
+    ok: boolean;
+    message: string | null;
+}
+
+/** List all installed extensions/plugins. */
+export async function listExtensions(): Promise<ExtensionsListResponse> {
+    return invoke('openclaw_extensions_list');
+}
+
+/** Activate an extension by name. */
+export async function activateExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_activate', { name });
+}
+
+/** Remove an extension by name. */
+export async function removeExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_remove', { name });
+}
+
+// ============================================================================
+// Config Editor
+// ============================================================================
+
+export interface SettingItem {
+    key: string;
+    value: any;
+    updated_at: string;
+}
+
+export interface SettingsListResponse {
+    settings: SettingItem[];
+}
+
+/** List all IronClaw config settings. */
+export async function listSettings(): Promise<SettingsListResponse> {
+    return invoke('openclaw_config_get');
+}
+
+/** Set a single config setting. */
+export async function setSetting(key: string, value: any): Promise<{ ok: boolean }> {
+    return invoke('openclaw_config_set', { key, value });
+}
+
+/** Bulk-update settings. */
+export async function patchSettings(patch: Record<string, any>): Promise<{ ok: boolean }> {
+    return invoke('openclaw_config_patch', { patch });
+}
+
+// ============================================================================
+// System Diagnostics
+// ============================================================================
+
+export interface DiagnosticCheck {
+    name: string;
+    status: 'pass' | 'fail' | 'warn' | 'skip';
+    detail: string;
+}
+
+export interface DiagnosticsResponse {
+    checks: DiagnosticCheck[];
+    passed: number;
+    failed: number;
+    skipped: number;
+}
+
+/** Run system diagnostics. */
+export async function runDiagnostics(): Promise<DiagnosticsResponse> {
+    return invoke('openclaw_diagnostics');
+}
+
+// ============================================================================
+// Tool Listing (for Tool Policies)
+// ============================================================================
+
+export interface ToolInfoItem {
+    name: string;
+    description: string;
+    enabled: boolean;
+    source: string; // 'builtin' | 'skill' | 'extension' | 'mcp'
+}
+
+export interface ToolsListResponse {
+    tools: ToolInfoItem[];
+    total: number;
+}
+
+/** List all registered tools with their status. */
+export async function listTools(): Promise<ToolsListResponse> {
+    return invoke('openclaw_tools_list');
+}
+
+// ============================================================================
+// DM Pairing Management
+// ============================================================================
+
+export interface PairingItem {
+    channel: string;
+    user_id: string;
+    paired_at: string;
+    status: 'active' | 'pending';
+}
+
+export interface PairingListResponse {
+    pairings: PairingItem[];
+    total: number;
+}
+
+/** List pairings for a channel (pending + approved). */
+export async function listPairings(channel: string): Promise<PairingListResponse> {
+    return invoke('openclaw_pairing_list', { channel });
+}
+
+/** Approve a pairing code for a channel. */
+export async function approvePairing(channel: string, code: string): Promise<{ ok: boolean }> {
+    return invoke('openclaw_pairing_approve', { channel, code });
+}
+
+// ============================================================================
+// Context Compaction
+// ============================================================================
+
+export interface CompactSessionResponse {
+    tokens_before: number;
+    tokens_after: number;
+    turns_removed: number;
+    summary: string | null;
+}
+
+/** Trigger context compaction for a session. */
+export async function compactSession(sessionKey: string): Promise<CompactSessionResponse> {
+    return invoke('openclaw_compact_session', { sessionKey });
 }

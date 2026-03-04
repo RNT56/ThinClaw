@@ -142,10 +142,11 @@ that expose all agent capabilities as callable Rust functions.
 
 | Enhancement | Priority | Status |
 |---|---|---|
-| Session context in `StatusUpdate` | P1 | |
-| Hot config reload | P2 | |
+| Session context in `StatusUpdate` | P1 | ✅ Done (2A: multi-session safe routing) |
+| Hot config reload | P2 | ✅ Done (2B: Tier 1 hot-reload live, Tier 2 fallback) |
 | Canvas support | ~~P2~~ | ✅ Done (`tools/builtin/canvas.rs`) |
-| Sub-agent spawning | P3 | |
+| Sub-agent spawning | P3 | ✅ Done (2C: registry, spawn, list, status) |
+| Extended Thinking | P1 | ✅ Done (v0.12.0: `StatusUpdate::Thinking` → `AssistantInternal`) |
 | Shared database | P3 | |
 | Fleet management | ~~P3~~ | ✅ Done (`src/tailscale.rs`) |
 | Voice wake word | P2 | ✅ Scaffold |

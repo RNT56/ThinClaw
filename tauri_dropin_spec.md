@@ -9,7 +9,7 @@
 
 ## Implementation Progress
 
-> Last updated: 2026-03-01 16:00 CET — **All 15 phases complete. Zero warnings, zero errors.** Post-integration work (InferenceRouter, Cloud Model Discovery, Cloud Storage A1–A6 ALL TIERS) also complete. 88 cloud tests passing. 7 cloud providers implemented.
+> Last updated: 2026-03-02 07:16 CET — **All 15 phases complete. Zero warnings, zero errors.** Post-integration work (InferenceRouter, Cloud Model Discovery, Cloud Storage A1–A6 ALL TIERS) also complete. 88 cloud tests passing. 7 cloud providers implemented. **IronClaw v0.12.0 sync:** Extended Thinking surfaced, `refresh_secrets()` hot-reload live, ToolBridge confirmed fully wired.
 
 | Phase | Status | Key Outcome |
 |---|---|---|
@@ -1454,4 +1454,45 @@ All 3 live Tauri commands (`tts_synthesize`, `transcribe_audio`, `imagine_genera
 8. **Pre-existing lint note.** `rag.rs:1096` has a `non-primitive cast` error
    from rust-analyzer. This is pre-existing and unrelated to recent changes.
    The actual build compiles clean with 0 errors, 0 warnings.
+
+---
+
+## 12. IronClaw v0.12.0 Sync (2026-03-02)
+
+> **IronClaw report date:** 2026-03-02 07:10 CET · **Build:** 0 errors, 0 warnings, 1,686 tests
+
+### 12.1 Extended Thinking — Integrated
+
+IronClaw shipped chain-of-thought reasoning support. Scrappy integration:
+
+| Aspect | Implementation |
+|--------|----------------|
+| **StatusUpdate mapping** | `StatusUpdate::Thinking(text)` → `UiEvent::AssistantInternal` (surfaces reasoning in chat with 🧠 indicator) |
+| **Env vars** | `AGENT_THINKING_ENABLED` (default: `false`) and `AGENT_THINKING_BUDGET_TOKENS` (default: `10000`) set in `build_inner()` |
+| **Config** | Thinking can be enabled via env var override or IronClaw TOML config |
+| **Frontend** | Renders as `AssistantInternal` in chat. Dedicated collapsible reasoning UI is deferred (P3). |
+
+### 12.2 ToolBridge — Confirmed Fully Wired
+
+IronClaw's report listed "2 lines to uncomment" — but both were already live:
+- `pub use ironclaw::hardware_bridge::ToolBridge` in `tool_bridge.rs:76`
+- `builder.with_tool_bridge(tool_bridge.clone())` in `ironclaw_bridge.rs:537`
+- Full 3-tier `ApprovalCard.tsx` (142 LOC) with Deny/Allow Once/Allow Session
+- `openclaw_resolve_approval` wired through `TauriToolBridge::resolve()`
+
+### 12.3 Secrets Hot-Reload — Now Live
+
+`ironclaw::api::config::refresh_secrets()` is now public in IronClaw v0.12.0.
+The Enhancement 2B Tier 1 path in `ironclaw_bridge.rs` has been uncommented:
+- Saves/toggles of API keys now trigger in-place hot-reload (zero downtime)
+- Falls back to stop→start cycle if hot-reload fails
+
+### 12.4 IronClaw Next Sprint Awareness
+
+| Task | Scrappy Impact |
+|------|----------------|
+| BridgedTool auto-registration | Sensor tools will auto-appear in ToolRegistry when bridge is wired |
+| Real token streaming | Event contract unchanged, granularity improves (words → tokens) |
+| Media pipeline | New content types in messages — may need frontend rendering updates |
+| Channel health monitor / Unit tests | No Scrappy impact |
 

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
     History,
     Calendar,
@@ -9,7 +9,9 @@ import {
     BookOpen,
     Clock,
     Zap,
-    Filter
+    Filter,
+    Sparkles,
+    FileText
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
@@ -21,6 +23,9 @@ export function OpenClawMemory() {
     const [content, setContent] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [search, setSearch] = useState('');
+    const [searchMode, setSearchMode] = useState<'files' | 'semantic'>('files');
+    const [searchResults, setSearchResults] = useState<openclaw.MemorySearchResult[]>([]);
+    const [isSearching, setIsSearching] = useState(false);
 
     const fetchLogs = async () => {
         try {
@@ -51,9 +56,36 @@ export function OpenClawMemory() {
         }
     };
 
+    const handleSemanticSearch = useCallback(async () => {
+        if (!search.trim() || search.trim().length < 2) return;
+        setIsSearching(true);
+        try {
+            const resp = await openclaw.searchMemory(search.trim(), 20);
+            setSearchResults(resp.results);
+            if (resp.results.length === 0) {
+                toast.info('No matching memories found');
+            }
+        } catch (e) {
+            console.error('Memory search failed:', e);
+            toast.error('Memory search failed');
+        } finally {
+            setIsSearching(false);
+        }
+    }, [search]);
+
     useEffect(() => {
         fetchLogs();
     }, []);
+
+    // Debounced semantic search
+    useEffect(() => {
+        if (searchMode !== 'semantic' || !search.trim() || search.trim().length < 3) {
+            setSearchResults([]);
+            return;
+        }
+        const timeout = setTimeout(handleSemanticSearch, 500);
+        return () => clearTimeout(timeout);
+    }, [search, searchMode, handleSemanticSearch]);
 
     const filteredLogs = logs.filter(f => f.toLowerCase().includes(search.toLowerCase()));
 
@@ -63,7 +95,7 @@ export function OpenClawMemory() {
             animate={{ opacity: 1, x: 0 }}
             className="flex-1 flex overflow-hidden h-[calc(100vh-100px)]"
         >
-            {/* Sidebar: Log List */}
+            {/* Sidebar: Log List + Search */}
             <div className="w-72 border-r border-white/5 flex flex-col bg-black/10">
                 <div className="p-6 border-b border-white/5 space-y-4">
                     <div className="flex items-center justify-between">
@@ -75,44 +107,129 @@ export function OpenClawMemory() {
                             {logs.length}
                         </span>
                     </div>
+
+                    {/* Search Mode Toggle */}
+                    <div className="flex p-0.5 bg-white/5 rounded-lg border border-white/10">
+                        <button
+                            onClick={() => setSearchMode('files')}
+                            className={cn(
+                                "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
+                                searchMode === 'files'
+                                    ? "bg-primary/15 text-primary shadow-sm"
+                                    : "text-muted-foreground hover:text-foreground"
+                            )}
+                        >
+                            <FileText className="w-3 h-3" />
+                            Files
+                        </button>
+                        <button
+                            onClick={() => setSearchMode('semantic')}
+                            className={cn(
+                                "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
+                                searchMode === 'semantic'
+                                    ? "bg-violet-500/15 text-violet-400 shadow-sm"
+                                    : "text-muted-foreground hover:text-foreground"
+                            )}
+                        >
+                            <Sparkles className="w-3 h-3" />
+                            Search
+                        </button>
+                    </div>
+
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                         <input
                             type="text"
-                            placeholder="Search by date..."
+                            placeholder={searchMode === 'semantic' ? "Semantic search memories..." : "Search by date..."}
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            className="w-full pl-9 pr-3 py-2 bg-white/5 border border-white/10 rounded-xl text-xs focus:ring-1 focus:ring-primary/40 outline-none transition-all"
+                            onKeyDown={(e) => { if (e.key === 'Enter' && searchMode === 'semantic') handleSemanticSearch(); }}
+                            className={cn(
+                                "w-full pl-9 pr-3 py-2 bg-white/5 border rounded-xl text-xs focus:ring-1 outline-none transition-all",
+                                searchMode === 'semantic'
+                                    ? "border-violet-500/20 focus:ring-violet-500/40"
+                                    : "border-white/10 focus:ring-primary/40"
+                            )}
                         />
+                        {isSearching && (
+                            <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-violet-400 animate-spin" />
+                        )}
                     </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-3 space-y-1">
-                    {filteredLogs.map(log => {
-                        const dateStr = log.replace('memory/', '').replace('.md', '');
-                        return (
-                            <button
-                                key={log}
-                                onClick={() => handleSelectLog(log)}
-                                className={cn(
-                                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-medium transition-all group",
-                                    activeLog === log
-                                        ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 ring-1 ring-primary/50"
-                                        : "text-muted-foreground hover:bg-white/5 hover:text-foreground border border-transparent"
-                                )}
+                    <AnimatePresence mode="wait">
+                        {searchMode === 'semantic' && searchResults.length > 0 ? (
+                            <motion.div
+                                key="search-results"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="space-y-1.5"
                             >
-                                <Calendar className={cn("w-4 h-4", activeLog === log ? "text-primary-foreground" : "text-primary/60")} />
-                                <span className="flex-1 text-left font-mono">{dateStr}</span>
-                                {activeLog === log && <ChevronRight className="w-3.5 h-3.5" />}
-                            </button>
-                        );
-                    })}
-                    {filteredLogs.length === 0 && !isLoading && (
-                        <div className="py-12 flex flex-col items-center justify-center text-center opacity-40">
-                            <Filter className="w-8 h-8 mb-2" />
-                            <p className="text-[10px] uppercase font-bold tracking-widest">No logs match criteria</p>
-                        </div>
-                    )}
+                                <div className="px-2 py-1.5 text-[10px] font-bold text-violet-400 uppercase tracking-widest">
+                                    {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
+                                </div>
+                                {searchResults.map((result, i) => (
+                                    <button
+                                        key={`${result.path}-${i}`}
+                                        onClick={() => handleSelectLog(result.path)}
+                                        className={cn(
+                                            "w-full flex flex-col gap-1.5 px-3 py-3 rounded-xl text-xs transition-all border",
+                                            activeLog === result.path
+                                                ? "bg-violet-500/10 border-violet-500/30 shadow-sm"
+                                                : "border-transparent hover:bg-white/5 hover:border-white/10"
+                                        )}
+                                    >
+                                        <div className="flex items-center justify-between w-full">
+                                            <span className="font-mono text-[10px] text-violet-400 truncate flex-1">
+                                                {result.path.replace('memory/', '').replace('.md', '')}
+                                            </span>
+                                            <span className="text-[9px] font-mono text-muted-foreground ml-2 shrink-0">
+                                                {(result.score * 100).toFixed(0)}%
+                                            </span>
+                                        </div>
+                                        <p className="text-[10px] text-muted-foreground line-clamp-2 text-left leading-relaxed">
+                                            {result.snippet}
+                                        </p>
+                                    </button>
+                                ))}
+                            </motion.div>
+                        ) : (
+                            <motion.div
+                                key="file-list"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                            >
+                                {filteredLogs.map(log => {
+                                    const dateStr = log.replace('memory/', '').replace('.md', '');
+                                    return (
+                                        <button
+                                            key={log}
+                                            onClick={() => handleSelectLog(log)}
+                                            className={cn(
+                                                "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-medium transition-all group",
+                                                activeLog === log
+                                                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 ring-1 ring-primary/50"
+                                                    : "text-muted-foreground hover:bg-white/5 hover:text-foreground border border-transparent"
+                                            )}
+                                        >
+                                            <Calendar className={cn("w-4 h-4", activeLog === log ? "text-primary-foreground" : "text-primary/60")} />
+                                            <span className="flex-1 text-left font-mono">{dateStr}</span>
+                                            {activeLog === log && <ChevronRight className="w-3.5 h-3.5" />}
+                                        </button>
+                                    );
+                                })}
+                                {filteredLogs.length === 0 && !isLoading && (
+                                    <div className="py-12 flex flex-col items-center justify-center text-center opacity-40">
+                                        <Filter className="w-8 h-8 mb-2" />
+                                        <p className="text-[10px] uppercase font-bold tracking-widest">No logs match criteria</p>
+                                    </div>
+                                )}
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
 
                 <div className="p-4 border-t border-white/5">

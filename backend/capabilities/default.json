@@ -54,6 +54,8 @@
         "/Users/mt/Library/Application Support/com.schack.scrappy/**",
         "$DOWNLOAD/**"
       ]
-    }
+    },
+    "updater:default",
+    "process:default"
   ]
 }

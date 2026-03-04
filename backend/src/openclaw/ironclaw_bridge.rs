@@ -270,22 +270,23 @@ impl IronClawState {
         }
 
         // Tier 1: In-place hot reload (zero downtime)
-        // TODO(2B): Uncomment when IronClaw exposes refresh_secrets() API:
-        //
-        // if let Ok(agent) = self.agent().await {
-        //     match ironclaw::api::config::refresh_secrets(agent).await {
-        //         Ok(()) => {
-        //             tracing::info!("[ironclaw] Secrets hot-reloaded (no restart needed)");
-        //             return Ok(());
-        //         }
-        //         Err(e) => {
-        //             tracing::warn!(
-        //                 "[ironclaw] Hot reload not available ({}), falling back to restart",
-        //                 e
-        //             );
-        //         }
-        //     }
-        // }
+        if let Some(ref store) = secrets_store {
+            match ironclaw::api::config::refresh_secrets(store.as_ref(), "local_user").await {
+                Ok(count) => {
+                    tracing::info!(
+                        "[ironclaw] Secrets hot-reloaded ({} keys refreshed, no restart needed)",
+                        count
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[ironclaw] Hot reload failed ({}), falling back to restart",
+                        e
+                    );
+                }
+            }
+        }
 
         // Tier 2: Fall back to stop→start cycle
         tracing::info!("[ironclaw] Reloading secrets via stop→start cycle...");
@@ -352,6 +353,27 @@ impl IronClawState {
             tracing::debug!(
                 "[ironclaw] Set WHISPER_HTTP_ENDPOINT=http://127.0.0.1:53757/v1/audio/transcriptions"
             );
+        }
+
+        // ── 1b-2. Set Extended Thinking env vars for IronClaw ───────────
+        // IronClaw v0.12.0 supports chain-of-thought reasoning via
+        // AGENT_THINKING_ENABLED + AGENT_THINKING_BUDGET_TOKENS env vars.
+        // Only set if not already overridden by the user.
+        if std::env::var("AGENT_THINKING_ENABLED").is_err() {
+            // Thinking is opt-in — providers that support it (Claude, etc.)
+            // will emit StatusUpdate::Thinking() events before the response.
+            // Set to "true" to enable; defaults to off.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("AGENT_THINKING_ENABLED", "false");
+            }
+            tracing::debug!("[ironclaw] Set AGENT_THINKING_ENABLED=false (default)");
+        }
+        if std::env::var("AGENT_THINKING_BUDGET_TOKENS").is_err() {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("AGENT_THINKING_BUDGET_TOKENS", "10000");
+            }
         }
 
         // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from Scrappy's config ───
@@ -538,6 +560,7 @@ impl IronClawState {
             skills_config: components.config.skills.clone(),
             hooks: components.hooks.clone(),
             cost_guard: components.cost_guard.clone(),
+            sse_sender: None,
         };
 
         let agent = Arc::new(Agent::new(

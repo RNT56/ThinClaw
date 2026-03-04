@@ -1,6 +1,6 @@
 
 import { motion, AnimatePresence } from 'framer-motion';
-import { Loader2, Terminal, CheckCircle2, ChevronRight, ChevronDown, Brain, Zap, Globe, MousePointer2, FileCode, Search, Image as ImageIcon } from 'lucide-react';
+import { Loader2, Terminal, CheckCircle2, ChevronRight, ChevronDown, Brain, Zap, Globe, MousePointer2, FileCode, Search, Image as ImageIcon, AlertTriangle } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { cn } from '../../lib/utils';
@@ -15,6 +15,24 @@ interface LiveAgentStatusProps {
 export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProps) {
     const [expanded, setExpanded] = useState(true);
     const [progress, setProgress] = useState<{ message: string, value: number } | null>(null);
+
+    // Stuck loop detection: count consecutive identical tool calls
+    const stuckInfo = (() => {
+        const tools = run.tools;
+        if (tools.length < 3) return null;
+        let count = 1;
+        for (let i = tools.length - 1; i > 0; i--) {
+            if (tools[i].tool === tools[i - 1].tool) {
+                count++;
+            } else {
+                break;
+            }
+        }
+        if (count >= 3) {
+            return { tool: tools[tools.length - 1].tool, count };
+        }
+        return null;
+    })();
 
     // Auto-collapse when done, unless persistent
     useEffect(() => {
@@ -79,7 +97,9 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
                         </div>
                         <div>
                             <h3 className="text-xs font-bold uppercase tracking-widest text-white/90">
-                                {run.status === 'running' ? 'Agent Working' : run.status === 'failed' && run.error ? 'Agent Error' : 'Agent Finished'}
+                                {stuckInfo && run.status === 'running'
+                                    ? 'Possible Stuck Loop'
+                                    : run.status === 'running' ? 'Agent Working' : run.status === 'failed' && run.error ? 'Agent Error' : 'Agent Finished'}
                             </h3>
                             <p className="text-[10px] text-white/50 font-mono mt-0.5">
                                 Run ID: {run.id.split('-').pop()} • {run.tools.length} Actions
@@ -88,6 +108,31 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
                     </div>
                     {expanded ? <ChevronDown className="w-4 h-4 text-white/30" /> : <ChevronRight className="w-4 h-4 text-white/30" />}
                 </div>
+
+                {/* Stuck Loop Warning */}
+                <AnimatePresence>
+                    {stuckInfo && run.status === 'running' && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            className="px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20 flex items-center gap-3 overflow-hidden"
+                        >
+                            <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center shrink-0">
+                                <AlertTriangle className="w-3 h-3 text-amber-400" />
+                            </div>
+                            <div className="flex-1">
+                                <span className="text-[11px] font-semibold text-amber-300">
+                                    Tool "{stuckInfo.tool}" called {stuckInfo.count}× consecutively
+                                </span>
+                                <span className="text-[10px] text-amber-400/60 ml-2">
+                                    — agent may be stuck; will auto-recover at 5×
+                                </span>
+                            </div>
+                            <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                        </motion.div>
+                    )}
+                </AnimatePresence>
 
                 {/* Progress Bar Override */}
                 <AnimatePresence>

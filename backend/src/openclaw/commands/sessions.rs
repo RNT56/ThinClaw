@@ -663,3 +663,239 @@ pub async fn openclaw_clear_memory(
 
     Ok(())
 }
+
+// ============================================================================
+// Batch 4: New Feature Commands
+// ============================================================================
+
+/// Set thinking mode (native IronClaw ThinkingConfig).
+///
+/// This replaces the frontend localStorage hack that prepended
+/// "Think step by step" to messages. Now we set the env vars
+/// that IronClaw's ThinkingConfig reads natively.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_set_thinking(
+    ironclaw: State<'_, IronClawState>,
+    enabled: bool,
+    budget_tokens: Option<u32>,
+) -> Result<super::types::ThinkingConfig, String> {
+    // Set environment variables that IronClaw reads for ThinkingConfig
+    if enabled {
+        std::env::set_var("AGENT_THINKING_ENABLED", "true");
+        if let Some(budget) = budget_tokens {
+            std::env::set_var("AGENT_THINKING_BUDGET_TOKENS", budget.to_string());
+        }
+    } else {
+        std::env::set_var("AGENT_THINKING_ENABLED", "false");
+        std::env::remove_var("AGENT_THINKING_BUDGET_TOKENS");
+    }
+
+    // Also persist to IronClaw's config if the API is available
+    let agent = ironclaw.agent().await.ok();
+    if let Some(agent) = agent {
+        if let Some(store) = agent.store() {
+            let _ = ironclaw::api::config::set_setting(
+                store,
+                "local_user",
+                "thinking_enabled",
+                &serde_json::Value::Bool(enabled),
+            )
+            .await;
+
+            if let Some(budget) = budget_tokens {
+                let _ = ironclaw::api::config::set_setting(
+                    store,
+                    "local_user",
+                    "thinking_budget_tokens",
+                    &serde_json::json!(budget),
+                )
+                .await;
+            }
+        }
+    }
+
+    info!(
+        "[ironclaw] Thinking mode: enabled={}, budget={:?}",
+        enabled, budget_tokens
+    );
+
+    Ok(super::types::ThinkingConfig {
+        enabled,
+        budget_tokens,
+    })
+}
+
+/// Search workspace memory using IronClaw's hybrid BM25+vector search.
+///
+/// Falls back to simple text search across workspace files if the
+/// vector search API isn't available.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_memory_search(
+    ironclaw: State<'_, IronClawState>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<super::types::MemorySearchResponse, String> {
+    let limit = limit.unwrap_or(20) as usize;
+
+    // Try IronClaw's memory search API
+    let agent = ironclaw.agent().await.ok();
+    if let Some(ref agent) = agent {
+        if let Some(workspace) = agent.workspace() {
+            match ironclaw::api::memory::search(workspace, &query, Some(limit)).await {
+                Ok(resp) => {
+                    let results: Vec<super::types::MemorySearchResult> = resp
+                        .results
+                        .into_iter()
+                        .map(|r| super::types::MemorySearchResult {
+                            path: r.path,
+                            snippet: r.content,
+                            score: r.score,
+                        })
+                        .collect();
+                    let total = results.len() as u32;
+                    return Ok(super::types::MemorySearchResponse {
+                        results,
+                        query,
+                        total,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        "[ironclaw] Memory search API failed, falling back to text search: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    // Fallback: if IronClaw's vector search isn't available but agent is accessible,
+    // do simple text search over workspace files via the API
+    if let Some(ref agent) = agent {
+        if let Some(workspace) = agent.workspace() {
+            let files = ironclaw::api::memory::list_files(workspace, None)
+                .await
+                .map(|resp| {
+                    resp.entries
+                        .iter()
+                        .map(|e| e.path.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let query_lower = query.to_lowercase();
+            let mut results = Vec::new();
+
+            for file_path in &files {
+                let content = match ironclaw::api::memory::get_file(workspace, file_path).await {
+                    Ok(resp) => resp.content,
+                    Err(_) => continue,
+                };
+
+                if content.to_lowercase().contains(&query_lower) {
+                    let lower = content.to_lowercase();
+                    if let Some(pos) = lower.find(&query_lower) {
+                        let start = pos.saturating_sub(80);
+                        let end = (pos + query_lower.len() + 80).min(content.len());
+                        let snippet = content[start..end].to_string();
+
+                        results.push(super::types::MemorySearchResult {
+                            path: file_path.clone(),
+                            snippet,
+                            score: 0.5,
+                        });
+                    }
+                }
+
+                if results.len() >= limit {
+                    break;
+                }
+            }
+
+            let total = results.len() as u32;
+            return Ok(super::types::MemorySearchResponse {
+                results,
+                query,
+                total,
+            });
+        }
+    }
+
+    // Ultimate fallback: no agent available
+    Ok(super::types::MemorySearchResponse {
+        results: Vec::new(),
+        query,
+        total: 0,
+    })
+}
+
+/// Export a session's history as a markdown transcript.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_export_session(
+    ironclaw: State<'_, IronClawState>,
+    session_key: String,
+) -> Result<super::types::SessionExportResponse, String> {
+    let agent = ironclaw.agent().await?;
+
+    // Fetch full history directly via IronClaw API
+    let history = ironclaw::api::sessions::get_history(
+        agent.session_manager(),
+        agent.store(),
+        "local_user",
+        Some(&session_key),
+        Some(500),
+        None,
+    )
+    .await
+    .map_err(|e| format!("Failed to fetch history: {}", e))?;
+
+    let mut transcript = String::new();
+    transcript.push_str(&format!("# Session Export: {}\n\n", session_key));
+    transcript.push_str(&format!(
+        "Exported at: {}\n\n---\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
+
+    let message_count = history.turns.len() as u32;
+
+    for turn in &history.turns {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&turn.started_at)
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|_| "??:??:??".to_string());
+
+        // User message
+        transcript.push_str(&format!(
+            "### 🧑 User ({})\n\n{}\n\n",
+            timestamp, turn.user_input
+        ));
+
+        // Tool calls
+        for tc in &turn.tool_calls {
+            transcript.push_str(&format!("> 🔧 [Tool: {}] ({})\n\n", tc.name, timestamp));
+        }
+
+        // Assistant response
+        if let Some(ref response) = turn.response {
+            let completed_ts = turn
+                .completed_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| timestamp.clone());
+
+            transcript.push_str(&format!(
+                "### 🤖 Assistant ({})\n\n{}\n\n",
+                completed_ts, response
+            ));
+        }
+    }
+
+    Ok(super::types::SessionExportResponse {
+        transcript,
+        session_key,
+        message_count,
+    })
+}

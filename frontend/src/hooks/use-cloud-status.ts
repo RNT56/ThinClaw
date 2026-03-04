@@ -77,6 +77,25 @@ export interface S3ConfigInput {
     root: string | null;
 }
 
+export interface WebDavConfigInput {
+    endpoint: string;
+    username: string | null;
+    password: string | null;
+    root: string | null;
+}
+
+export interface SftpConfigInput {
+    endpoint: string;
+    username: string | null;
+    key_or_password: string | null;
+    root: string | null;
+}
+
+export interface OAuthStartResult {
+    auth_url: string;
+    code_verifier: string;
+}
+
 // ── Phase labels (for UI checklist) ──────────────────────────────────────
 
 export const PHASE_LABELS: Record<string, string> = {

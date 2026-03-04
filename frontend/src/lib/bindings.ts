@@ -1669,6 +1669,71 @@ async cloudTestConnection(config: S3ConfigInput) : Promise<Result<ConnectionTest
 }
 },
 /**
+ * Configure and test iCloud Drive storage.
+ * 
+ * iCloud requires no configuration — it uses the native macOS container.
+ */
+async cloudTestIcloud() : Promise<Result<ConnectionTestResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_test_icloud") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Configure and test a WebDAV provider.
+ */
+async cloudTestWebdav(config: WebDavConfigInput) : Promise<Result<ConnectionTestResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_test_webdav", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Configure and test an SFTP provider.
+ */
+async cloudTestSftp(config: SftpConfigInput) : Promise<Result<ConnectionTestResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_test_sftp", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start the OAuth 2.0 PKCE flow for a cloud provider.
+ * 
+ * Returns the authorization URL and PKCE code verifier.
+ * The frontend should:
+ * 1. Open the `auth_url` in the system browser
+ * 2. Listen for the redirect on `http://localhost:11434/callback` (or similar)
+ * 3. Pass the received `code` + `code_verifier` to `cloud_oauth_complete()`
+ */
+async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_start", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Complete the OAuth 2.0 flow by exchanging the authorization code for tokens.
+ * 
+ * On success, the provider is configured and a connection test is performed.
+ */
+async cloudOauthComplete(provider: string, code: string, codeVerifier: string) : Promise<Result<ConnectionTestResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_complete", { provider, code, codeVerifier }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Start migration from local to cloud storage.
  */
 async cloudMigrateToCloud() : Promise<Result<null, string>> {
@@ -2035,6 +2100,18 @@ perMinute: number | null;
  */
 per1KChars: number | null }
 /**
+ * OAuth flow start result for the frontend.
+ */
+export type OAuthStartResult = { 
+/**
+ * The authorization URL to open in the user's browser.
+ */
+auth_url: string; 
+/**
+ * The PKCE code verifier — must be passed back in `cloud_oauth_complete`.
+ */
+code_verifier: string }
+/**
  * Diagnostic info
  */
 export type OpenClawDiagnostics = { timestamp: string; gateway_running: boolean; ws_connected: boolean; version: string; platform: string; port: number | null; state_dir: string | null; slack_enabled: boolean | null; telegram_enabled: boolean | null }
@@ -2089,6 +2166,14 @@ export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; 
  * S3 provider configuration input from the frontend.
  */
 export type S3ConfigInput = { endpoint: string | null; bucket: string; region: string | null; access_key_id: string; secret_access_key: string; root: string | null }
+/**
+ * SFTP provider configuration input from the frontend.
+ */
+export type SftpConfigInput = { endpoint: string; username: string | null; 
+/**
+ * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
+ */
+key_or_password: string | null; root: string | null }
 export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_running: boolean; image_running: boolean; summarizer_running: boolean }
 /**
  * Slack configuration input
@@ -2204,6 +2289,10 @@ gender: string | null;
  * Whether this is the default voice.
  */
 isDefault: boolean }
+/**
+ * WebDAV provider configuration input from the frontend.
+ */
+export type WebDavConfigInput = { endpoint: string; username: string | null; password: string | null; root: string | null }
 export type WebSearchResult = { title: string; link: string; snippet: string }
 
 /** tauri-specta globals **/

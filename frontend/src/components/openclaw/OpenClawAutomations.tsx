@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Timer,
@@ -12,7 +12,9 @@ import {
     Calendar,
     MoreHorizontal,
     X,
-    Zap
+    Zap,
+    Search,
+    ArrowRight
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
@@ -111,6 +113,12 @@ export function OpenClawAutomations() {
     const [history, setHistory] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
 
+    // Cron lint state
+    const [cronExpr, setCronExpr] = useState('');
+    const [lintResult, setLintResult] = useState<openclaw.CronLintResult | null>(null);
+    const [lintError, setLintError] = useState<string | null>(null);
+    const [isLinting, setIsLinting] = useState(false);
+
     const fetchData = async () => {
         try {
             const data = await openclaw.getOpenClawCronList();
@@ -135,7 +143,7 @@ export function OpenClawAutomations() {
                 success: `${key} triggered successfully`,
                 error: (err) => `Failed to run ${key}: ${err}`
             });
-        } catch (e) { }
+        } catch (_e) { }
     };
 
     const handleViewHistory = async (key: string) => {
@@ -144,10 +152,25 @@ export function OpenClawAutomations() {
         try {
             const data = await openclaw.getOpenClawCronHistory(key, 10);
             setHistory(Array.isArray(data) ? data : []);
-        } catch (e) {
+        } catch (_e) {
             toast.error(`Failed to fetch history for ${key}`);
         }
     };
+
+    const handleLintCron = useCallback(async () => {
+        if (!cronExpr.trim()) return;
+        setIsLinting(true);
+        setLintError(null);
+        setLintResult(null);
+        try {
+            const result = await openclaw.lintCronExpression(cronExpr.trim());
+            setLintResult(result);
+        } catch (e) {
+            setLintError(String(e));
+        } finally {
+            setIsLinting(false);
+        }
+    }, [cronExpr]);
 
     return (
         <motion.div
@@ -175,6 +198,81 @@ export function OpenClawAutomations() {
                         <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                     </button>
                 </div>
+            </div>
+
+            {/* ── Cron Expression Validator ──────────────────────────────── */}
+            <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md border-white/10 space-y-4">
+                <div className="flex items-center gap-2">
+                    <Search className="w-4 h-4 text-primary" />
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Cron Expression Validator</h2>
+                </div>
+                <div className="flex gap-3">
+                    <input
+                        type="text"
+                        value={cronExpr}
+                        onChange={e => setCronExpr(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleLintCron()}
+                        placeholder="0 */5 * * * * *  (sec min hour dom month dow year)"
+                        className="flex-1 px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/10 text-sm font-mono placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all"
+                    />
+                    <button
+                        onClick={handleLintCron}
+                        disabled={!cronExpr.trim() || isLinting}
+                        className="px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-all disabled:opacity-40 flex items-center gap-2 shadow-lg shadow-primary/20"
+                    >
+                        {isLinting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ArrowRight className="w-3.5 h-3.5" />}
+                        Validate
+                    </button>
+                </div>
+
+                <AnimatePresence mode="wait">
+                    {lintError && (
+                        <motion.div
+                            key="error"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -5 }}
+                            className="p-4 rounded-xl bg-red-500/5 border border-red-500/20 flex items-start gap-3"
+                        >
+                            <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+                            <div>
+                                <p className="text-sm font-medium text-red-400">Invalid Expression</p>
+                                <p className="text-xs text-red-400/70 font-mono mt-1">{lintError}</p>
+                            </div>
+                        </motion.div>
+                    )}
+                    {lintResult && (
+                        <motion.div
+                            key="result"
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -5 }}
+                            className="p-4 rounded-xl bg-green-500/5 border border-green-500/20 space-y-3"
+                        >
+                            <div className="flex items-center gap-2">
+                                <CheckCircle2 className="w-4 h-4 text-green-500" />
+                                <span className="text-sm font-medium text-green-500">Valid Expression</span>
+                                <span className="text-xs font-mono text-muted-foreground ml-auto">{lintResult.expression}</span>
+                            </div>
+                            <div className="space-y-2">
+                                <p className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Next 5 Fire Times</p>
+                                <div className="space-y-1.5">
+                                    {lintResult.next_fire_times.map((t, i) => (
+                                        <div key={i} className="flex items-center gap-3 text-xs">
+                                            <span className="w-5 h-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">
+                                                {i + 1}
+                                            </span>
+                                            <Clock className="w-3 h-3 text-muted-foreground/50" />
+                                            <span className="font-mono text-muted-foreground">
+                                                {new Date(t).toLocaleString()}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

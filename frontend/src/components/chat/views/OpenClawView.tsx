@@ -5,6 +5,13 @@ import { OpenClawChannels } from '../../openclaw/OpenClawChannels';
 import { OpenClawPresence } from '../../openclaw/OpenClawPresence';
 import { OpenClawAutomations } from '../../openclaw/OpenClawAutomations';
 import { OpenClawSkills } from '../../openclaw/OpenClawSkills';
+import { OpenClawHooks } from '../../openclaw/OpenClawHooks';
+import { OpenClawPlugins } from '../../openclaw/OpenClawPlugins';
+import { OpenClawConfig } from '../../openclaw/OpenClawConfig';
+import { OpenClawDoctor } from '../../openclaw/OpenClawDoctor';
+import { OpenClawEventInspector } from '../../openclaw/OpenClawEventInspector';
+import { OpenClawToolPolicies } from '../../openclaw/OpenClawToolPolicies';
+import { OpenClawPairing } from '../../openclaw/OpenClawPairing';
 import { OpenClawSystemControl } from '../../openclaw/OpenClawSystemControl';
 import { OpenClawBrain } from '../../openclaw/OpenClawBrain';
 import { OpenClawMemory } from '../../openclaw/OpenClawMemory';
@@ -44,12 +51,26 @@ export function OpenClawView() {
                 <OpenClawAutomations />
             ) : activeOpenClawPage === 'skills' ? (
                 <OpenClawSkills />
+            ) : activeOpenClawPage === 'hooks' ? (
+                <OpenClawHooks />
+            ) : activeOpenClawPage === 'plugins' ? (
+                <OpenClawPlugins />
             ) : activeOpenClawPage === 'system-control' ? (
                 <OpenClawSystemControl />
             ) : activeOpenClawPage === 'brain' ? (
                 <OpenClawBrain />
             ) : activeOpenClawPage === 'memory' ? (
                 <OpenClawMemory />
+            ) : activeOpenClawPage === 'config' ? (
+                <OpenClawConfig />
+            ) : activeOpenClawPage === 'doctor' ? (
+                <OpenClawDoctor />
+            ) : activeOpenClawPage === 'event-inspector' ? (
+                <OpenClawEventInspector />
+            ) : activeOpenClawPage === 'tool-policies' ? (
+                <OpenClawToolPolicies />
+            ) : activeOpenClawPage === 'pairing' ? (
+                <OpenClawPairing />
             ) : (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                     Select a page from the sidebar.

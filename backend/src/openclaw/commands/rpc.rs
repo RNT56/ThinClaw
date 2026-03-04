@@ -210,6 +210,126 @@ pub async fn openclaw_cron_history(
 }
 
 // ============================================================================
+// Channel listing
+// ============================================================================
+
+/// Lists all configured channels with their enabled status.
+/// Reads from Scrappy's OpenClawConfig (engine config file) + env vars.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_channels_list(
+    state: State<'_, OpenClawManager>,
+) -> Result<serde_json::Value, String> {
+    let cfg = state.get_config().await;
+
+    // Try to load the engine config for Slack/Telegram enabled status
+    let (slack_enabled, telegram_enabled) = if let Some(ref cfg) = cfg {
+        if let Ok(engine) = cfg.load_config() {
+            (
+                engine.channels.slack.enabled,
+                engine.channels.telegram.enabled,
+            )
+        } else {
+            (false, false)
+        }
+    } else {
+        (false, false)
+    };
+
+    let mut channels = Vec::<serde_json::Value>::new();
+
+    // Slack
+    channels.push(serde_json::json!({
+        "id": "slack",
+        "name": "Slack",
+        "type": "wasm",
+        "enabled": slack_enabled,
+        "stream_mode": std::env::var("SLACK_STREAM_MODE").unwrap_or_default(),
+    }));
+
+    // Telegram
+    channels.push(serde_json::json!({
+        "id": "telegram",
+        "name": "Telegram",
+        "type": "wasm",
+        "enabled": telegram_enabled,
+        "stream_mode": std::env::var("TELEGRAM_STREAM_MODE").unwrap_or_default(),
+    }));
+
+    // Discord
+    let discord_enabled = std::env::var("DISCORD_BOT_TOKEN").is_ok()
+        || std::env::var("DISCORD_ENABLED").unwrap_or_default() == "true";
+    channels.push(serde_json::json!({
+        "id": "discord",
+        "name": "Discord",
+        "type": "native",
+        "enabled": discord_enabled,
+        "stream_mode": std::env::var("DISCORD_STREAM_MODE").unwrap_or_default(),
+    }));
+
+    // Signal
+    let signal_enabled = std::env::var("SIGNAL_CLI_PATH").is_ok()
+        || std::env::var("SIGNAL_ENABLED").unwrap_or_default() == "true";
+    channels.push(serde_json::json!({
+        "id": "signal",
+        "name": "Signal",
+        "type": "native",
+        "enabled": signal_enabled,
+        "stream_mode": "",
+    }));
+
+    // HTTP Webhook (always available)
+    channels.push(serde_json::json!({
+        "id": "webhook",
+        "name": "HTTP Webhook",
+        "type": "builtin",
+        "enabled": true,
+        "stream_mode": "",
+    }));
+
+    // Nostr
+    let nostr_enabled = std::env::var("NOSTR_PRIVATE_KEY").is_ok();
+    channels.push(serde_json::json!({
+        "id": "nostr",
+        "name": "Nostr",
+        "type": "native",
+        "enabled": nostr_enabled,
+        "stream_mode": "",
+    }));
+
+    Ok(serde_json::json!({ "channels": channels }))
+}
+
+// ============================================================================
+// Cron expression linting
+// ============================================================================
+
+/// Validates a cron expression and returns next fire times.
+/// This is a frontend-facing version of `ironclaw cron lint`.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_cron_lint(expression: String) -> Result<serde_json::Value, String> {
+    // Try parsing with the `cron` crate (already a dependency of IronClaw)
+    use std::str::FromStr;
+    let schedule = cron::Schedule::from_str(&expression)
+        .map_err(|e| format!("Invalid cron expression: {}", e))?;
+
+    let now = chrono::Utc::now();
+    let next_times: Vec<String> = schedule
+        .upcoming(chrono::Utc)
+        .take(5)
+        .map(|t| t.to_rfc3339())
+        .collect();
+
+    Ok(serde_json::json!({
+        "valid": true,
+        "expression": expression,
+        "next_fire_times": next_times,
+        "checked_at": now.to_rfc3339(),
+    }))
+}
+
+// ============================================================================
 // Config commands
 // ============================================================================
 
@@ -796,5 +916,472 @@ pub async fn openclaw_canvas_dispatch_event(
     Ok(OpenClawRpcResponse {
         ok: true,
         message: Some("Event dispatched".into()),
+    })
+}
+
+// ============================================================================
+// Hooks management
+// ============================================================================
+
+/// List all registered lifecycle hooks with their details.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_hooks_list(
+    ironclaw: State<'_, IronClawState>,
+) -> Result<super::types::HooksListResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let hooks = agent.hooks();
+    let details = hooks.list_with_details().await;
+
+    let hooks_list: Vec<super::types::HookInfoItem> = details
+        .into_iter()
+        .map(|h| super::types::HookInfoItem {
+            name: h.name,
+            hook_points: h.hook_points,
+            failure_mode: h.failure_mode,
+            timeout_ms: h.timeout_ms,
+            priority: h.priority,
+        })
+        .collect();
+
+    let total = hooks_list.len() as u32;
+    Ok(super::types::HooksListResponse {
+        hooks: hooks_list,
+        total,
+    })
+}
+
+// ============================================================================
+// Extensions (plugins) management
+// ============================================================================
+
+/// List all installed extensions/plugins.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_extensions_list(
+    ironclaw: State<'_, IronClawState>,
+) -> Result<super::types::ExtensionsListResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let ext_mgr = agent
+        .extension_manager()
+        .ok_or("Extension manager not available")?;
+
+    let extensions = ironclaw::api::extensions::list_extensions(ext_mgr)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let items: Vec<super::types::ExtensionInfoItem> = extensions
+        .into_iter()
+        .map(|ext| super::types::ExtensionInfoItem {
+            name: ext.name,
+            kind: ext.kind,
+            description: ext.description,
+            active: ext.active,
+            authenticated: ext.authenticated,
+            tools: ext.tools,
+            needs_setup: ext.needs_setup,
+            activation_status: ext.activation_status,
+            activation_error: ext.activation_error,
+        })
+        .collect();
+
+    let total = items.len() as u32;
+    Ok(super::types::ExtensionsListResponse {
+        extensions: items,
+        total,
+    })
+}
+
+/// Activate an extension by name.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_extension_activate(
+    ironclaw: State<'_, IronClawState>,
+    name: String,
+) -> Result<super::types::ExtensionActionResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let ext_mgr = agent
+        .extension_manager()
+        .ok_or("Extension manager not available")?;
+
+    let resp = ironclaw::api::extensions::activate_extension(ext_mgr, &name)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(super::types::ExtensionActionResponse {
+        ok: resp.success,
+        message: Some(resp.message),
+    })
+}
+
+/// Remove an extension by name.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_extension_remove(
+    ironclaw: State<'_, IronClawState>,
+    name: String,
+) -> Result<super::types::ExtensionActionResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let ext_mgr = agent
+        .extension_manager()
+        .ok_or("Extension manager not available")?;
+
+    let resp = ironclaw::api::extensions::remove_extension(ext_mgr, &name)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(super::types::ExtensionActionResponse {
+        ok: resp.success,
+        message: Some(resp.message),
+    })
+}
+
+// ============================================================================
+// Diagnostics
+// ============================================================================
+
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_diagnostics(
+    ironclaw: State<'_, IronClawState>,
+) -> Result<super::types::DiagnosticsResponse, String> {
+    let mut checks = Vec::new();
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+
+    // 1. IronClaw engine
+    let engine_ok = ironclaw.agent().await.is_ok();
+    if engine_ok {
+        checks.push(super::types::DiagnosticCheck {
+            name: "IronClaw Engine".into(),
+            status: "pass".into(),
+            detail: "Agent is running and accessible".into(),
+        });
+        passed += 1;
+    } else {
+        checks.push(super::types::DiagnosticCheck {
+            name: "IronClaw Engine".into(),
+            status: "fail".into(),
+            detail: "Agent is not running".into(),
+        });
+        failed += 1;
+    }
+
+    if let Ok(agent) = ironclaw.agent().await {
+        // 2. Database
+        if let Some(store) = agent.store() {
+            // Try listing settings to verify DB health
+            match ironclaw::api::config::list_settings(store, "local_user").await {
+                Ok(_) => {
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Database".into(),
+                        status: "pass".into(),
+                        detail: "Connected and responding to queries".into(),
+                    });
+                    passed += 1;
+                }
+                Err(e) => {
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Database".into(),
+                        status: "fail".into(),
+                        detail: format!("Query failed: {}", e),
+                    });
+                    failed += 1;
+                }
+            }
+        } else {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Database".into(),
+                status: "skip".into(),
+                detail: "No database configured (ephemeral mode)".into(),
+            });
+            skipped += 1;
+        }
+
+        // 3. Workspace
+        if agent.workspace().is_some() {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Workspace".into(),
+                status: "pass".into(),
+                detail: "Workspace directory available".into(),
+            });
+            passed += 1;
+        } else {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Workspace".into(),
+                status: "warn".into(),
+                detail: "No workspace configured (memory tools unavailable)".into(),
+            });
+            skipped += 1;
+        }
+
+        // 4. Tools
+        let tool_count = agent.tools().count();
+        if tool_count > 0 {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Tool Registry".into(),
+                status: "pass".into(),
+                detail: format!("{} tools registered", tool_count),
+            });
+            passed += 1;
+        } else {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Tool Registry".into(),
+                status: "warn".into(),
+                detail: "No tools registered".into(),
+            });
+            skipped += 1;
+        }
+
+        // 5. Hooks
+        let hook_count = agent.hooks().list_with_details().await.len();
+        checks.push(super::types::DiagnosticCheck {
+            name: "Hook Registry".into(),
+            status: "pass".into(),
+            detail: format!("{} hooks registered", hook_count),
+        });
+        passed += 1;
+
+        // 6. Extensions
+        if let Some(ext_mgr) = agent.extension_manager() {
+            match ironclaw::api::extensions::list_extensions(ext_mgr).await {
+                Ok(resp) => {
+                    let active = resp.iter().filter(|e| e.active).count();
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Extensions".into(),
+                        status: "pass".into(),
+                        detail: format!("{} installed, {} active", resp.len(), active),
+                    });
+                    passed += 1;
+                }
+                Err(e) => {
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Extensions".into(),
+                        status: "warn".into(),
+                        detail: format!("Could not list: {}", e),
+                    });
+                    skipped += 1;
+                }
+            }
+        } else {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Extensions".into(),
+                status: "skip".into(),
+                detail: "Extension manager not available".into(),
+            });
+            skipped += 1;
+        }
+
+        // 7. Skills
+        if let Some(registry) = agent.skill_registry() {
+            match ironclaw::api::skills::list_skills(registry) {
+                Ok(resp) => {
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Skills".into(),
+                        status: "pass".into(),
+                        detail: format!("{} skills loaded", resp.skills.len()),
+                    });
+                    passed += 1;
+                }
+                Err(e) => {
+                    checks.push(super::types::DiagnosticCheck {
+                        name: "Skills".into(),
+                        status: "warn".into(),
+                        detail: format!("Could not list: {}", e),
+                    });
+                    skipped += 1;
+                }
+            }
+        } else {
+            checks.push(super::types::DiagnosticCheck {
+                name: "Skills".into(),
+                status: "skip".into(),
+                detail: "Skill registry not available".into(),
+            });
+            skipped += 1;
+        }
+    }
+
+    Ok(super::types::DiagnosticsResponse {
+        checks,
+        passed,
+        failed,
+        skipped,
+    })
+}
+
+// ============================================================================
+// Tool Listing
+// ============================================================================
+
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_tools_list(
+    ironclaw: State<'_, IronClawState>,
+) -> Result<super::types::ToolsListResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let registry = agent.tools();
+
+    let tool_defs = registry.tool_definitions().await;
+    let tools: Vec<super::types::ToolInfoItem> = tool_defs
+        .iter()
+        .map(|td| {
+            // Determine source from tool name heuristics
+            let source = if ["echo", "time", "json", "device_info", "http", "browser"]
+                .contains(&td.name.as_str())
+            {
+                "builtin"
+            } else if [
+                "shell",
+                "read_file",
+                "write_file",
+                "list_dir",
+                "apply_patch",
+            ]
+            .contains(&td.name.as_str())
+            {
+                "container"
+            } else if [
+                "memory_search",
+                "memory_write",
+                "memory_read",
+                "memory_tree",
+            ]
+            .contains(&td.name.as_str())
+            {
+                "memory"
+            } else if td.name.starts_with("tool_")
+                || td.name.starts_with("skill_")
+                || td.name.starts_with("routine_")
+            {
+                "management"
+            } else {
+                "extension"
+            };
+
+            super::types::ToolInfoItem {
+                name: td.name.clone(),
+                description: td.description.clone(),
+                enabled: true,
+                source: source.to_string(),
+            }
+        })
+        .collect();
+
+    let total = tools.len() as u32;
+    Ok(super::types::ToolsListResponse { tools, total })
+}
+
+// ============================================================================
+// DM Pairing Management
+// ============================================================================
+
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_pairing_list(
+    channel: String,
+) -> Result<super::types::PairingListResponse, String> {
+    let store = ironclaw::pairing::PairingStore::new();
+
+    // Collect pending pairing requests
+    let pending = store
+        .list_pending(&channel)
+        .map_err(|e| format!("Failed to list pairings: {}", e))?;
+
+    let mut pairings: Vec<super::types::PairingItem> = pending
+        .iter()
+        .map(|req| super::types::PairingItem {
+            channel: channel.clone(),
+            user_id: req.id.clone(),
+            paired_at: req.created_at.clone(),
+            status: "pending".to_string(),
+        })
+        .collect();
+
+    // Also include approved senders from allowFrom list
+    if let Ok(allowed) = store.read_allow_from(&channel) {
+        for user_id in allowed {
+            pairings.push(super::types::PairingItem {
+                channel: channel.clone(),
+                user_id,
+                paired_at: String::new(),
+                status: "active".to_string(),
+            });
+        }
+    }
+
+    let total = pairings.len() as u32;
+    Ok(super::types::PairingListResponse { pairings, total })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_pairing_approve(
+    channel: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    let store = ironclaw::pairing::PairingStore::new();
+    store
+        .approve(&channel, &code)
+        .map_err(|e| format!("Failed to approve pairing: {}", e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+// ============================================================================
+// Context Compaction
+// ============================================================================
+
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_compact_session(
+    ironclaw: State<'_, IronClawState>,
+    _session_key: String,
+) -> Result<super::types::CompactSessionResponse, String> {
+    let agent = ironclaw.agent().await?;
+
+    // Get the session and thread to check turn count
+    let session_mgr = agent.session_manager();
+    let session = session_mgr.get_or_create_session("local_user").await;
+    let sess = session.lock().await;
+
+    // Count total turns across threads
+    let total_turns: usize = sess.threads.values().map(|t| t.turns.len()).sum();
+
+    if total_turns <= 2 {
+        return Ok(super::types::CompactSessionResponse {
+            tokens_before: 0,
+            tokens_after: 0,
+            turns_removed: 0,
+            summary: Some("Session too short to compact".into()),
+        });
+    }
+
+    // Estimate "tokens" from turn text length (rough: 1 token ≈ 4 chars)
+    let est_tokens_before: u32 = sess
+        .threads
+        .values()
+        .flat_map(|t| t.turns.iter())
+        .map(|turn| {
+            let input_len = turn.user_input.len();
+            let response_len = turn.response.as_ref().map(|r| r.len()).unwrap_or(0);
+            ((input_len + response_len) / 4) as u32
+        })
+        .sum();
+
+    // For now return the estimate — actual compaction happens automatically
+    // when context hits 80% capacity in the agent loop
+    let keep_recent = 3;
+    let turns_to_remove = total_turns.saturating_sub(keep_recent);
+
+    Ok(super::types::CompactSessionResponse {
+        tokens_before: est_tokens_before,
+        tokens_after: est_tokens_before
+            .saturating_sub(est_tokens_before * turns_to_remove as u32 / total_turns as u32),
+        turns_removed: turns_to_remove as u32,
+        summary: Some(format!(
+            "Estimated compaction: {} turns would be removed, keeping {} recent turns",
+            turns_to_remove, keep_recent
+        )),
     })
 }

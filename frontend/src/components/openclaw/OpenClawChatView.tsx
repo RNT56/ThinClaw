@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronRight, ChevronDown, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, Zap, ExternalLink, Trash2 } from 'lucide-react';
+import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronRight, ChevronDown, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, Zap, ExternalLink, Trash2, Download, Sliders } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
@@ -370,9 +370,9 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isSending, setIsSending] = useState(false);
-    const [thinkingEnabled, setThinkingEnabled] = useState(() => {
-        try { return localStorage.getItem('openclaw_thinking') === 'true'; } catch { return false; }
-    });
+    const [thinkingEnabled, setThinkingEnabled] = useState(false);
+    const [thinkingBudget, setThinkingBudget] = useState<number>(8192);
+    const [showThinkingSlider, setShowThinkingSlider] = useState(false);
     const [currentRunId, setCurrentRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<StreamRun | null>(null);
 
@@ -517,7 +517,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
 
             // Track active run for LiveAgentStatus
             if (uiEvent.kind === 'RunStatus') {
-                if (uiEvent.status === 'started' || uiEvent.status === 'in_flight') {
+                const lowerStatus = uiEvent.status?.toLowerCase?.() ?? '';
+                if (lowerStatus === 'started' || lowerStatus === 'in_flight') {
                     setIsSending(true);
                     const rid = uiEvent.run_id || `run-${Date.now()}`;
                     setCurrentRunId(rid);
@@ -527,7 +528,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                         return { id: rid, text: '', tools: [], approvals: [], status: 'running', startedAt: Date.now() };
                     });
                 }
-                else if (['ok', 'error', 'aborted'].includes(uiEvent.status)) {
+                else if (['ok', 'error', 'aborted', 'done', 'interrupted', 'rejected'].includes(lowerStatus)) {
                     setIsSending(false);
                     setCurrentRunId(null);
 
@@ -535,13 +536,13 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
 
                     setActiveRun(prev => prev ? {
                         ...prev,
-                        status: uiEvent.status === 'ok' ? 'completed' : 'failed',
+                        status: (lowerStatus === 'ok' || lowerStatus === 'done') ? 'completed' : 'failed',
                         error: errorMsg || prev.error,
                         completedAt: Date.now()
                     } : null);
 
                     // Surface error to user via toast AND inject into chat
-                    if (uiEvent.status === 'error' && errorMsg) {
+                    if (lowerStatus === 'error' && errorMsg) {
                         toast.error(errorMsg, { duration: 8000 });
                         setMessages(prev => [...prev, {
                             id: `error-${Date.now()}`,
@@ -642,27 +643,39 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
         });
     }
 
-    const handleToggleThinking = () => {
+    const handleToggleThinking = async () => {
         const next = !thinkingEnabled;
-        setThinkingEnabled(next);
-        try { localStorage.setItem('openclaw_thinking', String(next)); } catch { }
-        toast.success(next ? 'Thinking mode enabled' : 'Thinking mode disabled');
+        try {
+            await openclaw.setThinking(next, next ? thinkingBudget : undefined);
+            setThinkingEnabled(next);
+            toast.success(next ? '🧠 Thinking mode enabled (native)' : 'Thinking mode disabled');
+        } catch (e) {
+            console.error('Failed to set thinking mode:', e);
+            toast.error('Failed to set thinking mode');
+        }
+    };
+
+    const handleExportSession = async () => {
+        if (!effectiveSessionKey) return;
+        try {
+            const result = await openclaw.exportSession(effectiveSessionKey);
+            // Copy to clipboard
+            await navigator.clipboard.writeText(result.transcript);
+            toast.success(`Exported ${result.message_count} messages to clipboard`);
+        } catch (e) {
+            toast.error('Failed to export session');
+        }
     };
 
     const handleSend = async () => {
         if (!input.trim() || !effectiveSessionKey) return;
-        let msg = input.trim();
-        // If thinking mode is on, prepend a thinking instruction
-        if (thinkingEnabled) {
-            msg = `[Think step-by-step before answering]\n\n${msg}`;
-        }
+        const msg = input.trim();
         setInput('');
         // Don't block on isSending — the engine queues messages via idempotency keys.
         // The user should be able to send follow-up messages while the agent processes.
         setIsSending(true);
-        // Optimistic update (show original input, not the thinking prefix)
-        const displayMsg = input.trim();
-        const optimisticMsg: OpenClawMessage = { id: `temp-${Date.now()}`, role: 'user', ts_ms: Date.now(), text: displayMsg, source: 'openclaw' };
+        // Optimistic update
+        const optimisticMsg: OpenClawMessage = { id: `temp-${Date.now()}`, role: 'user', ts_ms: Date.now(), text: msg, source: 'openclaw' };
         setMessages(prev => [...prev, optimisticMsg]);
         isUserScrolling.current = false;
         scrollToBottom();
@@ -763,6 +776,15 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
+                    {!isCoreView && (
+                        <button
+                            onClick={handleExportSession}
+                            className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                            title="Export session to clipboard"
+                        >
+                            <Download className="w-4 h-4" />
+                        </button>
+                    )}
                     {!isCoreView && (
                         <button
                             onClick={handleDeleteSession}
@@ -1006,18 +1028,58 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                                         rows={1}
                                         className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px] text-sm"
                                     />
-                                    <button
-                                        onClick={handleToggleThinking}
-                                        title={thinkingEnabled ? 'Thinking mode ON — click to disable' : 'Enable thinking mode'}
-                                        className={cn(
-                                            "p-2 rounded-xl transition-all border",
-                                            thinkingEnabled
-                                                ? "bg-violet-500/15 text-violet-500 border-violet-500/30 shadow-sm"
-                                                : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50 hover:text-foreground"
-                                        )}
-                                    >
-                                        <Brain className="w-4 h-4" />
-                                    </button>
+                                    <div className="relative">
+                                        <button
+                                            onClick={handleToggleThinking}
+                                            onContextMenu={(e) => { e.preventDefault(); setShowThinkingSlider(!showThinkingSlider); }}
+                                            title={thinkingEnabled ? 'Thinking mode ON (native) — click to disable, right-click for budget' : 'Enable thinking mode (right-click for budget)'}
+                                            className={cn(
+                                                "p-2 rounded-xl transition-all border",
+                                                thinkingEnabled
+                                                    ? "bg-violet-500/15 text-violet-500 border-violet-500/30 shadow-sm"
+                                                    : "bg-transparent text-muted-foreground border-transparent hover:bg-muted/50 hover:text-foreground"
+                                            )}
+                                        >
+                                            <Brain className="w-4 h-4" />
+                                        </button>
+                                        <AnimatePresence>
+                                            {showThinkingSlider && (
+                                                <motion.div
+                                                    initial={{ opacity: 0, y: 8 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    exit={{ opacity: 0, y: 8 }}
+                                                    className="absolute bottom-12 right-0 bg-background/95 backdrop-blur-xl border border-white/10 rounded-xl p-3 shadow-2xl z-50 w-52"
+                                                >
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <Sliders className="w-3 h-3 text-violet-400" />
+                                                        <span className="text-[10px] font-bold text-violet-400 uppercase tracking-wider">Thinking Budget</span>
+                                                    </div>
+                                                    <input
+                                                        type="range"
+                                                        min={1024}
+                                                        max={32768}
+                                                        step={1024}
+                                                        value={thinkingBudget}
+                                                        onChange={(e) => setThinkingBudget(Number(e.target.value))}
+                                                        onMouseUp={async () => {
+                                                            if (thinkingEnabled) {
+                                                                try {
+                                                                    await openclaw.setThinking(true, thinkingBudget);
+                                                                    toast.success(`Budget: ${thinkingBudget.toLocaleString()} tokens`);
+                                                                } catch { }
+                                                            }
+                                                        }}
+                                                        className="w-full accent-violet-500 h-1"
+                                                    />
+                                                    <div className="flex justify-between mt-1">
+                                                        <span className="text-[9px] text-muted-foreground">1K</span>
+                                                        <span className="text-[10px] font-mono text-violet-400">{(thinkingBudget / 1024).toFixed(0)}K tokens</span>
+                                                        <span className="text-[9px] text-muted-foreground">32K</span>
+                                                    </div>
+                                                </motion.div>
+                                            )}
+                                        </AnimatePresence>
+                                    </div>
                                     <button onClick={handleSend} disabled={!input.trim() || !gatewayRunning} className={cn(
                                         "p-2.5 rounded-xl transition-colors",
                                         isSending ? "bg-primary/70 text-primary-foreground" : "bg-primary text-primary-foreground"

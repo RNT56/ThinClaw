@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     MessageCircle, Radio, ChevronLeft, RefreshCw, Settings,
     Layout, Smartphone, Timer, Package, Cpu, Shield, Brain, History,
-    ChevronDown, Server, Laptop, Trash2
+    ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity, Stethoscope, Wrench, KeyRound
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -11,7 +11,7 @@ import { OpenClawSession } from '../../lib/openclaw';
 
 import { motion } from 'framer-motion';
 
-export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'presence' | 'automations' | 'skills' | 'system-control' | 'brain' | 'memory';
+export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'presence' | 'automations' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -294,6 +294,13 @@ export function OpenClawSidebar({
                     { id: 'presence', label: 'Presence', icon: Cpu },
                     { id: 'automations', label: 'Automations', icon: Timer },
                     { id: 'skills', label: 'Skills', icon: Package },
+                    { id: 'hooks', label: 'Hooks', icon: Anchor },
+                    { id: 'plugins', label: 'Plugins', icon: Plug },
+                    { id: 'config', label: 'Config Editor', icon: Settings2 },
+                    { id: 'tool-policies', label: 'Tool Policies', icon: Wrench },
+                    { id: 'pairing', label: 'DM Pairing', icon: KeyRound },
+                    { id: 'event-inspector', label: 'Event Inspector', icon: Activity },
+                    { id: 'doctor', label: 'Doctor', icon: Stethoscope },
                     { id: 'system-control', label: 'System', icon: Shield },
                 ].map((item) => {
                     const isDisabled = item.id === 'skills' && !gatewayRunning;

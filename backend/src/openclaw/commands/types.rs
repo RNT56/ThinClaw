@@ -189,3 +189,159 @@ pub struct ChildSessionInfo {
     /// Summary of the result (set on completion/failure).
     pub result_summary: Option<String>,
 }
+
+/// Memory search result item
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct MemorySearchResult {
+    /// File path within the workspace
+    pub path: String,
+    /// Matched snippet/content
+    pub snippet: String,
+    /// Relevance score (0.0 - 1.0)
+    pub score: f64,
+}
+
+/// Memory search response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct MemorySearchResponse {
+    pub results: Vec<MemorySearchResult>,
+    pub query: String,
+    pub total: u32,
+}
+
+/// Session export response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct SessionExportResponse {
+    /// Markdown-formatted transcript
+    pub transcript: String,
+    /// Session key
+    pub session_key: String,
+    /// Number of messages exported
+    pub message_count: u32,
+}
+
+/// Thinking mode configuration
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ThinkingConfig {
+    pub enabled: bool,
+    pub budget_tokens: Option<u32>,
+}
+
+/// Hook information for UI display
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct HookInfoItem {
+    pub name: String,
+    pub hook_points: Vec<String>,
+    pub failure_mode: String,
+    pub timeout_ms: u64,
+    pub priority: u32,
+}
+
+/// Hooks list response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct HooksListResponse {
+    pub hooks: Vec<HookInfoItem>,
+    pub total: u32,
+}
+
+/// Extension (plugin) information for UI display
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ExtensionInfoItem {
+    pub name: String,
+    pub kind: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub authenticated: bool,
+    pub tools: Vec<String>,
+    pub needs_setup: bool,
+    pub activation_status: Option<String>,
+    pub activation_error: Option<String>,
+}
+
+/// Extensions list response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ExtensionsListResponse {
+    pub extensions: Vec<ExtensionInfoItem>,
+    pub total: u32,
+}
+
+/// Extension action response (install, activate, remove)
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ExtensionActionResponse {
+    pub ok: bool,
+    pub message: Option<String>,
+}
+
+// ============================================================================
+// Diagnostics
+// ============================================================================
+
+/// A single diagnostic check result
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct DiagnosticCheck {
+    pub name: String,
+    pub status: String, // "pass" | "fail" | "warn" | "skip"
+    pub detail: String,
+}
+
+/// Full diagnostics response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct DiagnosticsResponse {
+    pub checks: Vec<DiagnosticCheck>,
+    pub passed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+}
+
+// ============================================================================
+// Tool Listing
+// ============================================================================
+
+/// Info about a registered tool
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ToolInfoItem {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub source: String, // "builtin" | "skill" | "extension" | "mcp"
+}
+
+/// Tool list response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ToolsListResponse {
+    pub tools: Vec<ToolInfoItem>,
+    pub total: u32,
+}
+
+// ============================================================================
+// DM Pairing
+// ============================================================================
+
+/// A single paired device/user
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct PairingItem {
+    pub channel: String,
+    pub user_id: String,
+    pub paired_at: String,
+    pub status: String, // "active" | "pending"
+}
+
+/// Pairing list response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct PairingListResponse {
+    pub pairings: Vec<PairingItem>,
+    pub total: u32,
+}
+
+// ============================================================================
+// Context Compaction
+// ============================================================================
+
+/// Compaction result
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct CompactSessionResponse {
+    pub tokens_before: u32,
+    pub tokens_after: u32,
+    pub turns_removed: u32,
+    pub summary: Option<String>,
+}
