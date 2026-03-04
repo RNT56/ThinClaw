@@ -14,12 +14,18 @@ import {
     ChevronUp,
     Settings2,
     Podcast,
-    Wifi
+    Wifi,
+    Mail,
+    ExternalLink,
+    Loader2,
+    CheckCircle2
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 // ── Channel icon mapping ────────────────────────────────────────
 const CHANNEL_ICONS: Record<string, any> = {
@@ -30,6 +36,7 @@ const CHANNEL_ICONS: Record<string, any> = {
     webhook: Globe,
     nostr: Radio,
     whatsapp: Smartphone,
+    gmail: Mail,
 };
 
 const CHANNEL_DESCRIPTIONS: Record<string, string> = {
@@ -40,6 +47,7 @@ const CHANNEL_DESCRIPTIONS: Record<string, string> = {
     webhook: 'HTTP webhook endpoint with HMAC-SHA256 signature verification. Always active.',
     nostr: 'NIP-04 encrypted direct messages on the Nostr protocol.',
     whatsapp: 'Bridge to WhatsApp via web authentication. Supports media and group chats.',
+    gmail: 'Gmail integration via OAuth 2.0. Read and respond to email with label-based filtering.',
 };
 
 const STREAM_MODES = ['', 'full', 'typing_only', 'disabled'];
@@ -232,6 +240,49 @@ export function OpenClawChannels() {
         return () => { unlisten.then(fn => fn()); };
     }, [fetchChannels]);
 
+    // ── Gmail OAuth ──────────────────────────────────────────────────
+    const [gmailConnecting, setGmailConnecting] = useState(false);
+    const [gmailConnected, setGmailConnected] = useState(false);
+    const [gmailLabelFilter, setGmailLabelFilter] = useState('');
+
+    const handleGmailConnect = async () => {
+        setGmailConnecting(true);
+        try {
+            const startResult = await invoke<{ auth_url: string; code_verifier: string }>(
+                'cloud_oauth_start', { provider: 'gmail' }
+            );
+            try {
+                await openUrl(startResult.auth_url);
+            } catch {
+                await navigator.clipboard.writeText(startResult.auth_url);
+                toast.info('Auth URL copied to clipboard. Please open it in your browser.');
+            }
+            const code = window.prompt('After authorizing Gmail in your browser, paste the authorization code here:');
+            if (!code?.trim()) {
+                toast.info('Gmail sign-in cancelled');
+                setGmailConnecting(false);
+                return;
+            }
+            const result = await invoke<{ connected: boolean; error?: string }>(
+                'cloud_oauth_complete', {
+                provider: 'gmail',
+                code: code.trim(),
+                codeVerifier: startResult.code_verifier,
+            }
+            );
+            if (result.connected) {
+                setGmailConnected(true);
+                toast.success('Gmail connected successfully!');
+            } else {
+                toast.error(result.error ?? 'Gmail connection failed');
+            }
+        } catch (e) {
+            toast.error(`Gmail sign-in failed: ${String(e)}`);
+        } finally {
+            setGmailConnecting(false);
+        }
+    };
+
     const handleStreamModeChange = async (channelId: string, mode: string) => {
         const envKey = `${channelId.toUpperCase()}_STREAM_MODE`;
         try {
@@ -375,6 +426,89 @@ export function OpenClawChannels() {
                         Streaming draft replies are supported on Discord, Telegram, and Slack.
                     </p>
                 </div>
+            </div>
+
+            {/* Gmail Channel Card */}
+            <div className="space-y-4">
+                <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground flex items-center gap-2">
+                    <Mail className="w-3.5 h-3.5 text-red-400" />
+                    Email Channels
+                </h2>
+                <motion.div
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="rounded-2xl border border-white/10 bg-card/30 backdrop-blur-md overflow-hidden"
+                >
+                    <div className="p-5">
+                        <div className="flex items-start gap-4">
+                            <div className={cn(
+                                "p-3 rounded-xl border transition-colors",
+                                gmailConnected
+                                    ? "bg-red-500/10 border-red-500/20 text-red-400"
+                                    : "bg-white/5 border-white/10 text-muted-foreground"
+                            )}>
+                                <Mail className="w-5 h-5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <h3 className="font-semibold text-sm">Gmail</h3>
+                                    <span className={cn(
+                                        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+                                        gmailConnected
+                                            ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+                                            : "text-zinc-400 bg-zinc-500/10 border-zinc-500/20"
+                                    )}>
+                                        {gmailConnected ? (
+                                            <><CheckCircle2 className="w-3 h-3" /> Connected</>
+                                        ) : (
+                                            'Not configured'
+                                        )}
+                                    </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+                                    {CHANNEL_DESCRIPTIONS['gmail']}
+                                </p>
+
+                                {gmailConnected ? (
+                                    <div className="mt-3 space-y-2">
+                                        <div className="flex items-center gap-2">
+                                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                                Label Filter
+                                            </label>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            value={gmailLabelFilter}
+                                            onChange={e => setGmailLabelFilter(e.target.value)}
+                                            placeholder="INBOX, Category:Primary"
+                                            className="w-full h-8 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
+                                        />
+                                        <p className="text-[10px] text-muted-foreground/50">
+                                            Comma-separated Gmail labels to watch. Leave empty to watch INBOX.
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <button
+                                        onClick={handleGmailConnect}
+                                        disabled={gmailConnecting}
+                                        className={cn(
+                                            "mt-3 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider",
+                                            "bg-red-500/10 text-red-400 border border-red-500/20",
+                                            "hover:bg-red-500/20 transition-all",
+                                            gmailConnecting && "opacity-50 cursor-wait"
+                                        )}
+                                    >
+                                        {gmailConnecting ? (
+                                            <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Connecting…</>
+                                        ) : (
+                                            <><ExternalLink className="w-3.5 h-3.5" /> Connect Gmail</>
+                                        )}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </motion.div>
             </div>
         </motion.div>
     );

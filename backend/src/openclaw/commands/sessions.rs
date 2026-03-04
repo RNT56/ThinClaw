@@ -831,13 +831,19 @@ pub async fn openclaw_memory_search(
     })
 }
 
-/// Export a session's history as a markdown transcript.
+/// Export a session's history in the requested format.
+///
+/// Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
+/// The `format` parameter is optional — `None` defaults to markdown
+/// for backward compatibility with existing frontend callers.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_export_session(
     ironclaw: State<'_, IronClawState>,
     session_key: String,
+    format: Option<String>,
 ) -> Result<super::types::SessionExportResponse, String> {
+    let fmt = format.as_deref().unwrap_or("md");
     let agent = ironclaw.agent().await?;
 
     // Fetch full history directly via IronClaw API
@@ -852,46 +858,136 @@ pub async fn openclaw_export_session(
     .await
     .map_err(|e| format!("Failed to fetch history: {}", e))?;
 
-    let mut transcript = String::new();
-    transcript.push_str(&format!("# Session Export: {}\n\n", session_key));
-    transcript.push_str(&format!(
-        "Exported at: {}\n\n---\n\n",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-    ));
-
     let message_count = history.turns.len() as u32;
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
 
-    for turn in &history.turns {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&turn.started_at)
-            .map(|dt| dt.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|_| "??:??:??".to_string());
-
-        // User message
-        transcript.push_str(&format!(
-            "### 🧑 User ({})\n\n{}\n\n",
-            timestamp, turn.user_input
-        ));
-
-        // Tool calls
-        for tc in &turn.tool_calls {
-            transcript.push_str(&format!("> 🔧 [Tool: {}] ({})\n\n", tc.name, timestamp));
+    let transcript = match fmt {
+        "json" => {
+            // Structured JSON export
+            let turns_json: Vec<serde_json::Value> = history
+                .turns
+                .iter()
+                .map(|turn| {
+                    serde_json::json!({
+                        "started_at": turn.started_at,
+                        "completed_at": turn.completed_at,
+                        "user_input": turn.user_input,
+                        "response": turn.response,
+                        "tool_calls": turn.tool_calls.iter().map(|tc| serde_json::json!({
+                            "name": tc.name,
+                            "has_error": tc.has_error,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            serde_json::to_string_pretty(&serde_json::json!({
+                "session_key": session_key,
+                "exported_at": now,
+                "message_count": message_count,
+                "turns": turns_json,
+            }))
+            .unwrap_or_default()
         }
-
-        // Assistant response
-        if let Some(ref response) = turn.response {
-            let completed_ts = turn
-                .completed_at
-                .as_ref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| timestamp.clone());
-
-            transcript.push_str(&format!(
-                "### 🤖 Assistant ({})\n\n{}\n\n",
-                completed_ts, response
-            ));
+        "csv" => {
+            // Tabular CSV export
+            let mut csv = String::from("timestamp,role,content\n");
+            for turn in &history.turns {
+                let ts = &turn.started_at;
+                let user_text = turn.user_input.replace('"', "\"\"").replace('\n', " ");
+                csv.push_str(&format!("\"{}\",\"user\",\"{}\"\n", ts, user_text));
+                if let Some(ref response) = turn.response {
+                    let resp_ts = turn.completed_at.as_deref().unwrap_or(ts);
+                    let resp_text = response.replace('"', "\"\"").replace('\n', " ");
+                    csv.push_str(&format!(
+                        "\"{}\",\"assistant\",\"{}\"\n",
+                        resp_ts, resp_text
+                    ));
+                }
+            }
+            csv
         }
-    }
+        "html" => {
+            // Basic styled HTML export
+            let mut html = format!(
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Session {}</title>\
+                <style>body{{font-family:system-ui;max-width:800px;margin:0 auto;padding:2rem}}\
+                .user{{background:#f0f4ff;padding:1rem;border-radius:8px;margin:0.5rem 0}}\
+                .assistant{{background:#f0fff4;padding:1rem;border-radius:8px;margin:0.5rem 0}}\
+                .ts{{color:#888;font-size:0.8rem}}</style></head><body>\
+                <h1>Session: {}</h1><p class=\"ts\">Exported: {}</p><hr>",
+                session_key, session_key, now
+            );
+            for turn in &history.turns {
+                let ts = &turn.started_at;
+                html.push_str(&format!(
+                    "<div class=\"user\"><strong>User</strong> <span class=\"ts\">{}</span><p>{}</p></div>",
+                    ts, turn.user_input
+                ));
+                if let Some(ref response) = turn.response {
+                    let resp_ts = turn.completed_at.as_deref().unwrap_or(ts);
+                    html.push_str(&format!(
+                        "<div class=\"assistant\"><strong>Assistant</strong> <span class=\"ts\">{}</span><p>{}</p></div>",
+                        resp_ts, response
+                    ));
+                }
+            }
+            html.push_str("</body></html>");
+            html
+        }
+        "txt" => {
+            // Plain text — no markdown formatting
+            let mut txt = format!("Session: {}\nExported: {}\n\n", session_key, now);
+            for turn in &history.turns {
+                let ts = chrono::DateTime::parse_from_rfc3339(&turn.started_at)
+                    .map(|dt| dt.format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|_| "??:??:??".to_string());
+                txt.push_str(&format!("[{}] User: {}\n\n", ts, turn.user_input));
+                if let Some(ref response) = turn.response {
+                    let resp_ts = turn
+                        .completed_at
+                        .as_ref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.format("%H:%M:%S").to_string())
+                        .unwrap_or_else(|| ts.clone());
+                    txt.push_str(&format!("[{}] Assistant: {}\n\n", resp_ts, response));
+                }
+            }
+            txt
+        }
+        _ => {
+            // Default: markdown
+            let mut md = String::new();
+            md.push_str(&format!("# Session Export: {}\n\n", session_key));
+            md.push_str(&format!("Exported at: {}\n\n---\n\n", now));
+            for turn in &history.turns {
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&turn.started_at)
+                    .map(|dt| dt.format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|_| "??:??:??".to_string());
+                md.push_str(&format!(
+                    "### 🧑 User ({})\n\n{}\n\n",
+                    timestamp, turn.user_input
+                ));
+                for tc in &turn.tool_calls {
+                    md.push_str(&format!("> 🔧 [Tool: {}] ({})\n\n", tc.name, timestamp));
+                }
+                if let Some(ref response) = turn.response {
+                    let completed_ts = turn
+                        .completed_at
+                        .as_ref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.format("%H:%M:%S").to_string())
+                        .unwrap_or_else(|| timestamp.clone());
+                    md.push_str(&format!(
+                        "### 🤖 Assistant ({})\n\n{}\n\n",
+                        completed_ts, response
+                    ));
+                }
+            }
+            md
+        }
+    };
 
     Ok(super::types::SessionExportResponse {
         transcript,

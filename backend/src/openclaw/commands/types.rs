@@ -345,3 +345,72 @@ pub struct CompactSessionResponse {
     pub turns_removed: u32,
     pub summary: Option<String>,
 }
+
+// ============================================================================
+// Sprint 13 — New backend API types
+// ============================================================================
+
+/// LLM cost tracker summary
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct CostSummary {
+    pub total_cost_usd: f64,
+    pub daily: std::collections::HashMap<String, f64>,
+    pub monthly: std::collections::HashMap<String, f64>,
+    pub by_model: std::collections::HashMap<String, f64>,
+    pub by_agent: std::collections::HashMap<String, f64>,
+    pub alert_threshold_usd: f64,
+    pub alert_triggered: bool,
+}
+
+/// Per-channel status entry with live state
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ChannelStatusEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub channel_type: String, // "wasm" | "native" | "builtin"
+    pub state: String, // "Running" | "Connecting" | "Degraded" | "Disconnected" | "Error"
+    pub enabled: bool,
+    pub uptime_secs: Option<u64>,
+    pub messages_sent: u64,
+    pub messages_received: u64,
+    pub last_error: Option<String>,
+    pub stream_mode: String,
+}
+
+/// Routine audit log entry
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct RoutineAuditEntry {
+    pub routine_key: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub outcome: String, // "success" | "failure" | "timeout"
+    pub duration_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Response cache statistics
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct CacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub size_bytes: u64,
+    pub hit_rate: f64,
+}
+
+/// Plugin lifecycle event
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct LifecycleEventItem {
+    pub timestamp: String,
+    pub plugin_id: String,
+    pub event_type: String, // "installed" | "activated" | "deactivated" | "removed" | "error"
+    pub details: Option<String>,
+}
+
+/// Manifest validation response
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct ManifestValidationResponse {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}

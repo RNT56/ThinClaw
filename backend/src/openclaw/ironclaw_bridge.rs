@@ -561,6 +561,7 @@ impl IronClawState {
             hooks: components.hooks.clone(),
             cost_guard: components.cost_guard.clone(),
             sse_sender: None,
+            agent_router: None,
         };
 
         let agent = Arc::new(Agent::new(

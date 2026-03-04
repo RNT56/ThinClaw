@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     MessageCircle, Radio, ChevronLeft, RefreshCw, Settings,
     Layout, Smartphone, Timer, Package, Cpu, Shield, Brain, History,
-    ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity, Stethoscope, Wrench, KeyRound
+    ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity,
+    Stethoscope, Wrench, KeyRound, DollarSign, Database, Zap, FileText, Star, GitBranch
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -11,7 +12,7 @@ import { OpenClawSession } from '../../lib/openclaw';
 
 import { motion } from 'framer-motion';
 
-export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'presence' | 'automations' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing';
+export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -167,6 +168,17 @@ export function OpenClawSidebar({
         }
     };
 
+    const handleSetDefault = async (e: React.MouseEvent, agentId: string) => {
+        e.stopPropagation();
+        try {
+            await openclaw.setDefaultAgent(agentId);
+            toast.success('Default agent updated');
+            fetchData();
+        } catch (err) {
+            toast.error(`Failed to set default: ${err}`);
+        }
+    };
+
     // Identify active agent
     const activeAgentName = status?.gateway_mode === 'local'
         ? 'Local Core'
@@ -258,10 +270,34 @@ export function OpenClawSidebar({
                                 >
                                     <Server className="w-4 h-4" />
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-xs font-bold truncate">{profile.name}</p>
-                                        <p className="text-[9px] opacity-70 truncate">{profile.url}</p>
+                                        <div className="flex items-center gap-1.5">
+                                            <p className="text-xs font-bold truncate">{profile.name}</p>
+                                            {profile.is_default && <Star className="w-3 h-3 text-amber-400 fill-amber-400" />}
+                                            {profile.status && (
+                                                <span className={cn("w-1.5 h-1.5 rounded-full",
+                                                    profile.status === 'running' ? 'bg-emerald-500' :
+                                                        profile.status === 'paused' ? 'bg-amber-500' :
+                                                            profile.status === 'error' ? 'bg-red-500' : 'bg-zinc-500'
+                                                )} />
+                                            )}
+                                        </div>
+                                        <p className="text-[9px] opacity-70 truncate">
+                                            {profile.url}
+                                            {profile.session_count != null && ` · ${profile.session_count} sessions`}
+                                        </p>
                                     </div>
-                                    {status?.gateway_mode === 'remote' && status.remote_url === profile.url && <div className="w-1.5 h-1.5 rounded-full bg-primary" />}
+                                    <div className="flex items-center gap-1">
+                                        {!profile.is_default && (
+                                            <button
+                                                onClick={(e) => handleSetDefault(e, profile.id)}
+                                                className="p-1 rounded hover:bg-white/10 transition-colors"
+                                                title="Set as default"
+                                            >
+                                                <Star className="w-3 h-3 text-muted-foreground/40 hover:text-amber-400" />
+                                            </button>
+                                        )}
+                                        {status?.gateway_mode === 'remote' && status.remote_url === profile.url && <div className="w-1.5 h-1.5 rounded-full bg-primary" />}
+                                    </div>
                                 </button>
                             ))}
                         </div>
@@ -291,14 +327,19 @@ export function OpenClawSidebar({
                     { id: 'brain', label: 'The Brain', icon: Brain },
                     { id: 'memory', label: 'Temporal Memory', icon: History },
                     { id: 'channels', label: 'Channels', icon: Smartphone },
+                    { id: 'channel-status', label: 'Channel Status', icon: Zap },
                     { id: 'presence', label: 'Presence', icon: Cpu },
                     { id: 'automations', label: 'Automations', icon: Timer },
+                    { id: 'routine-audit', label: 'Routine Audit', icon: FileText },
                     { id: 'skills', label: 'Skills', icon: Package },
                     { id: 'hooks', label: 'Hooks', icon: Anchor },
                     { id: 'plugins', label: 'Plugins', icon: Plug },
                     { id: 'config', label: 'Config Editor', icon: Settings2 },
                     { id: 'tool-policies', label: 'Tool Policies', icon: Wrench },
                     { id: 'pairing', label: 'DM Pairing', icon: KeyRound },
+                    { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
+                    { id: 'routing', label: 'Routing', icon: GitBranch },
+                    { id: 'cache-stats', label: 'Cache Stats', icon: Database },
                     { id: 'event-inspector', label: 'Event Inspector', icon: Activity },
                     { id: 'doctor', label: 'Doctor', icon: Stethoscope },
                     { id: 'system-control', label: 'System', icon: Shield },

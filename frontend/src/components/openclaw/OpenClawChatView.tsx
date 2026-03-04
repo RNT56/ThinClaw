@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronRight, ChevronDown, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, Zap, ExternalLink, Trash2, Download, Sliders } from 'lucide-react';
+import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronRight, ChevronDown, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, Zap, ExternalLink, Trash2, Download, Sliders, FileDown } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
@@ -655,16 +655,39 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
         }
     };
 
-    const handleExportSession = async () => {
+    const [exportFormat, setExportFormat] = useState<'md' | 'json' | 'txt' | 'csv' | 'html'>('md');
+    const [showExportMenu, setShowExportMenu] = useState(false);
+
+    const EXPORT_FORMATS = [
+        { id: 'md' as const, label: 'Markdown', ext: '.md' },
+        { id: 'json' as const, label: 'JSON', ext: '.json' },
+        { id: 'txt' as const, label: 'Plain Text', ext: '.txt' },
+        { id: 'csv' as const, label: 'CSV', ext: '.csv' },
+        { id: 'html' as const, label: 'HTML', ext: '.html' },
+    ];
+
+    const handleExportSession = async (format?: 'md' | 'json' | 'txt' | 'csv' | 'html') => {
         if (!effectiveSessionKey) return;
+        const fmt = format || exportFormat;
         try {
-            const result = await openclaw.exportSession(effectiveSessionKey);
-            // Copy to clipboard
-            await navigator.clipboard.writeText(result.transcript);
-            toast.success(`Exported ${result.message_count} messages to clipboard`);
+            const result = await openclaw.exportSession(effectiveSessionKey, fmt);
+            if (fmt === 'md' || fmt === 'txt') {
+                await navigator.clipboard.writeText(result.transcript);
+                toast.success(`Exported ${result.message_count} messages (${fmt.toUpperCase()}) to clipboard`);
+            } else {
+                const blob = new Blob([result.transcript], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `session-export${EXPORT_FORMATS.find(f => f.id === fmt)?.ext || '.txt'}`;
+                a.click();
+                URL.revokeObjectURL(url);
+                toast.success(`Downloaded ${result.message_count} messages as ${fmt.toUpperCase()}`);
+            }
         } catch (e) {
             toast.error('Failed to export session');
         }
+        setShowExportMenu(false);
     };
 
     const handleSend = async () => {
@@ -777,13 +800,41 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, onNavigateToSetti
                 </div>
                 <div className="flex items-center gap-2">
                     {!isCoreView && (
-                        <button
-                            onClick={handleExportSession}
-                            className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                            title="Export session to clipboard"
-                        >
-                            <Download className="w-4 h-4" />
-                        </button>
+                        <div className="relative">
+                            <div className="flex items-center">
+                                <button
+                                    onClick={() => handleExportSession()}
+                                    className="p-2 rounded-l-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                                    title={`Export as ${exportFormat.toUpperCase()}`}
+                                >
+                                    <Download className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={() => setShowExportMenu(!showExportMenu)}
+                                    className="p-2 rounded-r-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors border-l border-white/5"
+                                    title="Choose format"
+                                >
+                                    <ChevronDown className="w-3 h-3" />
+                                </button>
+                            </div>
+                            {showExportMenu && (
+                                <div className="absolute top-full right-0 mt-1 p-1 bg-zinc-900 border border-border rounded-xl shadow-2xl z-50 min-w-[140px] animate-in fade-in zoom-in-95 duration-150">
+                                    {EXPORT_FORMATS.map(f => (
+                                        <button
+                                            key={f.id}
+                                            onClick={() => { setExportFormat(f.id); handleExportSession(f.id); }}
+                                            className={cn(
+                                                "w-full text-left px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2",
+                                                exportFormat === f.id ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                                            )}
+                                        >
+                                            <FileDown className="w-3 h-3" />
+                                            {f.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     )}
                     {!isCoreView && (
                         <button

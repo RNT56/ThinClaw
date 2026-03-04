@@ -73,6 +73,11 @@ export interface AgentProfile {
     token: string | null;
     mode: string;
     auto_connect: boolean;
+    // Sprint 13 extensions (optional for backward compat)
+    is_default?: boolean;
+    status?: 'running' | 'paused' | 'error' | 'offline';
+    session_count?: number;
+    last_active_at?: string;
 }
 
 export interface SlackConfigInput {
@@ -714,10 +719,14 @@ export interface SessionExportResponse {
 }
 
 /**
- * Export a session's full history as a markdown transcript.
+ * Export a session's history in the given format.
+ * Supported: 'md' (default), 'json', 'txt', 'csv', 'html'
  */
-export async function exportSession(sessionKey: string): Promise<SessionExportResponse> {
-    return invoke('openclaw_export_session', { sessionKey });
+export async function exportSession(
+    sessionKey: string,
+    format: string = 'md'
+): Promise<SessionExportResponse> {
+    return invoke('openclaw_export_session', { sessionKey, format });
 }
 
 // ============================================================================
@@ -891,4 +900,153 @@ export interface CompactSessionResponse {
 /** Trigger context compaction for a session. */
 export async function compactSession(sessionKey: string): Promise<CompactSessionResponse> {
     return invoke('openclaw_compact_session', { sessionKey });
+}
+
+// ============================================================================
+// Sprint 13 — New Backend APIs
+// ============================================================================
+
+// --- Cost Tracking ---
+
+export interface CostSummary {
+    total_cost_usd: number;
+    daily: Record<string, number>;
+    monthly: Record<string, number>;
+    by_model: Record<string, number>;
+    by_agent: Record<string, number>;
+    alert_threshold_usd: number;
+    alert_triggered: boolean;
+}
+
+/** Get LLM cost summary with daily/monthly/per-model breakdowns. */
+export async function getCostSummary(): Promise<CostSummary> {
+    return invoke('openclaw_cost_summary');
+}
+
+/** Export cost data as CSV string. */
+export async function exportCostCsv(): Promise<string> {
+    return invoke('openclaw_cost_export_csv');
+}
+
+// --- Channel Status ---
+
+export interface ChannelStatusEntry {
+    id: string;
+    name: string;
+    type: 'wasm' | 'native' | 'builtin';
+    state: 'Running' | 'Connecting' | 'Degraded' | 'Disconnected' | 'Error';
+    enabled: boolean;
+    uptime_secs: number | null;
+    messages_sent: number;
+    messages_received: number;
+    last_error: string | null;
+    stream_mode: string;
+}
+
+/** Get all channel statuses with live state and counters. */
+export async function getChannelStatusList(): Promise<ChannelStatusEntry[]> {
+    return invoke('openclaw_channel_status_list');
+}
+
+// --- Agent Management ---
+
+/** Set the default agent profile. */
+export async function setDefaultAgent(agentId: string): Promise<void> {
+    return invoke('openclaw_agents_set_default', { agentId });
+}
+
+// --- ClawHub ---
+
+export interface ClawHubEntry {
+    id: string;
+    name: string;
+    description: string;
+    version: string;
+    author: string;
+    category: string;
+    install_count: number;
+    tags: string[];
+}
+
+/** Search ClawHub plugin catalog (proxied through IronClaw). */
+export async function searchClawHub(query: string): Promise<{ entries: ClawHubEntry[] }> {
+    return invoke('openclaw_clawhub_search', { query });
+}
+
+/** Install a plugin from ClawHub. */
+export async function installFromClawHub(pluginId: string): Promise<void> {
+    return invoke('openclaw_clawhub_install', { pluginId });
+}
+
+// --- Routine Audit ---
+
+export interface RoutineAuditEntry {
+    routine_key: string;
+    started_at: string;
+    completed_at: string | null;
+    outcome: 'success' | 'failure' | 'timeout';
+    duration_ms: number | null;
+    error: string | null;
+}
+
+/** List routine audit entries with optional outcome filter. */
+export async function getRoutineAuditList(
+    routineKey: string,
+    limit?: number,
+    outcome?: 'success' | 'failure'
+): Promise<RoutineAuditEntry[]> {
+    return invoke('openclaw_routine_audit_list', { routineKey, limit: limit ?? null, outcome: outcome ?? null });
+}
+
+// --- Cache Stats ---
+
+export interface CacheStats {
+    hits: number;
+    misses: number;
+    evictions: number;
+    size_bytes: number;
+    hit_rate: number;
+}
+
+/** Get response cache statistics. */
+export async function getCacheStats(): Promise<CacheStats> {
+    return invoke('openclaw_cache_stats');
+}
+
+// --- Plugin Lifecycle ---
+
+export interface LifecycleEventItem {
+    timestamp: string;
+    plugin_id: string;
+    event_type: string; // 'installed' | 'activated' | 'deactivated' | 'removed' | 'error'
+    details: string | null;
+}
+
+/** List plugin lifecycle events. */
+export async function getPluginLifecycleList(): Promise<LifecycleEventItem[]> {
+    return invoke('openclaw_plugin_lifecycle_list');
+}
+
+// --- Manifest Validation ---
+
+export interface ManifestValidation {
+    errors: string[];
+    warnings: string[];
+}
+
+/** Validate a plugin's manifest. */
+export async function validateManifest(pluginId: string): Promise<ManifestValidation> {
+    return invoke('openclaw_manifest_validate', { pluginId });
+}
+
+// --- Smart Routing ---
+
+/** Get current smart routing configuration. */
+export async function getRoutingConfig(): Promise<{ smart_routing_enabled: boolean }> {
+    return invoke('openclaw_routing_get');
+}
+
+/** Enable or disable smart routing. */
+export async function setRoutingConfig(smartRoutingEnabled: boolean): Promise<void> {
+    return invoke('openclaw_routing_set', { smartRoutingEnabled });
 }
