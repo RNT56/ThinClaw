@@ -25,6 +25,7 @@ mod logs;
 mod mcp;
 pub mod memory;
 mod message;
+mod models;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -50,6 +51,7 @@ pub use memory::MemoryCommand;
 pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use message::{MessageCommand, run_message_command};
+pub use models::{ModelCommand, run_model_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 #[cfg(feature = "repl")]
@@ -143,6 +145,10 @@ pub enum Command {
     /// Send messages to the agent
     #[command(subcommand)]
     Message(MessageCommand),
+
+    /// List and inspect available LLM models
+    #[command(subcommand)]
+    Models(ModelCommand),
 
     /// DM pairing (approve inbound requests from unknown senders)
     #[command(subcommand)]

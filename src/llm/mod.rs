@@ -7,10 +7,13 @@
 //! - **Ollama**: Local model inference
 //! - **Tinfoil**: Private inference via Tinfoil
 
+pub mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod discovery;
+pub mod extended_context;
 pub mod failover;
+pub mod gemini;
 mod provider;
 mod reasoning;
 pub mod response_cache;

@@ -101,8 +101,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| Forwarded attachment downloads | ✅ | ❌ | Fetch media from forwarded messages |
-| Faster reaction state machine | ✅ | ❌ | Watchdog + debounce |
+| Forwarded attachment downloads | ✅ | ✅ | Platform-aware download with size limits ([`src/channels/forward_download.rs`](src/channels/forward_download.rs)) |
+| Faster reaction state machine | ✅ | ✅ | Debounced state machine with watchdog cleanup ([`src/channels/reaction_machine.rs`](src/channels/reaction_machine.rs)) |
 | Thread parent binding inheritance | ✅ | ❌ | Threads inherit parent routing |
 
 ### Slack-Specific Features (since Feb 2025)
@@ -119,15 +119,15 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | DM pairing codes | ✅ | ✅ | `ironclaw pairing list/approve`, host APIs |
 | Allowlist/blocklist | ✅ | ✅ | allow_from + block_from + pairing store (blocklist takes precedence) |
-| Self-message bypass | ✅ | ❌ | Own messages skip pairing |
+| Self-message bypass | ✅ | ✅ | Multi-bot-ID detection + message filtering ([`src/channels/self_message.rs`](src/channels/self_message.rs)) |
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ✅ | `ToolPolicyManager` with AllowAll/AllowList/DenyList + hierarchical evaluation ([`src/tools/policy.rs`](src/tools/policy.rs)) |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
 | Per-channel media limits | ✅ | ✅ | `MediaLimits` with per-channel env var overrides + `filter_attachments()` ([`src/media/limits.rs`](src/media/limits.rs)) |
 | Typing indicators | ✅ | ✅ | `Channel::send_typing()` trait method with platform-agnostic interface; TUI + Telegram + extensible to Discord/Signal |
-| Per-channel ackReaction config | ✅ | ❌ | Customizable acknowledgement reactions |
-| Group session priming | ✅ | ❌ | Member roster injected for context |
-| Sender_id in trusted metadata | ✅ | ❌ | Exposed in system metadata |
+| Per-channel ackReaction config | ✅ | ✅ | Per-channel emoji overrides via env vars ([`src/channels/ack_reaction.rs`](src/channels/ack_reaction.rs)) |
+| Group session priming | ✅ | ✅ | Member roster injection with configurable limits ([`src/channels/group_priming.rs`](src/channels/group_priming.rs)) |
+| Sender_id in trusted metadata | ✅ | ✅ | `TrustedMetadata` struct with sender_id, channel, is_group ([`src/channels/self_message.rs`](src/channels/self_message.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -144,7 +144,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config |
 | `channels` | ✅ | ✅ | P2 | `channels.rs`: list (env+WASM detection), info (per-channel details) |
-| `models` | ✅ | 🚧 | - | Model selector in TUI |
+| `models` | ✅ | ✅ | - | `list`, `info`, `test` subcommands with Ollama auto-discovery ([`src/cli/models.rs`](src/cli/models.rs)) |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ✅ | P3 | `list`, `add`, `remove`, `show`, `set-default` subcommands |
 | `sessions` | ✅ | ✅ | P3 | `list`, `show`, `prune` subcommands with thread ownership display |
@@ -186,7 +186,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | ✅ | ActivationCriteria: keywords, patterns, tags, `use_when`/`dont_use_when` routing blocks |
-| Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
+| Skill path compaction | ✅ | ✅ | `~` prefix via `RuntimeBehavior::compact_path()` ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
 | Thinking modes (low/med/high) | ✅ | ✅ | `ThinkingConfig` enum (Disabled/Enabled with budget_tokens), configurable via `thinking_enabled` + `thinking_budget_tokens` settings |
 | Per-model thinkingDefault override | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var: exact+prefix model match with per-model budget |
 | Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
@@ -204,9 +204,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ✅ | `ImageExtractor::format_multiple_for_llm()` — multi-image content blocks |
 | URL allowlist (web_search/fetch) | ✅ | ✅ | `HTTP_URL_ALLOWLIST` env var — comma-separated domain globs |
-| suppressToolErrors config | ✅ | ❌ | Hide tool errors from user |
+| suppressToolErrors config | ✅ | ✅ | `RuntimeBehavior::format_tool_error()` with generic fallback ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
 | Intent-first tool display | ✅ | ❌ | Details and exec summaries |
-| Transcript file size in status | ✅ | ❌ | Show size in session status |
+| Transcript file size in status | ✅ | ✅ | `TranscriptStats` with message/token/tool/attachment counts ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -222,8 +222,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider |
 | Ollama (local) | ✅ | ✅ | - | Via `rig::providers::ollama` (full support) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
-| AWS Bedrock | ✅ | ❌ | P3 | Could use OpenAI-compatible with adapter |
-| Google Gemini | ✅ | ❌ | P3 | Could use OpenAI-compatible via AI Studio |
+| AWS Bedrock | ✅ | ✅ | P3 | OpenAI-to-Bedrock adapter with Converse API translation ([`src/llm/bedrock.rs`](src/llm/bedrock.rs)) |
+| Google Gemini | ✅ | ✅ | P3 | AI Studio adapter with system instruction support ([`src/llm/gemini.rs`](src/llm/gemini.rs)) |
 | NVIDIA API | ✅ | ❌ | P3 | Could use OpenAI-compatible |
 | Perplexity | ✅ | ❌ | P3 | Could use OpenAI-compatible |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
@@ -241,7 +241,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 | Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
-| 1M context beta header | ✅ | ❌ | Anthropic extended context support |
+| 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -784,20 +784,21 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 - ✅ CLI: `update` self-update — check/install/rollback with stable/beta/nightly channels + binary backup ([`src/cli/update.rs`](src/cli/update.rs))
 - ✅ CLI: `browser` automation — headless Chrome open/screenshot/links/check with DOM extraction ([`src/cli/browser.rs`](src/cli/browser.rs))
 - ✅ CLI: `sessions export` — markdown/JSON transcript export with role labels and timestamps ([`src/cli/sessions.rs`](src/cli/sessions.rs))
+- ✅ CLI: `models` — list/info/test with built-in model knowledge + Ollama auto-discovery ([`src/cli/models.rs`](src/cli/models.rs))
 
 **LLM & Inference**
 - ❌ Gemini embeddings
 - ❌ Local embeddings (on-device)
-- ❌ AWS Bedrock provider (OpenAI-compatible adapter)
-- ❌ Google Gemini provider (via AI Studio)
-- ❌ Anthropic 1M context beta header
+- ✅ AWS Bedrock provider — OpenAI-to-Bedrock Converse API adapter ([`src/llm/bedrock.rs`](src/llm/bedrock.rs))
+- ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
+- ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))
 - ✅ Auto model discovery from endpoints ([`src/llm/discovery.rs`](src/llm/discovery.rs): OpenAI/Anthropic/Ollama endpoint scanning with auto-discover)
 - ❌ `llama.cpp` native Rust bindings
 
 **Memory & Search**
 - ✅ Citation support in search results ([`src/workspace/search.rs`](src/workspace/search.rs): `Citation` struct with title/path/URL/page/line_range + `format_citations()` inline rendering)
 - ❌ Post-compaction context injection
-- ❌ Skill path compaction (`~` prefix)
+- ✅ Skill path compaction — `RuntimeBehavior::compact_path()` with `~` prefix ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs))
 - ✅ Media caching layer — TTL-based SHA-256 keyed file cache with LRU eviction ([`src/media/cache.rs`](src/media/cache.rs))
 
 **Hooks & Automation**

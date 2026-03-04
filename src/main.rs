@@ -116,6 +116,12 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_message_command(msg_cmd.clone()).await;
         }
+        Some(Command::Models(model_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return ironclaw::cli::run_model_command(model_cmd.clone()).await;
+        }
         Some(Command::Completion(completion)) => {
             init_cli_tracing();
             return completion.run();

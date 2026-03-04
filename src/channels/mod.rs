@@ -27,16 +27,21 @@
 //! WASM channels allow dynamic loading of channel implementations at runtime.
 //! See the [`wasm`] module for details.
 
+pub mod ack_reaction;
 pub mod canvas_gateway;
 mod channel;
 mod discord;
+pub mod forward_download;
+pub mod group_priming;
 pub mod health_monitor;
 mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
 mod manager;
 mod nostr;
+pub mod reaction_machine;
 mod repl;
+pub mod self_message;
 mod signal;
 mod slack;
 mod telegram;
@@ -56,6 +61,7 @@ pub use imessage::{IMessageChannel, IMessageConfig};
 pub use manager::ChannelManager;
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;
+pub use self_message::{SelfMessageConfig, TrustedMetadata};
 pub use signal::SignalChannel;
 pub use slack::SlackChannel;
 pub use telegram::TelegramChannel;

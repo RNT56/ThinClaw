@@ -23,6 +23,7 @@ pub mod job_monitor;
 mod router;
 pub mod routine;
 pub mod routine_engine;
+pub mod runtime_behavior;
 mod scheduler;
 mod self_repair;
 pub mod session;
