@@ -103,7 +103,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Forwarded attachment downloads | ✅ | ✅ | Platform-aware download with size limits ([`src/channels/forward_download.rs`](src/channels/forward_download.rs)) |
 | Faster reaction state machine | ✅ | ✅ | Debounced state machine with watchdog cleanup ([`src/channels/reaction_machine.rs`](src/channels/reaction_machine.rs)) |
-| Thread parent binding inheritance | ✅ | ❌ | Threads inherit parent routing |
+| Thread parent binding inheritance | ✅ | ✅ | Chain-resolved inheritance with agent propagation ([`src/agent/thread_inheritance.rs`](src/agent/thread_inheritance.rs)) |
 
 ### Slack-Specific Features (since Feb 2025)
 
@@ -178,11 +178,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
 | Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
 | Per-sender sessions | ✅ | ✅ | |
-| Global sessions | ✅ | ❌ | Optional shared context |
+| Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
 | Session pruning | ✅ | ✅ | `sessions prune` CLI + auto-cleanup with configurable TTL |
 | Context compaction | ✅ | ✅ | Auto summarization |
 | Post-compaction read audit | ✅ | ❌ | Layer 3: workspace rules appended to summaries |
-| Post-compaction context injection | ✅ | ❌ | Workspace context as system event |
+| Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | ✅ | ActivationCriteria: keywords, patterns, tags, `use_when`/`dont_use_when` routing blocks |
@@ -195,17 +195,17 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
-| Elevated mode | ✅ | ❌ | Privileged execution |
+| Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Subagent support | ✅ | ✅ | Task framework |
 | `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
-| Auth profiles | ✅ | ❌ | Multiple auth strategies |
+| Auth profiles | ✅ | ✅ | Multi-key rotation with health tracking ([`src/safety/auth_profiles.rs`](src/safety/auth_profiles.rs)) |
 | Generic API key rotation | ✅ | ❌ | Rotate keys across providers |
 | Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
-| llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
+| llms.txt discovery | ✅ | ✅ | .well-known probing + markdown link parsing ([`src/llm/llms_txt.rs`](src/llm/llms_txt.rs)) |
 | Multiple images per tool call | ✅ | ✅ | `ImageExtractor::format_multiple_for_llm()` — multi-image content blocks |
 | URL allowlist (web_search/fetch) | ✅ | ✅ | `HTTP_URL_ALLOWLIST` env var — comma-separated domain globs |
 | suppressToolErrors config | ✅ | ✅ | `RuntimeBehavior::format_tool_error()` with generic fallback ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
-| Intent-first tool display | ✅ | ❌ | Details and exec summaries |
+| Intent-first tool display | ✅ | ✅ | Human-readable intent + exec summaries ([`src/tools/intent_display.rs`](src/tools/intent_display.rs)) |
 | Transcript file size in status | ✅ | ✅ | `TranscriptStats` with message/token/tool/attachment counts ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
 
 ### Owner: IronClaw Agent
@@ -263,7 +263,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | TTS (Edge TTS) | ✅ | ✅ | - | `TtsSynthesizer` with Edge TTS provider support |
 | TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
 | Incremental TTS playback | ✅ | ❌ | P3 | iOS progressive playback |
-| Sticker-to-image | ✅ | ❌ | P3 | Telegram stickers |
+| Sticker-to-image | ✅ | ✅ | P3 | WebP/TGS/WebM detection + ffmpeg conversion ([`src/media/sticker.rs`](src/media/sticker.rs)) |
 | Media pipeline integration | ❌ | ✅ | - | `MediaPipeline` auto-wired into `process_user_input()` via `IncomingMessage.attachments` |
 
 ### Owner: IronClaw Agent
@@ -288,7 +288,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | ClawHub registry | ✅ | ❌ | Discovery |
 | `before_agent_start` hook | ✅ | ✅ | `HookPoint::BeforeAgentStart` — fires before agent main loop, can reject startup |
 | `before_message_write` hook | ✅ | ✅ | `HookPoint::BeforeMessageWrite` — fires before channel write, can modify/suppress |
-| `llm_input`/`llm_output` hooks | ✅ | ❌ | LLM payload inspection |
+| `llm_input`/`llm_output` hooks | ✅ | ✅ | Before/after hook pipeline with priority ordering ([`src/llm/llm_hooks.rs`](src/llm/llm_hooks.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -797,7 +797,7 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 **Memory & Search**
 - ✅ Citation support in search results ([`src/workspace/search.rs`](src/workspace/search.rs): `Citation` struct with title/path/URL/page/line_range + `format_citations()` inline rendering)
-- ❌ Post-compaction context injection
+- ✅ Post-compaction context injection — `ContextInjector` with priority-based fragment assembly ([`src/context/post_compaction.rs`](src/context/post_compaction.rs))
 - ✅ Skill path compaction — `RuntimeBehavior::compact_path()` with `~` prefix ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs))
 - ✅ Media caching layer — TTL-based SHA-256 keyed file cache with LRU eviction ([`src/media/cache.rs`](src/media/cache.rs))
 
@@ -812,15 +812,15 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 - ✅ Safe bins allowlist (`IRONCLAW_SAFE_BINS_ONLY` mode)
 - ✅ LD*/DYLD* env validation (library injection blocking)
 - ✅ Per-group tool policies ([`src/tools/policy.rs`](src/tools/policy.rs): AllowAll/AllowList/DenyList with group→channel→global evaluation, serializable config)
-- ❌ Elevated execution mode
+- ✅ Elevated execution mode — `ElevatedMode` with timeout + command allowlist ([`src/safety/elevated.rs`](src/safety/elevated.rs))
 - ✅ Skill download path restriction — `SkillPathConfig` with path traversal prevention, symlink detection, name sanitization ([`src/safety/skill_path.rs`](src/safety/skill_path.rs))
-- ❌ Dangerous tool re-enable warning
+- ✅ Dangerous tool re-enable warning — `DangerousToolTracker` with state history and warning generation ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs))
 
 **Media**
 - ✅ Video keyframe extraction — `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)): ffprobe metadata + ffmpeg keyframe/audio extraction with graceful fallback
 - ✅ Media caching layer — `MediaCache` with SHA-256 keying, TTL expiry, LRU eviction ([`src/media/cache.rs`](src/media/cache.rs))
 - ❌ Incremental TTS playback
-- ❌ Telegram sticker-to-image conversion
+- ✅ Telegram sticker-to-image conversion — WebP/TGS/WebM magic-byte detection + ffmpeg pipeline ([`src/media/sticker.rs`](src/media/sticker.rs))
 
 **UI & Control**
 - ✅ Canvas system (A2UI) — `CanvasTool` + `CanvasStore` + canvas gateway routes ([`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs))

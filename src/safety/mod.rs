@@ -7,7 +7,10 @@
 //! - Enforcing safety policies
 //! - Detecting secret leakage in outputs
 
+pub mod auth_profiles;
 mod credential_detect;
+pub mod dangerous_tools;
+pub mod elevated;
 mod leak_detector;
 mod policy;
 mod sanitizer;

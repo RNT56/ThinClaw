@@ -14,6 +14,8 @@ pub mod discovery;
 pub mod extended_context;
 pub mod failover;
 pub mod gemini;
+pub mod llm_hooks;
+pub mod llms_txt;
 mod provider;
 mod reasoning;
 pub mod response_cache;

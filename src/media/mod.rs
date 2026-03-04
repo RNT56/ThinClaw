@@ -16,6 +16,7 @@ pub mod cache;
 mod image;
 pub mod limits;
 mod pdf;
+pub mod sticker;
 pub mod tts;
 mod types;
 pub mod video;

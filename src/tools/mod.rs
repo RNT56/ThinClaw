@@ -9,6 +9,7 @@
 
 pub mod builder;
 pub mod builtin;
+pub mod intent_display;
 pub mod mcp;
 pub mod policy;
 pub mod rate_limiter;

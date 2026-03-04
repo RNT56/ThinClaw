@@ -8,6 +8,7 @@
 
 mod manager;
 mod memory;
+pub mod post_compaction;
 mod state;
 
 pub use manager::{ContextManager, PruneResult};
