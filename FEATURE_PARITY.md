@@ -157,14 +157,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `cron` | ✅ | ✅ | - | `cron add/edit/remove/trigger/runs/lint` — edit supports `--model`, `--thinking-budget`, `--schedule`, `--prompt`, `--enabled`; lint validates expressions offline |
 | `webhooks` | ✅ | ✅ | - | `POST /hooks/routine/{id}` with HMAC-SHA256 secret validation |
 | `message send` | ✅ | ✅ | P2 | `message.rs`: send to gateway with auth, auto-detect URL |
-| `browser` | ✅ | ❌ | P3 | Browser automation |
+| `browser` | ✅ | ✅ | P3 | Headless Chrome: open/screenshot/links/check ([`src/cli/browser.rs`](src/cli/browser.rs)) |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | ✅ | - | Diagnostics (DB, binaries, LLM credentials, Tailscale) |
-| `logs` | ✅ | ❌ | P3 | Query logs |
-| `update` | ✅ | ❌ | P3 | Self-update |
+| `logs` | ✅ | ✅ | P3 | tail/search/show/levels with time-range/level/target filtering ([`src/cli/logs.rs`](src/cli/logs.rs)) |
+| `update` | ✅ | ✅ | P3 | check/install/rollback with stable/beta/nightly channels ([`src/cli/update.rs`](src/cli/update.rs)) |
 | `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
-| `/export-session` | ✅ | ❌ | P3 | Export current session transcript |
+| `/export-session` | ✅ | ✅ | P3 | `sessions export` with markdown/JSON output ([`src/cli/sessions.rs`](src/cli/sessions.rs)) |
 
 ### Owner: IronClaw Agent
 
