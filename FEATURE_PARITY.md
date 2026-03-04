@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-03 13:53 CET
+> **Last reconciled:** 2026-03-04 10:48 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -517,7 +517,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 17. Scrappy Feature Surfacing Analysis
 
-> **Last updated:** 2026-03-03 13:53 CET — reconciled with Scrappy agent + Sprint 5 progress + codebase audit
+> **Last updated:** 2026-03-04 10:48 CET — reconciled after Sprint 12 completion
 >
 > IronClaw has shipped far more capabilities than Scrappy currently exposes through its UI.
 > This section tracks which IronClaw features Scrappy surfaces, which need UI, and wiring gaps.
@@ -563,22 +563,23 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### 17.2 Features IronClaw Has, Scrappy Has NO UI For
 
-> **All 12 items complete ✅** — every IronClaw backend capability now has a Scrappy UI.
+> **Sprint 12 shipped 12 new backend APIs** — the items below are new gaps opened by Sprint 12.
+> Previously completed items (hooks, plugins, config editor, memory search, session export, pairing, doctor, failover, compaction, tool policies, stuck loop, URL allowlist) are all ✅ Done.
 
-| IronClaw Feature | API Available | Scrappy UI Needed | Effort |
-|-----------------|--------------|-------------------|--------|
-| **Hooks management** (§8, §14) | `api::hooks::*` + webhook/lifecycle hooks | Hooks list/toggle/configure panel | ✅ Done |
-| **Plugin management** (§8) | `PluginManifest`, install/remove/toggle | Plugin manager panel in settings | ✅ Done |
-| **Config editing** (§9) | `api::config::*` (get/set/patch/export/import) | Config editor panel (JSON or form) | ✅ Done |
-| **Memory search** (§10) | `api::memory::search()` with hybrid BM25+vector | Search bar in Memory panel | ✅ Done |
-| **Session export** (§4) | Session history + transcript | Export button in chat header | ✅ Done |
-| **DM pairing codes** (§3) | `PairingStore` with list/approve/revoke | Pairing management in settings | ✅ Done |
-| **Doctor diagnostics** (§2) | `openclaw_diagnostics` probes 7 subsystems | Diagnostics panel with health bar | ✅ Done |
-| **Multi-provider failover** (§6) | `FailoverProvider` with `fallback_model` | Failover config in provider settings | ✅ Done |
-| **Context compaction** (§5) | `ContextCompactor` (auto-summarization) | Manual trigger + history display | ✅ Done |
-| **Tool policies** (§5) | `openclaw_tools_list` + ToolRegistry | Tool list with grouping + search | ✅ Done |
-| **Stuck loop indicator** (§5) | `force_text` at iteration threshold | Visual warning when loop detected | ✅ Done |
-| **URL allowlist** (§5) | `HTTP_URL_ALLOWLIST` env var | Input field in security settings | ✅ Done |
+| IronClaw Feature | API / Module | Scrappy UI Needed | Effort | Status |
+|-----------------|-------------|-------------------|--------|--------|
+| **Channel status view** | `ChannelStatusView` state machine ([`src/channels/status_view.rs`](src/channels/status_view.rs)) | Full per-channel status panel replacing basic list — show uptime, state, recv/sent counters, errors | 1-2 days | ❌ Needs Scrappy UI |
+| **LLM cost tracker** | `CostTracker` with budgets, per-agent/model breakdown, CSV export ([`src/llm/cost_tracker.rs`](src/llm/cost_tracker.rs)) | Cost dashboard: daily/monthly spend, per-model chart, budget alerts, export button | 2-3 days | ❌ Needs Scrappy UI |
+| **LLM routing policy** | `RoutingPolicy` with declarative rules ([`src/llm/routing_policy.rs`](src/llm/routing_policy.rs)) | Routing config panel: rule builder (vision→provider, token threshold→provider, round-robin) | 1-2 days | ❌ Needs Scrappy UI |
+| **ClawHub registry** | `CatalogCache` with search/browse ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs)) | Plugin discovery browser — search ClawHub, one-click install | 1-2 days | ❌ Needs Scrappy UI |
+| **Extension health monitor** | `ExtensionHealthMonitor` state machine ([`src/extensions/ext_health_monitor.rs`](src/extensions/ext_health_monitor.rs)) | Health indicator badges on channel/extension cards; health summary pane | 0.5 day | ❌ Needs Scrappy UI |
+| **Routine audit log** | `RoutineAuditLog` ring-buffer ([`src/agent/routine_audit.rs`](src/agent/routine_audit.rs)) | Run history panel in automations: outcome, duration, success rate per routine | 1 day | ❌ Needs Scrappy UI |
+| **Multi-format session export** | `SessionExporter` (MD/JSON/CSV/HTML/TXT) ([`src/cli/session_export.rs`](src/cli/session_export.rs)) | Export format picker in chat header (currently only markdown) | 0.5 day | ❌ Enhance existing UI |
+| **Agent management store** | `AgentManagementStore` CRUD ([`src/agent/management_api.rs`](src/agent/management_api.rs)) | Multi-agent picker in sidebar — list, status badges, set-default, pause/resume | 1-2 days | ❌ Needs Scrappy UI |
+| **Gmail channel** | `GmailConfig` + pub/sub wiring ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) | Gmail channel card in `OpenClawChannels.tsx` with OAuth token config + label filters | 1 day | ❌ Needs Scrappy UI |
+| **Plugin manifest validator** | `ManifestValidator` strict/lenient ([`src/extensions/manifest_validator.rs`](src/extensions/manifest_validator.rs)) | Validation feedback in plugin install flow (error/warning badges) | 0.5 day | ❌ Needs Scrappy UI |
+| **Plugin lifecycle hooks** | `LifecycleHookRegistry` + `AuditLogHook` ([`src/extensions/lifecycle_hooks.rs`](src/extensions/lifecycle_hooks.rs)) | Lifecycle event log tab in plugin manager | 0.5 day | ❌ Needs Scrappy UI |
+| **Response cache metrics** | `CachedResponseStore` hit/miss stats ([`src/llm/response_cache_ext.rs`](src/llm/response_cache_ext.rs)) | Cache stats indicator in provider settings (hit rate, size, evictions) | 0.5 day | ❌ Needs Scrappy UI |
 
 ### 17.3 Thinking Mode — ✅ Completed (2026-03-02)
 
@@ -622,27 +623,47 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 ---
 
-## 19. IronClaw Gaps That Will Impact Scrappy
+## 19. IronClaw → Scrappy Integration Tracker
 
-> When IronClaw ships these features, Scrappy will need frontend updates.
+> **Last updated:** 2026-03-04 10:48 CET
 
-| IronClaw Gap | IronClaw Priority | Scrappy Impact When Shipped |
-|-------------|-------------------|----------------------------|
-| **Media pipeline** enhancements | P3 | Frontend rendering for images/PDFs/audio in chat messages |
-| **BridgedTool auto-registration** | ✅ | Sensor tools auto-register in ToolRegistry when bridge is injected ([`src/app.rs`](src/app.rs): `init_tools()`, [`src/hardware_bridge.rs`](src/hardware_bridge.rs): `create_bridged_tools()`) |
-| **Canvas system (A2UI)** | P3 | `CanvasTool` backend exists — needs ToolRegistry wiring + web gateway hosting; Scrappy already has `CanvasWindow.tsx` |
-| **Auto model discovery** | P3 | Model list auto-populates from endpoint scan |
-| **iMessage channel wiring** | P4 | Channel code exists, config resolves — needs main.rs startup wiring; Scrappy may need iMessage settings panel |
-| **WhatsApp channel** | P4 | WhatsApp config + QR pairing in `OpenClawChannels.tsx` |
+### 19.1 Shipped — Scrappy UI Needed or In Progress
 
-**Recently shipped — Scrappy UI now wired:**
-| IronClaw Feature | Shipped | Scrappy UI |
-|-----------------|---------|------------|
-| **Discord channel** | ✅ P3 | `OpenClawChannels.tsx` shows Discord with type badge, enabled status, stream mode config |
-| **Streaming draft replies** | ✅ P3 | Per-channel stream mode selector (Full / Typing Only / Disabled) in channel cards |
-| **Cron lint** | ✅ P2 | Cron expression validator in `OpenClawAutomations.tsx` — validates via `cron` crate, shows next 5 fire times |
-| **Agent management** | ✅ P3 | CLI subcommands shipped. Scrappy needs multi-agent picker in sidebar |
-| **Session pruning** | ✅ P3 | CLI `sessions prune` shipped. Scrappy needs pruning config in settings |
+| IronClaw Feature | Shipped | Scrappy Work Needed |
+|-----------------|---------|---------------------|
+| **Multi-agent picker** | ✅ `AgentManagementStore` | Agent selector in Scrappy sidebar with status badges + set-default |
+| **Session pruning** | ✅ CLI `sessions prune` | Pruning config (max sessions, age cutoff) in settings |
+| **Channel status view** | ✅ `ChannelStatusView` | Full per-channel status panel (state, uptime, counters) replacing basic channel list |
+| **Gmail channel** | ✅ `GmailConfig` + pub/sub | Gmail card in `OpenClawChannels.tsx` with OAuth + label filter config |
+| **LLM cost tracker** | ✅ `CostTracker` | Cost dashboard: daily/monthly spend chart, per-model breakdown, budget alerts, CSV export |
+| **LLM routing policy** | ✅ `RoutingPolicy` | Routing rule builder panel in provider settings |
+| **ClawHub browser** | ✅ `CatalogCache` | Plugin discovery UI — search ClawHub catalog, one-click install |
+| **Plugin lifecycle log** | ✅ `AuditLogHook` | Lifecycle event log tab in plugin manager panel |
+| **Extension health badges** | ✅ `ExtensionHealthMonitor` | Health status badge on each channel/plugin card; summary pane |
+| **Routine run history** | ✅ `RoutineAuditLog` | Run history panel in automations: outcome, duration, per-routine success rate |
+| **Session export formats** | ✅ `SessionExporter` (5 formats) | Format picker dropdown in export button (currently markdown-only) |
+| **Response cache stats** | ✅ `CachedResponseStore` | Cache hit rate + size indicator in provider settings |
+| **Manifest validation feedback** | ✅ `ManifestValidator` | Error/warning badges in plugin install flow |
+
+### 19.2 Upcoming — IronClaw Not Yet Shipped
+
+| IronClaw Gap | Priority | Scrappy Impact When Shipped |
+|-------------|----------|-----------------------------|
+| **Media pipeline** enhancements | P3 | Frontend rendering for images/PDFs/audio in chat bubbles |
+| **iMessage channel** | P4 | iMessage settings panel, if macOS-only mode needed |
+| **WhatsApp channel** | P4 | QR pairing flow + WhatsApp card in `OpenClawChannels.tsx` |
+| **APNs push pipeline** | Deferred | iOS push wake — needs Apple Developer cert infra |
+
+### 19.3 Shipped — Scrappy Already Wired ✅
+
+| IronClaw Feature | Scrappy UI |
+|-----------------|------------|
+| BridgedTool auto-registration | Sensor tools auto-register; `AppBuilder::init_tools()` wired |
+| Canvas system (A2UI) | `CanvasWindow.tsx` with drag/resize/maximize |
+| Streaming draft replies | Per-channel stream mode selector in channel cards |
+| Discord channel | `OpenClawChannels.tsx` — type badge, stream mode config |
+| Cron lint | `OpenClawAutomations.tsx` — validator + next-5-fire-times |
+| Auto model discovery | Model list auto-populates from endpoint scan |
 
 ### Owner: Both (IronClaw ships backend, Scrappy ships frontend)
 
@@ -650,16 +671,16 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 ## 20. Scrappy Priority Ordering
 
-> **Last updated:** 2026-03-03 13:53 CET
+> **Last updated:** 2026-03-04 10:48 CET — updated after Sprint 12 with new backend APIs
 
-### Tier 1 — Do Now (≤ 3 days total)
+### Tier 1 — Do Now (≤ 3 days total) — All Complete ✅
 
 | # | Action | Why | Effort | Status |
 |---|--------|-----|--------|--------|
 | 1 | **Auto-updates** (`tauri-plugin-updater`) | Blocking production distribution | 1 day | ✅ Done |
 | 2 | **Wire thinking toggle to IronClaw native** | Remove prompt-prefix hack, use real `ThinkingConfig` | 3-4 hours | ✅ Done |
 
-### Tier 2 — Next Sprint (5-7 days)
+### Tier 2 — Next Sprint — All Complete ✅
 
 | # | Action | Why | Effort | Status |
 |---|--------|-----|--------|--------|
@@ -669,7 +690,7 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 | 6 | **Memory search bar** | Backend has hybrid BM25+vector search, Memory panel has no search | 4-6 hours | ✅ Done |
 | 7 | **Session export** | Download conversation transcript | 2-3 hours | ✅ Done |
 
-### Tier 3 — Backlog
+### Tier 3 — Previous Backlog — All Complete ✅
 
 | # | Action | Why | Effort | Status |
 |---|--------|-----|--------|--------|
@@ -681,7 +702,29 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 | 13 | **Tool policies manager** | Allow/deny per tool | 4-6 hours | ✅ Done |
 | 14 | **Voice wake** (VAD + Sherpa-ONNX) | Voice activation with recording overlay + keyword spotting | ✅ | ✅ Full |
 | 15 | **Animated tray icon** | Activity states (loading, active, idle) | 0.5 day | ✅ Done |
-| 16 | iMessage integration | AppleScript-based, fragile, macOS-only | 3-5 days | ❌ |
+| 16 | iMessage integration | AppleScript-based, fragile, macOS-only | 3-5 days | ❌ Deferred |
+
+### Tier 4 — Sprint 12 New Backend APIs (needs Scrappy UI)
+
+> These are net-new IronClaw capabilities from Sprint 12 that have no Scrappy UI yet.
+> See §19 for full details.
+
+| # | Action | Backend | Effort | Status |
+|---|--------|---------|--------|--------|
+| 17 | **Multi-agent picker in sidebar** | `AgentManagementStore` (`management_api.rs`) | 1-2 days | ❌ Todo |
+| 18 | **LLM cost dashboard** | `CostTracker` with budgets + CSV export (`cost_tracker.rs`) | 2-3 days | ❌ Todo |
+| 19 | **Channel status panel** | `ChannelStatusView` with state machine (`status_view.rs`) | 1-2 days | ❌ Todo |
+| 20 | **ClawHub plugin browser** | `CatalogCache` search + browse (`clawhub.rs`) | 1-2 days | ❌ Todo |
+| 21 | **Routine run history** | `RoutineAuditLog` ring-buffer (`routine_audit.rs`) | 1 day | ❌ Todo |
+| 22 | **Gmail channel card** | `GmailConfig` + pub/sub wiring (`gmail_wiring.rs`) | 1 day | ❌ Todo |
+| 23 | **Extension health badges** | `ExtensionHealthMonitor` state machine (`ext_health_monitor.rs`) | 0.5 day | ❌ Todo |
+| 24 | **Session export format picker** | `SessionExporter` 5 formats (`session_export.rs`) | 0.5 day | ❌ Todo |
+| 25 | **LLM routing rule builder** | `RoutingPolicy` 6 rule types (`routing_policy.rs`) | 1-2 days | ❌ Todo |
+| 26 | **Plugin lifecycle log tab** | `AuditLogHook` events (`lifecycle_hooks.rs`) | 0.5 day | ❌ Todo |
+| 27 | **Manifest validation feedback** | `ManifestValidator` errors/warnings (`manifest_validator.rs`) | 0.5 day | ❌ Todo |
+| 28 | **Response cache stats** | `CachedResponseStore` hit/miss (`response_cache_ext.rs`) | 0.5 day | ❌ Todo |
+
+**Tier 4 Total:** ~12 days of Scrappy frontend work
 
 ### Owner: Scrappy Agent
 
