@@ -61,7 +61,7 @@ pub use discord::DiscordChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
-pub use imessage::{IMessageChannel, IMessageConfig};
+pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::ChannelManager;
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;

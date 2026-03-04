@@ -41,6 +41,9 @@ pub struct IMessageConfig {
     pub allow_from: Vec<String>,
     /// Polling interval in seconds.
     pub poll_interval_secs: u64,
+    /// Maximum message age to process (seconds). Messages older than this
+    /// at startup time are skipped. Default: 300 (5 minutes).
+    pub max_message_age_secs: u64,
 }
 
 impl Default for IMessageConfig {
@@ -49,6 +52,7 @@ impl Default for IMessageConfig {
             db_path: default_chat_db_path(),
             allow_from: Vec::new(),
             poll_interval_secs: POLL_INTERVAL_SECS,
+            max_message_age_secs: 300,
         }
     }
 }
@@ -75,6 +79,29 @@ struct ChatDbMessage {
     chat_id: String,
     /// Whether the message is from me (outgoing).
     is_from_me: bool,
+    /// Number of attachments on this message.
+    attachment_count: i64,
+    /// Whether this is a group conversation.
+    is_group: bool,
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────
+
+/// Preflight diagnostic for iMessage channel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IMessageDiagnostic {
+    /// Whether chat.db exists at the configured path.
+    pub db_exists: bool,
+    /// Whether sqlite3 is available.
+    pub sqlite3_available: bool,
+    /// Whether osascript is available.
+    pub osascript_available: bool,
+    /// Whether Messages.app is running.
+    pub messages_running: bool,
+    /// Total message count in chat.db.
+    pub total_messages: Option<i64>,
+    /// Errors found during diagnostic.
+    pub errors: Vec<String>,
 }
 
 // ── Channel implementation ──────────────────────────────────────────
@@ -106,6 +133,80 @@ impl IMessageChannel {
         })
     }
 
+    /// Run a preflight diagnostic check.
+    pub async fn diagnose(config: &IMessageConfig) -> IMessageDiagnostic {
+        let mut errors = Vec::new();
+        let db_exists = config.db_path.exists();
+        if !db_exists {
+            errors.push(format!(
+                "chat.db not found at {}. Grant Full Disk Access.",
+                config.db_path.display()
+            ));
+        }
+
+        // Check sqlite3
+        let sqlite3_available = tokio::process::Command::new("sqlite3")
+            .arg("--version")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !sqlite3_available {
+            errors.push("sqlite3 CLI not found".to_string());
+        }
+
+        // Check osascript
+        let osascript_available = tokio::process::Command::new("osascript")
+            .arg("-e")
+            .arg("return \"ok\"")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !osascript_available {
+            errors.push("osascript not available".to_string());
+        }
+
+        // Check Messages.app running
+        let messages_running = tokio::process::Command::new("pgrep")
+            .arg("-x")
+            .arg("Messages")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !messages_running {
+            errors.push("Messages.app is not running (required for sending)".to_string());
+        }
+
+        // Get total message count
+        let total_messages = if db_exists && sqlite3_available {
+            tokio::process::Command::new("sqlite3")
+                .arg(&config.db_path)
+                .arg("SELECT COUNT(*) FROM message;")
+                .output()
+                .await
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<i64>()
+                        .ok()
+                })
+        } else {
+            None
+        };
+
+        IMessageDiagnostic {
+            db_exists,
+            sqlite3_available,
+            osascript_available,
+            messages_running,
+            total_messages,
+            errors,
+        }
+    }
+
     /// Get the latest ROWID from chat.db using sqlite3 CLI.
     async fn get_latest_rowid(db_path: &std::path::Path) -> Result<i64, ChannelError> {
         let output = tokio::process::Command::new("sqlite3")
@@ -124,6 +225,10 @@ impl IMessageChannel {
     }
 
     /// Poll for new messages since the given ROWID using sqlite3 CLI.
+    ///
+    /// Enhanced query: joins chat_message_join to detect group chats
+    /// (display_name IS NOT NULL = group) and counts attachments via
+    /// message_attachment_join.
     async fn poll_messages(
         db_path: &std::path::Path,
         since_rowid: i64,
@@ -133,7 +238,9 @@ impl IMessageChannel {
                     REPLACE(COALESCE(m.text,''), '|', ' '), \
                     m.is_from_me, \
                     COALESCE(h.id, 'unknown'), \
-                    COALESCE(c.chat_identifier, 'unknown') \
+                    COALESCE(c.chat_identifier, 'unknown'), \
+                    (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id = m.ROWID), \
+                    CASE WHEN c.display_name IS NOT NULL AND c.display_name != '' THEN 1 ELSE 0 END \
              FROM message m \
              LEFT JOIN handle h ON m.handle_id = h.ROWID \
              LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id \
@@ -169,8 +276,8 @@ impl IMessageChannel {
         let mut messages = Vec::new();
 
         for line in stdout.lines() {
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
-            if parts.len() < 5 {
+            let parts: Vec<&str> = line.splitn(7, '|').collect();
+            if parts.len() < 7 {
                 continue;
             }
 
@@ -182,6 +289,8 @@ impl IMessageChannel {
             let is_from_me = parts[2] == "1";
             let sender = parts[3].to_string();
             let chat_id = parts[4].to_string();
+            let attachment_count: i64 = parts[5].parse().unwrap_or(0);
+            let is_group = parts[6] == "1";
 
             if text.is_empty() {
                 continue;
@@ -193,6 +302,8 @@ impl IMessageChannel {
                 sender,
                 chat_id,
                 is_from_me,
+                attachment_count,
+                is_group,
             });
         }
 
@@ -245,6 +356,21 @@ end tell"#
     fn extract_recipient(chat_id: &str) -> &str {
         chat_id.rsplit(';').next().unwrap_or(chat_id)
     }
+
+    /// Determine if a sender identifier looks like a phone number.
+    fn is_phone_number(s: &str) -> bool {
+        let cleaned: String = s
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '+')
+            .collect();
+        cleaned.len() >= 10
+            && (cleaned.starts_with('+') || cleaned.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    /// Determine if a sender identifier looks like an email.
+    fn is_email(s: &str) -> bool {
+        s.contains('@') && s.contains('.')
+    }
 }
 
 #[async_trait]
@@ -272,6 +398,11 @@ impl Channel for IMessageChannel {
 
         // Spawn polling task
         tokio::spawn(async move {
+            // Deduplication set: tracks ROWIDs seen in this session to
+            // handle sqlite3 returning the same message if ROWID
+            // boundaries shift (e.g., deleted messages).
+            let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
@@ -286,6 +417,19 @@ impl Channel for IMessageChannel {
                             if msg.is_from_me {
                                 last_rowid.store(msg.rowid, Ordering::Relaxed);
                                 continue;
+                            }
+
+                            // Deduplication
+                            if seen.contains(&msg.rowid) {
+                                last_rowid.store(msg.rowid, Ordering::Relaxed);
+                                continue;
+                            }
+                            seen.insert(msg.rowid);
+
+                            // Evict old entries from dedup set (keep last 500)
+                            if seen.len() > 500 {
+                                let min_rowid = *seen.iter().min().unwrap_or(&0);
+                                seen.remove(&min_rowid);
                             }
 
                             // Check allow-list
@@ -303,6 +447,15 @@ impl Channel for IMessageChannel {
                                     "chat_id": msg.chat_id,
                                     "rowid": msg.rowid,
                                     "recipient": recipient,
+                                    "is_group": msg.is_group,
+                                    "attachment_count": msg.attachment_count,
+                                    "sender_type": if Self::is_phone_number(&msg.sender) {
+                                        "phone"
+                                    } else if Self::is_email(&msg.sender) {
+                                        "email"
+                                    } else {
+                                        "unknown"
+                                    },
                                 }));
 
                             last_rowid.store(msg.rowid, Ordering::Relaxed);
@@ -374,7 +527,7 @@ impl Channel for IMessageChannel {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Split a long message into chunks.
+/// Split a long message into chunks, preferring line-break boundaries.
 fn split_message(text: &str) -> Vec<String> {
     if text.len() <= MAX_MESSAGE_LENGTH {
         return vec![text.to_string()];
@@ -400,9 +553,16 @@ fn split_message(text: &str) -> Vec<String> {
     chunks
 }
 
+/// Escape text for safe inclusion in AppleScript strings.
+fn escape_applescript(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── extract_recipient tests ────────────────────────────────────
 
     #[test]
     fn test_extract_recipient_phone() {
@@ -429,10 +589,70 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_recipient_sms() {
+        assert_eq!(
+            IMessageChannel::extract_recipient("SMS;-;+4917612345678"),
+            "+4917612345678"
+        );
+    }
+
+    #[test]
+    fn test_extract_recipient_empty() {
+        assert_eq!(IMessageChannel::extract_recipient(""), "");
+    }
+
+    // ── sender type detection ──────────────────────────────────────
+
+    #[test]
+    fn test_is_phone_number() {
+        assert!(IMessageChannel::is_phone_number("+1234567890"));
+        assert!(IMessageChannel::is_phone_number("+4917612345678"));
+        assert!(!IMessageChannel::is_phone_number("user@icloud.com"));
+        assert!(!IMessageChannel::is_phone_number("short"));
+    }
+
+    #[test]
+    fn test_is_email() {
+        assert!(IMessageChannel::is_email("user@icloud.com"));
+        assert!(IMessageChannel::is_email("test@gmail.com"));
+        assert!(!IMessageChannel::is_email("+1234567890"));
+        assert!(!IMessageChannel::is_email("noidea"));
+    }
+
+    // ── split_message tests ────────────────────────────────────────
+
+    #[test]
     fn test_split_message_short() {
         let chunks = split_message("Hello!");
         assert_eq!(chunks, vec!["Hello!"]);
     }
+
+    #[test]
+    fn test_split_message_empty() {
+        let chunks = split_message("");
+        assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn test_split_message_newline_boundary() {
+        let mut text = "a".repeat(MAX_MESSAGE_LENGTH - 5);
+        text.push('\n');
+        text.push_str(&"b".repeat(100));
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), MAX_MESSAGE_LENGTH - 5);
+    }
+
+    // ── escape tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_escape_applescript() {
+        assert_eq!(escape_applescript(r#"say "hello""#), r#"say \"hello\""#);
+        assert_eq!(escape_applescript("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_applescript("normal"), "normal");
+    }
+
+    // ── config tests ───────────────────────────────────────────────
 
     #[test]
     fn test_default_config() {
@@ -440,5 +660,51 @@ mod tests {
         assert!(config.db_path.to_string_lossy().contains("chat.db"));
         assert!(config.allow_from.is_empty());
         assert_eq!(config.poll_interval_secs, POLL_INTERVAL_SECS);
+        assert_eq!(config.max_message_age_secs, 300);
+    }
+
+    #[test]
+    fn test_default_chat_db_path() {
+        let path = default_chat_db_path();
+        assert!(path.to_string_lossy().contains("Library/Messages/chat.db"));
+    }
+
+    #[test]
+    fn test_config_with_allow_from() {
+        let config = IMessageConfig {
+            allow_from: vec!["+1234567890".into(), "user@icloud.com".into()],
+            ..Default::default()
+        };
+        assert_eq!(config.allow_from.len(), 2);
+        assert!(config.allow_from.contains(&"+1234567890".to_string()));
+    }
+
+    // ── channel creation tests ─────────────────────────────────────
+
+    #[test]
+    fn test_new_channel_missing_db() {
+        let config = IMessageConfig {
+            db_path: PathBuf::from("/nonexistent/chat.db"),
+            ..Default::default()
+        };
+        let result = IMessageChannel::new(config);
+        assert!(result.is_err());
+    }
+
+    // ── diagnostic struct tests ────────────────────────────────────
+
+    #[test]
+    fn test_diagnostic_serializable() {
+        let diag = IMessageDiagnostic {
+            db_exists: true,
+            sqlite3_available: true,
+            osascript_available: true,
+            messages_running: false,
+            total_messages: Some(12345),
+            errors: vec!["Messages.app is not running".into()],
+        };
+        let json = serde_json::to_string(&diag).unwrap();
+        assert!(json.contains("\"db_exists\":true"));
+        assert!(json.contains("12345"));
     }
 }

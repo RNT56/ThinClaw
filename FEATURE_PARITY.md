@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-04 14:00 CET
+> **Last reconciled:** 2026-03-04 20:22 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -786,7 +786,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 | 13 | **Tool policies manager** | Allow/deny per tool | 4-6 hours | ✅ Done |
 | 14 | **Voice wake** (VAD + Sherpa-ONNX) | Voice activation with recording overlay + keyword spotting | ✅ | ✅ Full |
 | 15 | **Animated tray icon** | Activity states (loading, active, idle) | 0.5 day | ✅ Done |
-| 16 | iMessage integration | AppleScript-based, fragile, macOS-only | 3-5 days | ❌ Deferred |
+| 16 | **iMessage integration** | chat.db polling + osascript sending, group chat, attachment awareness, dedup, diagnostics | macOS-only | ✅ Implemented |
 
 ### Tier 4 — Sprint 13 New Backend APIs — ✅ All IronClaw Wired
 

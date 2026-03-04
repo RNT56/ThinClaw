@@ -54,6 +54,11 @@ impl IMessageConfig {
         if let Ok(contacts) = std::env::var("IMESSAGE_CONTACTS") {
             config.monitored_contacts = contacts.split(',').map(|s| s.trim().to_string()).collect();
         }
+        if let Ok(max_age) = std::env::var("IMESSAGE_MAX_AGE") {
+            if let Ok(secs) = max_age.parse() {
+                config.max_message_age_secs = secs;
+            }
+        }
 
         config
     }
