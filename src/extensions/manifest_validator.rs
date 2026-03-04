@@ -151,6 +151,27 @@ impl ValidationResult {
     pub fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
     }
+
+    /// Convert to a serializable response for the `openclaw_manifest_validate` Tauri command.
+    ///
+    /// Returns `{ errors: Vec<String>, warnings: Vec<String> }` matching §17.4.
+    pub fn to_response(&self) -> ValidationResponse {
+        ValidationResponse {
+            valid: self.valid,
+            errors: self.errors.iter().map(|e| e.to_string()).collect(),
+            warnings: self.warnings.iter().map(|w| w.to_string()).collect(),
+        }
+    }
+}
+
+/// Serializable validation response for `openclaw_manifest_validate`.
+///
+/// Matches §17.4 integration contract: `{ errors: Vec<String>, warnings: Vec<String> }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResponse {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// Validation errors.
@@ -164,6 +185,23 @@ pub enum ValidationError {
     TooManyPermissions { count: usize, max: usize },
 }
 
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(f, "missing required field: {}", field),
+            Self::InvalidSemver(v) => write!(f, "invalid semver: {}", v),
+            Self::UnknownPermission(p) => write!(f, "unknown permission: {}", p),
+            Self::InvalidUrl(u) => write!(f, "invalid URL: {}", u),
+            Self::NameTooLong { name, max } => {
+                write!(f, "name '{}' exceeds max length {}", name, max)
+            }
+            Self::TooManyPermissions { count, max } => {
+                write!(f, "too many permissions: {} (max {})", count, max)
+            }
+        }
+    }
+}
+
 /// Validation warnings.
 #[derive(Debug, Clone)]
 pub enum ValidationWarning {
@@ -171,6 +209,17 @@ pub enum ValidationWarning {
     NoKeywords,
     HighPrivilege(String),
     DeprecatedField(String),
+}
+
+impl std::fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingDescription => write!(f, "missing description"),
+            Self::NoKeywords => write!(f, "no keywords specified"),
+            Self::HighPrivilege(p) => write!(f, "high-privilege permission: {}", p),
+            Self::DeprecatedField(field) => write!(f, "deprecated field: {}", field),
+        }
+    }
 }
 
 /// Simple semver check: major.minor.patch
@@ -272,5 +321,60 @@ mod tests {
         info.homepage_url = Some("ftp://bad.com".into());
         let result = v.validate(&info);
         assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_to_response_valid() {
+        let v = ManifestValidator::new();
+        let result = v.validate(&valid_info());
+        let response = result.to_response();
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+    }
+
+    #[test]
+    fn test_to_response_with_errors() {
+        let v = ManifestValidator::new();
+        let mut info = valid_info();
+        info.name = "".into();
+        info.version = Some("bad".into());
+        let result = v.validate(&info);
+        let response = result.to_response();
+        assert!(!response.valid);
+        assert!(response.errors.len() >= 2);
+        assert!(response.errors[0].contains("missing required field"));
+    }
+
+    #[test]
+    fn test_to_response_serializable() {
+        let v = ManifestValidator::new();
+        let result = v.validate(&valid_info());
+        let response = result.to_response();
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"valid\":true"));
+    }
+
+    #[test]
+    fn test_validation_error_display() {
+        assert_eq!(
+            ValidationError::MissingField("name".into()).to_string(),
+            "missing required field: name"
+        );
+        assert_eq!(
+            ValidationError::InvalidSemver("bad".into()).to_string(),
+            "invalid semver: bad"
+        );
+    }
+
+    #[test]
+    fn test_validation_warning_display() {
+        assert_eq!(
+            ValidationWarning::MissingDescription.to_string(),
+            "missing description"
+        );
+        assert_eq!(
+            ValidationWarning::HighPrivilege("exec".into()).to_string(),
+            "high-privilege permission: exec"
+        );
     }
 }

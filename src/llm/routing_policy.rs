@@ -41,6 +41,9 @@ pub struct RoutingPolicy {
     rules: Vec<RoutingRule>,
     default_provider: String,
     round_robin_counter: Arc<AtomicUsize>,
+    /// Whether smart routing is enabled. When disabled, always uses default_provider.
+    /// This is the Sprint 13 "Smart Routing" toggle for Scrappy.
+    enabled: bool,
 }
 
 impl RoutingPolicy {
@@ -49,6 +52,7 @@ impl RoutingPolicy {
             rules: Vec::new(),
             default_provider: default_provider.to_string(),
             round_robin_counter: Arc::new(AtomicUsize::new(0)),
+            enabled: true,
         }
     }
 
@@ -84,7 +88,12 @@ impl RoutingPolicy {
     }
 
     /// Select a provider for the given context.
+    ///
+    /// If smart routing is disabled, always returns the default provider.
     pub fn select_provider(&self, ctx: &RoutingContext) -> String {
+        if !self.enabled {
+            return self.default_provider.clone();
+        }
         for rule in &self.rules {
             if let Some(provider) = self.matches_rule(rule, ctx) {
                 return provider;
@@ -146,6 +155,19 @@ impl RoutingPolicy {
     /// Default provider name.
     pub fn default_provider(&self) -> &str {
         &self.default_provider
+    }
+
+    /// Whether smart routing is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable smart routing.
+    ///
+    /// When disabled, `select_provider()` always returns the default provider,
+    /// ignoring all rules. This is the "Smart Routing" toggle in Scrappy UI.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 }
 
@@ -247,5 +269,28 @@ mod tests {
         // Without env vars set, defaults to "openai"
         let policy = RoutingPolicy::from_env();
         assert!(!policy.default_provider().is_empty());
+    }
+
+    #[test]
+    fn test_smart_routing_toggle() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        let mut ctx = base_ctx();
+        ctx.has_vision = true;
+
+        // Enabled: rule fires
+        assert!(policy.is_enabled());
+        assert_eq!(policy.select_provider(&ctx), "gemini");
+
+        // Disabled: falls back to default
+        policy.set_enabled(false);
+        assert!(!policy.is_enabled());
+        assert_eq!(policy.select_provider(&ctx), "openai");
+
+        // Re-enabled: rule fires again
+        policy.set_enabled(true);
+        assert_eq!(policy.select_provider(&ctx), "gemini");
     }
 }

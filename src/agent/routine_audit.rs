@@ -114,6 +114,35 @@ impl RoutineAuditLog {
     pub fn is_empty(&self) -> bool {
         self.runs.is_empty()
     }
+
+    /// Query runs by routine name with optional limit and outcome filter.
+    ///
+    /// This is the method that backs `openclaw_routine_audit_list` (and should
+    /// replace the stub in `openclaw_cron_history`). Returns newest-first.
+    ///
+    /// - `limit`: Maximum number of runs to return (default: 20 if None).
+    /// - `outcome_filter`: `"success"`, `"failure"`, or `None` for all.
+    pub fn query_by_routine(
+        &self,
+        routine_name: &str,
+        limit: Option<u32>,
+        outcome_filter: Option<&str>,
+    ) -> Vec<&RoutineRun> {
+        let limit = limit.unwrap_or(20) as usize;
+
+        let filtered = self
+            .runs
+            .iter()
+            .rev() // newest first
+            .filter(|r| r.routine_name == routine_name)
+            .filter(|r| match outcome_filter {
+                Some("success") => r.outcome.is_success(),
+                Some("failure") => r.outcome.is_failure(),
+                _ => true,
+            });
+
+        filtered.take(limit).collect()
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +257,60 @@ mod tests {
         );
         assert!(RoutineOutcome::TimedOut { timeout_ms: 100 }.is_failure());
         assert!(!RoutineOutcome::Skipped { reason: "r".into() }.is_failure());
+    }
+
+    #[test]
+    fn test_query_by_routine_default_limit() {
+        let mut log = RoutineAuditLog::new(100);
+        for i in 0..30 {
+            let mut run = make_run("daily", RoutineOutcome::Success { duration_ms: i });
+            run.id = format!("run-{}", i);
+            log.push(run);
+        }
+        // Default limit = 20
+        let results = log.query_by_routine("daily", None, None);
+        assert_eq!(results.len(), 20);
+        // Newest first
+        assert_eq!(results[0].id, "run-29");
+    }
+
+    #[test]
+    fn test_query_by_routine_with_limit() {
+        let mut log = RoutineAuditLog::new(100);
+        for i in 0..10 {
+            let mut run = make_run("daily", RoutineOutcome::Success { duration_ms: i });
+            run.id = format!("run-{}", i);
+            log.push(run);
+        }
+        let results = log.query_by_routine("daily", Some(3), None);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_query_by_routine_filter_failures() {
+        let mut log = RoutineAuditLog::new(10);
+        log.push(make_run("r", RoutineOutcome::Success { duration_ms: 1 }));
+        log.push(make_run(
+            "r",
+            RoutineOutcome::Failed {
+                error: "e".into(),
+                duration_ms: 1,
+            },
+        ));
+        log.push(make_run("r", RoutineOutcome::Success { duration_ms: 2 }));
+
+        let failures = log.query_by_routine("r", None, Some("failure"));
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].outcome.is_failure());
+
+        let successes = log.query_by_routine("r", None, Some("success"));
+        assert_eq!(successes.len(), 2);
+    }
+
+    #[test]
+    fn test_query_by_routine_no_match() {
+        let log = RoutineAuditLog::new(10);
+        let results = log.query_by_routine("nonexistent", None, None);
+        assert!(results.is_empty());
     }
 }

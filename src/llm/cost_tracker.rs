@@ -2,8 +2,12 @@
 //!
 //! Accumulates per-request cost records, provides daily/monthly
 //! aggregation, per-agent/model grouping, budget alerts, and CSV export.
+//!
+//! The [`CostSummary`] struct provides the serializable response shape
+//! for the `openclaw_cost_summary` Tauri command (see §17.4 integration contract).
 
-use std::collections::{HashMap, VecDeque};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// A single cost entry.
 #[derive(Debug, Clone)]
@@ -162,6 +166,52 @@ impl CostTracker {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Build a serializable summary matching the `openclaw_cost_summary` response shape.
+    ///
+    /// Aggregates totals, daily/monthly breakdowns, per-model/per-agent groupings,
+    /// and alert state into one response.
+    pub fn summary(&self, today: &str, _this_month: &str) -> CostSummary {
+        let mut daily: BTreeMap<String, f64> = BTreeMap::new();
+        let mut monthly: BTreeMap<String, f64> = BTreeMap::new();
+
+        for e in &self.entries {
+            // date key: first 10 chars "2026-03-04"
+            if e.timestamp.len() >= 10 {
+                let date_key = &e.timestamp[..10];
+                *daily.entry(date_key.to_string()).or_insert(0.0) += e.cost_usd;
+            }
+            // month key: first 7 chars "2026-03"
+            if e.timestamp.len() >= 7 {
+                let month_key = &e.timestamp[..7];
+                *monthly.entry(month_key.to_string()).or_insert(0.0) += e.cost_usd;
+            }
+        }
+
+        CostSummary {
+            total_cost_usd: self.total_cost(),
+            daily,
+            monthly,
+            by_model: self.cost_by_model().into_iter().collect::<BTreeMap<_, _>>(),
+            by_agent: self.cost_by_agent().into_iter().collect::<BTreeMap<_, _>>(),
+            alert_threshold_usd: self.budget.daily_limit_usd,
+            alert_triggered: self.should_alert(today),
+        }
+    }
+}
+
+/// Serializable cost summary for the `openclaw_cost_summary` Tauri command.
+///
+/// Matches the response shape agreed in §17.4 integration contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostSummary {
+    pub total_cost_usd: f64,
+    pub daily: BTreeMap<String, f64>,
+    pub monthly: BTreeMap<String, f64>,
+    pub by_model: BTreeMap<String, f64>,
+    pub by_agent: BTreeMap<String, f64>,
+    pub alert_threshold_usd: Option<f64>,
+    pub alert_triggered: bool,
 }
 
 #[cfg(test)]
@@ -275,5 +325,53 @@ mod tests {
         assert!(!tracker.is_over_daily_budget("2026-03-04"));
         assert!(!tracker.is_over_monthly_budget("2026-03"));
         assert!(!tracker.should_alert("2026-03-04"));
+    }
+
+    #[test]
+    fn test_summary_basic() {
+        let budget = BudgetConfig {
+            daily_limit_usd: Some(10.0),
+            alert_threshold: 0.8,
+            ..Default::default()
+        };
+        let mut tracker = CostTracker::new(budget);
+        tracker.record(make_entry(1.0, "2026-03-04T10:00:00Z", "gpt-4o"));
+        tracker.record(make_entry(2.0, "2026-03-04T11:00:00Z", "claude"));
+        tracker.record(make_entry(3.0, "2026-03-05T10:00:00Z", "gpt-4o"));
+
+        let summary = tracker.summary("2026-03-04", "2026-03");
+        assert!((summary.total_cost_usd - 6.0).abs() < 1e-6);
+        assert_eq!(summary.daily.len(), 2);
+        assert!((summary.daily["2026-03-04"] - 3.0).abs() < 1e-6);
+        assert!((summary.daily["2026-03-05"] - 3.0).abs() < 1e-6);
+        assert_eq!(summary.monthly.len(), 1);
+        assert!((summary.monthly["2026-03"] - 6.0).abs() < 1e-6);
+        assert_eq!(summary.by_model.len(), 2);
+        assert!((summary.by_model["gpt-4o"] - 4.0).abs() < 1e-6);
+        assert!((summary.by_model["claude"] - 2.0).abs() < 1e-6);
+        assert_eq!(summary.alert_threshold_usd, Some(10.0));
+        assert!(!summary.alert_triggered);
+    }
+
+    #[test]
+    fn test_summary_alert_triggered() {
+        let budget = BudgetConfig {
+            daily_limit_usd: Some(1.0),
+            alert_threshold: 0.8,
+            ..Default::default()
+        };
+        let mut tracker = CostTracker::new(budget);
+        tracker.record(make_entry(0.9, "2026-03-04T10:00:00Z", "m"));
+        let summary = tracker.summary("2026-03-04", "2026-03");
+        assert!(summary.alert_triggered);
+    }
+
+    #[test]
+    fn test_summary_serializable() {
+        let tracker = CostTracker::new(BudgetConfig::default());
+        let summary = tracker.summary("2026-03-04", "2026-03");
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("total_cost_usd"));
+        assert!(json.contains("alert_triggered"));
     }
 }

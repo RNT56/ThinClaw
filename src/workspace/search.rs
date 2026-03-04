@@ -197,6 +197,9 @@ impl SearchResult {
 /// 1. Content excerpt... [source: README.md]
 /// 2. Another piece... [source: docs/guide.md, p.3]
 /// ```
+///
+/// Reserved for use when wiring citations into `build_appendix()` search output.
+#[allow(dead_code)]
 pub fn format_citations(results: &[SearchResult]) -> String {
     let mut output = String::new();
     for (i, result) in results.iter().enumerate() {

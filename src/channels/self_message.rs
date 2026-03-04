@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_bypass_disabled() {
-        let mut config = SelfMessageConfig {
+        let config = SelfMessageConfig {
             bot_user_ids: vec!["bot-123".to_string()],
             enabled: false,
         };

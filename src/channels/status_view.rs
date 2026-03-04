@@ -1,6 +1,9 @@
 //! Full channel status view.
 //!
 //! Per-channel state, message counters, error info, formatted table/JSON output.
+//!
+//! The [`ChannelStatusEvent`] struct provides the SSE event shape
+//! for real-time status updates via `openclaw-event` (see §17.4).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,6 +39,7 @@ impl ChannelViewState {
 }
 
 /// Status entry for a single channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatusEntry {
     pub name: String,
     pub channel_type: String,
@@ -48,6 +52,7 @@ pub struct ChannelStatusEntry {
 }
 
 /// Aggregated status summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSummary {
     pub total: usize,
     pub running: usize,
@@ -176,6 +181,35 @@ impl ChannelStatusView {
 impl Default for ChannelStatusView {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// SSE event payload for channel status changes.
+///
+/// Emitted via `AppHandle::emit("openclaw-event", ...)` with `kind: "ChannelStatus"`.
+/// Scrappy subscribes to these for real-time status updates.
+/// See §17.4 integration contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelStatusEvent {
+    /// Always `"ChannelStatus"` for event routing.
+    pub kind: String,
+    /// Channel name (e.g., "telegram", "discord").
+    pub channel: String,
+    /// New state label (e.g., "running", "reconnecting", "failed").
+    pub state: String,
+    /// ISO 8601 timestamp.
+    pub timestamp: String,
+}
+
+impl ChannelStatusEvent {
+    /// Create a status change event from an entry.
+    pub fn from_entry(entry: &ChannelStatusEntry) -> Self {
+        Self {
+            kind: "ChannelStatus".to_string(),
+            channel: entry.name.clone(),
+            state: entry.state.label().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
     }
 }
 
@@ -315,5 +349,38 @@ mod tests {
     fn test_default_empty() {
         let view = ChannelStatusView::default();
         assert!(view.is_empty());
+    }
+
+    #[test]
+    fn test_channel_status_event_from_entry() {
+        let entry = make_entry("telegram", ChannelViewState::Running { uptime_secs: 100 });
+        let event = ChannelStatusEvent::from_entry(&entry);
+        assert_eq!(event.kind, "ChannelStatus");
+        assert_eq!(event.channel, "telegram");
+        assert_eq!(event.state, "running");
+        assert!(!event.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_channel_status_event_serializable() {
+        let entry = make_entry(
+            "discord",
+            ChannelViewState::Failed {
+                error: "timeout".into(),
+                failed_at: "now".into(),
+            },
+        );
+        let event = ChannelStatusEvent::from_entry(&entry);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"kind\":\"ChannelStatus\""));
+        assert!(json.contains("\"channel\":\"discord\""));
+        assert!(json.contains("\"state\":\"failed\""));
+    }
+
+    #[test]
+    fn test_channel_status_entry_serializable() {
+        let entry = make_entry("slack", ChannelViewState::Running { uptime_secs: 50 });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"name\":\"slack\""));
     }
 }

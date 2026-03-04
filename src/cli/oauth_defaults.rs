@@ -8,6 +8,7 @@
 //! - **Google** (Desktop App): Calendar, Drive, Gmail, Sheets, etc.
 //! - **GitHub** (OAuth App): GitHub API access for code, issues, PRs.
 //! - **Notion** (Integration): Notion workspace access.
+//! - **Gmail** (Desktop App): Gmail-specific variant with pub/sub scopes.
 //!
 //! # Built-in Credentials
 //!
@@ -75,7 +76,7 @@ const NOTION_CLIENT_SECRET: &str = match option_env!("IRONCLAW_NOTION_CLIENT_SEC
 /// Returns `None` if no built-in credentials are configured for that provider.
 pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     match secret_name {
-        "google_oauth_token" => Some(OAuthCredentials {
+        "google_oauth_token" | "gmail_oauth_token" => Some(OAuthCredentials {
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
         }),
@@ -88,6 +89,46 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
             client_secret: NOTION_CLIENT_SECRET,
         }),
         _ => None,
+    }
+}
+
+/// Gmail-specific OAuth configuration.
+///
+/// Uses the same Google Desktop App credentials as `google_oauth_token`,
+/// but with scopes specific to Gmail access and pub/sub notifications.
+/// This is what `cloud_oauth_start("gmail")` dispatches to in Scrappy.
+pub struct GmailOAuthConfig;
+
+impl GmailOAuthConfig {
+    /// OAuth scopes required for Gmail integration.
+    pub const SCOPES: &'static [&'static str] = &[
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/pubsub",
+    ];
+
+    /// The authorization endpoint.
+    pub const AUTH_URL: &'static str = "https://accounts.google.com/o/oauth2/v2/auth";
+
+    /// The token exchange endpoint.
+    pub const TOKEN_URL: &'static str = "https://oauth2.googleapis.com/token";
+
+    /// The redirect URI (uses the shared callback port).
+    pub fn redirect_uri() -> String {
+        format!("{}/callback", callback_url())
+    }
+
+    /// Build the full authorization URL with PKCE.
+    pub fn auth_url(state: &str, code_challenge: &str) -> String {
+        format!(
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
+            Self::AUTH_URL,
+            GOOGLE_CLIENT_ID,
+            urlencoding::encode(&Self::redirect_uri()),
+            urlencoding::encode(&Self::SCOPES.join(" ")),
+            urlencoding::encode(state),
+            code_challenge,
+        )
     }
 }
 
@@ -399,7 +440,8 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::cli::oauth_defaults::{
-        builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
+        GmailOAuthConfig, builtin_credentials, callback_host, callback_url, is_loopback_host,
+        landing_html,
     };
 
     /// Serializes env-mutating tests to prevent parallel races.
@@ -566,5 +608,52 @@ mod tests {
         assert!(html.contains("IronClaw"));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
+    }
+
+    #[test]
+    fn test_gmail_returns_credentials() {
+        let creds = builtin_credentials("gmail_oauth_token");
+        // Like Google, may be placeholder in dev mode
+        assert!(creds.is_some());
+        let creds = creds.unwrap();
+        assert!(!creds.client_id.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_shares_google_credentials() {
+        let google = builtin_credentials("google_oauth_token").unwrap();
+        let gmail = builtin_credentials("gmail_oauth_token").unwrap();
+        assert_eq!(google.client_id, gmail.client_id);
+        assert_eq!(google.client_secret, gmail.client_secret);
+    }
+
+    #[test]
+    fn test_gmail_scopes() {
+        assert_eq!(GmailOAuthConfig::SCOPES.len(), 3);
+        assert!(
+            GmailOAuthConfig::SCOPES
+                .iter()
+                .any(|s| s.contains("gmail.readonly"))
+        );
+        assert!(
+            GmailOAuthConfig::SCOPES
+                .iter()
+                .any(|s| s.contains("gmail.send"))
+        );
+        assert!(
+            GmailOAuthConfig::SCOPES
+                .iter()
+                .any(|s| s.contains("pubsub"))
+        );
+    }
+
+    #[test]
+    fn test_gmail_auth_url_contains_required_params() {
+        let url = GmailOAuthConfig::auth_url("test-state", "test-challenge");
+        assert!(url.contains("accounts.google.com"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("code_challenge=test-challenge"));
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("gmail"));
     }
 }
