@@ -19,6 +19,7 @@ pub mod media_cache_config;
 mod pdf;
 pub mod sticker;
 pub mod tts;
+pub mod tts_streaming;
 mod types;
 pub mod video;
 
@@ -28,5 +29,8 @@ pub use image::ImageExtractor;
 pub use limits::MediaLimits;
 pub use pdf::PdfExtractor;
 pub use tts::{TtsConfig, TtsError, TtsOutputFormat, TtsProvider, TtsSynthesizer, TtsVoice};
+pub use tts_streaming::{
+    IncrementalTtsConfig, SentenceChunker, TtsChunk, TtsChunkFormat, TtsPlaybackProgress,
+};
 pub use types::{MediaContent, MediaExtractError, MediaExtractor, MediaPipeline, MediaType};
 pub use video::{VideoAnalysis, VideoAnalysisConfig, VideoAnalyzer, VideoError, VideoMetadata};

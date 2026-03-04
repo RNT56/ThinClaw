@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-04 12:55 CET
+> **Last reconciled:** 2026-03-04 13:30 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -224,12 +224,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | AWS Bedrock | ✅ | ✅ | P3 | OpenAI-to-Bedrock adapter with Converse API translation ([`src/llm/bedrock.rs`](src/llm/bedrock.rs)) |
 | Google Gemini | ✅ | ✅ | P3 | AI Studio adapter with system instruction support ([`src/llm/gemini.rs`](src/llm/gemini.rs)) |
-| NVIDIA API | ✅ | ❌ | P3 | Could use OpenAI-compatible |
-| Perplexity | ✅ | ❌ | P3 | Could use OpenAI-compatible |
-| MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
-| GLM-5 | ✅ | ❌ | P3 | |
+| NVIDIA API | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Nvidia` — pre-configured OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
+| Perplexity | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Perplexity` — `sonar-pro` default model ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
+| MiniMax | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::MiniMax` with `X-MiniMax-Version` header ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
+| GLM-5 | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Glm` — Zhipu `glm-4-plus` default ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
-| llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
+| llama.cpp (native) | ❌ | ✅ | P3 | `LlamaModel` trait + `LlamaConfig` + `LlamaCppStub` fallback, ready for `llama-cpp-2` FFI ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs)) |
 
 ### Model Features
 
@@ -262,7 +262,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Vision model integration | ✅ | ✅ | P2 | `ImageExtractor::format_for_llm()` — base64 data-URI for multimodal LLMs |
 | TTS (Edge TTS) | ✅ | ✅ | - | `TtsSynthesizer` with Edge TTS provider support |
 | TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
-| Incremental TTS playback | ✅ | ❌ | P3 | iOS progressive playback |
+| Incremental TTS playback | ✅ | ✅ | P3 | `SentenceChunker` + `TtsChunk` streaming via SSE, progressive chunk synthesis ([`src/media/tts_streaming.rs`](src/media/tts_streaming.rs)) |
 | Sticker-to-image | ✅ | ✅ | P3 | WebP/TGS/WebM detection + ffmpeg conversion ([`src/media/sticker.rs`](src/media/sticker.rs)) |
 | Media pipeline integration | ❌ | ✅ | - | `MediaPipeline` auto-wired into `process_user_input()` via `IncomingMessage.attachments` |
 
@@ -914,7 +914,8 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 - ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
 - ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))
 - ✅ Auto model discovery from endpoints ([`src/llm/discovery.rs`](src/llm/discovery.rs): OpenAI/Anthropic/Ollama endpoint scanning with auto-discover)
-- ❌ `llama.cpp` native Rust bindings
+- ✅ `llama.cpp` native interface — `LlamaModel` trait, `LlamaConfig` (GPU layers, sampling, context length), `ModelLoadStatus`, `LlamaCppStub` fallback ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs))
+- ✅ Provider presets — NVIDIA, Perplexity, MiniMax, GLM-5 pre-configured for OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs))
 
 **Memory & Search**
 - ✅ Citation support in search results ([`src/workspace/search.rs`](src/workspace/search.rs): `Citation` struct with title/path/URL/page/line_range + `format_citations()` inline rendering)
@@ -940,7 +941,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 **Media**
 - ✅ Video keyframe extraction — `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)): ffprobe metadata + ffmpeg keyframe/audio extraction with graceful fallback
 - ✅ Media caching layer — `MediaCache` with SHA-256 keying, TTL expiry, LRU eviction ([`src/media/cache.rs`](src/media/cache.rs))
-- ❌ Incremental TTS playback
+- ✅ Incremental TTS playback — `SentenceChunker` + `TtsChunk` SSE streaming with sentence-aligned chunking ([`src/media/tts_streaming.rs`](src/media/tts_streaming.rs))
 - ✅ Telegram sticker-to-image conversion — WebP/TGS/WebM magic-byte detection + ffmpeg pipeline ([`src/media/sticker.rs`](src/media/sticker.rs))
 
 **UI & Control**
