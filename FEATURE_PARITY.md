@@ -565,6 +565,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 > **Sprint 12 shipped 12 new backend APIs** — the items below are new gaps opened by Sprint 12.
 > Previously completed items (hooks, plugins, config editor, memory search, session export, pairing, doctor, failover, compaction, tool policies, stuck loop, URL allowlist) are all ✅ Done.
+> See §17.4 for the integration contract (command names, data shapes, SSE events) agreed with Scrappy agent.
 
 | IronClaw Feature | API / Module | Scrappy UI Needed | Effort | Status |
 |-----------------|-------------|-------------------|--------|--------|
@@ -590,6 +591,74 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 - Toggle in `OpenClawChatView.tsx` now calls backend command instead of localStorage
 - Budget slider (1K–32K tokens) accessible via right-click on 🧠 button
 - Removed `"[Think step-by-step]"` message prefix injection from `handleSend`
+
+### 17.4 Integration Contract — Sprint 12 APIs
+
+> **Agreed with Scrappy agent:** 2026-03-04 11:00 CET
+>
+> All Tauri commands use `openclaw_*` prefix. No REST gateway — everything through Tauri IPC.
+> Scrappy uses `specta` for type generation via `bindings.ts`.
+
+#### Tauri Command Specifications
+
+| Command | Module | Params | Response Shape | Notes |
+|---------|--------|--------|---------------|-------|
+| `openclaw_cost_summary` | `cost_tracker.rs` | — | `{ total_cost_usd, daily: {date→cost}, monthly: {month→cost}, by_model: {model→cost}, by_agent: {agent→cost}, alert_threshold_usd, alert_triggered }` | Single rich endpoint; frontend picks what to display |
+| `openclaw_cost_export_csv` | `cost_tracker.rs` | — | `String` (CSV text) | For download/clipboard |
+| `openclaw_channel_status_list` | `status_view.rs` | — | `Vec<ChannelStatusEntry>` with state/uptime/counters | Poll on mount; SSE for live updates |
+| `openclaw_agents_list` | `management_api.rs` | — | **Extend existing** `Vec<AgentProfile>` with `is_default: Option<bool>`, `status: Option<String>`, `session_count: Option<u32>`, `last_active_at: Option<String>` | ⚠️ Already exists in `rpc.rs:834` — add fields as `Option<>` for backward compat |
+| `openclaw_agents_set_default` | `management_api.rs` | `agent_id: String` | `Result<(), String>` | Follow `State<'_, OpenClawManager> + State<'_, IronClawState>` pattern |
+| `openclaw_clawhub_search` | `clawhub.rs` | `query: String, filters: Option<...>` | Catalog entries | **Proxied** through IronClaw — `CLAWHUB_API_KEY` stays server-side |
+| `openclaw_clawhub_install` | `clawhub.rs` | `plugin_id: String` | `Result<InstallResult, String>` | Installs to `~/.ironclaw/tools/` |
+| `openclaw_routine_audit_list` | `routine_audit.rs` | `routine_key: String, limit: Option<u32>, outcome: Option<String>` | `Vec<RoutineAuditEntry>` | Default limit=20; outcome filter: `"success"` \| `"failure"` \| null |
+| `openclaw_cache_stats` | `response_cache_ext.rs` | — | `CacheStats { hits, misses, evictions, size, hit_rate }` | |
+| `openclaw_export_session` | `session_export.rs` | `session_key: String, format: Option<String>` | `SessionExportResponse` | **Extend existing** — add `format` param (`"md"` \| `"json"` \| `"csv"` \| `"html"` \| `"txt"`, default `"md"`) |
+| `openclaw_plugin_lifecycle_list` | `lifecycle_hooks.rs` | — | `Vec<(String, LifecycleEvent)>` | |
+| `openclaw_manifest_validate` | `manifest_validator.rs` | `plugin_id: String` | `{ errors: Vec<String>, warnings: Vec<String> }` | |
+
+#### SSE Event Pattern
+
+Channel status changes should be emitted via the existing `AppHandle::emit("openclaw-event", ...)` pipeline:
+
+```json
+{
+  "kind": "ChannelStatus",
+  "channel": "telegram",
+  "state": "Reconnecting",
+  "timestamp": "2026-03-04T10:30:00Z"
+}
+```
+
+Scrappy subscribes to `openclaw-event` for live updates + polls `openclaw_channel_status_list` on mount. Fallback poll interval: 10s.
+
+#### Gmail OAuth Flow
+
+Gmail uses Scrappy's existing `cloud_oauth_start` / `cloud_oauth_complete` PKCE flow:
+
+1. Frontend calls `cloudOauthStart("gmail")` → gets `{ auth_url, code_verifier }`
+2. Opens browser → user authenticates with Google
+3. Google redirects to localhost callback
+4. Frontend calls `cloudOauthComplete("gmail", code, codeVerifier)`
+5. Backend stores tokens in Keychain via `KeychainSecretsAdapter`
+
+**IronClaw action required:** Add `"gmail"` variant to `oauth_defaults.rs` with Google OAuth client credentials (client_id, redirect_uri, scopes: `gmail.readonly`, `gmail.send`, `pubsub`). Do NOT build a separate `/auth/gmail` gateway endpoint.
+
+#### ClawHub Architecture Decision
+
+**Proxy through IronClaw gateway** (not direct frontend → ClawHub):
+- `CLAWHUB_API_KEY` stays server-side (security)
+- `CatalogCache` TTL benefits all consumers (caching)
+- Consistent with all-via-Tauri-IPC pattern
+
+#### Known Issues to Fix
+
+1. **`openclaw_cron_history` is a stub** — Returns `[]` always (`rpc.rs:203`). Frontend `handleViewHistory()` in `OpenClawAutomations.tsx` already calls it with `(key, limit)` args. **Action:** Wire to `RoutineAuditLog`.
+2. **`openclaw_agents_list` missing fields** — Returns bare `Vec<AgentProfile>` (id, name, url, token, mode, auto_connect). Missing: `is_default`, `status`, `session_count`. **Action:** Extend `AgentProfile` with `Option<>` fields.
+3. **`openclaw_channels_list` reads env vars** — Currently uses `OpenClawManager` + env vars instead of IronClaw Agent API. **Action:** Expose `channels_status()` API on Agent for cleaner integration.
+
+#### Test Pattern
+
+Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts command name + payload. New commands should get corresponding test stubs in `openclaw.test.ts` when frontend wrappers are added.
 
 ### Owner: Scrappy Agent
 
@@ -625,25 +694,25 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 ## 19. IronClaw → Scrappy Integration Tracker
 
-> **Last updated:** 2026-03-04 10:48 CET
+> **Last updated:** 2026-03-04 11:02 CET — enriched with Scrappy agent feedback
 
 ### 19.1 Shipped — Scrappy UI Needed or In Progress
 
-| IronClaw Feature | Shipped | Scrappy Work Needed |
-|-----------------|---------|---------------------|
-| **Multi-agent picker** | ✅ `AgentManagementStore` | Agent selector in Scrappy sidebar with status badges + set-default |
-| **Session pruning** | ✅ CLI `sessions prune` | Pruning config (max sessions, age cutoff) in settings |
-| **Channel status view** | ✅ `ChannelStatusView` | Full per-channel status panel (state, uptime, counters) replacing basic channel list |
-| **Gmail channel** | ✅ `GmailConfig` + pub/sub | Gmail card in `OpenClawChannels.tsx` with OAuth + label filter config |
-| **LLM cost tracker** | ✅ `CostTracker` | Cost dashboard: daily/monthly spend chart, per-model breakdown, budget alerts, CSV export |
-| **LLM routing policy** | ✅ `RoutingPolicy` | Routing rule builder panel in provider settings |
-| **ClawHub browser** | ✅ `CatalogCache` | Plugin discovery UI — search ClawHub catalog, one-click install |
-| **Plugin lifecycle log** | ✅ `AuditLogHook` | Lifecycle event log tab in plugin manager panel |
-| **Extension health badges** | ✅ `ExtensionHealthMonitor` | Health status badge on each channel/plugin card; summary pane |
-| **Routine run history** | ✅ `RoutineAuditLog` | Run history panel in automations: outcome, duration, per-routine success rate |
-| **Session export formats** | ✅ `SessionExporter` (5 formats) | Format picker dropdown in export button (currently markdown-only) |
-| **Response cache stats** | ✅ `CachedResponseStore` | Cache hit rate + size indicator in provider settings |
-| **Manifest validation feedback** | ✅ `ManifestValidator` | Error/warning badges in plugin install flow |
+| IronClaw Feature | Shipped | Scrappy Work Needed | Scrappy State |
+|-----------------|---------|---------------------|---------------|
+| **Multi-agent picker** | ✅ `AgentManagementStore` | Sidebar dropdown + full settings panel; extend `AgentProfile` with `is_default`/`status`/`session_count` `Option<>` fields | ⚠️ `openclaw_agents_list` exists but missing fields |
+| **Session pruning** | ✅ CLI `sessions prune` | Pruning config (max sessions, age cutoff) in settings | Not started |
+| **Channel status view** | ✅ `ChannelStatusView` | Full per-channel status panel; SSE push `kind: "ChannelStatus"` + poll mount | ⚠️ `OpenClawChannels.tsx` reads enabled/disabled only — needs state/uptime/counters |
+| **Gmail channel** | ✅ `GmailConfig` + pub/sub | Gmail card in `OpenClawChannels.tsx`; OAuth via existing `cloud_oauth_start("gmail")` PKCE flow | Not started — add `"gmail"` to `oauth_defaults.rs` |
+| **LLM cost tracker** | ✅ `CostTracker` | Cost dashboard via `openclaw_cost_summary` — summary card + per-model chart + alert badge | Not started |
+| **LLM routing policy** | ✅ `RoutingPolicy` | Advanced settings, collapsed by default; "Smart Routing" toggle = Sprint 13, full rule builder = Sprint 14 | Not started |
+| **ClawHub browser** | ✅ `CatalogCache` | Plugin discovery via `openclaw_clawhub_search/install` — proxied through IronClaw | Not started — `OpenClawPlugins.tsx` exists for local only |
+| **Plugin lifecycle log** | ✅ `AuditLogHook` | Lifecycle event log tab via `openclaw_plugin_lifecycle_list` | Not started |
+| **Extension health badges** | ✅ `ExtensionHealthMonitor` | Health badge on channel/plugin cards | Not started |
+| **Routine run history** | ✅ `RoutineAuditLog` | Wire to **existing `openclaw_cron_history` stub** (`rpc.rs:203` currently returns `[]`) | ⚠️ Frontend `handleViewHistory()` already calls the stub — just needs backend wiring |
+| **Session export formats** | ✅ `SessionExporter` (5 formats) | Add `format: Option<String>` param to existing `openclaw_export_session`; add format picker + save-to-file option | Not started |
+| **Response cache stats** | ✅ `CachedResponseStore` | Cache stats indicator via `openclaw_cache_stats` | Not started |
+| **Manifest validation feedback** | ✅ `ManifestValidator` | Error/warning badges via `openclaw_manifest_validate` | Not started |
 
 ### 19.2 Upcoming — IronClaw Not Yet Shipped
 
@@ -707,24 +776,33 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 ### Tier 4 — Sprint 12 New Backend APIs (needs Scrappy UI)
 
 > These are net-new IronClaw capabilities from Sprint 12 that have no Scrappy UI yet.
-> See §19 for full details.
+> See §17.4 for the full integration contract (command names, data shapes, SSE events).
+> See §19.1 for Scrappy-side progress state.
 
-| # | Action | Backend | Effort | Status |
-|---|--------|---------|--------|--------|
-| 17 | **Multi-agent picker in sidebar** | `AgentManagementStore` (`management_api.rs`) | 1-2 days | ❌ Todo |
-| 18 | **LLM cost dashboard** | `CostTracker` with budgets + CSV export (`cost_tracker.rs`) | 2-3 days | ❌ Todo |
-| 19 | **Channel status panel** | `ChannelStatusView` with state machine (`status_view.rs`) | 1-2 days | ❌ Todo |
-| 20 | **ClawHub plugin browser** | `CatalogCache` search + browse (`clawhub.rs`) | 1-2 days | ❌ Todo |
-| 21 | **Routine run history** | `RoutineAuditLog` ring-buffer (`routine_audit.rs`) | 1 day | ❌ Todo |
-| 22 | **Gmail channel card** | `GmailConfig` + pub/sub wiring (`gmail_wiring.rs`) | 1 day | ❌ Todo |
-| 23 | **Extension health badges** | `ExtensionHealthMonitor` state machine (`ext_health_monitor.rs`) | 0.5 day | ❌ Todo |
-| 24 | **Session export format picker** | `SessionExporter` 5 formats (`session_export.rs`) | 0.5 day | ❌ Todo |
-| 25 | **LLM routing rule builder** | `RoutingPolicy` 6 rule types (`routing_policy.rs`) | 1-2 days | ❌ Todo |
-| 26 | **Plugin lifecycle log tab** | `AuditLogHook` events (`lifecycle_hooks.rs`) | 0.5 day | ❌ Todo |
-| 27 | **Manifest validation feedback** | `ManifestValidator` errors/warnings (`manifest_validator.rs`) | 0.5 day | ❌ Todo |
-| 28 | **Response cache stats** | `CachedResponseStore` hit/miss (`response_cache_ext.rs`) | 0.5 day | ❌ Todo |
+| # | Action | Backend | Tauri Command | Effort | Priority | Status |
+|---|--------|---------|---------------|--------|----------|--------|
+| 17 | **Multi-agent picker in sidebar** | `AgentManagementStore` | `openclaw_agents_list` (extend) + `openclaw_agents_set_default` | 1-2 days | Sprint 13 | ⚠️ Backend hook exists, missing fields |
+| 18 | **LLM cost dashboard** | `CostTracker` | `openclaw_cost_summary` / `openclaw_cost_export_csv` | 2-3 days | Sprint 13 | ❌ Todo |
+| 19 | **Channel status panel** | `ChannelStatusView` | `openclaw_channel_status_list` + SSE `kind: "ChannelStatus"` | 1-2 days | Sprint 13 | ⚠️ `OpenClawChannels.tsx` reads basic fields only |
+| 20 | **ClawHub plugin browser** | `CatalogCache` | `openclaw_clawhub_search` / `openclaw_clawhub_install` | 1-2 days | Sprint 13 | ❌ Todo |
+| 21 | **Routine run history** | `RoutineAuditLog` | `openclaw_routine_audit_list` (wire existing `openclaw_cron_history` stub) | 1 day | Sprint 13 | ⚠️ Frontend calls stub that returns `[]` |
+| 22 | **Gmail channel card** | `GmailConfig` | Gmail card + `cloud_oauth_start("gmail")` PKCE flow | 1 day | Sprint 13 | ❌ Todo — add `"gmail"` to `oauth_defaults.rs` |
+| 23 | **Extension health badges** | `ExtensionHealthMonitor` | (via `openclaw_channel_status_list` or dedicated) | 0.5 day | Sprint 13 | ❌ Todo |
+| 24 | **Session export format picker** | `SessionExporter` | Extend `openclaw_export_session` with `format: Option<String>` | 0.5 day | Sprint 13 | ❌ Todo |
+| 25 | **LLM routing rule builder** | `RoutingPolicy` | (TBD) | 1-2 days | **Sprint 14** | ❌ Deferred — "Smart Routing" toggle Sprint 13, full builder Sprint 14 |
+| 26 | **Plugin lifecycle log tab** | `AuditLogHook` | `openclaw_plugin_lifecycle_list` | 0.5 day | Sprint 13 | ❌ Todo |
+| 27 | **Manifest validation feedback** | `ManifestValidator` | `openclaw_manifest_validate` | 0.5 day | Sprint 13 | ❌ Todo |
+| 28 | **Response cache stats** | `CachedResponseStore` | `openclaw_cache_stats` | 0.5 day | Sprint 13 | ❌ Todo |
 
-**Tier 4 Total:** ~12 days of Scrappy frontend work
+**Tier 4 Total:** ~12 days of Scrappy frontend work (~10 days Sprint 13 + ~2 days Sprint 14)
+
+### Tier 5 — Sprint 14 / Deferred
+
+| # | Action | Notes |
+|---|--------|-------|
+| 25 | **Full LLM routing rule builder** | Advanced rule editor UI (Sprint 14) — Sprint 13 ships toggle only |
+| 16 | **iMessage integration** | P4, AppleScript-based, macOS-only |
+| — | **Session pruning UI** | Pruning config in settings (low priority) |
 
 ### Owner: Scrappy Agent
 
@@ -732,7 +810,7 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 ## Implementation Priorities (IronClaw)
 
-> **Last updated:** 2026-03-03 13:53 CET — Sprint 5 complete, reconciled with Scrappy agent + codebase audit
+> **Last updated:** 2026-03-04 11:02 CET — Sprint 12 complete, Sprint 13 IronClaw todos identified
 >
 > All open IronClaw work aggregated from project artifacts into a single prioritized list.
 > For Scrappy-specific priorities, see §20 above.
