@@ -9,6 +9,7 @@
 
 pub mod bedrock;
 pub mod circuit_breaker;
+pub mod cost_tracker;
 pub mod costs;
 pub mod discovery;
 pub mod embeddings;
@@ -20,8 +21,10 @@ pub mod llms_txt;
 mod provider;
 mod reasoning;
 pub mod response_cache;
+pub mod response_cache_ext;
 pub mod retry;
 mod rig_adapter;
+pub mod routing_policy;
 pub mod smart_routing;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};

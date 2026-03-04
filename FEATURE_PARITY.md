@@ -285,7 +285,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
 | Provider plugins | ✅ | ✅ | `ProviderPlugin` trait + capabilities ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |
-| ClawHub registry | ✅ | ❌ | Discovery |
+| ClawHub registry | ✅ | ✅ | `ClawHubConfig` + `CatalogCache` with TTL, search, merge ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs)) |
 | `before_agent_start` hook | ✅ | ✅ | `HookPoint::BeforeAgentStart` — fires before agent main loop, can reject startup |
 | `before_message_write` hook | ✅ | ✅ | `HookPoint::BeforeMessageWrite` — fires before channel write, can modify/suppress |
 | `llm_input`/`llm_output` hooks | ✅ | ✅ | Before/after hook pipeline with priority ordering ([`src/llm/llm_hooks.rs`](src/llm/llm_hooks.rs)) |
@@ -406,7 +406,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions |
-| Channel status view | ✅ | 🚧 | P2 | Gateway status widget, full channel view pending |
+| Channel status view | ✅ | ✅ | P2 | `ChannelStatusView` with per-channel state machine, table/JSON format ([`src/channels/status_view.rs`](src/channels/status_view.rs)) |
 | Agent management | ✅ | ✅ | P3 | CLI: `agents list/add/remove/show/set-default`; `AgentRouter` dispatch pipeline |
 | Model selection | ✅ | ✅ | - | TUI only |
 | Config editing | ✅ | ❌ | P3 | |
@@ -447,7 +447,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
 | Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget lifecycle event delivery |
 | Heartbeat system | ✅ | ✅ | - | Periodic execution |
-| Gmail pub/sub | ✅ | ❌ | P3 | |
+| Gmail pub/sub | ✅ | ✅ | P3 | `GmailConfig` + `parse_pubsub_push()` + sender filtering ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -825,11 +825,11 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 **UI & Control**
 - ✅ Canvas system (A2UI) — `CanvasTool` + `CanvasStore` + canvas gateway routes ([`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs))
 - ❌ WebChat theme sync (dark/light)
-- 🚧 Agent management UI — backend shipped (CLI + AgentRouter), Scrappy sidebar picker needed
+- ✅ Agent management API — `AgentManagementStore` with CRUD, default tracking, status updates ([`src/agent/management_api.rs`](src/agent/management_api.rs))
 - ❌ Config editing UI
 
 **Plugin System**
-- ❌ ClawHub registry integration
+- ✅ ClawHub registry — `ClawHubConfig` + `CatalogCache` ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs))
 - ✅ HTTP path registration for plugins — `PluginRouter` ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs))
 - ✅ Auth / Memory / Provider plugin types — trait interfaces ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs))
 

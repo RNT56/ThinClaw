@@ -16,8 +16,12 @@
 //!    -> tool_activate("telegram")  -> configures credentials, starts channel
 //! ```
 
+pub mod clawhub;
 pub mod discovery;
+pub mod ext_health_monitor;
+pub mod lifecycle_hooks;
 pub mod manager;
+pub mod manifest_validator;
 pub mod plugin_interfaces;
 pub mod plugin_manifest;
 pub mod plugin_routes;

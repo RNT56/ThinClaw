@@ -32,6 +32,7 @@ mod pairing;
 mod registry;
 #[cfg(feature = "repl")]
 mod service;
+pub mod session_export;
 pub mod sessions;
 pub mod status;
 pub mod subagent_spawn;
