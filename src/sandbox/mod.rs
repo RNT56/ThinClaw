@@ -88,8 +88,11 @@
 pub mod config;
 pub mod container;
 pub mod detect;
+pub mod docker_chromium;
+pub mod docker_init;
 pub mod error;
 pub mod manager;
+pub mod podman;
 pub mod proxy;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};

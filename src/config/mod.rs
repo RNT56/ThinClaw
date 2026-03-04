@@ -15,6 +15,8 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 mod llm;
+pub mod mdns_discovery;
+pub mod model_compat;
 pub mod network_modes;
 mod routines;
 mod safety;

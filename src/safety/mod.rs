@@ -10,9 +10,11 @@
 pub mod auth_profiles;
 mod credential_detect;
 pub mod dangerous_tools;
+pub mod device_pairing;
 pub mod elevated;
 pub mod key_rotation;
 mod leak_detector;
+pub mod media_url;
 mod policy;
 mod sanitizer;
 pub mod skill_path;

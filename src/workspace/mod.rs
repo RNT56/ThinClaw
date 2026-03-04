@@ -41,12 +41,16 @@
 //! 4. **Hybrid search**: Vector similarity + BM25 full-text via RRF
 
 mod chunker;
+pub mod citations;
 mod document;
 mod embeddings;
 pub mod hygiene;
+pub mod lancedb;
+pub mod qmd;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
+pub mod sqlite_vec;
 
 pub use chunker::{ChunkConfig, ChunkingStrategy, chunk, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};

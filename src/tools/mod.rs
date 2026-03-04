@@ -7,6 +7,7 @@
 //! - Delegate tasks to other services
 //! - Build new software and tools
 
+pub mod browser_args;
 pub mod builder;
 pub mod builtin;
 pub mod intent_display;

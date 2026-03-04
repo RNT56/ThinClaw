@@ -15,6 +15,7 @@ mod audio;
 pub mod cache;
 mod image;
 pub mod limits;
+pub mod media_cache_config;
 mod pdf;
 pub mod sticker;
 pub mod tts;

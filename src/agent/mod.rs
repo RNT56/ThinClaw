@@ -21,6 +21,7 @@ mod dispatcher;
 pub mod global_session;
 mod heartbeat;
 pub mod job_monitor;
+pub mod presence;
 mod router;
 pub mod routine;
 pub mod routine_engine;

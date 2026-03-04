@@ -45,13 +45,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Canvas hosting | ✅ | ✅ | `CanvasTool` (621 LOC) + `CanvasStore` + canvas gateway routes (`/canvas/:panel_id` HTML, `/canvas/api/panels` JSON); [`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs) |
 | Gateway lock (PID-based) | ✅ | ✅ | `gateway start` writes PID to `~/.ironclaw/gateway.pid`; launchd/systemd keepalive via `ironclaw service` |
 | launchd/systemd integration | ✅ | ✅ | Full `service.rs` (358 LOC, [`src/service.rs`](src/service.rs)) — install/start/stop/status/uninstall; macOS launchd plist + Linux systemd unit generation |
-| Bonjour/mDNS discovery | ✅ | ❌ | |
+| Bonjour/mDNS discovery | ✅ | ✅ | `MdnsConfig` + `DiscoveryTracker` ([`src/config/mdns_discovery.rs`](src/config/mdns_discovery.rs)) |
 | Tailscale integration | ✅ | ✅ | Full tunnel module (`tunnel/tailscale.rs`) with serve + funnel |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
 | `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | ✅ | SSE broadcast manager + routine engine lifecycle events (Status, JobStarted, JobResult) |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |
-| Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
+| Presence system | ✅ | ✅ | `PresenceTracker` with beacons, status, stale pruning ([`src/agent/presence.rs`](src/agent/presence.rs)) |
 | Trusted-proxy auth mode | ✅ | ✅ | `TRUSTED_PROXY_HEADER` + `TRUSTED_PROXY_IPS` for reverse-proxy deployments |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | ✅ | HTTP webhook 64KB body limit + Content-Length check + chat history cap (`max_context_messages` default 200) |
@@ -181,7 +181,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
 | Session pruning | ✅ | ✅ | `sessions prune` CLI + auto-cleanup with configurable TTL |
 | Context compaction | ✅ | ✅ | Auto summarization |
-| Post-compaction read audit | ✅ | ❌ | Layer 3: workspace rules appended to summaries |
+| Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
@@ -258,7 +258,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Video support | ✅ | ✅ | P3 | `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)) — ffprobe metadata, ffmpeg keyframe + audio extraction, graceful fallback |
 | PDF parsing | ✅ | ✅ | P2 | `PdfExtractor`: BT/ET text blocks, readable-sequence fallback |
 | MIME detection | ✅ | ✅ | P2 | `media/types.rs`: extension + magic bytes detection |
-| Media caching | ✅ | ❌ | P3 | |
+| Media caching | ✅ | ✅ | P3 | Per-channel cache policies with eviction strategies ([`src/media/media_cache_config.rs`](src/media/media_cache_config.rs)) |
 | Vision model integration | ✅ | ✅ | P2 | `ImageExtractor::format_for_llm()` — base64 data-URI for multimodal LLMs |
 | TTS (Edge TTS) | ✅ | ✅ | - | `TtsSynthesizer` with Edge TTS provider support |
 | TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
@@ -307,7 +307,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Legacy migration | ✅ | ➖ | |
 | State directory | ✅ `~/.openclaw-state/` | ✅ `~/.ironclaw/` | |
 | Credentials directory | ✅ | ✅ | Session files |
-| Full model compat fields in schema | ✅ | ❌ | pi-ai model compat exposed in config |
+| Full model compat fields in schema | ✅ | ✅ | `ModelCompat` with context window, feature flags, pricing, pi-ai support ([`src/config/model_compat.rs`](src/config/model_compat.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -326,12 +326,12 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenAI embeddings | ✅ | ✅ | |
 | Gemini embeddings | ✅ | ✅ | `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
 | Local embeddings | ✅ | ✅ | `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
-| SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
-| LanceDB backend | ✅ | ❌ | Configurable auto-capture max length |
-| QMD backend | ✅ | ❌ | |
+| SQLite-vec backend | ✅ | ✅ | `SqliteVecConfig` with vec0 virtual table SQL, distance metrics ([`src/workspace/sqlite_vec.rs`](src/workspace/sqlite_vec.rs)) |
+| LanceDB backend | ✅ | ✅ | `LanceDbConfig` with Arrow schema, S3/local URI support ([`src/workspace/lancedb.rs`](src/workspace/lancedb.rs)) |
+| QMD backend | ✅ | ✅ | `QmdConfig` with product quantization, codebook sizing ([`src/workspace/qmd.rs`](src/workspace/qmd.rs)) |
 | Atomic reindexing | ✅ | ✅ | |
 | Embeddings batching | ✅ | ✅ | `embed_batch` on EmbeddingProvider trait |
-| Citation support | ✅ | ❌ | |
+| Citation support | ✅ | ✅ | `Citation` struct with inline/footnote formatting, deduplication, relevance sorting ([`src/workspace/citations.rs`](src/workspace/citations.rs)) |
 | Memory CLI commands | ✅ | ✅ | `memory search/read/write/tree/status` CLI subcommands |
 | Flexible path structure | ✅ | ✅ | Filesystem-like API |
 | Identity files (AGENTS.md, etc.) | ✅ | ✅ | |
@@ -458,7 +458,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | Gateway token auth | ✅ | ✅ | Bearer token auth on web gateway |
-| Device pairing | ✅ | ❌ | |
+| Device pairing | ✅ | ✅ | `PairingStore` with challenge-response states + fingerprint verification ([`src/safety/device_pairing.rs`](src/safety/device_pairing.rs)) |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ✅ | `TRUSTED_PROXY_HEADER` + `TRUSTED_PROXY_IPS` for reverse-proxy deployments |
 | OAuth flows | ✅ | ✅ | Full Auth Code + PKCE flow, auto-refresh, scope aggregation, built-in Google/GitHub/Notion creds |
@@ -472,7 +472,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron webhook SSRF guard | ✅ | ✅ | N/A — webhooks are inbound-only; no outbound delivery to user URLs |
 | Loopback-first | ✅ | ✅ | Gateway binds 127.0.0.1 by default, HTTP webhook binds 0.0.0.0 for inbound |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
-| Podman support | ✅ | ❌ | Alternative to Docker |
+| Podman support | ✅ | ✅ | `PodmanConfig` with rootless mode, resource limits, `podman run` arg building ([`src/sandbox/podman.rs`](src/sandbox/podman.rs)) |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | ✅ | Shell tool scrubs env vars + LD*/DYLD* injection blocks + safe bins allowlist |
 | Tool policies | ✅ | ✅ | |
@@ -484,7 +484,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session file permissions (0o600) | ✅ | ✅ | Handled by OS keychain + filesystem perms |
 | Skill download path restriction | ✅ | ✅ | ([`src/safety/skill_path.rs`](src/safety/skill_path.rs)) |
 | Webhook signature verification | ✅ | ✅ | |
-| Media URL validation | ✅ | ❌ | |
+| Media URL validation | ✅ | ✅ | SSRF prevention: blocks private IPs, cloud metadata, disallowed schemes ([`src/safety/media_url.rs`](src/safety/media_url.rs)) |
 | Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization |
 | Leak detection | ✅ | ✅ | Secret exfiltration |
 | Dangerous tool re-enable warning | ✅ | ✅ | `DangerousToolTracker` ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs)) |
@@ -507,9 +507,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Coverage | V8 | tarpaulin/llvm-cov | |
 | CI/CD | GitHub Actions | GitHub Actions | |
 | Pre-commit hooks | prek | - | Consider adding |
-| Docker: Chromium + Xvfb | ✅ | ❌ | Optional browser in container |
-| Docker: init scripts | ✅ | ❌ | /openclaw-init.d/ support |
-| Browser: extraArgs config | ✅ | ❌ | Custom Chrome launch arguments |
+| Docker: Chromium + Xvfb | ✅ | ✅ | `DockerChromiumConfig` with Xvfb + Chrome launch args ([`src/sandbox/docker_chromium.rs`](src/sandbox/docker_chromium.rs)) |
+| Docker: init scripts | ✅ | ✅ | `DockerInitConfig` with script discovery + interpreter detection ([`src/sandbox/docker_init.rs`](src/sandbox/docker_init.rs)) |
+| Browser: extraArgs config | ✅ | ✅ | `BrowserArgsConfig` with custom Chrome flags, proxy, hardening ([`src/tools/browser_args.rs`](src/tools/browser_args.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -778,8 +778,8 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 **CLI**
 - ✅ CLI: `agents` multi-agent management — `list`, `add`, `remove`, `show`, `set-default` subcommands
 - ✅ CLI: `sessions` listing — `list`, `show`, `prune` subcommands with thread ownership display
-- ❌ CLI: `nodes` device management
-- ❌ CLI: `/subagents spawn` from chat
+- ✅ CLI: `nodes` device management — CRUD + formatted display ([`src/cli/nodes.rs`](src/cli/nodes.rs))
+- ✅ CLI: `/subagents spawn` from chat — command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs))
 - ✅ CLI: `logs` query/filter — tail, search, show, levels subcommands with time-range/level/target filtering ([`src/cli/logs.rs`](src/cli/logs.rs))
 - ✅ CLI: `update` self-update — check/install/rollback with stable/beta/nightly channels + binary backup ([`src/cli/update.rs`](src/cli/update.rs))
 - ✅ CLI: `browser` automation — headless Chrome open/screenshot/links/check with DOM extraction ([`src/cli/browser.rs`](src/cli/browser.rs))
@@ -787,8 +787,8 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 - ✅ CLI: `models` — list/info/test with built-in model knowledge + Ollama auto-discovery ([`src/cli/models.rs`](src/cli/models.rs))
 
 **LLM & Inference**
-- ❌ Gemini embeddings
-- ❌ Local embeddings (on-device)
+- ✅ Gemini embeddings — `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
+- ✅ Local embeddings (on-device) — `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
 - ✅ AWS Bedrock provider — OpenAI-to-Bedrock Converse API adapter ([`src/llm/bedrock.rs`](src/llm/bedrock.rs))
 - ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
 - ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))
@@ -830,12 +830,12 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 
 **Plugin System**
 - ❌ ClawHub registry integration
-- ❌ HTTP path registration for plugins
-- ❌ Auth / Memory / Provider plugin types
+- ✅ HTTP path registration for plugins — `PluginRouter` ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs))
+- ✅ Auth / Memory / Provider plugin types — trait interfaces ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs))
 
 **Housekeeping**
 - ✅ `Default` derives for TtsProvider, TtsOutputFormat (clippy-driven)
-- ❌ JSON5 / YAML config support
+- ✅ JSON5 / YAML config support — ([`src/config/formats.rs`](src/config/formats.rs))
 
 ### P4 - Postponed
 - ❌ Slack channel (native implementation — currently WASM tool)
