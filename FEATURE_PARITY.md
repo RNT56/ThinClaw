@@ -40,7 +40,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
 | Configuration hot-reload | ✅ | ✅ | `ConfigWatcher` with mtime polling, debounce, broadcast subscribers |
-| Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
+| Network modes (loopback/LAN/remote) | ✅ | ✅ | Full loopback/LAN/remote with security validation ([`src/config/network_modes.rs`](src/config/network_modes.rs)) |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
 | Canvas hosting | ✅ | ✅ | `CanvasTool` (621 LOC) + `CanvasStore` + canvas gateway routes (`/canvas/:panel_id` HTML, `/canvas/api/panels` JSON); [`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs) |
 | Gateway lock (PID-based) | ✅ | ✅ | `gateway start` writes PID to `~/.ironclaw/gateway.pid`; launchd/systemd keepalive via `ironclaw service` |
@@ -74,7 +74,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST (`channels/discord.rs`) + WASM webhook channel |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
-| iMessage | ✅ | 🚧 | P3 | `IMessageChannel` (445 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) — chat.db polling + osascript sending; config resolves via `IMESSAGE_ENABLED` ([`src/config/channels.rs`](src/config/channels.rs)); not yet wired into main.rs channel startup |
+| iMessage | ✅ | ✅ | P3 | `IMessageChannel` (445 LOC) + `IMessageConfig` startup wiring ([`src/channels/imessage_wiring.rs`](src/channels/imessage_wiring.rs)) |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools |
 | LINE | ✅ | ❌ | P3 | |
@@ -151,7 +151,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `memory` | ✅ | ✅ | - | Memory search CLI |
 | `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
-| `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
+| `nodes` | ✅ | ✅ | P3 | Device management with CRUD + formatted display ([`src/cli/nodes.rs`](src/cli/nodes.rs)) |
 | `plugins` | ✅ | ✅ | - | `PluginManifest` — persistent JSON manifest, install/remove/toggle |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
 | `cron` | ✅ | ✅ | - | `cron add/edit/remove/trigger/runs/lint` — edit supports `--model`, `--thinking-budget`, `--schedule`, `--prompt`, `--enabled`; lint validates expressions offline |
@@ -163,7 +163,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `logs` | ✅ | ✅ | P3 | tail/search/show/levels with time-range/level/target filtering ([`src/cli/logs.rs`](src/cli/logs.rs)) |
 | `update` | ✅ | ✅ | P3 | check/install/rollback with stable/beta/nightly channels ([`src/cli/update.rs`](src/cli/update.rs)) |
 | `completion` | ✅ | ✅ | - | Shell completion |
-| `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
+| `/subagents spawn` | ✅ | ✅ | P3 | Command parsing + subagent tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
 | `/export-session` | ✅ | ✅ | P3 | `sessions export` with markdown/JSON output ([`src/cli/sessions.rs`](src/cli/sessions.rs)) |
 
 ### Owner: IronClaw Agent
@@ -191,15 +191,15 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Per-model thinkingDefault override | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var: exact+prefix model match with per-model budget |
 | Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
 | Tool-level streaming | ✅ | ✅ | `StreamChunk::ToolCall` + `StreamChunk::ToolCallDelta` via `complete_stream_with_tools()` |
-| Z.AI tool_stream | ✅ | 🚧 | Tool call deltas work; full Z.AI streaming protocol not yet wired |
+| Z.AI tool_stream | ✅ | ✅ | Full tool_stream protocol with delta accumulation ([`src/channels/tool_stream.rs`](src/channels/tool_stream.rs)) |
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Subagent support | ✅ | ✅ | Task framework |
-| `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
+| `/subagents spawn` command | ✅ | ✅ | Command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
 | Auth profiles | ✅ | ✅ | Multi-key rotation with health tracking ([`src/safety/auth_profiles.rs`](src/safety/auth_profiles.rs)) |
-| Generic API key rotation | ✅ | ❌ | Rotate keys across providers |
+| Generic API key rotation | ✅ | ✅ | Multi-strategy rotation with health tracking ([`src/safety/key_rotation.rs`](src/safety/key_rotation.rs)) |
 | Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
 | llms.txt discovery | ✅ | ✅ | .well-known probing + markdown link parsing ([`src/llm/llms_txt.rs`](src/llm/llms_txt.rs)) |
 | Multiple images per tool call | ✅ | ✅ | `ImageExtractor::format_multiple_for_llm()` — multi-image content blocks |
@@ -276,14 +276,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
-| HTTP path registration | ✅ | ❌ | Plugin routes |
+| HTTP path registration | ✅ | ✅ | Plugin route registry with conflict detection ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs)) |
 | Workspace-relative install | ✅ | ✅ | ~/.ironclaw/tools/ |
 | Channel plugins | ✅ | ✅ | WASM channels |
-| Auth plugins | ✅ | ❌ | |
-| Memory plugins | ✅ | ❌ | Custom backends |
+| Auth plugins | ✅ | ✅ | `AuthPlugin` trait + `AuthCredentials`/`AuthToken` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
+| Memory plugins | ✅ | ✅ | `MemoryPlugin` trait + `MemoryEntry` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
 | Tool plugins | ✅ | ✅ | WASM tools |
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
-| Provider plugins | ✅ | ❌ | |
+| Provider plugins | ✅ | ✅ | `ProviderPlugin` trait + capabilities ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |
 | ClawHub registry | ✅ | ❌ | Discovery |
 | `before_agent_start` hook | ✅ | ✅ | `HookPoint::BeforeAgentStart` — fires before agent main loop, can reject startup |
@@ -299,8 +299,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | Primary config file | ✅ `~/.openclaw/openclaw.json` | ✅ `.env` | Different formats |
-| JSON5 support | ✅ | ❌ | Comments, trailing commas |
-| YAML alternative | ✅ | ❌ | |
+| JSON5 support | ✅ | ✅ | Comment stripping + trailing comma removal ([`src/config/formats.rs`](src/config/formats.rs)) |
+| YAML alternative | ✅ | ✅ | YAML-to-JSON + JSON-to-YAML serialization ([`src/config/formats.rs`](src/config/formats.rs)) |
 | Environment variable interpolation | ✅ | ✅ | `${VAR}` |
 | Config validation/schema | ✅ | ✅ | Type-safe Config struct |
 | Hot-reload | ✅ | ✅ | `ConfigWatcher` polls mtime, broadcasts changes |
@@ -324,8 +324,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MMR re-ranking | ✅ | ✅ | `mmr_rerank()` — greedy diversity selection with cosine similarity, wired into `hybrid_search()` |
 | LLM-based query expansion | ✅ | ✅ | `expand_query_keywords()` — stop word removal + morphological variants, wired pre-FTS |
 | OpenAI embeddings | ✅ | ✅ | |
-| Gemini embeddings | ✅ | ❌ | |
-| Local embeddings | ✅ | ❌ | |
+| Gemini embeddings | ✅ | ✅ | `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
+| Local embeddings | ✅ | ✅ | `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
 | SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
 | LanceDB backend | ✅ | ❌ | Configurable auto-capture max length |
 | QMD backend | ✅ | ❌ | |
@@ -426,8 +426,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger |
-| Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
-| Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
+| Cron stagger controls | ✅ | ✅ | P3 | `StaggerConfig` + `CronGate` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
+| Cron finished-run webhook | ✅ | ✅ | P3 | `FinishedRunPayload` + `notify_finished_run()` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
 | Timezone support | ✅ | ✅ | - | Via cron expressions |
 | One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor` wired into background tasks |
@@ -439,9 +439,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `onMessage` hook | ✅ | ✅ | - | Routines with event trigger |
 | `onSessionStart` hook | ✅ | ✅ | P2 | |
 | `onSessionEnd` hook | ✅ | ✅ | P2 | |
-| `transcribeAudio` hook | ✅ | ❌ | P3 | |
+| `transcribeAudio` hook | ✅ | ✅ | P3 | `BeforeTranscribeAudio` hook point ([`src/hooks/hook.rs`](src/hooks/hook.rs)) |
 | `transformResponse` hook | ✅ | ✅ | P2 | |
-| `llm_input`/`llm_output` hooks | ✅ | ❌ | P3 | LLM payload inspection |
+| `llm_input`/`llm_output` hooks | ✅ | ✅ | P3 | Before/after hook pipeline ([`src/llm/llm_hooks.rs`](src/llm/llm_hooks.rs)) |
 | Bundled hooks | ✅ | ✅ | P2 | Audit + declarative rule/webhook hooks |
 | Plugin hooks | ✅ | ✅ | P3 | Registered from WASM `capabilities.json` |
 | Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
@@ -464,7 +464,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OAuth flows | ✅ | ✅ | Full Auth Code + PKCE flow, auto-refresh, scope aggregation, built-in Google/GitHub/Notion creds |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | ✅ | allow_from + block_from + pairing store, CLI block/unblock commands |
-| Per-group tool policies | ✅ | ❌ | |
+| Per-group tool policies | ✅ | ✅ | `ToolPolicyManager` ([`src/tools/policy.rs`](src/tools/policy.rs)) |
 | Exec approvals | ✅ | ✅ | TUI overlay |
 | TLS 1.3 minimum | ✅ | ✅ | reqwest rustls |
 | SSRF protection | ✅ | ✅ | WASM allowlist |
@@ -476,18 +476,18 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | ✅ | Shell tool scrubs env vars + LD*/DYLD* injection blocks + safe bins allowlist |
 | Tool policies | ✅ | ✅ | |
-| Elevated mode | ✅ | ❌ | |
+| Elevated mode | ✅ | ✅ | ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Safe bins allowlist | ✅ | ✅ | `IRONCLAW_SAFE_BINS_ONLY` + extensible `IRONCLAW_EXTRA_BINS` |
 | LD*/DYLD* validation | ✅ | ✅ | Blocks `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc. |
 | Path traversal prevention | ✅ | ✅ | Including config includes (OC-06) |
 | Credential theft via env injection | ✅ | ✅ | Shell env scrubbing + command injection detection + LD*/DYLD* blocking + safe bins |
 | Session file permissions (0o600) | ✅ | ✅ | Handled by OS keychain + filesystem perms |
-| Skill download path restriction | ✅ | ❌ | Prevent arbitrary write targets |
+| Skill download path restriction | ✅ | ✅ | ([`src/safety/skill_path.rs`](src/safety/skill_path.rs)) |
 | Webhook signature verification | ✅ | ✅ | |
 | Media URL validation | ✅ | ❌ | |
 | Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization |
 | Leak detection | ✅ | ✅ | Secret exfiltration |
-| Dangerous tool re-enable warning | ✅ | ❌ | Warn when gateway.tools.allow re-enables HTTP tools |
+| Dangerous tool re-enable warning | ✅ | ✅ | `DangerousToolTracker` ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs)) |
 
 ### Owner: IronClaw Agent
 

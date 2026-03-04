@@ -11,6 +11,7 @@ pub mod auth_profiles;
 mod credential_detect;
 pub mod dangerous_tools;
 pub mod elevated;
+pub mod key_rotation;
 mod leak_detector;
 mod policy;
 mod sanitizer;

@@ -26,6 +26,7 @@ mod mcp;
 pub mod memory;
 mod message;
 mod models;
+pub mod nodes;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -33,6 +34,7 @@ mod registry;
 mod service;
 pub mod sessions;
 pub mod status;
+pub mod subagent_spawn;
 mod tool;
 mod update;
 

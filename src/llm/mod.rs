@@ -11,6 +11,7 @@ pub mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod discovery;
+pub mod embeddings;
 pub mod extended_context;
 pub mod failover;
 pub mod gemini;
