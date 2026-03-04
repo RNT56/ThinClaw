@@ -67,6 +67,24 @@ pub struct DiscoveredOrchestrator {
     pub online: bool,
 }
 
+/// Identity of the local Tailscale user.
+///
+/// Extracted from the Tailscale local API status response.
+/// Can be used for passwordless gateway authentication: if the
+/// incoming request originates from a known tailnet IP, the
+/// user is implicitly authenticated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TailscaleIdentity {
+    /// Tailnet user login (e.g. "user@example.com").
+    pub user_login: Option<String>,
+    /// Display name (hostname of the self node).
+    pub display_name: Option<String>,
+    /// Tailscale node ID / public key.
+    pub node_id: Option<String>,
+    /// Local tailnet IP addresses.
+    pub tailscale_ips: Vec<String>,
+}
+
 impl TailscaleDiscovery {
     /// Create a new Tailscale discovery client with default settings.
     pub fn new() -> Self {
@@ -180,6 +198,51 @@ impl TailscaleDiscovery {
             .first()
             .map(|o| format!("http://{}:3000", o.ip)))
     }
+
+    /// Extract the identity of the local Tailscale user.
+    ///
+    /// Queries the local Tailscale daemon to get the current user's
+    /// identity, which can be used for passwordless gateway auth.
+    pub async fn extract_identity(&self) -> Result<TailscaleIdentity, String> {
+        let status = self.get_status().await?;
+        let self_node = status.self_node;
+        Ok(TailscaleIdentity {
+            user_login: self_node
+                .as_ref()
+                .and_then(|n| n.dns_name.as_ref())
+                .map(|dns| {
+                    // DNS name is like "hostname.tailnet.ts.net."
+                    // Extract the tailnet portion as user identifier
+                    dns.trim_end_matches('.').to_string()
+                }),
+            display_name: self_node.as_ref().and_then(|n| n.host_name.clone()),
+            node_id: None, // Not exposed in basic status; could use whois API
+            tailscale_ips: status.tailscale_ips.unwrap_or_default(),
+        })
+    }
+
+    /// Check if a remote IP address is a trusted peer on the tailnet.
+    ///
+    /// Used for gateway auth: if the connecting client's IP is a known
+    /// tailnet peer, the request is implicitly trusted.
+    pub async fn is_trusted_peer(&self, remote_ip: &str) -> Result<bool, String> {
+        let status = self.get_status().await?;
+        let peers = status.peer.unwrap_or_default();
+        for peer in peers.values() {
+            if let Some(ips) = &peer.tailscale_ips {
+                if ips.iter().any(|ip| ip == remote_ip) {
+                    return Ok(true);
+                }
+            }
+        }
+        // Also check self IPs (local loopback over tailnet)
+        if let Some(self_ips) = status.tailscale_ips {
+            if self_ips.iter().any(|ip| ip == remote_ip) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Default for TailscaleDiscovery {
@@ -237,5 +300,32 @@ mod tests {
         let json = serde_json::to_value(&orch).unwrap();
         assert_eq!(json["hostname"], "server-1");
         assert_eq!(json["ip"], "100.64.1.2");
+    }
+
+    #[test]
+    fn test_tailscale_identity_serializable() {
+        let identity = TailscaleIdentity {
+            user_login: Some("host.tailnet.ts.net".into()),
+            display_name: Some("my-laptop".into()),
+            node_id: None,
+            tailscale_ips: vec!["100.64.1.1".into()],
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(json.contains("\"user_login\":\"host.tailnet.ts.net\""));
+        assert!(json.contains("\"display_name\":\"my-laptop\""));
+        assert!(json.contains("100.64.1.1"));
+    }
+
+    #[test]
+    fn test_tailscale_identity_deserializable() {
+        let json = r#"{
+            "user_login": "me@example.com",
+            "display_name": "my-server",
+            "node_id": null,
+            "tailscale_ips": ["100.64.1.2"]
+        }"#;
+        let identity: TailscaleIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.user_login.as_deref(), Some("me@example.com"));
+        assert_eq!(identity.tailscale_ips.len(), 1);
     }
 }

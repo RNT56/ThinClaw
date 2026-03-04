@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Lifecycle event types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LifecycleEvent {
     Installing {
         name: String,
@@ -137,6 +137,33 @@ impl AuditLogHook {
     pub fn is_empty(&self) -> bool {
         self.events.lock().unwrap().is_empty()
     }
+
+    /// Return events as serializable flat structs for Tauri command response.
+    ///
+    /// Matches the `openclaw_plugin_lifecycle_list` contract: a flat list
+    /// of `{ timestamp, plugin, event_type, details }` objects.
+    pub fn events_serialized(&self) -> Vec<SerializedLifecycleEvent> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(ts, event)| SerializedLifecycleEvent {
+                timestamp: ts.clone(),
+                plugin: event.plugin_name().to_string(),
+                event_type: event.label().to_string(),
+                details: match event {
+                    LifecycleEvent::Installing { kind, .. } => Some(format!("kind: {}", kind)),
+                    LifecycleEvent::Activated { tools, .. } => {
+                        Some(format!("tools: {}", tools.join(", ")))
+                    }
+                    LifecycleEvent::Failed { reason, event, .. } => {
+                        Some(format!("event: {}, reason: {}", event, reason))
+                    }
+                    _ => None,
+                },
+            })
+            .collect()
+    }
 }
 
 impl LifecycleHook for AuditLogHook {
@@ -191,6 +218,17 @@ impl LifecycleHook for MetricsHook {
     fn name(&self) -> &str {
         "metrics"
     }
+}
+
+/// Flattened, serializable lifecycle event for Tauri command responses.
+///
+/// Matches the `openclaw_plugin_lifecycle_list` response shape.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SerializedLifecycleEvent {
+    pub timestamp: String,
+    pub plugin: String,
+    pub event_type: String,
+    pub details: Option<String>,
 }
 
 #[cfg(test)]
@@ -324,5 +362,52 @@ mod tests {
         assert_eq!(registry.hook_count(), 0);
         registry.register(Box::new(AuditLogHook::new()));
         assert_eq!(registry.hook_count(), 1);
+    }
+
+    #[test]
+    fn test_events_serialized() {
+        let hook = AuditLogHook::new();
+        hook.on_event(&LifecycleEvent::Installing {
+            name: "notion".into(),
+            kind: "mcp".into(),
+        });
+        hook.on_event(&LifecycleEvent::Activated {
+            name: "notion".into(),
+            tools: vec!["search".into(), "add_page".into()],
+        });
+        let serialized = hook.events_serialized();
+        assert_eq!(serialized.len(), 2);
+        assert_eq!(serialized[0].plugin, "notion");
+        assert_eq!(serialized[0].event_type, "installing");
+        assert!(serialized[0].details.as_ref().unwrap().contains("mcp"));
+        assert_eq!(serialized[1].event_type, "activated");
+        assert!(serialized[1].details.as_ref().unwrap().contains("search"));
+    }
+
+    #[test]
+    fn test_events_serialized_json() {
+        let hook = AuditLogHook::new();
+        hook.on_event(&LifecycleEvent::Failed {
+            name: "bad_plugin".into(),
+            event: "install".into(),
+            reason: "network error".into(),
+        });
+        let serialized = hook.events_serialized();
+        let json = serde_json::to_string(&serialized[0]).unwrap();
+        assert!(json.contains("\"event_type\":\"failed\""));
+        assert!(json.contains("\"plugin\":\"bad_plugin\""));
+        assert!(json.contains("network error"));
+    }
+
+    #[test]
+    fn test_lifecycle_event_serializable() {
+        let event = LifecycleEvent::Activated {
+            name: "slack".into(),
+            tools: vec!["send".into()],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("slack"));
+        let deser: LifecycleEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, event);
     }
 }

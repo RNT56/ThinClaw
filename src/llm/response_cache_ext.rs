@@ -37,7 +37,7 @@ struct CacheEntry {
 }
 
 /// Cache stats.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
@@ -268,5 +268,18 @@ mod tests {
         store.get("miss");
         let stats = store.stats();
         assert!((stats.hit_rate - 0.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cache_stats_serializable() {
+        let mut store = CachedResponseStore::new(CacheConfig::default());
+        store.set("k1", "r1".into(), "gpt-4o");
+        store.get("k1");
+        store.get("miss");
+        let stats = store.stats();
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("\"hits\":1"));
+        assert!(json.contains("\"misses\":1"));
+        assert!(json.contains("\"size\":1"));
     }
 }

@@ -26,6 +26,7 @@ mod skills;
 mod tunnel;
 mod wasm;
 pub mod watcher;
+mod webchat;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
@@ -55,6 +56,7 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use self::webchat::{WebChatConfig, WebChatTheme};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///

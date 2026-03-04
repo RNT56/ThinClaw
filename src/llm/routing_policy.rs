@@ -4,6 +4,7 @@
 //! (token count, vision, tools, budget). First matching rule wins.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -42,8 +43,70 @@ pub struct RoutingPolicy {
     default_provider: String,
     round_robin_counter: Arc<AtomicUsize>,
     /// Whether smart routing is enabled. When disabled, always uses default_provider.
-    /// This is the Sprint 13 "Smart Routing" toggle for Scrappy.
     enabled: bool,
+    /// Per-provider latency tracker for LowestLatency rule.
+    latency_tracker: LatencyTracker,
+}
+
+/// Per-provider latency tracker using exponential moving average.
+///
+/// Call `record()` after each LLM response with the provider name and
+/// latency. The `LowestLatency` routing rule consults this to pick the
+/// provider with the lowest EMA latency.
+#[derive(Debug, Clone, Default)]
+pub struct LatencyTracker {
+    /// provider → (ema_ms, sample_count)
+    providers: HashMap<String, (f64, u64)>,
+    /// EMA smoothing factor (0..1). Higher = more weight to recent samples.
+    alpha: f64,
+}
+
+impl LatencyTracker {
+    pub fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+            alpha: 0.3, // responsive to recent changes
+        }
+    }
+
+    /// Record a latency sample for a provider.
+    pub fn record(&mut self, provider: &str, latency_ms: f64) {
+        let entry = self
+            .providers
+            .entry(provider.to_string())
+            .or_insert((latency_ms, 0));
+        entry.1 += 1;
+        if entry.1 == 1 {
+            // First sample: use raw value
+            entry.0 = latency_ms;
+        } else {
+            // EMA update
+            entry.0 = self.alpha * latency_ms + (1.0 - self.alpha) * entry.0;
+        }
+    }
+
+    /// Get the provider with the lowest average latency.
+    /// Returns None if no latency data recorded.
+    pub fn get_fastest(&self) -> Option<String> {
+        self.providers
+            .iter()
+            .min_by(|a, b| {
+                a.1.0
+                    .partial_cmp(&b.1.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Get the EMA latency for a specific provider.
+    pub fn get_latency(&self, provider: &str) -> Option<f64> {
+        self.providers.get(provider).map(|(ema, _)| *ema)
+    }
+
+    /// Number of providers with latency data.
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
 }
 
 impl RoutingPolicy {
@@ -53,6 +116,7 @@ impl RoutingPolicy {
             default_provider: default_provider.to_string(),
             round_robin_counter: Arc::new(AtomicUsize::new(0)),
             enabled: true,
+            latency_tracker: LatencyTracker::new(),
         }
     }
 
@@ -132,10 +196,7 @@ impl RoutingPolicy {
                     None
                 }
             }
-            RoutingRule::LowestLatency => {
-                // In real impl, would check latency metrics
-                None
-            }
+            RoutingRule::LowestLatency => self.latency_tracker.get_fastest(),
             RoutingRule::RoundRobin { providers } => {
                 if providers.is_empty() {
                     return None;
@@ -168,6 +229,20 @@ impl RoutingPolicy {
     /// ignoring all rules. This is the "Smart Routing" toggle in Scrappy UI.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Record a latency sample for a provider.
+    ///
+    /// Call this after each LLM response with the provider name and
+    /// response time in milliseconds. The `LowestLatency` rule uses
+    /// this data to route to the fastest provider.
+    pub fn record_latency(&mut self, provider: &str, latency_ms: f64) {
+        self.latency_tracker.record(provider, latency_ms);
+    }
+
+    /// Get the latency tracker (read-only) for inspection.
+    pub fn latency_tracker(&self) -> &LatencyTracker {
+        &self.latency_tracker
     }
 }
 
@@ -292,5 +367,49 @@ mod tests {
         // Re-enabled: rule fires again
         policy.set_enabled(true);
         assert_eq!(policy.select_provider(&ctx), "gemini");
+    }
+
+    #[test]
+    fn test_latency_tracker_basic() {
+        let mut tracker = LatencyTracker::new();
+        tracker.record("openai", 200.0);
+        tracker.record("gemini", 100.0);
+        assert_eq!(tracker.get_fastest().as_deref(), Some("gemini"));
+        assert_eq!(tracker.provider_count(), 2);
+    }
+
+    #[test]
+    fn test_latency_tracker_ema() {
+        let mut tracker = LatencyTracker::new();
+        tracker.record("p", 1000.0); // first sample
+        tracker.record("p", 100.0); // EMA: 0.3*100 + 0.7*1000 = 730
+        let latency = tracker.get_latency("p").unwrap();
+        assert!((latency - 730.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_latency_tracker_empty() {
+        let tracker = LatencyTracker::new();
+        assert!(tracker.get_fastest().is_none());
+    }
+
+    #[test]
+    fn test_lowest_latency_rule() {
+        let mut policy = RoutingPolicy::new("default");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.record_latency("openai", 300.0);
+        policy.record_latency("gemini", 150.0);
+        policy.record_latency("anthropic", 200.0);
+
+        let selected = policy.select_provider(&base_ctx());
+        assert_eq!(selected, "gemini");
+    }
+
+    #[test]
+    fn test_lowest_latency_no_data_falls_through() {
+        let mut policy = RoutingPolicy::new("default");
+        policy.add_rule(RoutingRule::LowestLatency);
+        // No latency data recorded
+        assert_eq!(policy.select_provider(&base_ctx()), "default");
     }
 }

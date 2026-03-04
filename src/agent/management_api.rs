@@ -42,6 +42,12 @@ pub struct AgentSummary {
     pub channels: Vec<String>,
     pub created_at: String,
     pub model: Option<String>,
+    /// Number of sessions this agent is participating in.
+    /// Used by Scrappy sidebar for session count badge.
+    pub session_count: u32,
+    /// ISO 8601 timestamp of last activity.
+    /// Used by Scrappy for "last active" display.
+    pub last_active_at: Option<String>,
 }
 
 /// Agent management store.
@@ -134,6 +140,34 @@ impl AgentManagementStore {
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
     }
+
+    /// Record agent activity (updates last_active_at timestamp).
+    pub fn update_activity(&mut self, id: &str, timestamp: &str) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.last_active_at = Some(timestamp.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Increment session count for an agent.
+    pub fn increment_sessions(&mut self, id: &str) -> bool {
+        if let Some(agent) = self.agents.get_mut(id) {
+            agent.session_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Find agents by status label.
+    pub fn find_by_status(&self, status_label: &str) -> Vec<&AgentSummary> {
+        self.agents
+            .values()
+            .filter(|a| a.status.label() == status_label)
+            .collect()
+    }
 }
 
 impl Default for AgentManagementStore {
@@ -157,6 +191,8 @@ mod tests {
             channels: vec![],
             created_at: "2026-01-01T00:00:00Z".into(),
             model: None,
+            session_count: 0,
+            last_active_at: None,
         }
     }
 
@@ -231,5 +267,48 @@ mod tests {
         assert_eq!(AgentStatus::Busy { job_count: 1 }.label(), "busy");
         assert_eq!(AgentStatus::Paused.label(), "paused");
         assert_eq!(AgentStatus::Offline.label(), "offline");
+    }
+
+    #[test]
+    fn test_update_activity() {
+        let mut store = AgentManagementStore::new();
+        store.register(make_agent("a1"));
+        assert!(store.update_activity("a1", "2026-03-04T12:00:00Z"));
+        assert_eq!(
+            store.get("a1").unwrap().last_active_at.as_deref(),
+            Some("2026-03-04T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn test_increment_sessions() {
+        let mut store = AgentManagementStore::new();
+        store.register(make_agent("a1"));
+        assert!(store.increment_sessions("a1"));
+        assert!(store.increment_sessions("a1"));
+        assert_eq!(store.get("a1").unwrap().session_count, 2);
+    }
+
+    #[test]
+    fn test_find_by_status() {
+        let mut store = AgentManagementStore::new();
+        store.register(make_agent("idle1"));
+        let mut busy = make_agent("busy1");
+        busy.status = AgentStatus::Busy { job_count: 1 };
+        store.register(busy);
+        let mut paused = make_agent("paused1");
+        paused.status = AgentStatus::Paused;
+        store.register(paused);
+        assert_eq!(store.find_by_status("idle").len(), 1);
+        assert_eq!(store.find_by_status("busy").len(), 1);
+        assert_eq!(store.find_by_status("paused").len(), 1);
+    }
+
+    #[test]
+    fn test_agent_summary_serializable() {
+        let agent = make_agent("test");
+        let json = serde_json::to_string(&agent).unwrap();
+        assert!(json.contains("\"session_count\":0"));
+        assert!(json.contains("\"last_active_at\":null"));
     }
 }

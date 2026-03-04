@@ -4,7 +4,8 @@
 //! of chat session records.
 
 /// Export format.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ExportFormat {
     Markdown,
     Json,
@@ -181,6 +182,32 @@ impl SessionExporter {
     }
 }
 
+/// Response shape for `openclaw_export_session` Tauri command.
+///
+/// Contains the exported content, format metadata, and MIME type
+/// for use by Scrappy's export format picker.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionExportResponse {
+    pub content: String,
+    pub format: ExportFormat,
+    pub mime_type: String,
+    pub extension: String,
+    pub record_count: usize,
+}
+
+impl SessionExportResponse {
+    /// Create a response from an export operation.
+    pub fn from_export(exporter: &SessionExporter, records: &[ExportRecord]) -> Self {
+        Self {
+            content: exporter.export(records),
+            format: exporter.format.clone(),
+            mime_type: exporter.format.mime_type().to_string(),
+            extension: exporter.format.extension().to_string(),
+            record_count: records.len(),
+        }
+    }
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -322,5 +349,27 @@ mod tests {
         let output = exporter.export(&sample_records());
         assert!(output.contains("Hello, world!"));
         assert!(!output.contains("Hi there!"));
+    }
+
+    #[test]
+    fn test_export_format_serializable() {
+        let json = serde_json::to_string(&ExportFormat::Markdown).unwrap();
+        assert_eq!(json, "\"markdown\"");
+        let deser: ExportFormat = serde_json::from_str("\"csv\"").unwrap();
+        assert_eq!(deser, ExportFormat::Csv);
+    }
+
+    #[test]
+    fn test_session_export_response() {
+        let exporter = SessionExporter::new(ExportFormat::Json);
+        let response = SessionExportResponse::from_export(&exporter, &sample_records());
+        assert_eq!(response.format, ExportFormat::Json);
+        assert_eq!(response.mime_type, "application/json");
+        assert_eq!(response.extension, "json");
+        assert_eq!(response.record_count, 2);
+        assert!(response.content.contains("\"records\""));
+        // Verify serializable
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"format\":\"json\""));
     }
 }
