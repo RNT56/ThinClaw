@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-04 10:48 CET
+> **Last reconciled:** 2026-03-04 12:10 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -781,18 +781,18 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 | # | Action | Backend | Tauri Command | Effort | Priority | Status |
 |---|--------|---------|---------------|--------|----------|--------|
-| 17 | **Multi-agent picker in sidebar** | `AgentManagementStore` | `openclaw_agents_list` (extend) + `openclaw_agents_set_default` | 1-2 days | Sprint 13 | ⚠️ Backend hook exists, missing fields |
-| 18 | **LLM cost dashboard** | `CostTracker` | `openclaw_cost_summary` / `openclaw_cost_export_csv` | 2-3 days | Sprint 13 | ❌ Todo |
-| 19 | **Channel status panel** | `ChannelStatusView` | `openclaw_channel_status_list` + SSE `kind: "ChannelStatus"` | 1-2 days | Sprint 13 | ⚠️ `OpenClawChannels.tsx` reads basic fields only |
-| 20 | **ClawHub plugin browser** | `CatalogCache` | `openclaw_clawhub_search` / `openclaw_clawhub_install` | 1-2 days | Sprint 13 | ❌ Todo |
-| 21 | **Routine run history** | `RoutineAuditLog` | `openclaw_routine_audit_list` (wire existing `openclaw_cron_history` stub) | 1 day | Sprint 13 | ⚠️ Frontend calls stub that returns `[]` |
-| 22 | **Gmail channel card** | `GmailConfig` | Gmail card + `cloud_oauth_start("gmail")` PKCE flow | 1 day | Sprint 13 | ❌ Todo — add `"gmail"` to `oauth_defaults.rs` |
-| 23 | **Extension health badges** | `ExtensionHealthMonitor` | (via `openclaw_channel_status_list` or dedicated) | 0.5 day | Sprint 13 | ❌ Todo |
-| 24 | **Session export format picker** | `SessionExporter` | Extend `openclaw_export_session` with `format: Option<String>` | 0.5 day | Sprint 13 | ❌ Todo |
-| 25 | **LLM routing rule builder** | `RoutingPolicy` | (TBD) | 1-2 days | **Sprint 14** | ❌ Deferred — "Smart Routing" toggle Sprint 13, full builder Sprint 14 |
-| 26 | **Plugin lifecycle log tab** | `AuditLogHook` | `openclaw_plugin_lifecycle_list` | 0.5 day | Sprint 13 | ❌ Todo |
-| 27 | **Manifest validation feedback** | `ManifestValidator` | `openclaw_manifest_validate` | 0.5 day | Sprint 13 | ❌ Todo |
-| 28 | **Response cache stats** | `CachedResponseStore` | `openclaw_cache_stats` | 0.5 day | Sprint 13 | ❌ Todo |
+| 17 | **Multi-agent picker in sidebar** | `AgentManagementStore` | `openclaw_agents_list` (extend) + `openclaw_agents_set_default` | 1-2 days | Sprint 13 | ⚠️ Backend hook exists, `AgentSummary` has all fields — missing Scrappy UI |
+| 18 | **LLM cost dashboard** | `CostTracker` | `openclaw_cost_summary` / `openclaw_cost_export_csv` | 2-3 days | Sprint 13 | ✅ IronClaw: `CostSummary` response type + `summary()` method shipped — needs Scrappy UI |
+| 19 | **Channel status panel** | `ChannelStatusView` | `openclaw_channel_status_list` + SSE `kind: "ChannelStatus"` | 1-2 days | Sprint 13 | ✅ IronClaw: `ChannelStatusEvent` SSE type + serializable entries shipped — needs Scrappy UI |
+| 20 | **ClawHub plugin browser** | `CatalogCache` | `openclaw_clawhub_search` / `openclaw_clawhub_install` | 1-2 days | Sprint 13 | ⚠️ `CatalogCache` backend exists — no Tauri command wiring yet |
+| 21 | **Routine run history** | `RoutineAuditLog` | `openclaw_routine_audit_list` (wire existing `openclaw_cron_history` stub) | 1 day | Sprint 13 | ✅ IronClaw: `query_by_routine()` with limit+filter shipped — needs Scrappy UI |
+| 22 | **Gmail channel card** | `GmailConfig` | Gmail card + `cloud_oauth_start("gmail")` PKCE flow | 1 day | Sprint 13 | ✅ IronClaw: `GmailOAuthConfig` + scopes + auth URL shipped — needs Scrappy UI |
+| 23 | **Extension health badges** | `ExtensionHealthMonitor` | (via `openclaw_channel_status_list` or dedicated) | 0.5 day | Sprint 13 | ⚠️ Uses ChannelStatusEvent — needs Scrappy UI badge component |
+| 24 | **Session export format picker** | `SessionExporter` | Extend `openclaw_export_session` with `format: Option<String>` | 0.5 day | Sprint 13 | ⚠️ `SessionExporter` backend exists — needs format param wire-up |
+| 25 | **LLM routing rule builder** | `RoutingPolicy` | (TBD) | 1-2 days | **Sprint 14** | ✅ IronClaw: Smart Routing toggle (`is_enabled`/`set_enabled`) shipped — full builder Sprint 14 |
+| 26 | **Plugin lifecycle log tab** | `AuditLogHook` | `openclaw_plugin_lifecycle_list` | 0.5 day | Sprint 13 | ⚠️ `AuditLogHook.events()` exists — needs Tauri command wiring |
+| 27 | **Manifest validation feedback** | `ManifestValidator` | `openclaw_manifest_validate` | 0.5 day | Sprint 13 | ✅ IronClaw: `ValidationResponse` + `Display` impls + `to_response()` shipped — needs Scrappy UI |
+| 28 | **Response cache stats** | `CachedResponseStore` | `openclaw_cache_stats` | 0.5 day | Sprint 13 | ⚠️ `CacheStats` struct exists — needs Tauri command wiring |
 
 **Tier 4 Total:** ~12 days of Scrappy frontend work (~10 days Sprint 13 + ~2 days Sprint 14)
 
@@ -810,7 +810,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 ## Implementation Priorities (IronClaw)
 
-> **Last updated:** 2026-03-04 11:02 CET — Sprint 12 complete, Sprint 13 IronClaw todos identified
+> **Last updated:** 2026-03-04 12:10 CET — Sprint 13 IronClaw-side complete (backend APIs for Scrappy), remaining: Tauri command wiring + Scrappy UI
 >
 > All open IronClaw work aggregated from project artifacts into a single prioritized list.
 > For Scrappy-specific priorities, see §20 above.
