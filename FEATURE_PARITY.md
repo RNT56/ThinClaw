@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-05 05:09 CET
+> **Last reconciled:** 2026-03-05 06:49 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -85,6 +85,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | MS Teams | ✅ | ❌ | P3 | |
 | Twitch | ✅ | ❌ | P3 | |
 | Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
+| Gmail | ✅ | ✅ | - | `GmailChannel` (700+ LOC) — Pub/Sub pull + Gmail API read/reply + sender allowlist ([`src/channels/gmail.rs`](src/channels/gmail.rs)) |
 | Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`) |
 
 ### Telegram-Specific Features (since Feb 2025)
@@ -709,7 +710,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 ## 19. IronClaw → Scrappy Integration Tracker
 
-> **Last updated:** 2026-03-04 11:02 CET — enriched with Scrappy agent feedback
+> **Last updated:** 2026-03-05 06:49 CET — Sprint 15 G2+R1 completed
 
 ### 19.1 Shipped — Scrappy UI Needed or In Progress
 
@@ -718,9 +719,9 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 | **Multi-agent picker** | ✅ `AgentManagementStore` | Sidebar dropdown + full settings panel; extend `AgentProfile` with `is_default`/`status`/`session_count` `Option<>` fields | ⚠️ `openclaw_agents_list` exists but missing fields |
 | **Session pruning** | ✅ CLI `sessions prune` | Pruning config (max sessions, age cutoff) in settings | Not started |
 | **Channel status view** | ✅ `ChannelStatusView` | Full per-channel status panel; SSE push `kind: "ChannelStatus"` + poll mount | ⚠️ `OpenClawChannels.tsx` reads enabled/disabled only — needs state/uptime/counters |
-| **Gmail channel** | ✅ `GmailConfig` + pub/sub | Gmail card in `OpenClawChannels.tsx`; OAuth via existing `cloud_oauth_start("gmail")` PKCE flow | Not started — add `"gmail"` to `oauth_defaults.rs` |
+| **Gmail channel** | ✅ `GmailChannel` (700+ LOC) + `GmailChannelConfig` + Pub/Sub pull + Gmail API | Gmail card in `OpenClawChannels.tsx`; OAuth via existing `cloud_oauth_start("gmail")` PKCE flow | 🔮 G3 — Scrappy Sprint 15 |
 | **LLM cost tracker** | ✅ `CostTracker` | Cost dashboard via `openclaw_cost_summary` — summary card + per-model chart + alert badge | Not started |
-| **LLM routing policy** | ✅ `RoutingPolicy` | Advanced settings, collapsed by default; "Smart Routing" toggle = Sprint 13, full rule builder = Sprint 14 | Not started |
+| **LLM routing policy** | ✅ `RoutingPolicy` + CRUD API (list/add/remove/reorder) | Full rule builder UI; `openclaw_routing_rules_*` commands ready | 🔮 R2 — Scrappy Sprint 15 |
 | **ClawHub browser** | ✅ `CatalogCache` | Plugin discovery via `openclaw_clawhub_search/install` — proxied through IronClaw | Not started — `OpenClawPlugins.tsx` exists for local only |
 | **Plugin lifecycle log** | ✅ `AuditLogHook` | Lifecycle event log tab via `openclaw_plugin_lifecycle_list` | Not started |
 | **Extension health badges** | ✅ `ExtensionHealthMonitor` | Health badge on channel/plugin cards | Not started |
@@ -790,9 +791,9 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 ### Tier 4 — Sprint 13 New Backend APIs — ✅ All IronClaw Wired
 
-> **Scrappy Sprint 13 + IronClaw Sprint 14:** All 10 implementable items are end-to-end.
-> `tauri_commands` facade ([`src/tauri_commands.rs`](src/tauri_commands.rs)) bridges all 8 previously-stub commands.
-> Deferred: #22 Gmail (needs OAuth PKCE) and #25 Routing rule builder → Sprint 14.
+> **Scrappy Sprint 13 + IronClaw Sprint 14/15:** All 10 implementable items are end-to-end.
+> `tauri_commands` facade ([`src/tauri_commands.rs`](src/tauri_commands.rs)) exposes 14 commands (8 Sprint 14 + 6 Sprint 15).
+> Sprint 15: #22 Gmail channel fully wired (G2 ✅), #25 Routing CRUD API complete (R1 ✅). Scrappy UI pending (G3, R2).
 
 | # | Action | Backend | Tauri Command | Scrappy UI | IronClaw Wiring | Status |
 |---|--------|---------|---------------|------------|-----------------|--------|
@@ -801,22 +802,22 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 | 19 | **Channel status panel** | `ChannelStatusView` | `openclaw_channel_status_list` live | ✅ Cards with state badges, SSE | ✅ Reads config + env | ✅ End-to-end |
 | 20 | **ClawHub plugin browser** | `CatalogCache` | `openclaw_clawhub_search` / `_install` | ✅ Search + install UI | ✅ `tauri_commands::clawhub_search()` | ✅ End-to-end |
 | 21 | **Routine run history** | `RoutineAuditLog` | `openclaw_routine_audit_list` | ✅ Tabular log with filters | ✅ `tauri_commands::routine_audit_list()` | ✅ End-to-end |
-| 22 | **Gmail channel card** | `GmailConfig` | Gmail card + PKCE flow | 🔮 **Deferred** — needs OAuth PKCE browser flow | ⚠️ Config only | 🔮 Sprint 14 |
+| 22 | **Gmail channel card** | `GmailChannel` (700+ LOC) | `openclaw_gmail_status` live | 🔮 G3 — Gmail card + PKCE flow (Scrappy Sprint 15) | ✅ Full channel: Pub/Sub + Gmail API + config | 🚧 IronClaw ✅, Scrappy 🔮 |
 | 23 | **Extension health badges** | `ExtensionHealthMonitor` | Via Channel Status panel | ✅ State badges | ✅ Via channel status | ✅ End-to-end |
 | 24 | **Session export format picker** | `SessionExporter` | `openclaw_export_session` live | ✅ `exportSession(key, format)` | ✅ md/json/txt/csv/html | ✅ End-to-end |
-| 25 | **LLM routing rule builder** | `RoutingPolicy` | (TBD) | 🔮 **Deferred** | ✅ Toggle API exists | 🔮 Sprint 14 |
+| 25 | **LLM routing rule builder** | `RoutingPolicy` | `openclaw_routing_rules_*` (6 commands) | 🔮 R2 — Full rule builder UI (Scrappy Sprint 15) | ✅ CRUD API: list/add/remove/reorder + status | � IronClaw ✅, Scrappy 🔮 |
 | 26 | **Plugin lifecycle log tab** | `AuditLogHook` | `openclaw_plugin_lifecycle_list` | ✅ Timeline tab, color-coded | ✅ `tauri_commands::plugin_lifecycle_list()` | ✅ End-to-end |
 | 27 | **Manifest validation feedback** | `ManifestValidator` | `openclaw_manifest_validate` | ✅ Validate button, inline errors | ✅ `tauri_commands::manifest_validate()` | ✅ End-to-end |
 | 28 | **Response cache stats** | `CachedResponseStore` | `openclaw_cache_stats` | ✅ Hits/misses/rate/size cards | ✅ `tauri_commands::cache_stats()` | ✅ End-to-end |
 
-**Tier 4 Score:** ✅ 10 end-to-end | 🔮 2 deferred (Gmail PKCE, routing builder)
+**Tier 4 Score:** ✅ 10 end-to-end | � 2 IronClaw-complete, Scrappy-pending (Gmail #22, Routing #25)
 
 ### Tier 5 — Sprint 15 / Remaining
 
 | # | Action | Notes |
 |---|--------|-------|
-| 25 | **Full LLM routing rule builder** | Advanced rule editor UI — Sprint 13 ships toggle only |
-| 22 | **Gmail channel end-to-end** | Gmail PKCE OAuth + channel wiring + Scrappy UI |
+| R2 | **Full LLM routing rule builder UI** | IronClaw CRUD API ✅ (R1) — Scrappy UI pending (`OpenClawRouting.tsx`) |
+| G3 | **Gmail channel card UI** | IronClaw channel ✅ (G2) — Scrappy card + OAuth PKCE flow pending |
 | — | **Session pruning UI** | Pruning config in settings (low priority) |
 | — | **Per-conversation channel scoping** | Optional optimization: replace `app.emit()` broadcast with Tauri V2 `Channel<T>` per-invoke |
 
@@ -895,7 +896,7 @@ running inside Scrappy.
 
 ## Implementation Priorities (IronClaw)
 
-> **Last updated:** 2026-03-05 05:43 CET — Sprint 14 complete. Tauri IPC architecture verified ✅. Next: Gmail PKCE + routing rule builder.
+> **Last updated:** 2026-03-05 06:49 CET — Sprint 15 IronClaw work complete. G1 ✅ G2 ✅ R1 ✅. Remaining: Scrappy UI (G3, R2).
 >
 > All open IronClaw work aggregated from project artifacts into a single prioritized list.
 > For Scrappy-specific priorities, see §20 above. For Scrappy ↔ IronClaw architecture, see §21.
@@ -1060,7 +1061,7 @@ running inside Scrappy.
 - ✅ `StatusUpdate::Thinking(text)` → `UiEvent::AssistantInternal` (surfaces reasoning with 🧠)
 - ✅ `refresh_secrets()` hot-reload — uncommented, uses `(secrets_store, "local_user")` signature
 - ✅ `BridgedTool` → `Tool` trait adapter — fully implemented ([`src/hardware_bridge.rs`](src/hardware_bridge.rs): 610 LOC, 7 tests) + auto-registration in `AppBuilder::init_tools()` ([`src/app.rs`](src/app.rs))
-- ✅ Tauri commands facade — 8 commands wired via [`src/tauri_commands.rs`](src/tauri_commands.rs) (12 tests)
+- ✅ Tauri commands facade — 14 commands wired via [`src/tauri_commands.rs`](src/tauri_commands.rs) (27 tests) — 8 Sprint 14 + 6 Sprint 15 (routing CRUD + Gmail status)
 
 **macOS App Features (from Scrappy feature parity report, 2026-03-02)**
 - ✅ Auto-updates — `tauri-plugin-updater` + `UpdateChecker.tsx`, signing keys, GitHub endpoint (was P1)
@@ -1097,13 +1098,13 @@ running inside Scrappy.
 
 | # | Task | Owner | Effort | Status |
 |---|------|-------|--------|--------|
-| **G1** | Gmail PKCE OAuth defaults — add to `oauth_defaults.rs` | IronClaw | 0.5 day | ✅ Already exists (`GmailOAuthConfig`) |
-| **G2** | Gmail channel startup wiring — Pub/Sub listener + message delivery | IronClaw | 1 day | 🔮 Planned |
+| **G1** | Gmail PKCE OAuth defaults — `oauth_defaults.rs` | IronClaw | 0.5 day | ✅ Complete (`GmailOAuthConfig`) |
+| **G2** | Gmail channel — `GmailChannel` (700+ LOC) Pub/Sub + Gmail API | IronClaw | 1 day | ✅ Complete (`360d7d6`) |
 | **G3** | Gmail channel card UI | Scrappy | 0.5-1 day | 🔮 Planned |
-| **R1** | Routing rule CRUD API — list/add/remove/reorder in `tauri_commands.rs` | IronClaw | 0.5 day | 🔮 Planned |
+| **R1** | Routing rule CRUD API — 6 commands in `tauri_commands.rs` | IronClaw | 0.5 day | ✅ Complete (`b5a5605`) |
 | **R2** | Routing rule builder UI — `OpenClawRouting.tsx` | Scrappy | 1-1.5 days | 🔮 Planned |
 
-**Total: ~4 days** (split across IronClaw + Scrappy)
+**IronClaw: ✅ Complete** (G1, G2, R1) | **Scrappy: 🔮 Remaining** (~2 days: G3 + R2)
 
 ### Deferred (No Urgency)
 - ✅ Sherpa-ONNX keyword spotting ([`src/voice_wake.rs`](src/voice_wake.rs): `detection_loop_sherpa()` — 3-thread pipeline with auto-fallback)
