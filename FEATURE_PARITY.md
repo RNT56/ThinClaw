@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-04 20:22 CET
+> **Last reconciled:** 2026-03-05 05:09 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -381,7 +381,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Canvas placement | ✅ | ✅ | Done | Draggable + resizable + maximize floating panel |
 | Auto-updates | ✅ | ✅ | Done | `tauri-plugin-updater` + `UpdateChecker.tsx` — auto-check, download, install, restart |
 | Voice wake | ✅ | ✅ | Full | VAD-based voice activation + Sherpa-ONNX keyword spotting backend with auto-fallback |
-| iMessage integration | ✅ | ❌ | Backlog | AppleScript-based, fragile, macOS-only |
+| iMessage integration | ✅ | ✅ | - | chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics |
 
 ### Detailed Coverage Evidence
 
@@ -811,17 +811,181 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 **Tier 4 Score:** ✅ 10 end-to-end | 🔮 2 deferred (Gmail PKCE, routing builder)
 
-### Tier 5 — Sprint 14 / Deferred
+### Tier 5 — Sprint 15 / Architecture
 
 | # | Action | Notes |
 |---|--------|-------|
-| 25 | **Full LLM routing rule builder** | Advanced rule editor UI (Sprint 14) — Sprint 13 ships toggle only |
-| 16 | **iMessage integration** | P4, AppleScript-based, macOS-only |
+| 25 | **Full LLM routing rule builder** | Advanced rule editor UI — Sprint 13 ships toggle only |
+| 29 | **Tauri V2 Channel migration** | Replace GatewayChannel HTTP/SSE with native Tauri IPC for Scrappy (see §21) |
 | — | **Session pruning UI** | Pruning config in settings (low priority) |
 
-### Owner: Scrappy Agent
+### Owner: Scrappy Agent + IronClaw
 
 ---
+
+## §21 — Tauri V2 Channel Migration (Scrappy ↔ IronClaw Communication)
+
+> **Status:** 🔮 Planned — Sprint 15
+>
+> **Problem:** Scrappy embeds IronClaw as a Rust library but communicates via a
+> localhost HTTP server (`GatewayChannel` on port 3000). This is overkill for
+> in-process communication and introduces security, port conflict, and performance concerns.
+>
+> **Solution:** Implement a `TauriChannel` that uses Tauri V2's native IPC
+> (`invoke()` + `Channel<T>` streaming) instead of HTTP/SSE.
+
+### 21.1 Communication Paradigm Comparison
+
+| Aspect | **Current (HTTP/SSE)** | **Tauri Events** | **Tauri V2 Channels** ✅ |
+|--------|------------------------|------------------|--------------------------|
+| **Open port** | ⚠️ Yes — `127.0.0.1:3000` | ❌ None | ❌ None |
+| **Port conflicts** | Possible | Impossible | Impossible |
+| **Local attack surface** | Any local process can connect | Tauri-only | Tauri-only |
+| **Overhead** | TCP + HTTP parsing + JSON | Tauri IPC (minimal) | Tauri IPC (minimal) |
+| **Streaming** | ✅ SSE / WebSocket | ✅ `emit()` (broadcast) | ✅ Per-call `Channel<T>` |
+| **Per-conversation isolation** | Via `thread_id` filtering | Manual filtering | ✅ Built-in (scoped channel) |
+| **Works for external clients** | ✅ Browsers, curl | ❌ Tauri webview only | ❌ Tauri webview only |
+| **Type safety** | JSON-over-HTTP | Serde payloads | ✅ Typed `Channel<ChatEvent>` |
+| **Refactor effort** | Already done | ~2 days | ~3-4 days |
+| **Recommended for Scrappy** | ❌ | ⚠️ Acceptable | ✅ **Best option** |
+
+### 21.2 Current Architecture (to be replaced in Scrappy mode)
+
+```text
+┌──────── Scrappy.app ─────────┐
+│  React Webview               │
+│    │                         │
+│    ├─ invoke("openclaw_*") ──┼──► Tauri rpc.rs → tauri_commands.rs (IronClaw)
+│    │  (request-response)     │
+│    │                         │
+│    └─ fetch(localhost:3000) ──┼──► GatewayChannel (axum HTTP server)
+│       EventSource(/events)   │    └─ SSE stream → agent loop
+│       (streaming)            │
+└──────────────────────────────┘
+```
+
+**Problems:**
+1. Full axum HTTP server running inside same process (unnecessary TCP stack)
+2. Open port `127.0.0.1:3000` — other local processes can connect
+3. Two different communication patterns (invoke vs fetch)
+4. Port conflicts with other services on 3000
+
+### 21.3 Target Architecture (Tauri V2 Channels)
+
+```text
+┌──────── Scrappy.app ─────────┐
+│  React Webview               │
+│    │                         │
+│    ├─ invoke("openclaw_*") ──┼──► Tauri rpc.rs → IronClaw (request-response)
+│    │                         │
+│    └─ invoke("openclaw_chat",┼──► TauriChannel (implements Channel trait)
+│         { onEvent: channel })│    └─ channel.send(ChatEvent) → streaming
+│       (streaming via Channel)│
+└──────────────────────────────┘
+
+No HTTP server. No open ports. No TCP. Pure IPC.
+```
+
+### 21.4 Implementation Tasks
+
+| # | Task | Side | Effort | Depends On |
+|---|------|------|--------|------------|
+| **T1** | **Define `ChatEvent` enum** — Typed event variants: `StreamChunk`, `Thinking`, `ToolStarted`, `ToolCompleted`, `ToolResult`, `Status`, `ApprovalNeeded`, `Error`, `Done` | IronClaw | 0.5 day | — |
+| **T2** | **Implement `TauriChannel`** — New struct implementing the `Channel` trait. Receives messages via an `mpsc::Sender` injected from the Tauri command, pushes responses through a Tauri `Channel<ChatEvent>` | IronClaw | 1-2 days | T1 |
+| **T3** | **Create `openclaw_chat` Tauri command** — Accepts `message: String` + `on_event: Channel<ChatEvent>`. Injects the message into the `TauriChannel` and streams events back | IronClaw + Scrappy | 1 day | T2 |
+| **T4** | **Conditional channel registration in `AppBuilder`** — When running inside Tauri: register `TauriChannel` instead of `GatewayChannel`. When standalone: keep `GatewayChannel` | IronClaw | 0.5 day | T2 |
+| **T5** | **Migrate Scrappy React chat to `invoke()`** — Replace `fetch(localhost:3000)` / `EventSource` with `invoke("openclaw_chat", { onEvent })` pattern | Scrappy | 1-2 days | T3 |
+| **T6** | **Migrate SSE listeners to Tauri events** — Channel status, tool progress, job events — use `emit()` / `listen()` instead of SSE | Both | 1 day | T4 |
+| **T7** | **Remove GatewayChannel from Scrappy startup** — Feature-gate `GatewayChannel` creation behind `#[cfg(not(feature = "tauri"))]` or runtime detection | IronClaw | 0.5 day | T5, T6 |
+| **T8** | **End-to-end testing** — Verify chat streaming, tool approvals, job events, session management all work through pure Tauri IPC | Both | 1 day | T7 |
+
+**Total estimated effort:** 6-8 days (split across IronClaw + Scrappy)
+
+### 21.5 Key Implementation Details
+
+#### `TauriChannel` (IronClaw side — `src/channels/tauri_channel.rs`)
+
+```rust
+// Pseudocode — actual impl will use Tauri v2 Channel<T>
+pub struct TauriChannel {
+    /// Receives messages injected by the Tauri command handler.
+    msg_rx: Arc<Mutex<Option<mpsc::Receiver<IncomingMessage>>>>,
+    /// Pushes events to the frontend via Tauri Channel<ChatEvent>.
+    event_sender: Arc<RwLock<Option<TauriChannelSender<ChatEvent>>>>,
+}
+
+#[async_trait]
+impl Channel for TauriChannel {
+    fn name(&self) -> &str { "tauri" }
+
+    async fn start(&self) -> Result<MessageStream, ChannelError> {
+        // Return stream from msg_rx — messages injected via invoke()
+    }
+
+    async fn respond(&self, msg: &IncomingMessage, response: OutgoingResponse) -> Result<(), ChannelError> {
+        // Push ChatEvent::Response through the Tauri channel
+        self.event_sender.read().await
+            .as_ref()
+            .map(|s| s.send(ChatEvent::Response { content: response.content }));
+        Ok(())
+    }
+
+    async fn send_status(&self, status: StatusUpdate, _metadata: &serde_json::Value) -> Result<(), ChannelError> {
+        // Map StatusUpdate → ChatEvent variant and send via Tauri channel
+    }
+}
+```
+
+#### `openclaw_chat` Tauri command (Scrappy side — `rpc.rs`)
+
+```rust
+#[tauri::command]
+async fn openclaw_chat(
+    message: String,
+    thread_id: Option<String>,
+    on_event: tauri::ipc::Channel<ChatEvent>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // Inject message into TauriChannel
+    state.tauri_channel.inject_message(IncomingMessage::new("tauri", "user", &message)).await;
+
+    // Set the event sender for streaming responses
+    state.tauri_channel.set_event_sender(on_event).await;
+
+    // The agent loop processes asynchronously — events stream via on_event
+    Ok(())
+}
+```
+
+#### Frontend (Scrappy React — `ChatInput.tsx`)
+
+```typescript
+import { invoke, Channel } from "@tauri-apps/api/core";
+
+async function sendMessage(text: string, threadId?: string) {
+  const onEvent = new Channel<ChatEvent>();
+
+  onEvent.onmessage = (event) => {
+    switch (event.type) {
+      case "stream_chunk":  appendToken(event.content); break;
+      case "thinking":      showThinking(event.message); break;
+      case "tool_started":  showToolCard(event.name); break;
+      case "tool_completed": updateToolCard(event.name, event.success); break;
+      case "response":      setFinalResponse(event.content); break;
+      case "error":         showError(event.message); break;
+    }
+  };
+
+  await invoke("openclaw_chat", { message: text, threadId, onEvent });
+}
+```
+
+### 21.6 Migration Strategy
+
+1. **Phase 1** (non-breaking): Implement `TauriChannel` alongside `GatewayChannel`. Both register. Frontend uses `TauriChannel` for chat, `GatewayChannel` remains available for browser/debug access.
+2. **Phase 2**: Migrate all SSE listeners to Tauri events.
+3. **Phase 3**: Feature-gate `GatewayChannel` in Tauri builds. It only starts in standalone mode.
+4. **Standalone mode preserved**: `ironclaw run` (CLI binary) still uses `GatewayChannel` for browser access. Only Scrappy switches to `TauriChannel`.
 
 ## Implementation Priorities (IronClaw)
 
@@ -1006,7 +1170,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 - ✅ Doctor diagnostics — `OpenClawDoctor.tsx` with health bar and per-component checks (was P3)
 - ✅ Tool policies — `OpenClawToolPolicies.tsx` with grouped tool listing and search (was P3)
 - ✅ Animated tray icon — TrayState with active dot badge on Thinking/ToolStarted, 3s debounced reset (was P3)
-- ❌ iMessage integration — AppleScript-based, fragile, macOS-only (P4, low priority)
+- ✅ iMessage integration — `IMessageChannel` (chat.db polling + osascript, group chats, attachments, dedup, diagnostics)
 
 ### Deferred (No Urgency)
 - ✅ Sherpa-ONNX keyword spotting ([`src/voice_wake.rs`](src/voice_wake.rs): `detection_loop_sherpa()` — 3-thread pipeline with auto-fallback)
