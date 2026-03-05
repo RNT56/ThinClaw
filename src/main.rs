@@ -31,6 +31,7 @@ use ironclaw::{
     secrets::SecretsStore,
 };
 
+use ironclaw::channels::GmailChannel;
 #[cfg(target_os = "macos")]
 use ironclaw::channels::IMessageChannel;
 
@@ -508,6 +509,50 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to initialize iMessage channel");
+            }
+        }
+    }
+
+    // Add Gmail channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref gmail_config) = config.channels.gmail
+    {
+        use ironclaw::channels::gmail_wiring::GmailConfig;
+
+        let gmail_wiring_config = GmailConfig {
+            enabled: true,
+            project_id: gmail_config.project_id.clone(),
+            subscription_id: gmail_config.subscription_id.clone(),
+            topic_id: gmail_config.topic_id.clone(),
+            oauth_token: gmail_config.oauth_token.clone(),
+            allowed_senders: gmail_config.allowed_senders.clone(),
+            label_filters: gmail_config.label_filters.clone(),
+            max_message_size_bytes: gmail_config.max_message_size_bytes,
+            ..GmailConfig::default()
+        };
+
+        match GmailChannel::new(gmail_wiring_config) {
+            Ok(gmail_channel) => {
+                channel_names.push("gmail".to_string());
+                channels.add(Box::new(gmail_channel)).await;
+                tracing::info!(
+                    project = %gmail_config.project_id,
+                    subscription = %gmail_config.subscription_id,
+                    "Gmail channel enabled (Pub/Sub pull)"
+                );
+                if gmail_config.allowed_senders.is_empty() {
+                    tracing::warn!(
+                        "Gmail channel has empty allowed_senders list — ALL incoming emails will be processed."
+                    );
+                }
+                if gmail_config.oauth_token.is_none() {
+                    tracing::warn!(
+                        "Gmail channel has no OAuth token. Run `ironclaw auth gmail` to authenticate."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Gmail channel");
             }
         }
     }

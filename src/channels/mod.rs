@@ -32,6 +32,7 @@ pub mod canvas_gateway;
 mod channel;
 mod discord;
 pub mod forward_download;
+mod gmail;
 pub mod gmail_wiring;
 pub mod group_priming;
 pub mod health_monitor;
@@ -58,6 +59,7 @@ pub use channel::{
     StreamMode,
 };
 pub use discord::DiscordChannel;
+pub use gmail::GmailChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]

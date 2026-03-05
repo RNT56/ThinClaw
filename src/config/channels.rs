@@ -18,6 +18,7 @@ pub struct ChannelsConfig {
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
+    pub gmail: Option<GmailChannelConfig>,
     #[cfg(target_os = "macos")]
     pub imessage: Option<IMessageChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
@@ -210,6 +211,7 @@ impl ChannelsConfig {
             telegram: Self::resolve_telegram(settings)?,
             slack: Self::resolve_slack()?,
             discord: Self::resolve_discord()?,
+            gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
             imessage: Self::resolve_imessage()?,
         })
@@ -344,6 +346,25 @@ pub struct IMessageChannelConfig {
     pub poll_interval_secs: u64,
 }
 
+/// Gmail channel configuration.
+#[derive(Debug, Clone)]
+pub struct GmailChannelConfig {
+    /// GCP project ID.
+    pub project_id: String,
+    /// Pub/Sub subscription ID.
+    pub subscription_id: String,
+    /// Pub/Sub topic ID.
+    pub topic_id: String,
+    /// OAuth2 access token (from `ironclaw auth gmail`).
+    pub oauth_token: Option<String>,
+    /// Email addresses allowed to interact (empty = all).
+    pub allowed_senders: Vec<String>,
+    /// Gmail label filters (default: INBOX, UNREAD).
+    pub label_filters: Vec<String>,
+    /// Maximum message body size in bytes.
+    pub max_message_size_bytes: usize,
+}
+
 impl ChannelsConfig {
     fn resolve_slack() -> Result<Option<SlackChannelConfig>, ConfigError> {
         let bot_token = match optional_env("SLACK_BOT_TOKEN")? {
@@ -434,6 +455,68 @@ impl ChannelsConfig {
         Ok(Some(IMessageChannelConfig {
             allow_from,
             poll_interval_secs,
+        }))
+    }
+
+    fn resolve_gmail() -> Result<Option<GmailChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("GMAIL_ENABLED", false)?;
+        if !enabled {
+            return Ok(None);
+        }
+
+        let project_id = optional_env("GMAIL_PROJECT_ID")?.ok_or(ConfigError::InvalidValue {
+            key: "GMAIL_PROJECT_ID".to_string(),
+            message: "GMAIL_PROJECT_ID is required when GMAIL_ENABLED=true".to_string(),
+        })?;
+
+        let subscription_id =
+            optional_env("GMAIL_SUBSCRIPTION_ID")?.ok_or(ConfigError::InvalidValue {
+                key: "GMAIL_SUBSCRIPTION_ID".to_string(),
+                message: "GMAIL_SUBSCRIPTION_ID is required when GMAIL_ENABLED=true".to_string(),
+            })?;
+
+        let topic_id = optional_env("GMAIL_TOPIC_ID")?.ok_or(ConfigError::InvalidValue {
+            key: "GMAIL_TOPIC_ID".to_string(),
+            message: "GMAIL_TOPIC_ID is required when GMAIL_ENABLED=true".to_string(),
+        })?;
+
+        let oauth_token = optional_env("GMAIL_OAUTH_TOKEN")?;
+
+        let allowed_senders = optional_env("GMAIL_ALLOWED_SENDERS")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let label_filters = optional_env("GMAIL_LABEL_FILTERS")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["INBOX".into(), "UNREAD".into()]);
+
+        let max_message_size_bytes: usize = optional_env("GMAIL_MAX_MESSAGE_SIZE")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "GMAIL_MAX_MESSAGE_SIZE".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .unwrap_or(10 * 1024 * 1024);
+
+        Ok(Some(GmailChannelConfig {
+            project_id,
+            subscription_id,
+            topic_id,
+            oauth_token,
+            allowed_senders,
+            label_filters,
+            max_message_size_bytes,
         }))
     }
 }
