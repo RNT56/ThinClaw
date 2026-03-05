@@ -16,11 +16,13 @@
 //! ```
 
 use crate::agent::routine_audit::{RoutineAuditLog, RoutineRun};
+use crate::channels::gmail_wiring::GmailConfig;
 use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
 use crate::extensions::lifecycle_hooks::{AuditLogHook, SerializedLifecycleEvent};
 use crate::extensions::manifest_validator::{ManifestValidator, PluginInfoRef, ValidationResponse};
 use crate::llm::cost_tracker::{CostSummary, CostTracker};
 use crate::llm::response_cache_ext::{CacheStats, CachedResponseStore};
+use crate::llm::routing_policy::{RoutingPolicy, RoutingRule, RoutingRuleSummary};
 
 // ── 1. openclaw_cost_summary ──────────────────────────────────────────
 
@@ -162,6 +164,223 @@ pub fn manifest_validate(
     Ok(result.to_response())
 }
 
+// ── 9. openclaw_routing_rules_list ────────────────────────────────────
+
+/// List all routing rules with human-readable descriptions.
+///
+/// Maps to: `openclaw_routing_rules_list`
+/// Response: `Vec<RoutingRuleSummary>`
+pub fn routing_rules_list(policy: &RoutingPolicy) -> Result<Vec<RoutingRuleSummary>, String> {
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 10. openclaw_routing_rules_add ────────────────────────────────────
+
+/// Add a routing rule at the end (or at a specific position).
+///
+/// Maps to: `openclaw_routing_rules_add`
+/// Params: `rule: RoutingRule, position: Option<usize>`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_add(
+    policy: &mut RoutingPolicy,
+    rule: RoutingRule,
+    position: Option<usize>,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    // Validate the rule before adding
+    match &rule {
+        RoutingRule::RoundRobin { providers } if providers.is_empty() => {
+            return Err("Round-robin rule requires at least one provider".into());
+        }
+        RoutingRule::Fallback { fallbacks, .. } if fallbacks.is_empty() => {
+            return Err("Fallback rule requires at least one fallback provider".into());
+        }
+        RoutingRule::LargeContext { threshold, .. } if *threshold == 0 => {
+            return Err("Large context threshold must be greater than 0".into());
+        }
+        _ => {}
+    }
+
+    if let Some(pos) = position {
+        if pos > policy.rule_count() {
+            return Err(format!(
+                "Position {} out of bounds (have {} rules)",
+                pos,
+                policy.rule_count()
+            ));
+        }
+        // Insert at position: add at end then reorder
+        policy.add_rule(rule);
+        let last = policy.rule_count() - 1;
+        if pos < last {
+            policy.reorder_rules(last, pos).map_err(|e| e.to_string())?;
+        }
+    } else {
+        policy.add_rule(rule);
+    }
+
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 11. openclaw_routing_rules_remove ─────────────────────────────────
+
+/// Remove a routing rule by index.
+///
+/// Maps to: `openclaw_routing_rules_remove`
+/// Params: `index: usize`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_remove(
+    policy: &mut RoutingPolicy,
+    index: usize,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    policy.remove_rule(index)?;
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 12. openclaw_routing_rules_reorder ────────────────────────────────
+
+/// Reorder a routing rule (move from one position to another).
+///
+/// Maps to: `openclaw_routing_rules_reorder`
+/// Params: `from: usize, to: usize`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_reorder(
+    policy: &mut RoutingPolicy,
+    from: usize,
+    to: usize,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    policy.reorder_rules(from, to)?;
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 13. openclaw_routing_status ───────────────────────────────────────
+
+/// Get full routing policy status for UI display.
+///
+/// Maps to: `openclaw_routing_status`
+/// Response: `RoutingStatusResponse`
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoutingStatusResponse {
+    pub enabled: bool,
+    pub default_provider: String,
+    pub rule_count: usize,
+    pub rules: Vec<RoutingRuleSummary>,
+    pub latency_data: Vec<LatencyEntry>,
+}
+
+/// Per-provider latency data for UI display.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LatencyEntry {
+    pub provider: String,
+    pub avg_latency_ms: f64,
+}
+
+pub fn routing_status(policy: &RoutingPolicy) -> Result<RoutingStatusResponse, String> {
+    let tracker = policy.latency_tracker();
+    let mut latency_data = Vec::new();
+
+    // Collect all providers with latency data.
+    // We check known providers by iterating rules for provider names.
+    let mut providers: Vec<String> = Vec::new();
+    for rule in policy.rules() {
+        match rule {
+            RoutingRule::LargeContext { provider, .. }
+            | RoutingRule::VisionContent { provider } => {
+                if !providers.contains(provider) {
+                    providers.push(provider.clone());
+                }
+            }
+            RoutingRule::Fallback {
+                primary, fallbacks, ..
+            } => {
+                if !providers.contains(primary) {
+                    providers.push(primary.clone());
+                }
+                for p in fallbacks {
+                    if !providers.contains(p) {
+                        providers.push(p.clone());
+                    }
+                }
+            }
+            RoutingRule::RoundRobin {
+                providers: rr_providers,
+            } => {
+                for p in rr_providers {
+                    if !providers.contains(p) {
+                        providers.push(p.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Also add default provider.
+    if !providers.contains(&policy.default_provider().to_string()) {
+        providers.push(policy.default_provider().to_string());
+    }
+
+    for provider in &providers {
+        if let Some(latency) = tracker.get_latency(provider) {
+            latency_data.push(LatencyEntry {
+                provider: provider.clone(),
+                avg_latency_ms: latency,
+            });
+        }
+    }
+
+    Ok(RoutingStatusResponse {
+        enabled: policy.is_enabled(),
+        default_provider: policy.default_provider().to_string(),
+        rule_count: policy.rule_count(),
+        rules: RoutingRuleSummary::from_policy(policy),
+        latency_data,
+    })
+}
+
+// ── 14. openclaw_gmail_status ─────────────────────────────────────────
+
+/// Get Gmail channel configuration status.
+///
+/// Maps to: `openclaw_gmail_status`
+/// Response: `GmailStatusResponse`
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GmailStatusResponse {
+    pub enabled: bool,
+    pub configured: bool,
+    pub status: String,
+    pub project_id: String,
+    pub subscription_id: String,
+    pub label_filters: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub missing_fields: Vec<String>,
+    pub oauth_configured: bool,
+}
+
+pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String> {
+    use crate::channels::gmail_wiring::GmailStatus;
+
+    let status = config.status();
+    let status_str = match &status {
+        GmailStatus::Disabled => "disabled".to_string(),
+        GmailStatus::Ready { subscription } => format!("ready ({})", subscription),
+        GmailStatus::MissingCredentials { fields } => {
+            format!("missing credentials: {}", fields.join(", "))
+        }
+        GmailStatus::Error(e) => format!("error: {}", e),
+    };
+
+    Ok(GmailStatusResponse {
+        enabled: config.enabled,
+        configured: config.is_configured(),
+        status: status_str,
+        project_id: config.project_id.clone(),
+        subscription_id: config.subscription_id.clone(),
+        label_filters: config.label_filters.clone(),
+        allowed_senders: config.allowed_senders.clone(),
+        missing_fields: config.validate(),
+        oauth_configured: config.oauth_token.is_some(),
+    })
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -175,6 +394,12 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_cache_stats",
         "openclaw_plugin_lifecycle_list",
         "openclaw_manifest_validate",
+        "openclaw_routing_rules_list",
+        "openclaw_routing_rules_add",
+        "openclaw_routing_rules_remove",
+        "openclaw_routing_rules_reorder",
+        "openclaw_routing_status",
+        "openclaw_gmail_status",
     ]
 }
 
@@ -185,6 +410,7 @@ mod tests {
     use crate::extensions::lifecycle_hooks::{LifecycleEvent, LifecycleHook};
     use crate::llm::cost_tracker::{BudgetConfig, CostEntry};
     use crate::llm::response_cache_ext::CacheConfig;
+    use crate::llm::routing_policy::RoutingRule;
 
     #[test]
     fn test_cost_summary() {
@@ -370,9 +596,12 @@ mod tests {
     #[test]
     fn test_available_commands() {
         let cmds = available_commands();
-        assert_eq!(cmds.len(), 8);
+        assert_eq!(cmds.len(), 14);
         assert!(cmds.contains(&"openclaw_cost_summary"));
         assert!(cmds.contains(&"openclaw_manifest_validate"));
+        assert!(cmds.contains(&"openclaw_routing_rules_list"));
+        assert!(cmds.contains(&"openclaw_routing_status"));
+        assert!(cmds.contains(&"openclaw_gmail_status"));
     }
 
     #[test]
@@ -388,5 +617,202 @@ mod tests {
         assert!(json.contains("\"success\":true"));
         let deser: InstallResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.plugin_name, "test");
+    }
+
+    // ── Routing rule CRUD tests ───────────────────────────────────────
+
+    #[test]
+    fn test_routing_rules_list_empty() {
+        let policy = RoutingPolicy::new("openai");
+        let rules = routing_rules_list(&policy).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_routing_rules_list_with_rules() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::LargeContext {
+            threshold: 100_000,
+            provider: "claude".into(),
+        });
+        let rules = routing_rules_list(&policy).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].rule_type, "vision");
+        assert_eq!(rules[1].rule_type, "large_context");
+        assert!(rules[1].description.contains("100000"));
+    }
+
+    #[test]
+    fn test_routing_rules_add_at_end() {
+        let mut policy = RoutingPolicy::new("openai");
+        let rules = routing_rules_add(&mut policy, RoutingRule::LowestLatency, None).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_type, "lowest_latency");
+    }
+
+    #[test]
+    fn test_routing_rules_add_at_position() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+
+        // Insert at position 0
+        let rules = routing_rules_add(
+            &mut policy,
+            RoutingRule::LargeContext {
+                threshold: 50000,
+                provider: "claude".into(),
+            },
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].rule_type, "large_context");
+        assert_eq!(rules[1].rule_type, "lowest_latency");
+    }
+
+    #[test]
+    fn test_routing_rules_add_validation_empty_round_robin() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_add(
+            &mut policy,
+            RoutingRule::RoundRobin { providers: vec![] },
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least one provider"));
+    }
+
+    #[test]
+    fn test_routing_rules_add_validation_zero_threshold() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_add(
+            &mut policy,
+            RoutingRule::LargeContext {
+                threshold: 0,
+                provider: "claude".into(),
+            },
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_routing_rules_remove() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        let rules = routing_rules_remove(&mut policy, 0).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_type, "vision");
+    }
+
+    #[test]
+    fn test_routing_rules_remove_out_of_bounds() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_remove(&mut policy, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_routing_rules_reorder() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::LargeContext {
+            threshold: 100_000,
+            provider: "claude".into(),
+        });
+
+        // Move last to first
+        let rules = routing_rules_reorder(&mut policy, 2, 0).unwrap();
+        assert_eq!(rules[0].rule_type, "large_context");
+        assert_eq!(rules[1].rule_type, "lowest_latency");
+        assert_eq!(rules[2].rule_type, "vision");
+    }
+
+    #[test]
+    fn test_routing_status() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.record_latency("openai", 200.0);
+        policy.record_latency("gemini", 100.0);
+
+        let status = routing_status(&policy).unwrap();
+        assert!(status.enabled);
+        assert_eq!(status.default_provider, "openai");
+        assert_eq!(status.rule_count, 1);
+        assert_eq!(status.rules.len(), 1);
+        assert!(!status.latency_data.is_empty());
+    }
+
+    #[test]
+    fn test_routing_status_serializable() {
+        let policy = RoutingPolicy::new("openai");
+        let status = routing_status(&policy).unwrap();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"default_provider\":\"openai\""));
+    }
+
+    // ── Gmail status tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_gmail_status_disabled() {
+        let config = GmailConfig::default();
+        let status = gmail_status(&config).unwrap();
+        assert!(!status.enabled);
+        assert!(!status.configured);
+        assert_eq!(status.status, "disabled");
+    }
+
+    #[test]
+    fn test_gmail_status_missing_creds() {
+        let config = GmailConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(status.status.contains("missing credentials"));
+        assert!(!status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_ready() {
+        let config = GmailConfig {
+            enabled: true,
+            project_id: "my-project".into(),
+            subscription_id: "my-sub".into(),
+            topic_id: "my-topic".into(),
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
+        assert!(status.configured);
+        assert!(status.status.contains("ready"));
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_serializable() {
+        let config = GmailConfig::default();
+        let status = gmail_status(&config).unwrap();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        assert!(json.contains("\"configured\":false"));
     }
 }

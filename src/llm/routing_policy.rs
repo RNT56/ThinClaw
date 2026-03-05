@@ -244,6 +244,113 @@ impl RoutingPolicy {
     pub fn latency_tracker(&self) -> &LatencyTracker {
         &self.latency_tracker
     }
+
+    /// Get all rules (read-only, for UI display).
+    pub fn rules(&self) -> &[RoutingRule] {
+        &self.rules
+    }
+
+    /// Remove a rule by index.
+    ///
+    /// Returns `Err` if the index is out of bounds.
+    pub fn remove_rule(&mut self, index: usize) -> Result<RoutingRule, String> {
+        if index >= self.rules.len() {
+            return Err(format!(
+                "Rule index {} out of bounds (have {} rules)",
+                index,
+                self.rules.len()
+            ));
+        }
+        Ok(self.rules.remove(index))
+    }
+
+    /// Reorder a rule from one position to another.
+    ///
+    /// Moves the rule at `from` to `to`, shifting other rules accordingly.
+    /// Returns `Err` if either index is out of bounds.
+    pub fn reorder_rules(&mut self, from: usize, to: usize) -> Result<(), String> {
+        let len = self.rules.len();
+        if from >= len {
+            return Err(format!(
+                "Source index {} out of bounds (have {} rules)",
+                from, len
+            ));
+        }
+        if to >= len {
+            return Err(format!(
+                "Target index {} out of bounds (have {} rules)",
+                to, len
+            ));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let rule = self.rules.remove(from);
+        self.rules.insert(to, rule);
+        Ok(())
+    }
+
+    /// Set the default provider.
+    pub fn set_default_provider(&mut self, provider: impl Into<String>) {
+        self.default_provider = provider.into();
+    }
+}
+
+/// Serializable summary of a routing rule for UI display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingRuleSummary {
+    pub index: usize,
+    pub rule_type: String,
+    pub description: String,
+    pub rule: RoutingRule,
+}
+
+impl RoutingRuleSummary {
+    /// Build summaries from a policy's rules.
+    pub fn from_policy(policy: &RoutingPolicy) -> Vec<Self> {
+        policy
+            .rules()
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| {
+                let (rule_type, description) = match rule {
+                    RoutingRule::LargeContext {
+                        threshold,
+                        provider,
+                    } => (
+                        "large_context".into(),
+                        format!("If tokens > {}, use {}", threshold, provider),
+                    ),
+                    RoutingRule::VisionContent { provider } => (
+                        "vision".into(),
+                        format!("If vision content, use {}", provider),
+                    ),
+                    RoutingRule::CostOptimized { max_cost_per_m_usd } => (
+                        "cost_optimized".into(),
+                        format!("If budget ≤ ${}/M tokens", max_cost_per_m_usd),
+                    ),
+                    RoutingRule::LowestLatency => (
+                        "lowest_latency".into(),
+                        "Route to provider with lowest average latency".into(),
+                    ),
+                    RoutingRule::RoundRobin { providers } => (
+                        "round_robin".into(),
+                        format!("Round-robin across: {}", providers.join(", ")),
+                    ),
+                    RoutingRule::Fallback { primary, fallbacks } => (
+                        "fallback".into(),
+                        format!("Try {}, fallback to {}", primary, fallbacks.join(", ")),
+                    ),
+                };
+                Self {
+                    index: i,
+                    rule_type,
+                    description,
+                    rule: rule.clone(),
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +518,121 @@ mod tests {
         policy.add_rule(RoutingRule::LowestLatency);
         // No latency data recorded
         assert_eq!(policy.select_provider(&base_ctx()), "default");
+    }
+
+    // ── CRUD method tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rules_accessor() {
+        let mut policy = RoutingPolicy::new("openai");
+        assert!(policy.rules().is_empty());
+        policy.add_rule(RoutingRule::LowestLatency);
+        assert_eq!(policy.rules().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_rule() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        let removed = policy.remove_rule(0).unwrap();
+        assert!(matches!(removed, RoutingRule::LowestLatency));
+        assert_eq!(policy.rule_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_rule_out_of_bounds() {
+        let mut policy = RoutingPolicy::new("openai");
+        assert!(policy.remove_rule(0).is_err());
+    }
+
+    #[test]
+    fn test_reorder_rules() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::LargeContext {
+            threshold: 100_000,
+            provider: "claude".into(),
+        });
+
+        // Move last to first
+        policy.reorder_rules(2, 0).unwrap();
+        assert!(matches!(
+            policy.rules()[0],
+            RoutingRule::LargeContext { .. }
+        ));
+        assert!(matches!(policy.rules()[1], RoutingRule::LowestLatency));
+        assert!(matches!(
+            policy.rules()[2],
+            RoutingRule::VisionContent { .. }
+        ));
+    }
+
+    #[test]
+    fn test_reorder_rules_same_index() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        assert!(policy.reorder_rules(0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_reorder_rules_out_of_bounds() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        assert!(policy.reorder_rules(0, 5).is_err());
+        assert!(policy.reorder_rules(5, 0).is_err());
+    }
+
+    #[test]
+    fn test_set_default_provider() {
+        let mut policy = RoutingPolicy::new("openai");
+        assert_eq!(policy.default_provider(), "openai");
+        policy.set_default_provider("anthropic");
+        assert_eq!(policy.default_provider(), "anthropic");
+
+        // Verify it affects routing when disabled
+        policy.set_enabled(false);
+        assert_eq!(policy.select_provider(&base_ctx()), "anthropic");
+    }
+
+    #[test]
+    fn test_routing_rule_summary() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::RoundRobin {
+            providers: vec!["a".into(), "b".into()],
+        });
+        policy.add_rule(RoutingRule::Fallback {
+            primary: "main".into(),
+            fallbacks: vec!["backup".into()],
+        });
+
+        let summaries = RoutingRuleSummary::from_policy(&policy);
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].index, 0);
+        assert_eq!(summaries[0].rule_type, "vision");
+        assert!(summaries[0].description.contains("gemini"));
+        assert_eq!(summaries[1].rule_type, "round_robin");
+        assert!(summaries[1].description.contains("a, b"));
+        assert_eq!(summaries[2].rule_type, "fallback");
+        assert!(summaries[2].description.contains("main"));
+    }
+
+    #[test]
+    fn test_routing_rule_summary_serializable() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        let summaries = RoutingRuleSummary::from_policy(&policy);
+        let json = serde_json::to_string(&summaries).unwrap();
+        assert!(json.contains("lowest_latency"));
+        let deser: Vec<RoutingRuleSummary> = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.len(), 1);
     }
 }
