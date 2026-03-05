@@ -17,6 +17,7 @@
 
 use crate::agent::routine_audit::{RoutineAuditLog, RoutineRun};
 use crate::channels::gmail_wiring::GmailConfig;
+use crate::cli::oauth_defaults::{self, GmailOAuthConfig};
 use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
 use crate::extensions::lifecycle_hooks::{AuditLogHook, SerializedLifecycleEvent};
 use crate::extensions::manifest_validator::{ManifestValidator, PluginInfoRef, ValidationResponse};
@@ -381,6 +382,152 @@ pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String>
     })
 }
 
+// ── 15. openclaw_gmail_oauth_start ────────────────────────────────────
+
+/// Response from the Gmail OAuth PKCE flow.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GmailOAuthResult {
+    pub success: bool,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+    pub scope: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Start the Gmail OAuth PKCE flow.
+///
+/// This opens the user's browser for Google consent, waits for the
+/// callback, exchanges the auth code for tokens, and returns them.
+///
+/// Maps to: `openclaw_gmail_oauth_start`
+/// Response: `GmailOAuthResult`
+pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    // Check that we have the built-in Google credentials.
+    let creds = oauth_defaults::builtin_credentials("gmail_oauth_token").ok_or_else(|| {
+        "Gmail OAuth credentials not available. Rebuild with IRONCLAW_GOOGLE_CLIENT_ID set."
+            .to_string()
+    })?;
+
+    // Generate PKCE verifier and challenge.
+    let mut verifier_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut verifier_bytes);
+    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+    let mut hasher = Sha256::new();
+    hasher.update(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+    // Build the authorization URL.
+    let auth_url = GmailOAuthConfig::auth_url("gmail-tauri", &code_challenge);
+
+    // Open the browser.
+    if let Err(e) = open::that(&auth_url) {
+        tracing::warn!(error = %e, "Could not open browser for Gmail OAuth");
+        return Err(format!(
+            "Could not open browser. Please open this URL manually: {}",
+            auth_url
+        ));
+    }
+
+    tracing::info!("Gmail OAuth flow started — waiting for browser callback");
+
+    // Bind the callback listener.
+    let listener = oauth_defaults::bind_callback_listener()
+        .await
+        .map_err(|e| format!("Failed to bind OAuth callback listener: {}", e))?;
+
+    // Wait for the callback (5 minute timeout).
+    let code = oauth_defaults::wait_for_callback(listener, "/callback", "code", "Gmail")
+        .await
+        .map_err(|e| format!("OAuth callback failed: {}", e))?;
+
+    tracing::info!("Gmail OAuth code received — exchanging for tokens");
+
+    // Exchange the code for tokens.
+    let client = reqwest::Client::new();
+    let token_params = [
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        ("redirect_uri", &GmailOAuthConfig::redirect_uri()),
+        ("code_verifier", &code_verifier),
+    ];
+
+    let token_response = client
+        .post(GmailOAuthConfig::TOKEN_URL)
+        .basic_auth(&creds.client_id, Some(&creds.client_secret))
+        .form(&token_params)
+        .send()
+        .await
+        .map_err(|e| format!("Token exchange request failed: {}", e))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let body = token_response.text().await.unwrap_or_default();
+        tracing::error!(
+            status = %status,
+            body = %body,
+            "Gmail OAuth token exchange failed"
+        );
+        return Ok(GmailOAuthResult {
+            success: false,
+            access_token: None,
+            refresh_token: None,
+            expires_in: None,
+            scope: None,
+            error: Some(format!("Token exchange failed: {} - {}", status, body)),
+        });
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let access_token = token_data
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    let scope = token_data
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if access_token.is_none() {
+        return Ok(GmailOAuthResult {
+            success: false,
+            access_token: None,
+            refresh_token: None,
+            expires_in: None,
+            scope: None,
+            error: Some("Token exchange succeeded but no access_token in response".into()),
+        });
+    }
+
+    tracing::info!("Gmail OAuth completed successfully");
+
+    Ok(GmailOAuthResult {
+        success: true,
+        access_token,
+        refresh_token,
+        expires_in,
+        scope,
+        error: None,
+    })
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -400,6 +547,7 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_routing_rules_reorder",
         "openclaw_routing_status",
         "openclaw_gmail_status",
+        "openclaw_gmail_oauth_start",
     ]
 }
 
@@ -596,12 +744,13 @@ mod tests {
     #[test]
     fn test_available_commands() {
         let cmds = available_commands();
-        assert_eq!(cmds.len(), 14);
+        assert_eq!(cmds.len(), 15);
         assert!(cmds.contains(&"openclaw_cost_summary"));
         assert!(cmds.contains(&"openclaw_manifest_validate"));
         assert!(cmds.contains(&"openclaw_routing_rules_list"));
         assert!(cmds.contains(&"openclaw_routing_status"));
         assert!(cmds.contains(&"openclaw_gmail_status"));
+        assert!(cmds.contains(&"openclaw_gmail_oauth_start"));
     }
 
     #[test]
