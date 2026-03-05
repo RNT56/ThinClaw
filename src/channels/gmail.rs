@@ -67,6 +67,7 @@ struct GmailChannelState {
 struct GmailMessageListResponse {
     messages: Option<Vec<GmailMessageRef>>,
     #[serde(default)]
+    #[allow(dead_code)]
     next_page_token: Option<String>,
 }
 
@@ -75,6 +76,7 @@ struct GmailMessageListResponse {
 struct GmailMessageRef {
     id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     thread_id: Option<String>,
 }
 
@@ -86,8 +88,10 @@ struct GmailMessage {
     thread_id: Option<String>,
     snippet: Option<String>,
     payload: Option<GmailPayload>,
+    #[allow(dead_code)]
     label_ids: Option<Vec<String>>,
     #[serde(default)]
+    #[allow(dead_code)]
     internal_date: Option<String>,
 }
 
@@ -320,7 +324,7 @@ impl GmailChannel {
     /// Fetch new messages from Gmail API using history ID.
     async fn fetch_new_messages(
         &self,
-        history_id: Option<u64>,
+        _history_id: Option<u64>,
     ) -> Result<Vec<GmailMessage>, ChannelError> {
         let token = self.state.access_token.read().await.clone();
 
@@ -690,7 +694,7 @@ impl GmailChannel {
     async fn poll_loop(
         config: GmailConfig,
         state: Arc<GmailChannelState>,
-        http: Client,
+        _http: Client,
         channel: GmailChannel,
     ) {
         tracing::info!(
