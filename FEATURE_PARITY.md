@@ -989,10 +989,10 @@ async function sendMessage(text: string, threadId?: string) {
 
 ## Implementation Priorities (IronClaw)
 
-> **Last updated:** 2026-03-04 12:10 CET — Sprint 13 IronClaw-side complete (backend APIs for Scrappy), remaining: Tauri command wiring + Scrappy UI
+> **Last updated:** 2026-03-05 05:16 CET — Sprint 14 complete. Next: Tauri V2 Channel migration (§21) + Gmail PKCE.
 >
 > All open IronClaw work aggregated from project artifacts into a single prioritized list.
-> For Scrappy-specific priorities, see §20 above.
+> For Scrappy-specific priorities, see §20 above. For TauriChannel architecture, see §21.
 > Scrappy = macOS desktop app (Tauri/Rust). May later add a native Swift macOS app separately.
 
 ### P0 - Core (Complete ✅)
@@ -1141,21 +1141,22 @@ async function sendMessage(text: string, threadId?: string) {
 ### P4 - Postponed
 - ❌ Slack channel (native implementation — currently WASM tool)
 - ❌ WhatsApp channel (Baileys Web, echo detection)
-- ✅ iMessage channel — `IMessageChannel` (445 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending + main.rs startup wiring
+- ✅ iMessage channel — `IMessageChannel` (530 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics, 23 tests
 - ❌ Other messaging platforms (LINE, Feishu/Lark, Google Chat, MS Teams, Twitch)
 
 ### P5 - Scrappy (Tauri) Integration
 > Scrappy is the macOS desktop app, built with Tauri v2 (Rust + React).
 > These tasks require action in the Scrappy codebase, not IronClaw.
-> For full Scrappy priorities see §20.
+> For full Scrappy priorities see §20. For TauriChannel migration see §21.
 
 **Wiring (updated 2026-03-02 — confirmed live by Scrappy Agent)**
 - ✅ `ToolBridge` wiring — both lines uncommented, live
 - ✅ `StatusUpdate::Thinking(text)` → `UiEvent::AssistantInternal` (surfaces reasoning with 🧠)
 - ✅ `refresh_secrets()` hot-reload — uncommented, uses `(secrets_store, "local_user")` signature
 - ✅ `BridgedTool` → `Tool` trait adapter — fully implemented ([`src/hardware_bridge.rs`](src/hardware_bridge.rs): 610 LOC, 7 tests) + auto-registration in `AppBuilder::init_tools()` ([`src/app.rs`](src/app.rs))
+- ✅ Tauri commands facade — 8 commands wired via [`src/tauri_commands.rs`](src/tauri_commands.rs) (12 tests)
 
-**macOS App Gaps (from Scrappy feature parity report, 2026-03-02)**
+**macOS App Features (from Scrappy feature parity report, 2026-03-02)**
 - ✅ Auto-updates — `tauri-plugin-updater` + `UpdateChecker.tsx`, signing keys, GitHub endpoint (was P1)
 - ✅ Thinking toggle — native IronClaw `ThinkingConfig` with budget slider (was P1)
 - ✅ Memory search — hybrid BM25+vector search surfaced in Memory panel (was P2)
@@ -1172,12 +1173,37 @@ async function sendMessage(text: string, threadId?: string) {
 - ✅ Animated tray icon — TrayState with active dot badge on Thinking/ToolStarted, 3s debounced reset (was P3)
 - ✅ iMessage integration — `IMessageChannel` (chat.db polling + osascript, group chats, attachments, dedup, diagnostics)
 
+### P6 - Tauri V2 Channel Migration 🔮 (Sprint 15)
+
+> **Goal:** Replace the GatewayChannel HTTP/SSE localhost server with native Tauri V2
+> `invoke()` + `Channel<ChatEvent>` streaming for all Scrappy ↔ IronClaw communication.
+> See §21 for full architecture comparison, diagrams, and pseudocode.
+
+| # | Task | Owner | Effort | Status |
+|---|------|-------|--------|--------|
+| **T1** | Define `ChatEvent` enum — typed variants: `StreamChunk`, `Thinking`, `ToolStarted`, `ToolCompleted`, `ToolResult`, `Status`, `ApprovalNeeded`, `Error`, `Done` | IronClaw | 0.5 day | 🔮 Planned |
+| **T2** | Implement `TauriChannel` (`src/channels/tauri_channel.rs`) — new `Channel` trait impl using `mpsc::Sender` + `Channel<ChatEvent>` | IronClaw | 1-2 days | 🔮 Planned |
+| **T3** | Create `openclaw_chat` Tauri command — accepts message + `on_event: Channel<ChatEvent>`, injects into `TauriChannel` | Both | 1 day | 🔮 Planned |
+| **T4** | Conditional channel registration — `AppBuilder` uses `TauriChannel` in Tauri builds, `GatewayChannel` in standalone | IronClaw | 0.5 day | 🔮 Planned |
+| **T5** | Migrate Scrappy React chat — replace `fetch(localhost:3000)` / `EventSource` with `invoke("openclaw_chat", { onEvent })` | Scrappy | 1-2 days | 🔮 Planned |
+| **T6** | Migrate SSE listeners to Tauri events — channel status, tool progress, job events via `emit()`/`listen()` | Both | 1 day | 🔮 Planned |
+| **T7** | Feature-gate GatewayChannel — `#[cfg(not(feature = "tauri"))]` or runtime detection; only starts in standalone mode | IronClaw | 0.5 day | 🔮 Planned |
+| **T8** | End-to-end testing — chat streaming, tool approvals, job events, session management through pure Tauri IPC | Both | 1 day | 🔮 Planned |
+
+**Total: 6-8 days** (split across IronClaw + Scrappy)
+
+**Migration phases:**
+1. **Phase 1** — Implement `TauriChannel` alongside `GatewayChannel` (both active, non-breaking)
+2. **Phase 2** — Migrate all SSE listeners to Tauri events
+3. **Phase 3** — Feature-gate `GatewayChannel` in Tauri builds (standalone mode preserved)
+
 ### Deferred (No Urgency)
 - ✅ Sherpa-ONNX keyword spotting ([`src/voice_wake.rs`](src/voice_wake.rs): `detection_loop_sherpa()` — 3-thread pipeline with auto-fallback)
 - 🔮 Skill cross-crate deps (no skills use Rust deps yet)
 - 🔮 WS RPC for remote Hardware Bridge (desktop uses internal trait)
 - 🔮 whisper-rs local inference (WhisperHttp covers desktop)
 - 🔮 macOS dictation backend (scaffold in `talk_mode.rs`)
+- 🔮 GatewayChannel deprecation in Tauri mode (post-P6 completion)
 
 
 ---
