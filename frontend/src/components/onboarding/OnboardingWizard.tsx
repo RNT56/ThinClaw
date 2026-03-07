@@ -1197,12 +1197,23 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </div>
                                         </div>
                                         {permissions.accessibility ? (
-                                            <span className="flex items-center gap-1.5 text-green-500 text-sm font-medium bg-green-500/10 px-3 py-1 rounded-full">
-                                                <CheckCircle className="w-4 h-4" /> Granted
-                                            </span>
+                                            <div className="flex items-center gap-2">
+                                                <span className="flex items-center gap-1.5 text-green-500 text-sm font-medium bg-green-500/10 px-3 py-1 rounded-full">
+                                                    <CheckCircle className="w-4 h-4" /> Granted
+                                                </span>
+                                                <button
+                                                    onClick={() => openclaw.openPermissionSettings('accessibility')}
+                                                    className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
+                                                >
+                                                    Manage
+                                                </button>
+                                            </div>
                                         ) : (
                                             <button
-                                                onClick={() => openclaw.requestPermission('accessibility')}
+                                                onClick={async () => {
+                                                    const updated = await openclaw.requestPermission('accessibility');
+                                                    setPermissions(updated);
+                                                }}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"
                                             >
                                                 Grant Access
@@ -1221,12 +1232,23 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             </div>
                                         </div>
                                         {permissions.screen_recording ? (
-                                            <span className="flex items-center gap-1.5 text-green-500 text-sm font-medium bg-green-500/10 px-3 py-1 rounded-full">
-                                                <CheckCircle className="w-4 h-4" /> Granted
-                                            </span>
+                                            <div className="flex items-center gap-2">
+                                                <span className="flex items-center gap-1.5 text-green-500 text-sm font-medium bg-green-500/10 px-3 py-1 rounded-full">
+                                                    <CheckCircle className="w-4 h-4" /> Granted
+                                                </span>
+                                                <button
+                                                    onClick={() => openclaw.openPermissionSettings('screen_recording')}
+                                                    className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
+                                                >
+                                                    Manage
+                                                </button>
+                                            </div>
                                         ) : (
                                             <button
-                                                onClick={() => openclaw.requestPermission('screen_recording')}
+                                                onClick={async () => {
+                                                    const updated = await openclaw.requestPermission('screen_recording');
+                                                    setPermissions(updated);
+                                                }}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"
                                             >
                                                 Grant Access
