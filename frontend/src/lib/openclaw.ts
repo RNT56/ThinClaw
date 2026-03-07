@@ -25,8 +25,8 @@ function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 // ============================================================================
 
 export interface OpenClawStatus {
-    gateway_running: boolean;
-    ws_connected: boolean;
+    engine_running: boolean;
+    engine_connected: boolean;
     slack_enabled: boolean;
     telegram_enabled: boolean;
     port: number;
@@ -51,6 +51,9 @@ export interface OpenClawStatus {
     has_groq_key: boolean;
     groq_granted: boolean;
     node_host_enabled: boolean;
+    allow_local_tools: boolean;
+    workspace_mode: string;
+    workspace_root: string | null;
     local_inference_enabled: boolean;
     selected_cloud_brain: string | null;
     selected_cloud_model: string | null;
@@ -111,6 +114,7 @@ export interface OpenClawMessage {
     text: string;
     source: string | null;
     metadata?: any;
+    tokensPerSec?: number;
 }
 
 export interface OpenClawHistoryResponse {
@@ -167,8 +171,8 @@ export interface OpenClawSkillsStatus {
 
 export interface OpenClawDiagnostics {
     timestamp: string;
-    gateway_running: boolean;
-    ws_connected: boolean;
+    engine_running: boolean;
+    engine_connected: boolean;
     version: string;
     platform: string;
     port: number | null;
@@ -221,14 +225,14 @@ export async function saveGatewaySettings(
 }
 
 /**
- * Start the OpenClaw gateway (WS client)
+ * Start the IronClaw engine (in-process, no HTTP server)
  */
 export async function startOpenClawGateway(): Promise<void> {
     return invoke('openclaw_start_gateway');
 }
 
 /**
- * Stop the OpenClaw gateway
+ * Stop the IronClaw engine
  */
 export async function stopOpenClawGateway(): Promise<void> {
     return invoke('openclaw_stop_gateway');
@@ -452,6 +456,14 @@ export async function toggleOpenClawNodeHost(enabled: boolean): Promise<OpenClaw
     return invoke('openclaw_toggle_node_host', { enabled });
 }
 
+export async function toggleOpenClawLocalTools(enabled: boolean): Promise<OpenClawRpcResponse> {
+    return invoke('openclaw_toggle_local_tools', { enabled });
+}
+
+export async function setOpenClawWorkspaceMode(mode: string, root: string | null): Promise<string> {
+    return invoke('openclaw_set_workspace_mode', { mode, root });
+}
+
 export async function toggleOpenClawLocalInference(enabled: boolean): Promise<OpenClawRpcResponse> {
     return invoke('openclaw_toggle_local_inference', { enabled });
 }
@@ -514,8 +526,12 @@ export async function getPermissionStatus(): Promise<{ accessibility: boolean, s
     return invoke('get_permission_status');
 }
 
-export async function requestPermission(permission: string): Promise<void> {
+export async function requestPermission(permission: string): Promise<{ accessibility: boolean, screen_recording: boolean }> {
     return invoke('request_permission', { permission });
+}
+
+export async function openPermissionSettings(permission: string): Promise<void> {
+    return invoke('open_permission_settings', { permission });
 }
 
 export async function setSetupCompleted(completed: boolean): Promise<void> {
@@ -645,6 +661,76 @@ export async function canvasPush(content: string): Promise<void> {
 
 export async function canvasNavigate(url: string): Promise<void> {
     return invoke('openclaw_canvas_navigate', { url });
+}
+
+// --- Canvas / A2UI Types ---
+
+export type PanelPosition = 'right' | 'bottom' | 'center' | 'floating';
+export type NotifyLevel = 'info' | 'success' | 'warning' | 'error';
+export type ButtonStyle = 'primary' | 'secondary' | 'danger' | 'ghost';
+
+export interface KvItem {
+    key: string;
+    value: string;
+}
+
+export interface FormFieldText { type: 'text'; name: string; label: string; placeholder?: string; required?: boolean; }
+export interface FormFieldNumber { type: 'number'; name: string; label: string; min?: number; max?: number; }
+export interface FormFieldSelect { type: 'select'; name: string; label: string; options: string[]; }
+export interface FormFieldCheckbox { type: 'checkbox'; name: string; label: string; checked?: boolean; }
+export interface FormFieldTextarea { type: 'textarea'; name: string; label: string; rows?: number; }
+export type FormField = FormFieldText | FormFieldNumber | FormFieldSelect | FormFieldCheckbox | FormFieldTextarea;
+
+export interface UiComponentText { type: 'text'; content: string; }
+export interface UiComponentHeading { type: 'heading'; text: string; level?: number; }
+export interface UiComponentTable { type: 'table'; headers: string[]; rows: string[][]; }
+export interface UiComponentCode { type: 'code'; language: string; content: string; }
+export interface UiComponentImage { type: 'image'; src: string; alt?: string; width?: number; }
+export interface UiComponentProgress { type: 'progress'; label?: string; value: number; max: number; }
+export interface UiComponentKeyValue { type: 'key_value'; items: KvItem[]; }
+export interface UiComponentDivider { type: 'divider'; }
+export interface UiComponentButton { type: 'button'; label: string; action: string; style?: ButtonStyle; }
+export interface UiComponentForm { type: 'form'; form_id: string; fields: FormField[]; submit_label: string; }
+export interface UiComponentJson { type: 'json'; data: any; collapsed?: boolean; }
+
+export type UiComponent =
+    | UiComponentText | UiComponentHeading | UiComponentTable | UiComponentCode
+    | UiComponentImage | UiComponentProgress | UiComponentKeyValue | UiComponentDivider
+    | UiComponentButton | UiComponentForm | UiComponentJson;
+
+export interface CanvasActionShow {
+    action: 'show';
+    panel_id: string;
+    title: string;
+    components: UiComponent[];
+    position?: PanelPosition;
+    modal?: boolean;
+}
+export interface CanvasActionUpdate {
+    action: 'update';
+    panel_id: string;
+    components: UiComponent[];
+}
+export interface CanvasActionDismiss {
+    action: 'dismiss';
+    panel_id: string;
+}
+export interface CanvasActionNotify {
+    action: 'notify';
+    message: string;
+    level?: NotifyLevel;
+    duration_secs?: number;
+}
+export type CanvasAction = CanvasActionShow | CanvasActionUpdate | CanvasActionDismiss | CanvasActionNotify;
+
+/** Dispatch a canvas action event (button click, form submit) back to the agent. */
+export async function canvasDispatchAction(
+    sessionKey: string,
+    eventType: string,
+    payload: any,
+    runId?: string
+): Promise<OpenClawRpcResponse> {
+    return invoke('openclaw_canvas_dispatch_event', { sessionKey, runId: runId ?? null, eventType, payload });
 }
 
 export async function abortSession(sessionKey: string, runId?: string): Promise<void> {
@@ -860,6 +946,31 @@ export async function listTools(): Promise<ToolsListResponse> {
     return invoke('openclaw_tools_list');
 }
 
+/** Get the list of globally disabled tool names. */
+export async function getDisabledTools(): Promise<string[]> {
+    return invoke('openclaw_tool_policy_get');
+}
+
+/** Overwrite the list of globally disabled tool names. */
+export async function setDisabledTools(disabledTools: string[]): Promise<void> {
+    return invoke('openclaw_tool_policy_set', { disabledTools });
+}
+
+/** Toggle a single tool on/off. Returns the new enabled state. */
+export async function toggleTool(toolName: string, currentlyEnabled: boolean): Promise<boolean> {
+    const disabled = await getDisabledTools();
+    let next: string[];
+    if (currentlyEnabled) {
+        // Currently enabled → disable it
+        next = [...new Set([...disabled, toolName])];
+    } else {
+        // Currently disabled → enable it
+        next = disabled.filter(n => n !== toolName);
+    }
+    await setDisabledTools(next);
+    return !currentlyEnabled;
+}
+
 // ============================================================================
 // DM Pairing Management
 // ============================================================================
@@ -1049,4 +1160,115 @@ export async function getRoutingConfig(): Promise<{ smart_routing_enabled: boole
 /** Enable or disable smart routing. */
 export async function setRoutingConfig(smartRoutingEnabled: boolean): Promise<void> {
     return invoke('openclaw_routing_set', { smartRoutingEnabled });
+}
+
+// --- Routing Rules ---
+
+export interface RoutingRule {
+    id: string;
+    label: string;
+    match_kind: 'keyword' | 'context_length' | 'provider' | 'always';
+    match_value: string;
+    target_model: string;
+    target_provider: string | null;
+    priority: number;
+    enabled: boolean;
+}
+
+export interface RoutingRulesResponse {
+    rules: RoutingRule[];
+    smart_routing_enabled: boolean;
+}
+
+/** List all routing rules along with smart routing toggle state. */
+export async function getRoutingRules(): Promise<RoutingRulesResponse> {
+    return invoke('openclaw_routing_rules_list');
+}
+
+/** Save routing rules (full replace — ordered by priority). */
+export async function saveRoutingRules(rules: RoutingRule[]): Promise<void> {
+    return invoke('openclaw_routing_rules_save', { rules });
+}
+
+// --- Gmail OAuth PKCE ---
+
+export interface GmailOAuthResult {
+    success: boolean;
+    access_token: string | null;
+    refresh_token: string | null;
+    expires_in: number | null;
+    scope: string | null;
+    error: string | null;
+}
+
+/**
+ * Start the Gmail OAuth PKCE flow via IronClaw.
+ * Opens a browser for Google consent, waits for callback, exchanges for tokens.
+ * Returns the full result — caller should check `success` field.
+ */
+export async function startGmailOAuth(): Promise<GmailOAuthResult> {
+    return invoke('openclaw_gmail_oauth_start');
+}
+
+// --- Routing Rule CRUD ---
+
+/** Add a routing rule at position (or at the end). Returns updated rules list. */
+export async function addRoutingRule(rule: RoutingRule, position?: number): Promise<RoutingRule[]> {
+    return invoke('openclaw_routing_rules_add', { rule, position: position ?? null });
+}
+
+/** Remove a routing rule by index. Returns updated rules list. */
+export async function removeRoutingRule(index: number): Promise<RoutingRule[]> {
+    return invoke('openclaw_routing_rules_remove', { index });
+}
+
+/** Reorder a routing rule (move from one position to another). Returns updated rules list. */
+export async function reorderRoutingRule(from: number, to: number): Promise<RoutingRule[]> {
+    return invoke('openclaw_routing_rules_reorder', { from, to });
+}
+
+// --- Routing Status ---
+
+export interface RoutingRuleSummary {
+    index: number;
+    kind: string;
+    description: string;
+    provider: string | null;
+}
+
+export interface LatencyEntry {
+    provider: string;
+    avg_latency_ms: number;
+}
+
+export interface RoutingStatusResponse {
+    enabled: boolean;
+    default_provider: string;
+    rule_count: number;
+    rules: RoutingRuleSummary[];
+    latency_data: LatencyEntry[];
+}
+
+/** Get full routing policy status including latency data. */
+export async function getRoutingStatus(): Promise<RoutingStatusResponse> {
+    return invoke('openclaw_routing_status');
+}
+
+// --- Gmail Status ---
+
+export interface GmailStatusResponse {
+    enabled: boolean;
+    configured: boolean;
+    status: string;
+    project_id: string;
+    subscription_id: string;
+    label_filters: string[];
+    allowed_senders: string[];
+    missing_fields: string[];
+    oauth_configured: boolean;
+}
+
+/** Get Gmail channel configuration status. */
+export async function getGmailStatus(): Promise<GmailStatusResponse> {
+    return invoke('openclaw_gmail_status');
 }

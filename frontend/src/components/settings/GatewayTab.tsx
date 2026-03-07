@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, MousePointerClick, Globe, Cpu, Settings } from 'lucide-react';
+import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, MousePointerClick, Globe, Cpu, Settings, FolderOpen } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as openclaw from '../../lib/openclaw';
@@ -32,6 +32,9 @@ interface StatusInfo {
     authToken: string;
     stateDir: string;
     nodeHostEnabled: boolean;
+    allowLocalTools: boolean;
+    workspaceMode: string;
+    workspaceRoot: string | null;
     localInferenceEnabled: boolean;
     exposeInference: boolean;
     hasHuggingfaceToken: boolean;
@@ -67,6 +70,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
         authToken: '',
         stateDir: '',
         nodeHostEnabled: false,
+        allowLocalTools: true,
+        workspaceMode: 'sandboxed',
+        workspaceRoot: null,
         localInferenceEnabled: false,
         exposeInference: false,
         hasHuggingfaceToken: false,
@@ -116,8 +122,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
         try {
             const s = await openclaw.getOpenClawStatus();
             setStatus({
-                gateway: s.gateway_running ? 'running' : 'stopped',
-                wsConnected: s.ws_connected,
+                gateway: s.engine_running ? 'running' : 'stopped',
+                wsConnected: s.engine_connected,
                 slackEnabled: s.slack_enabled,
                 telegramEnabled: s.telegram_enabled,
                 port: s.port,
@@ -128,6 +134,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 authToken: s.auth_token,
                 stateDir: s.state_dir,
                 nodeHostEnabled: s.node_host_enabled,
+                allowLocalTools: s.allow_local_tools ?? true,
+                workspaceMode: (s as any).workspace_mode || 'unrestricted',
+                workspaceRoot: (s as any).workspace_root || null,
                 localInferenceEnabled: s.local_inference_enabled,
                 exposeInference: (s as any).expose_inference || false,
                 hasHuggingfaceToken: s.has_huggingface_token,
@@ -774,6 +783,172 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </p>
                     </div>
 
+                    {/* Local Dev Tools Card */}
+                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-amber-500/10 rounded-xl group-hover:bg-amber-500/20 transition-colors">
+                                    <Code className="w-5 h-5 text-amber-500" />
+                                </div>
+                                <h4 className="font-bold text-base">Dev Tools</h4>
+                            </div>
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        await openclaw.toggleOpenClawLocalTools(!status.allowLocalTools);
+                                        await fetchStatus();
+                                        toast.success(status.allowLocalTools ? 'Dev tools disabled' : 'Dev tools enabled');
+                                    } catch (e) { toast.error('toggle failed'); }
+                                }}
+                                className={cn(
+                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
+                                    status.allowLocalTools ? "bg-amber-600" : "bg-muted"
+                                )}
+                            >
+                                <span className={cn(
+                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
+                                    status.allowLocalTools ? "translate-x-5" : "translate-x-0"
+                                )} />
+                            </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                            Allow the agent to read/write files, run shell commands, and execute code. Requires engine restart.
+                        </p>
+                    </div>
+
+                    {/* Workspace Mode Card */}
+                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group md:col-span-2">
+                        <div className="flex items-center gap-3 mb-2">
+                            <div className="p-2 bg-violet-500/10 rounded-xl group-hover:bg-violet-500/20 transition-colors">
+                                <FolderOpen className="w-5 h-5 text-violet-500" />
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-base">Workspace Mode</h4>
+                                <p className="text-xs text-muted-foreground">Controls where the agent can read/write files. Requires engine restart.</p>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-3">
+                            {([
+                                {
+                                    mode: 'sandboxed',
+                                    label: 'Sandboxed',
+                                    icon: '🔒',
+                                    desc: 'Confined to workspace. Files outside are blocked entirely.',
+                                    borderColor: '#f59e0b',
+                                    bgColor: 'rgba(245,158,11,0.1)',
+                                },
+                                {
+                                    mode: 'project',
+                                    label: 'Project',
+                                    icon: '📁',
+                                    desc: 'Working directory set. Can still access other files if needed.',
+                                    borderColor: '#3b82f6',
+                                    bgColor: 'rgba(59,130,246,0.1)',
+                                },
+                                {
+                                    mode: 'unrestricted',
+                                    label: 'Unrestricted',
+                                    icon: '🌐',
+                                    desc: 'Full system access. Agent can access any file with your approval.',
+                                    borderColor: '#10b981',
+                                    bgColor: 'rgba(16,185,129,0.1)',
+                                },
+                            ] as const).map(({ mode, label, icon, desc, borderColor, bgColor }) => (
+                                <button
+                                    key={mode}
+                                    onClick={async () => {
+                                        try {
+                                            // Pass null for root — backend will auto-generate if needed
+                                            const resolvedPath = await openclaw.setOpenClawWorkspaceMode(
+                                                mode,
+                                                mode === 'unrestricted' ? null : (status.workspaceRoot || null)
+                                            );
+                                            setStatus(prev => ({
+                                                ...prev,
+                                                workspaceMode: mode,
+                                                workspaceRoot: resolvedPath === 'none' ? null : resolvedPath,
+                                            }));
+                                            toast.success(`Workspace mode: ${label}`);
+                                        } catch (e: any) {
+                                            toast.error(e?.toString() || 'Failed to set workspace mode');
+                                        }
+                                    }}
+                                    className={cn(
+                                        "relative p-4 rounded-xl border-2 text-left transition-all duration-200",
+                                        status.workspaceMode === mode
+                                            ? "shadow-lg"
+                                            : "border-border/50 hover:border-border hover:bg-muted/30"
+                                    )}
+                                    style={status.workspaceMode === mode ? {
+                                        borderColor,
+                                        backgroundColor: bgColor,
+                                    } : undefined}
+                                >
+                                    <div className="flex items-center gap-2 mb-1.5">
+                                        <span className="text-lg">{icon}</span>
+                                        <span className="font-semibold text-sm">{label}</span>
+                                    </div>
+                                    <div className="text-[10px] text-muted-foreground leading-tight">{desc}</div>
+                                    {status.workspaceMode === mode && (
+                                        <div className="absolute top-2.5 right-2.5">
+                                            <CheckCircle className="w-4 h-4" style={{ color: borderColor }} />
+                                        </div>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Workspace path display & editor (shown for sandboxed/project modes) */}
+                        {status.workspaceMode !== 'unrestricted' && (
+                            <div className="space-y-2 pt-1">
+                                {status.workspaceRoot && (
+                                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border/30">
+                                        <FolderOpen className="w-4 h-4 text-muted-foreground shrink-0" />
+                                        <span className="text-xs text-muted-foreground font-mono truncate flex-1" title={status.workspaceRoot}>
+                                            {status.workspaceRoot}
+                                        </span>
+                                        <span className="text-[10px] text-muted-foreground/60 shrink-0">
+                                            {status.workspaceMode === 'sandboxed' ? 'sandboxed' : 'working dir'}
+                                        </span>
+                                    </div>
+                                )}
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value={status.workspaceRoot || ''}
+                                        onChange={(e) => setStatus(prev => ({ ...prev, workspaceRoot: e.target.value || null }))}
+                                        placeholder="Custom path (leave empty for default)"
+                                        className="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border/50 text-xs font-mono placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-violet-500/50"
+                                    />
+                                    <button
+                                        onClick={async () => {
+                                            try {
+                                                const resolvedPath = await openclaw.setOpenClawWorkspaceMode(
+                                                    status.workspaceMode,
+                                                    status.workspaceRoot
+                                                );
+                                                setStatus(prev => ({
+                                                    ...prev,
+                                                    workspaceRoot: resolvedPath === 'none' ? null : resolvedPath,
+                                                }));
+                                                toast.success('Workspace directory updated');
+                                            } catch (e: any) {
+                                                toast.error(e?.toString() || 'Failed to set workspace root');
+                                            }
+                                        }}
+                                        className="px-4 py-2 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-500 text-xs font-semibold transition-colors whitespace-nowrap"
+                                    >
+                                        Apply
+                                    </button>
+                                </div>
+                                <p className="text-[10px] text-muted-foreground/60 leading-relaxed">
+                                    Leave empty to use the default workspace inside the app data directory. Or enter a custom path.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
                     {/* Local Inference Card */}
                     <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
                         <div className="flex items-center justify-between">
@@ -917,26 +1092,97 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         {/* OS Permissions Section (Mac Only) */}
                         {status.gatewayMode === 'local' && (
                             <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-lg space-y-4">
-                                <h5 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">OS Governance</h5>
+                                <div className="flex items-center justify-between">
+                                    <h5 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">OS Governance</h5>
+                                    <button
+                                        onClick={async () => {
+                                            const perms = await openclaw.getPermissionStatus();
+                                            setPermissions(perms);
+                                        }}
+                                        className="text-[9px] text-muted-foreground/50 hover:text-muted-foreground transition-colors uppercase tracking-wider font-bold"
+                                    >
+                                        Refresh
+                                    </button>
+                                </div>
                                 <div className="space-y-3">
                                     {[
-                                        { id: 'accessibility', label: 'Accessibility', icon: MousePointerClick, granted: permissions.accessibility },
-                                        { id: 'screen_recording', label: 'Vision Stream', icon: Monitor, granted: permissions.screen_recording }
+                                        { id: 'accessibility', label: 'Accessibility', desc: 'UI automation & input control', icon: MousePointerClick, granted: permissions.accessibility },
+                                        { id: 'screen_recording', label: 'Vision Stream', desc: 'Screen capture for context', icon: Monitor, granted: permissions.screen_recording }
                                     ].map(perm => (
-                                        <div key={perm.id} className="flex items-center justify-between p-3 rounded-2xl bg-muted/20 border border-border/50">
+                                        <div key={perm.id} className="flex items-center justify-between p-3.5 rounded-2xl bg-muted/20 border border-border/50 transition-all duration-300">
                                             <div className="flex items-center gap-3">
-                                                <perm.icon className="w-4 h-4 text-muted-foreground" />
-                                                <span className="text-xs font-medium">{perm.label}</span>
+                                                <div className={cn(
+                                                    "p-1.5 rounded-lg transition-colors",
+                                                    perm.granted ? "bg-emerald-500/10" : "bg-muted/50"
+                                                )}>
+                                                    <perm.icon className={cn("w-4 h-4", perm.granted ? "text-emerald-500" : "text-muted-foreground")} />
+                                                </div>
+                                                <div>
+                                                    <span className="text-xs font-semibold block">{perm.label}</span>
+                                                    <span className="text-[10px] text-muted-foreground/60">{perm.desc}</span>
+                                                </div>
                                             </div>
                                             {perm.granted ? (
-                                                <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">
-                                                    <CheckCircle className="w-3 h-3" />
-                                                    ACTIVE
+                                                <div className="flex items-center gap-2">
+                                                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">
+                                                        <CheckCircle className="w-3 h-3" />
+                                                        ACTIVE
+                                                    </div>
+                                                    <button
+                                                        onClick={async () => {
+                                                            await openclaw.openPermissionSettings(perm.id);
+                                                            toast.info(`Revoke ${perm.label} in System Settings`, {
+                                                                description: "Toggle the switch off, then restart Scrappy for changes to take effect."
+                                                            });
+                                                            // Auto-poll to detect revocation
+                                                            let checks = 0;
+                                                            const poller = setInterval(async () => {
+                                                                checks++;
+                                                                if (checks > 15) { clearInterval(poller); return; }
+                                                                const fresh = await openclaw.getPermissionStatus();
+                                                                setPermissions(fresh);
+                                                                if (!fresh[perm.id as keyof typeof fresh]) {
+                                                                    toast.success(`${perm.label} revoked. Restart Scrappy to apply.`);
+                                                                    clearInterval(poller);
+                                                                }
+                                                            }, 2000);
+                                                        }}
+                                                        className="px-2 py-1 rounded-lg border border-border/50 text-[10px] font-bold text-muted-foreground hover:text-foreground hover:bg-muted/50 active:scale-95 transition-all"
+                                                        title="Open System Settings to revoke"
+                                                    >
+                                                        Manage
+                                                    </button>
                                                 </div>
                                             ) : (
                                                 <button
-                                                    onClick={() => openclaw.requestPermission(perm.id as any)}
-                                                    className="px-3 py-1 rounded-lg bg-primary text-primary-foreground text-[10px] font-bold hover:opacity-90 transition-all"
+                                                    onClick={async () => {
+                                                        try {
+                                                            const updated = await openclaw.requestPermission(perm.id);
+                                                            setPermissions(updated);
+                                                            if (updated[perm.id as keyof typeof updated]) {
+                                                                toast.success(`${perm.label} permission granted`);
+                                                            } else {
+                                                                toast.info(`Grant ${perm.label} in System Settings, then return here`, {
+                                                                    description: "System Settings should have opened. After granting access, the status updates automatically."
+                                                                });
+                                                                // Auto-poll for permission changes for 30s after request
+                                                                let checks = 0;
+                                                                const poller = setInterval(async () => {
+                                                                    checks++;
+                                                                    if (checks > 15) { clearInterval(poller); return; }
+                                                                    const fresh = await openclaw.getPermissionStatus();
+                                                                    setPermissions(fresh);
+                                                                    if (fresh[perm.id as keyof typeof fresh]) {
+                                                                        toast.success(`${perm.label} permission granted!`);
+                                                                        clearInterval(poller);
+                                                                    }
+                                                                }, 2000);
+                                                            }
+                                                        } catch (e: any) {
+                                                            toast.error(`Failed to request ${perm.label}`, { description: String(e) });
+                                                        }
+                                                    }}
+                                                    className="px-3.5 py-1.5 rounded-lg bg-primary text-primary-foreground text-[10px] font-bold hover:opacity-90 active:scale-95 transition-all shadow-sm"
                                                 >
                                                     AUTHORIZE
                                                 </button>
@@ -944,6 +1190,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                         </div>
                                     ))}
                                 </div>
+                                <p className="text-[10px] text-muted-foreground/40 leading-relaxed">
+                                    macOS manages these permissions at the system level. After revoking, restart Scrappy for the change to take effect.
+                                </p>
                             </div>
                         )}
 

@@ -250,6 +250,8 @@ pub fn run() {
         openclaw::commands::openclaw_remove_custom_secret,
         openclaw::commands::openclaw_toggle_custom_secret,
         openclaw::commands::openclaw_toggle_node_host,
+        openclaw::commands::openclaw_toggle_local_tools,
+        openclaw::commands::openclaw_set_workspace_mode,
         openclaw::commands::openclaw_toggle_local_inference,
         openclaw::commands::openclaw_toggle_expose_inference,
         openclaw::commands::openclaw_set_setup_completed,
@@ -281,6 +283,8 @@ pub fn run() {
         // Diagnostics & tools
         openclaw::commands::openclaw_diagnostics,
         openclaw::commands::openclaw_tools_list,
+        openclaw::commands::openclaw_tool_policy_get,
+        openclaw::commands::openclaw_tool_policy_set,
         // Pairing & compaction
         openclaw::commands::openclaw_pairing_list,
         openclaw::commands::openclaw_pairing_approve,
@@ -298,8 +302,17 @@ pub fn run() {
         openclaw::commands::openclaw_manifest_validate,
         openclaw::commands::openclaw_routing_get,
         openclaw::commands::openclaw_routing_set,
+        openclaw::commands::openclaw_routing_rules_list,
+        openclaw::commands::openclaw_routing_rules_save,
+        openclaw::commands::openclaw_routing_rules_add,
+        openclaw::commands::openclaw_routing_rules_remove,
+        openclaw::commands::openclaw_routing_rules_reorder,
+        openclaw::commands::openclaw_routing_status,
+        openclaw::commands::openclaw_gmail_oauth_start,
+        openclaw::commands::openclaw_gmail_status,
         permissions::get_permission_status,
         permissions::request_permission,
+        permissions::open_permission_settings,
         toggle_spotlight,
         hide_spotlight,
         // Engine & HF Hub
@@ -531,6 +544,27 @@ pub fn run() {
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 use tauri::Manager;
+
+                // ── Respect auto_start_gateway setting ───────────────────
+                // Only auto-start IronClaw if the user has explicitly enabled
+                // it in Gateway Settings. When false, the user starts/stops
+                // the engine manually via the Gateway panel.
+                let should_auto_start = {
+                    let openclaw_mgr = ironclaw_handle.state::<openclaw::OpenClawManager>();
+                    let oc_config = openclaw_mgr.get_config().await;
+                    oc_config
+                        .as_ref()
+                        .map(|cfg| cfg.auto_start_gateway)
+                        .unwrap_or(false)
+                };
+
+                if !should_auto_start {
+                    println!(
+                        "[main] IronClaw auto-start disabled (auto_start_gateway=false). \
+                              Start manually via Gateway settings."
+                    );
+                    return;
+                }
 
                 // If local inference is selected but no server is running yet,
                 // wait for the engine to come online before starting IronClaw.

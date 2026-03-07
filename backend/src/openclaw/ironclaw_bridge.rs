@@ -9,10 +9,16 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex, RwLock};
 
+use ironclaw::agent::routine_audit::RoutineAuditLog;
 use ironclaw::agent::{Agent, AgentDeps, BackgroundTasksHandle};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::ChannelManager;
+use ironclaw::extensions::clawhub::CatalogCache;
+use ironclaw::extensions::lifecycle_hooks::AuditLogHook;
+use ironclaw::extensions::manifest_validator::ManifestValidator;
+use ironclaw::llm::cost_tracker::{BudgetConfig, CostTracker};
+use ironclaw::llm::response_cache_ext::{CacheConfig, CachedResponseStore};
 
 use super::ironclaw_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
@@ -33,6 +39,20 @@ pub(crate) struct IronClawInner {
     pub active_sessions: Arc<RwLock<HashMap<String, u64>>>,
     /// ToolBridge — routes hardware tool approvals through Tauri's UI.
     pub tool_bridge: Arc<TauriToolBridge>,
+
+    // ── Sprint 13: Backend service objects for tauri_commands facade ────
+    /// LLM cost tracker (records per-request costs, daily/monthly aggregation).
+    pub cost_tracker: Arc<RwLock<CostTracker>>,
+    /// ClawHub catalog cache (local search over fetched plugin registry).
+    pub catalog_cache: Arc<RwLock<CatalogCache>>,
+    /// Routine audit log (ring-buffer of routine execution records).
+    pub routine_audit_log: Arc<RwLock<RoutineAuditLog>>,
+    /// Response cache stats store.
+    pub response_cache: Arc<RwLock<CachedResponseStore>>,
+    /// Plugin lifecycle audit log hook.
+    pub audit_log_hook: Arc<AuditLogHook>,
+    /// Plugin manifest validator.
+    pub manifest_validator: Arc<ManifestValidator>,
 }
 
 /// Managed state: holds the running IronClaw agent and background task handle.
@@ -162,6 +182,11 @@ impl IronClawState {
     }
 
     /// Get a clone of the agent Arc, or error if engine is stopped.
+    /// Get the state directory path (where ironclaw.db and ironclaw.toml live).
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
+    }
+
     pub async fn agent(&self) -> Result<Arc<Agent>, String> {
         self.inner
             .read()
@@ -200,6 +225,68 @@ impl IronClawState {
             .await
             .as_ref()
             .map(|i| Arc::clone(&i.tool_bridge))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    // ── Sprint 13: Backend service accessors for tauri_commands ─────────
+
+    /// Get the cost tracker, or error if engine is stopped.
+    pub async fn cost_tracker(&self) -> Result<Arc<RwLock<CostTracker>>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.cost_tracker))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the ClawHub catalog cache, or error if engine is stopped.
+    pub async fn catalog_cache(&self) -> Result<Arc<RwLock<CatalogCache>>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.catalog_cache))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the routine audit log, or error if engine is stopped.
+    pub async fn routine_audit_log(&self) -> Result<Arc<RwLock<RoutineAuditLog>>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.routine_audit_log))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the response cache store, or error if engine is stopped.
+    pub async fn response_cache(&self) -> Result<Arc<RwLock<CachedResponseStore>>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.response_cache))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the audit log hook, or error if engine is stopped.
+    pub async fn audit_log_hook(&self) -> Result<Arc<AuditLogHook>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.audit_log_hook))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the manifest validator, or error if engine is stopped.
+    pub async fn manifest_validator(&self) -> Result<Arc<ManifestValidator>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.manifest_validator))
             .ok_or_else(|| "IronClaw engine is not running".to_string())
     }
 
@@ -376,11 +463,63 @@ impl IronClawState {
             }
         }
 
+        // ── 1b-3. Enable local dev tools (file write, shell, etc.) ──────
+        // IronClaw defaults ALLOW_LOCAL_TOOLS to false (designed for SaaS where
+        // tools run in sandboxed containers). In Scrappy's desktop context the
+        // agent should be able to create files, run commands, and edit code.
+        // The setting is controlled by the user via Gateway Settings toggle.
+        {
+            use tauri::Manager;
+            let openclaw_mgr = app_handle.state::<super::OpenClawManager>();
+            let oc_config = openclaw_mgr.get_config().await;
+            let allow_local = oc_config
+                .as_ref()
+                .map(|c| c.allow_local_tools)
+                .unwrap_or(true); // default true for desktop
+
+            let workspace_mode = oc_config
+                .as_ref()
+                .map(|c| c.workspace_mode.clone())
+                .unwrap_or_else(|| "unrestricted".to_string());
+
+            let workspace_root = oc_config.as_ref().and_then(|c| c.workspace_root.clone());
+
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("ALLOW_LOCAL_TOOLS", allow_local.to_string());
+                std::env::set_var("WORKSPACE_MODE", &workspace_mode);
+                if let Some(ref root) = workspace_root {
+                    std::env::set_var("WORKSPACE_ROOT", root);
+                } else {
+                    std::env::remove_var("WORKSPACE_ROOT");
+                }
+                // Enable safe bins allowlist for sandboxed mode (belt-and-suspenders
+                // with ShellTool's own base_dir enforcement)
+                if workspace_mode == "sandboxed" {
+                    std::env::set_var("IRONCLAW_SAFE_BINS_ONLY", "true");
+                } else {
+                    std::env::remove_var("IRONCLAW_SAFE_BINS_ONLY");
+                }
+            }
+            tracing::info!(
+                "[ironclaw] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
+                allow_local,
+                workspace_mode,
+                workspace_root,
+                workspace_mode == "sandboxed",
+            );
+        }
+
         // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from Scrappy's config ───
         // IronClaw's LlmConfig::resolve() defaults to openai_compatible which
         // requires LLM_BASE_URL. We must tell it which backend to use based on
         // the user's gateway settings (local core vs cloud brain).
-        if std::env::var("LLM_BACKEND").is_err() {
+        //
+        // IMPORTANT: always overwrite — do NOT check is_err() here. A previous
+        // failed start (e.g. MLX not ready yet) may have written "ollama" as a
+        // placeholder. When the user restarts the gateway after MLX is up, we
+        // must overwrite with the real URL, not keep the stale placeholder.
+        {
             use tauri::Manager;
             let openclaw_mgr = app_handle.state::<super::OpenClawManager>();
             let oc_config = openclaw_mgr.get_config().await;
@@ -420,19 +559,60 @@ impl IronClawState {
                                 std::env::set_var("LLM_BASE_URL", &url);
                             }
                         } else {
-                            // Neither sidecar nor engine running yet (MLX starts after
-                            // IronClaw init). Use ollama backend as a safe placeholder —
-                            // it defaults to localhost:11434 and doesn't require an API
-                            // key, so config resolution succeeds. When the user starts
-                            // the gateway later (after MLX is up), build_inner() will
-                            // be called again and pick up the real server.
-                            tracing::info!(
-                                "[ironclaw] Local inference selected but server not ready yet, \
-                                 using LLM_BACKEND=ollama as placeholder"
-                            );
-                            #[allow(unused_unsafe)]
-                            unsafe {
-                                std::env::set_var("LLM_BACKEND", "ollama");
+                            // Neither sidecar nor engine running yet.
+                            // If the user has a cloud brain selected, fall back to that
+                            // instead of ollama — prevents "Provider llama3 request failed"
+                            // errors when cloud intelligence is actually configured.
+                            if let Some(ref brain) = cfg.selected_cloud_brain {
+                                tracing::info!(
+                                    "[ironclaw] Local inference not ready, falling back to cloud brain '{}'",
+                                    brain
+                                );
+                                match brain.as_str() {
+                                    "anthropic" => {
+                                        #[allow(unused_unsafe)]
+                                        unsafe {
+                                            std::env::set_var("LLM_BACKEND", "anthropic");
+                                        }
+                                    }
+                                    "openai" => {
+                                        #[allow(unused_unsafe)]
+                                        unsafe {
+                                            std::env::set_var("LLM_BACKEND", "openai");
+                                        }
+                                    }
+                                    other => {
+                                        if let Some(ep) =
+                                            crate::inference::provider_endpoints::endpoint_for(
+                                                other,
+                                            )
+                                        {
+                                            #[allow(unused_unsafe)]
+                                            unsafe {
+                                                std::env::set_var(
+                                                    "LLM_BACKEND",
+                                                    "openai_compatible",
+                                                );
+                                                std::env::set_var("LLM_BASE_URL", ep.base_url);
+                                            }
+                                        } else {
+                                            #[allow(unused_unsafe)]
+                                            unsafe {
+                                                std::env::set_var("LLM_BACKEND", "ollama");
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // No cloud brain configured either — use ollama as last resort
+                                tracing::info!(
+                                    "[ironclaw] Local inference not ready, no cloud brain configured, \
+                                     using LLM_BACKEND=ollama as placeholder"
+                                );
+                                #[allow(unused_unsafe)]
+                                unsafe {
+                                    std::env::set_var("LLM_BACKEND", "ollama");
+                                }
                             }
                         }
                     }
@@ -562,6 +742,8 @@ impl IronClawState {
             cost_guard: components.cost_guard.clone(),
             sse_sender: None,
             agent_router: None,
+            canvas_store: None,
+            subagent_executor: None,
         };
 
         let agent = Arc::new(Agent::new(
@@ -587,6 +769,16 @@ impl IronClawState {
 
         tracing::info!("IronClaw engine initialized successfully");
 
+        // ── Sprint 13: Create backend service objects for tauri_commands ──
+        let cost_tracker = Arc::new(RwLock::new(CostTracker::new(BudgetConfig::default())));
+        let catalog_cache = Arc::new(RwLock::new(CatalogCache::new(3600)));
+        let routine_audit_log = Arc::new(RwLock::new(RoutineAuditLog::new(500)));
+        let response_cache = Arc::new(RwLock::new(
+            CachedResponseStore::new(CacheConfig::default()),
+        ));
+        let audit_log_hook = Arc::new(AuditLogHook::new());
+        let manifest_validator = Arc::new(ManifestValidator::new());
+
         Ok(IronClawInner {
             agent,
             bg_handle: Mutex::new(Some(bg_handle)),
@@ -594,6 +786,12 @@ impl IronClawState {
             log_broadcaster,
             active_sessions,
             tool_bridge,
+            cost_tracker,
+            catalog_cache,
+            routine_audit_log,
+            response_cache,
+            audit_log_hook,
+            manifest_validator,
         })
     }
 }

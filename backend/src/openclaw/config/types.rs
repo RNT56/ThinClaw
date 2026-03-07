@@ -8,6 +8,16 @@ pub const OPENCLAW_VERSION: &str = "2026.2.23-beta.1";
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Serde default helper — returns `true` (used for fields that should default to enabled).
+fn default_true() -> bool {
+    true
+}
+
+/// Serde default helper — returns `"sandboxed"` for workspace_mode.
+fn default_workspace_mode() -> String {
+    "sandboxed".to_string()
+}
 use zeroize::Zeroize;
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
@@ -69,6 +79,12 @@ pub struct OpenClawIdentity {
     pub custom_secrets: Vec<CustomSecret>,
     #[serde(default)]
     pub node_host_enabled: bool,
+    #[serde(default = "default_true")]
+    pub allow_local_tools: bool,
+    #[serde(default = "default_workspace_mode")]
+    pub workspace_mode: String,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
     #[serde(default)]
     pub local_inference_enabled: bool,
     #[serde(default)]
@@ -179,6 +195,12 @@ pub struct OpenClawConfig {
     pub custom_secrets: Vec<CustomSecret>,
     /// Node host (OS automation) enabled
     pub node_host_enabled: bool,
+    /// Allow local dev tools (shell, write_file, read_file, etc.)
+    pub allow_local_tools: bool,
+    /// Workspace mode: "unrestricted", "sandboxed", or "project"
+    pub workspace_mode: String,
+    /// Root directory for sandboxed/project workspace modes
+    pub workspace_root: Option<String>,
     pub local_inference_enabled: bool,
     /// Expose inference server to network (0.0.0.0)
     pub expose_inference: bool,

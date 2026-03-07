@@ -1,9 +1,9 @@
-//! Gateway lifecycle commands: start, stop, status, diagnostics, sync
+//! Engine lifecycle commands: start, stop, status, diagnostics, sync
 //!
-//! **Phase 3 migration**: `openclaw_get_status` / `openclaw_get_diagnostics` now
-//! report IronClaw engine status (always running, in-process). `start_gateway`
-//! and `stop_gateway` are now no-ops (IronClaw is in-process, always running).
-//! Config reads still come from `OpenClawConfig` (Scrappy's identity.json).
+//! IronClaw is embedded as an in-process library crate — there is no HTTP
+//! server or gateway. The `start`/`stop` commands control the IronClaw agent
+//! lifecycle. All communication uses native Tauri IPC (`invoke` + `emit`).
+//! Config reads come from `OpenClawConfig` (Scrappy's identity.json).
 
 use tauri::State;
 use tracing::info;
@@ -15,8 +15,8 @@ use crate::openclaw::ironclaw_bridge::IronClawState;
 /// Get OpenClaw status.
 ///
 /// Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
-/// Engine status fields (`gateway_running`, `ws_connected`) reflect IronClaw's
-/// in-process state.
+/// Engine status fields (`engine_running`, `engine_connected`) reflect IronClaw's
+/// in-process state — both are `true` when the agent is initialized.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_status(
@@ -92,9 +92,9 @@ pub async fn openclaw_get_status(
             .and_then(|c| c.groq_api_key.clone())
             .is_some(),
         groq_granted: config.as_ref().map(|c| c.groq_granted).unwrap_or(false),
-        // IronClaw engine status
-        gateway_running: engine_running,
-        ws_connected: engine_running, // In-process = always connected
+        // IronClaw engine status (in-process = always connected when running)
+        engine_running,
+        engine_connected: engine_running,
         slack_enabled: config
             .as_ref()
             .map(|c| {
@@ -119,6 +119,12 @@ pub async fn openclaw_get_status(
             .as_ref()
             .map(|c| c.node_host_enabled)
             .unwrap_or(false),
+        allow_local_tools: config.as_ref().map(|c| c.allow_local_tools).unwrap_or(true),
+        workspace_mode: config
+            .as_ref()
+            .map(|c| c.workspace_mode.clone())
+            .unwrap_or_else(|| "sandboxed".to_string()),
+        workspace_root: config.as_ref().and_then(|c| c.workspace_root.clone()),
         local_inference_enabled: config
             .as_ref()
             .map(|c| c.local_inference_enabled)
@@ -302,6 +308,9 @@ pub async fn openclaw_sync_local_llm(
 /// When local inference is selected and the engine isn't ready yet, this
 /// command will poll the sidecar/engine status for up to 30 seconds before
 /// proceeding — covering the common case where MLX is still booting.
+///
+/// **Note:** Named `start_gateway` for backward compatibility with the frontend;
+/// there is no actual HTTP gateway — this starts the IronClaw in-process engine.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_start_gateway(
@@ -310,7 +319,7 @@ pub async fn openclaw_start_gateway(
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
 ) -> Result<(), String> {
-    info!("[ironclaw] Start gateway requested");
+    info!("[ironclaw] Engine start requested");
 
     // ── Check if local inference engine needs to be awaited ──────────
     let oc_config = state.get_config().await;
@@ -393,13 +402,15 @@ pub async fn openclaw_start_gateway(
 ///
 /// Shuts down background tasks, channels, and emits Disconnected event.
 /// If already stopped, this is a no-op (returns Ok).
+///
+/// **Note:** Named `stop_gateway` for backward compatibility; stops in-process engine.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_stop_gateway(
     _state: State<'_, OpenClawManager>,
     ironclaw: State<'_, IronClawState>,
 ) -> Result<(), String> {
-    info!("[ironclaw] Stop gateway requested");
+    info!("[ironclaw] Engine stop requested");
 
     let was_running = ironclaw.stop().await;
     if was_running {
@@ -437,7 +448,7 @@ pub async fn openclaw_reload_secrets(ironclaw: State<'_, IronClawState>) -> Resu
     Ok(())
 }
 
-/// Get gateway diagnostic info.
+/// Get engine diagnostic info.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_diagnostics(
@@ -468,8 +479,8 @@ pub async fn openclaw_get_diagnostics(
 
     Ok(OpenClawDiagnostics {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        gateway_running: engine_running,
-        ws_connected: engine_running,
+        engine_running,
+        engine_connected: engine_running,
         version: env!("CARGO_PKG_VERSION").to_string(),
         platform: std::env::consts::OS.to_string(),
         port,
