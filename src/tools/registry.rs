@@ -1,6 +1,7 @@
 //! Tool registry for managing available tools.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -16,12 +17,13 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool, DeviceInfoTool,
-    EchoTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool,
-    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue,
-    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
-    ToolSearchTool, TtsTool, WriteFileTool,
+    AgentThinkTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool,
+    DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool, JobEventsTool,
+    JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -72,6 +74,11 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tts",
     "browser",
     "canvas",
+    "agent_think",
+    "emit_user_message",
+    "spawn_subagent",
+    "list_subagents",
+    "cancel_subagent",
 ];
 
 /// Registry of available tools.
@@ -222,6 +229,10 @@ impl ToolRegistry {
             .join("browser-profile");
         self.register_sync(Arc::new(BrowserTool::new(browser_profile)));
 
+        // Agent control tools (thinking + user messaging)
+        self.register_sync(Arc::new(AgentThinkTool));
+        self.register_sync(Arc::new(EmitUserMessageTool));
+
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
@@ -270,13 +281,56 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
-        self.register_sync(Arc::new(ShellTool::new()));
-        self.register_sync(Arc::new(ReadFileTool::new()));
-        self.register_sync(Arc::new(WriteFileTool::new()));
-        self.register_sync(Arc::new(ListDirTool::new()));
-        self.register_sync(Arc::new(ApplyPatchTool::new()));
+        self.register_dev_tools_with_config(None, None);
+    }
 
-        tracing::info!("Registered 5 development tools");
+    /// Register development tools with optional workspace constraints.
+    ///
+    /// - `base_dir`: If set, file tools (read, write, patch, grep, list_dir) are
+    ///   sandboxed to this directory — they cannot access files outside it.
+    /// - `working_dir`: If set, the shell tool defaults to this directory as its
+    ///   cwd. Commands can still change directory, but start here.
+    pub fn register_dev_tools_with_config(
+        &self,
+        base_dir: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+    ) {
+        // Shell tool — when base_dir is set, the shell gets sandbox restrictions too
+        let mut shell = ShellTool::new();
+        if let Some(ref wd) = working_dir {
+            shell = shell.with_working_dir(wd.clone());
+        }
+        if let Some(ref bd) = base_dir {
+            shell = shell.with_base_dir(bd.clone());
+        }
+        self.register_sync(Arc::new(shell));
+
+        // File tools — optionally sandboxed
+        if let Some(ref bd) = base_dir {
+            self.register_sync(Arc::new(ReadFileTool::new().with_base_dir(bd.clone())));
+            self.register_sync(Arc::new(WriteFileTool::new().with_base_dir(bd.clone())));
+            self.register_sync(Arc::new(ListDirTool::new().with_base_dir(bd.clone())));
+            self.register_sync(Arc::new(ApplyPatchTool::new().with_base_dir(bd.clone())));
+            self.register_sync(Arc::new(GrepTool::new().with_base_dir(bd.clone())));
+        } else {
+            self.register_sync(Arc::new(ReadFileTool::new()));
+            self.register_sync(Arc::new(WriteFileTool::new()));
+            self.register_sync(Arc::new(ListDirTool::new()));
+            self.register_sync(Arc::new(ApplyPatchTool::new()));
+            self.register_sync(Arc::new(GrepTool::new()));
+        }
+
+        tracing::info!(
+            "Registered 6 development tools (sandbox={}, working_dir={})",
+            base_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none".into()),
+            working_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none".into()),
+        );
     }
 
     /// Register memory tools with a workspace.

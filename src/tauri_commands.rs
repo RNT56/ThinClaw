@@ -528,6 +528,68 @@ pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
     })
 }
 
+// ── Canvas panel commands ─────────────────────────────────────────────
+
+/// Summary of a canvas panel for listing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CanvasPanelSummary {
+    pub panel_id: String,
+    pub title: String,
+}
+
+/// Full panel data returned by the get command.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CanvasPanelData {
+    pub panel_id: String,
+    pub title: String,
+    pub components: serde_json::Value,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// List all active canvas panels.
+///
+/// Maps to: `openclaw_canvas_panels_list`
+/// Response: `Vec<CanvasPanelSummary>`
+pub async fn canvas_panels_list(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+) -> Result<Vec<CanvasPanelSummary>, String> {
+    let panels = store.list().await;
+    Ok(panels
+        .into_iter()
+        .map(|p| CanvasPanelSummary {
+            panel_id: p.panel_id,
+            title: p.title,
+        })
+        .collect())
+}
+
+/// Get full data for a specific canvas panel.
+///
+/// Maps to: `openclaw_canvas_panel_get`
+/// Response: `Option<CanvasPanelData>`
+pub async fn canvas_panel_get(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+    panel_id: &str,
+) -> Result<Option<CanvasPanelData>, String> {
+    Ok(store.get(panel_id).await.map(|p| CanvasPanelData {
+        panel_id: p.panel_id,
+        title: p.title,
+        components: p.components,
+        metadata: p.metadata,
+    }))
+}
+
+/// Dismiss (remove) a canvas panel.
+///
+/// Maps to: `openclaw_canvas_panel_dismiss`
+/// Response: `bool` (true if panel existed)
+pub async fn canvas_panel_dismiss(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+    panel_id: &str,
+) -> Result<bool, String> {
+    Ok(store.dismiss(panel_id).await)
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -548,6 +610,9 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_routing_status",
         "openclaw_gmail_status",
         "openclaw_gmail_oauth_start",
+        "openclaw_canvas_panels_list",
+        "openclaw_canvas_panel_get",
+        "openclaw_canvas_panel_dismiss",
     ]
 }
 

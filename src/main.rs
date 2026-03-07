@@ -579,6 +579,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Create the shared canvas store and mount HTTP routes.
+    let canvas_store = ironclaw::channels::canvas_gateway::CanvasStore::default();
+    webhook_routes.push(ironclaw::channels::canvas_gateway::canvas_routes(
+        canvas_store.clone(),
+    ));
+
     // Start the unified webhook server if any routes were registered.
     let mut webhook_server = if !webhook_routes.is_empty() {
         let addr =
@@ -788,6 +794,31 @@ async fn main() -> anyhow::Result<()> {
         ext_mgr.set_sse_sender(sender).await;
     }
 
+    // ── Sub-agent system ────────────────────────────────────────────────
+    let subagent_executor = {
+        let executor = std::sync::Arc::new(ironclaw::agent::SubagentExecutor::new(
+            components.llm.clone(),
+            components.safety.clone(),
+            components.tools.clone(),
+            channels.clone(),
+            ironclaw::agent::SubagentConfig::default(),
+        ));
+
+        // Register sub-agent tools with the executor
+        components.tools.register_sync(std::sync::Arc::new(
+            ironclaw::tools::builtin::SpawnSubagentTool::new(executor.clone()),
+        ));
+        components.tools.register_sync(std::sync::Arc::new(
+            ironclaw::tools::builtin::ListSubagentsTool::new(executor.clone()),
+        ));
+        components.tools.register_sync(std::sync::Arc::new(
+            ironclaw::tools::builtin::CancelSubagentTool::new(executor.clone()),
+        ));
+
+        tracing::info!("Sub-agent system initialized");
+        executor
+    };
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -803,6 +834,8 @@ async fn main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_sender: routine_sse_sender,
         agent_router: None,
+        canvas_store: Some(canvas_store),
+        subagent_executor: Some(subagent_executor),
     };
 
     let agent = Agent::new(

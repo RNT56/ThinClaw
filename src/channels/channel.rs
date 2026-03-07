@@ -159,6 +159,22 @@ pub enum StatusUpdate {
         message: String,
         code: Option<String>,
     },
+    /// Canvas / A2UI action — agent wants to show, update, or dismiss a UI panel.
+    ///
+    /// Emitted after the `canvas` tool executes successfully. The channel
+    /// layer forwards this to the frontend (Tauri event, SSE, etc.) for
+    /// immediate rendering, while the agent loop also persists the panel
+    /// in the `CanvasStore` for HTTP access.
+    CanvasAction(crate::tools::builtin::CanvasAction),
+    /// Agent-initiated progress message sent via the `emit_user_message` tool.
+    ///
+    /// Unlike `Thinking` (ephemeral status), this is a persistent message the
+    /// agent wants the user to see. Channels should render it as a real chat
+    /// message or notification, not a transient indicator.
+    AgentMessage {
+        content: String,
+        message_type: String,
+    },
 }
 
 // ── Streaming draft replies ───────────────────────────────────────────

@@ -437,10 +437,32 @@ impl Channel for SlackChannel {
 
     async fn send_status(
         &self,
-        _status: StatusUpdate,
-        _metadata: &serde_json::Value,
+        status: StatusUpdate,
+        metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        // Slack doesn't have a native "typing" indicator for bots
+        // Forward agent progress messages as real Slack messages
+        if let StatusUpdate::AgentMessage {
+            content,
+            message_type,
+        } = status
+        {
+            let channel = match metadata.get("channel").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return Ok(()),
+            };
+            let thread_ts = metadata.get("thread_ts").and_then(|v| v.as_str());
+
+            let prefix = match message_type.as_str() {
+                "warning" => "⚠️ ",
+                "question" => "❓ ",
+                "interim_result" => "📋 ",
+                _ => "💬 ",
+            };
+            let text = format!("{}{}", prefix, content);
+            let bot_token = self.config.bot_token.expose_secret();
+            let _ = Self::post_message(&self.client, bot_token, channel, &text, thread_ts).await;
+        }
+        // All other status updates are silently dropped (Slack has no typing indicator for bots)
         Ok(())
     }
 

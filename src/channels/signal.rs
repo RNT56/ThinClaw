@@ -960,6 +960,23 @@ impl Channel for SignalChannel {
             self.send_status_message(target_str, &message).await;
         }
 
+        // Send agent progress messages to user
+        if let StatusUpdate::AgentMessage {
+            content,
+            message_type,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let prefix = match message_type.as_str() {
+                "warning" => "⚠️ ",
+                "question" => "❓ ",
+                "interim_result" => "📋 ",
+                _ => "💬 ",
+            };
+            let message = format!("{}{}", prefix, content);
+            self.send_status_message(target_str, &message).await;
+        }
+
         Ok(())
     }
 

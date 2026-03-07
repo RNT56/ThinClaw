@@ -308,6 +308,20 @@ const SAFE_BINS: &[&str] = &[
     "podman",
     // Documentation
     "man",
+    // Desktop (open files in default app)
+    "open",     // macOS
+    "xdg-open", // Linux
+    // Clipboard
+    "pbcopy",  // macOS
+    "pbpaste", // macOS
+    "xclip",   // Linux
+    // Common utilities
+    "tee",
+    "xargs",
+    "chmod",
+    "realpath",
+    "basename",
+    "dirname",
 ];
 
 /// Check whether safe-bins-only mode is enabled.
@@ -379,6 +393,105 @@ fn check_safe_bins(cmd: &str) -> Option<String> {
         "binary '{}' not in safe bins allowlist (set IRONCLAW_EXTRA_BINS to extend)",
         binary
     ))
+}
+
+/// Same as `check_safe_bins` but always enforced (for sandbox base_dir mode).
+///
+/// When `ShellTool::base_dir` is set, the safe bins allowlist is mandatory —
+/// the `IRONCLAW_SAFE_BINS_ONLY` env var check is skipped.
+/// Returns `true` if the command should be BLOCKED.
+fn check_safe_bins_forced(cmd: &str) -> bool {
+    let binary = match extract_binary_name(cmd) {
+        Some(b) => b,
+        None => return true, // Can't determine binary → block
+    };
+
+    // Check built-in list
+    if SAFE_BINS.contains(&binary.as_str()) {
+        return false;
+    }
+
+    // Check user-extended list
+    if let Ok(extra) = std::env::var("IRONCLAW_EXTRA_BINS") {
+        let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
+        if extras.contains(&binary.as_str()) {
+            return false;
+        }
+    }
+
+    true // Not in allowlist → block
+}
+
+/// Scan a command string for absolute paths outside the sandbox base directory.
+///
+/// This is a best-effort heuristic — it catches obvious cases like:
+/// - `cat /etc/passwd`
+/// - `ls /usr/local/bin`
+/// - `cp file.txt /tmp/leaked`
+///
+/// It does NOT catch:
+/// - Subshell expansions (`cat $(echo /etc/passwd)`)
+/// - Paths constructed in code (`python -c "open('/etc/passwd')"`)
+/// - Variable expansions (`cat $HOME/.ssh/id_rsa`)
+///
+/// Those are handled by the safe-bins allowlist + user approval system.
+fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
+    let base_str = base_dir.to_string_lossy();
+
+    // Tokenize the command by whitespace and common shell delimiters
+    // We look for tokens that start with `/` (absolute paths) or contain `..`
+    for token in cmd.split(|c: char| {
+        c.is_whitespace() || c == ';' || c == '|' || c == '&' || c == '>' || c == '<'
+    }) {
+        let token = token.trim_matches(|c: char| c == '\'' || c == '"' || c == '(' || c == ')');
+        if token.is_empty() {
+            continue;
+        }
+
+        // Check for `..` traversal (e.g., `cat ../../etc/passwd`, `./../../secrets`)
+        // This catches relative path escapes that don't start with `/`
+        if token.contains("..") {
+            // Allow `..` in non-path contexts (e.g., range syntax `1..10`)
+            // A `..` is suspicious when preceded/followed by `/` or at token boundaries
+            if token.contains("../") || token.contains("..") && token.starts_with('.') {
+                return Some(format!("path traversal: {}", token));
+            }
+        }
+
+        // Only check absolute path tokens from here on
+        if !token.starts_with('/') {
+            continue;
+        }
+
+        // Allow the base_dir itself and anything under it
+        if token.starts_with(base_str.as_ref()) {
+            continue;
+        }
+
+        // Allow `/dev/null` and `/dev/stdin` etc. (common harmless redirects)
+        if token.starts_with("/dev/") {
+            continue;
+        }
+
+        // Allow `/tmp` (frequently needed for temp files in builds)
+        if token.starts_with("/tmp") {
+            continue;
+        }
+
+        // Allow common tool paths that are invoked, not accessed
+        // (e.g., `/usr/bin/env python3` or `/bin/sh -c ...`)
+        if token.starts_with("/usr/bin/")
+            || token.starts_with("/bin/")
+            || token.starts_with("/usr/local/bin/")
+        {
+            continue;
+        }
+
+        // This is an absolute path outside the workspace
+        return Some(token.to_string());
+    }
+
+    None
 }
 
 /// Check whether a shell command contains patterns that must never be auto-approved.
@@ -548,6 +661,11 @@ pub struct ShellTool {
     sandbox: Option<Arc<SandboxManager>>,
     /// Sandbox policy to use when sandbox is available.
     sandbox_policy: SandboxPolicy,
+    /// If set, restrict commands to operate within this directory.
+    /// - The `workdir` parameter must be under this path
+    /// - Commands referencing absolute paths outside this directory are blocked
+    /// - Safe bins allowlist is auto-enabled
+    base_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ShellTool {
@@ -558,6 +676,7 @@ impl std::fmt::Debug for ShellTool {
             .field("allow_dangerous", &self.allow_dangerous)
             .field("sandbox", &self.sandbox.is_some())
             .field("sandbox_policy", &self.sandbox_policy)
+            .field("base_dir", &self.base_dir)
             .finish()
     }
 }
@@ -571,12 +690,24 @@ impl ShellTool {
             allow_dangerous: false,
             sandbox: None,
             sandbox_policy: SandboxPolicy::ReadOnly,
+            base_dir: None,
         }
     }
 
     /// Set the working directory.
     pub fn with_working_dir(mut self, dir: PathBuf) -> Self {
         self.working_dir = Some(dir);
+        self
+    }
+
+    /// Set the filesystem sandbox directory.
+    ///
+    /// When set, the shell tool will:
+    /// - Reject `workdir` parameters pointing outside this directory
+    /// - Scan commands for absolute paths outside this directory and block them
+    /// - Auto-enable the safe-bins allowlist (restricts to curated commands)
+    pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
+        self.base_dir = Some(dir);
         self
     }
 
@@ -806,6 +937,42 @@ impl ShellTool {
                 reason,
                 truncate_for_error(cmd)
             )));
+        }
+
+        // When base_dir is set, enforce sandbox restrictions:
+        // 1. Safe bins allowlist (auto-enabled)
+        // 2. Workdir validation
+        // 3. Command path scanning
+        if let Some(ref base) = self.base_dir {
+            let base_canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
+
+            // Auto-enable safe bins when sandboxed
+            if check_safe_bins_forced(cmd) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Sandboxed shell: command not in safe bins allowlist: {}",
+                    truncate_for_error(cmd)
+                )));
+            }
+
+            // Validate workdir parameter
+            if let Some(wd) = workdir {
+                let wd_path = PathBuf::from(wd);
+                let wd_resolved = wd_path.canonicalize().unwrap_or_else(|_| wd_path.clone());
+                if !wd_resolved.starts_with(&base_canonical) {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "Sandboxed shell: workdir '{}' is outside the workspace",
+                        wd
+                    )));
+                }
+            }
+
+            // Scan for obvious absolute path escapes in command
+            if let Some(escaped_path) = detect_path_escape(cmd, &base_canonical) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Sandboxed shell: command references path outside workspace: {}",
+                    escaped_path
+                )));
+            }
         }
 
         // Determine working directory
@@ -1548,5 +1715,155 @@ mod tests {
         // When IRONCLAW_SAFE_BINS_ONLY is not set, everything passes
         assert!(check_safe_bins("rm -rf /tmp").is_none());
         assert!(check_safe_bins("ruby script.rb").is_none());
+    }
+    // ── Sandbox base_dir enforcement tests ──────────────────────────────
+
+    #[test]
+    fn test_detect_path_escape_blocks_outside_paths() {
+        let base = Path::new("/home/user/projects");
+        assert!(detect_path_escape("cat /etc/passwd", base).is_some());
+        assert!(detect_path_escape("ls /var/log/syslog", base).is_some());
+        assert!(detect_path_escape("cp file.txt /home/other/", base).is_some());
+    }
+
+    #[test]
+    fn test_detect_path_escape_allows_workspace_paths() {
+        let base = Path::new("/home/user/projects");
+        assert!(detect_path_escape("cat /home/user/projects/src/main.rs", base).is_none());
+        assert!(detect_path_escape("ls /home/user/projects/", base).is_none());
+    }
+
+    #[test]
+    fn test_detect_path_escape_allows_safe_locations() {
+        let base = Path::new("/home/user/projects");
+        // /dev/, /tmp, /usr/bin/, /bin/ are allowed
+        assert!(detect_path_escape("echo hello > /dev/null", base).is_none());
+        assert!(detect_path_escape("cat /tmp/build_output.log", base).is_none());
+        assert!(detect_path_escape("/usr/bin/env python3 script.py", base).is_none());
+        assert!(detect_path_escape("/bin/sh -c 'echo hi'", base).is_none());
+    }
+
+    #[test]
+    fn test_detect_path_escape_catches_traversal() {
+        let base = Path::new("/home/user/projects");
+        assert!(detect_path_escape("cat ../../etc/passwd", base).is_some());
+        assert!(detect_path_escape("cat ../../../secrets", base).is_some());
+        assert!(detect_path_escape("ls ./../../../", base).is_some());
+    }
+
+    #[test]
+    fn test_detect_path_escape_allows_relative_in_workspace() {
+        let base = Path::new("/home/user/projects");
+        // Normal relative paths without `..` are fine
+        assert!(detect_path_escape("cat ./src/main.rs", base).is_none());
+        assert!(detect_path_escape("ls src/lib.rs", base).is_none());
+    }
+
+    #[test]
+    fn test_safe_bins_forced_blocks_unknown() {
+        // Unknown binaries are blocked
+        assert!(check_safe_bins_forced("ruby evil.rb"));
+        assert!(check_safe_bins_forced("perl -e 'system(\"rm -rf /\")'"));
+        assert!(check_safe_bins_forced("custom_binary --flag"));
+    }
+
+    #[test]
+    fn test_safe_bins_forced_allows_known() {
+        // Known safe binaries pass
+        assert!(!check_safe_bins_forced("ls -la"));
+        assert!(!check_safe_bins_forced("cat README.md"));
+        assert!(!check_safe_bins_forced("python3 script.py"));
+        assert!(!check_safe_bins_forced("cargo build --release"));
+        assert!(!check_safe_bins_forced("git status"));
+        assert!(!check_safe_bins_forced("open file.html")); // macOS desktop
+        assert!(!check_safe_bins_forced("npm install"));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_blocks_workdir_escape() {
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let ctx = JobContext::default();
+
+        // Trying to set workdir outside sandbox
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "ls",
+                    "workdir": "/etc"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("workdir")),
+            "Expected workdir escape to be blocked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_blocks_path_escape_in_command() {
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let ctx = JobContext::default();
+
+        // Use a path that isn't in DANGEROUS_PATTERNS but IS outside the sandbox
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "cat /home/other_user/secrets.txt"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("outside workspace")),
+            "Expected path escape to be blocked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_blocks_unknown_binary() {
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "ruby evil.rb"}), &ctx)
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("safe bins")),
+            "Expected safe bins block, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_allows_safe_command_in_workspace() {
+        // Create a temp directory for the sandbox
+        let sandbox_dir = std::env::temp_dir().join("ironclaw_test_sandbox_safe");
+        let _ = std::fs::create_dir_all(&sandbox_dir);
+
+        let tool = ShellTool::new().with_base_dir(sandbox_dir.clone());
+        let ctx = JobContext::default();
+
+        // echo is in safe bins and doesn't reference paths outside
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "echo hello from sandbox",
+                    "workdir": sandbox_dir.to_str().unwrap()
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Safe command in sandbox should succeed: {result:?}"
+        );
+        let tool_output = result.unwrap();
+        let output = tool_output.result.get("output").unwrap().as_str().unwrap();
+        assert!(output.contains("hello from sandbox"));
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&sandbox_dir);
     }
 }

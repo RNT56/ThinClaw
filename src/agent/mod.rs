@@ -32,6 +32,7 @@ mod scheduler;
 mod self_repair;
 pub mod session;
 mod session_manager;
+pub mod subagent_executor;
 pub mod submission;
 pub mod task;
 pub mod thread_inheritance;
@@ -53,6 +54,10 @@ pub use scheduler::Scheduler;
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
 pub use session_manager::SessionManager;
+pub use subagent_executor::{
+    SubagentConfig, SubagentExecutor, SubagentInfo, SubagentResult, SubagentSpawnRequest,
+    SubagentStatus,
+};
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
 pub use undo::{Checkpoint, UndoManager};

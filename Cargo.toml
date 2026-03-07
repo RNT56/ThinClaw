@@ -161,7 +161,6 @@ chromiumoxide = "0.9.1"
 ratatui = "0.30.0"
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
-inquire = "0.9.4"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 # QR code rendering for terminal pairing

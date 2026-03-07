@@ -222,9 +222,14 @@ impl Config {
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
 ///
 /// This bridges the gap between secrets stored during onboarding and the
-/// env-var-first resolution in `LlmConfig::resolve()`. Keys in the overlay
-/// are read by `optional_env()` before falling back to `std::env::var()`,
-/// so explicit env vars always win.
+/// env-var-based resolution in `LlmConfig::resolve()`. Keys in the overlay
+/// are checked by `optional_env()` BEFORE `std::env::var()`, so keychain
+/// keys take priority over stale values in `.env` files.
+///
+/// We intentionally do NOT check `std::env::var()` here. `.env` files loaded
+/// by dotenvy set real process env vars, and those can contain outdated API
+/// keys from initial setup. The keychain is the canonical, user-updateable
+/// source of truth.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
@@ -239,10 +244,6 @@ pub async fn inject_llm_keys_from_secrets(
     let mut injected = HashMap::new();
 
     for (secret_name, env_var) in mappings {
-        match std::env::var(env_var) {
-            Ok(val) if !val.is_empty() => continue,
-            _ => {}
-        }
         match secrets.get_decrypted(user_id, secret_name).await {
             Ok(decrypted) => {
                 injected.insert(env_var.to_string(), decrypted.expose().to_string());
@@ -292,11 +293,6 @@ pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id
     let mut injected = HashMap::new();
 
     for (secret_name, env_var) in mappings {
-        // Skip if a real env var is set (env always wins)
-        match std::env::var(env_var) {
-            Ok(val) if !val.is_empty() => continue,
-            _ => {}
-        }
         if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
             injected.insert(env_var.to_string(), decrypted.expose().to_string());
             tracing::debug!(

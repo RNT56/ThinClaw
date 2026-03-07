@@ -62,11 +62,25 @@ impl StoredPanel {
     }
 }
 
+/// A queued action from a client callback.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueuedAction {
+    /// Which panel the action came from.
+    pub panel_id: String,
+    /// The action identifier (button name, form submit, etc.).
+    pub action: String,
+    /// Form field values (for form submissions).
+    pub values: HashMap<String, serde_json::Value>,
+}
+
 /// In-memory store for active canvas panels.
 #[derive(Debug, Clone)]
 pub struct CanvasStore {
     panels: Arc<RwLock<HashMap<String, StoredPanel>>>,
     ttl: Duration,
+    /// Channel for queuing action callbacks from clients.
+    action_tx: tokio::sync::mpsc::Sender<QueuedAction>,
+    action_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<QueuedAction>>>,
 }
 
 impl Default for CanvasStore {
@@ -78,9 +92,12 @@ impl Default for CanvasStore {
 impl CanvasStore {
     /// Create a new canvas store with a custom TTL.
     pub fn new(ttl: Duration) -> Self {
+        let (action_tx, action_rx) = tokio::sync::mpsc::channel(256);
         Self {
             panels: Arc::new(RwLock::new(HashMap::new())),
             ttl,
+            action_tx,
+            action_rx: Arc::new(tokio::sync::Mutex::new(action_rx)),
         }
     }
 
@@ -150,6 +167,24 @@ impl CanvasStore {
         let before = panels.len();
         panels.retain(|_, p| !p.is_expired(self.ttl));
         before - panels.len()
+    }
+
+    /// Queue an action callback from a client (called by the HTTP handler).
+    pub async fn push_action(&self, action: QueuedAction) -> bool {
+        self.action_tx.send(action).await.is_ok()
+    }
+
+    /// Drain all pending action callbacks (called by the agent loop).
+    ///
+    /// Returns a vector of queued actions. Non-blocking: returns an empty
+    /// vector if no actions are pending.
+    pub async fn drain_actions(&self) -> Vec<QueuedAction> {
+        let mut rx = self.action_rx.lock().await;
+        let mut actions = Vec::new();
+        while let Ok(action) = rx.try_recv() {
+            actions.push(action);
+        }
+        actions
     }
 }
 
@@ -223,10 +258,17 @@ async fn handle_action(
         "Canvas action callback received"
     );
 
-    // Actions are logged and can be consumed by the agent loop.
-    // In a full implementation, this would push to an action channel
-    // that the agent reads on its next turn.
-    (StatusCode::ACCEPTED, "Action received").into_response()
+    // Queue the action for the agent loop to process on its next turn.
+    let queued = QueuedAction {
+        panel_id,
+        action: payload.action,
+        values: payload.values,
+    };
+    if store.push_action(queued).await {
+        (StatusCode::ACCEPTED, "Action queued").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "Action queue full").into_response()
+    }
 }
 
 /// GET /canvas/:panel_id — Render a panel as a standalone HTML page.

@@ -720,6 +720,343 @@ impl Tool for ApplyPatchTool {
     }
 }
 
+/// Search file contents using pattern matching (grep-like).
+#[derive(Debug, Default)]
+pub struct GrepTool {
+    base_dir: Option<PathBuf>,
+}
+
+impl GrepTool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
+        self.base_dir = Some(dir);
+        self
+    }
+}
+
+/// Maximum number of matches to return.
+const MAX_GREP_MATCHES: usize = 100;
+
+/// Maximum file size to scan (5MB).
+const MAX_GREP_FILE_SIZE: u64 = 5 * 1024 * 1024;
+
+/// Maximum directory depth for recursive search.
+const MAX_GREP_DEPTH: usize = 10;
+
+/// Directories to skip when recursively searching.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    "__pycache__",
+    "venv",
+    ".venv",
+    ".next",
+    "dist",
+    "build",
+    ".cargo",
+    ".tox",
+    "vendor",
+];
+
+#[async_trait]
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn description(&self) -> &str {
+        "Search for a pattern in file contents. Searches a file or recursively searches \
+         a directory. Returns matching lines with file paths and line numbers. \
+         Supports literal strings and regex patterns. Use include_pattern to filter by \
+         file extension (e.g. '*.rs', '*.py')."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "The search pattern (literal string or regex)"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File or directory to search (defaults to current directory)"
+                },
+                "is_regex": {
+                    "type": "boolean",
+                    "description": "If true, treat pattern as a regex (default false, literal match)"
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "If true, ignore case (default false)"
+                },
+                "include_pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to filter files (e.g. '*.rs', '*.py', '*.tsx')"
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of context lines before and after each match (default 0)"
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let pattern_str = require_str(&params, "pattern")?;
+
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let is_regex = params
+            .get("is_regex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let case_insensitive = params
+            .get("case_insensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let include_pattern = params
+            .get("include_pattern")
+            .and_then(|v| v.as_str());
+
+        let context_lines = params
+            .get("context_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        let start = std::time::Instant::now();
+
+        let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Build the matcher
+        let pattern = if is_regex {
+            pattern_str.to_string()
+        } else {
+            // Escape regex special characters for literal matching
+            regex::escape(pattern_str)
+        };
+
+        let re = if case_insensitive {
+            regex::Regex::new(&format!("(?i){}", pattern))
+        } else {
+            regex::Regex::new(&pattern)
+        }
+        .map_err(|e| ToolError::InvalidParameters(format!("Invalid pattern: {}", e)))?;
+
+        // Collect files to search
+        let mut files = Vec::new();
+        if path.is_file() {
+            files.push(path.clone());
+        } else if path.is_dir() {
+            collect_files(&path, &mut files, include_pattern, 0).await?;
+        } else {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Path does not exist: {}",
+                path.display()
+            )));
+        }
+
+        // Search each file
+        let mut matches = Vec::new();
+        let mut files_searched = 0_u32;
+        let mut files_with_matches = 0_u32;
+
+        for file_path in &files {
+            if matches.len() >= MAX_GREP_MATCHES {
+                break;
+            }
+
+            // Skip files that are too large
+            let metadata = match fs::metadata(&file_path).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.len() > MAX_GREP_FILE_SIZE {
+                continue;
+            }
+
+            // Read file content (skip binary files)
+            let content = match fs::read_to_string(&file_path).await {
+                Ok(c) => c,
+                Err(_) => continue, // binary or unreadable
+            };
+
+            files_searched += 1;
+            let lines: Vec<&str> = content.lines().collect();
+            let mut file_had_match = false;
+
+            for (line_idx, line) in lines.iter().enumerate() {
+                if matches.len() >= MAX_GREP_MATCHES {
+                    break;
+                }
+
+                if re.is_match(line) {
+                    file_had_match = true;
+
+                    // Gather context lines
+                    let ctx_start = line_idx.saturating_sub(context_lines);
+                    let ctx_end = (line_idx + context_lines + 1).min(lines.len());
+
+                    let context: Vec<serde_json::Value> = if context_lines > 0 {
+                        lines[ctx_start..ctx_end]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, l)| {
+                                let actual_line = ctx_start + i + 1;
+                                serde_json::json!({
+                                    "line": actual_line,
+                                    "content": l,
+                                    "is_match": actual_line == line_idx + 1,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let relative = file_path
+                        .strip_prefix(&path)
+                        .unwrap_or(file_path)
+                        .to_string_lossy()
+                        .to_string();
+
+                    let mut match_obj = serde_json::json!({
+                        "file": relative,
+                        "line": line_idx + 1,
+                        "content": line.trim(),
+                    });
+
+                    if !context.is_empty() {
+                        match_obj["context"] = serde_json::json!(context);
+                    }
+
+                    matches.push(match_obj);
+                }
+            }
+
+            if file_had_match {
+                files_with_matches += 1;
+            }
+        }
+
+        let truncated = matches.len() >= MAX_GREP_MATCHES;
+
+        let result = serde_json::json!({
+            "matches": matches,
+            "total_matches": matches.len(),
+            "files_searched": files_searched,
+            "files_with_matches": files_with_matches,
+            "truncated": truncated,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true // File content could contain anything
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
+    }
+}
+
+/// Recursively collect files for grep, respecting include patterns and skip dirs.
+async fn collect_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    include_pattern: Option<&str>,
+    depth: usize,
+) -> Result<(), ToolError> {
+    if depth > MAX_GREP_DEPTH || files.len() >= MAX_GREP_MATCHES * 10 {
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(dir)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read directory: {}", e)))?;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read entry: {}", e)))?
+    {
+        let entry_path = entry.path();
+        let metadata = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if metadata.is_dir() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            // Skip known non-essential directories
+            if SKIP_DIRS.contains(&name_str.as_ref()) || name_str.starts_with('.') {
+                continue;
+            }
+
+            Box::pin(collect_files(&entry_path, files, include_pattern, depth + 1)).await?;
+        } else if metadata.is_file() {
+            // Apply include pattern filter
+            if let Some(pattern) = include_pattern {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !glob_matches(pattern, &name_str) {
+                    continue;
+                }
+            }
+
+            files.push(entry_path);
+        }
+    }
+
+    Ok(())
+}
+
+/// Simple glob matching (supports *.ext and *pattern* style).
+fn glob_matches(pattern: &str, filename: &str) -> bool {
+    if pattern.starts_with("*.") {
+        // Extension match: *.rs, *.py, etc.
+        let ext = &pattern[1..]; // ".rs"
+        filename.ends_with(ext)
+    } else if pattern.starts_with('*') && pattern.ends_with('*') {
+        // Contains match: *test*
+        let inner = &pattern[1..pattern.len() - 1];
+        filename.contains(inner)
+    } else if pattern.starts_with('*') {
+        // Suffix match: *_test.rs
+        let suffix = &pattern[1..];
+        filename.ends_with(suffix)
+    } else if pattern.ends_with('*') {
+        // Prefix match: test_*
+        let prefix = &pattern[..pattern.len() - 1];
+        filename.starts_with(prefix)
+    } else {
+        // Exact match
+        filename == pattern
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -591,6 +591,44 @@ impl Channel for ReplChannel {
                 let code_str = code.as_deref().unwrap_or("error");
                 eprintln!("\x1b[31m  \u{2717} [{code_str}] {message}\x1b[0m");
             }
+            StatusUpdate::CanvasAction(ref action) => {
+                let summary = match action {
+                    crate::tools::builtin::CanvasAction::Show {
+                        panel_id, title, ..
+                    } => {
+                        format!("show \"{title}\" ({panel_id})")
+                    }
+                    crate::tools::builtin::CanvasAction::Update { panel_id, .. } => {
+                        format!("update ({panel_id})")
+                    }
+                    crate::tools::builtin::CanvasAction::Dismiss { panel_id } => {
+                        format!("dismiss ({panel_id})")
+                    }
+                    crate::tools::builtin::CanvasAction::Notify { message, level, .. } => {
+                        format!("notify [{level:?}] {message}")
+                    }
+                };
+                eprintln!("  \x1b[35m\u{25A0} canvas:{summary}\x1b[0m");
+            }
+            StatusUpdate::AgentMessage {
+                content,
+                message_type,
+            } => {
+                let width = crossterm::terminal::size()
+                    .map(|(w, _)| w as usize)
+                    .unwrap_or(80);
+                let prefix = match message_type.as_str() {
+                    "warning" => "\x1b[33m⚠️  ",
+                    "question" => "\x1b[36m❓ ",
+                    "interim_result" => "\x1b[32m📋 ",
+                    _ => "\x1b[34m💬 ",
+                };
+                eprintln!("{prefix}[agent]{}\x1b[0m", "");
+                let skin = make_skin();
+                let text = termimad::FmtText::from(&skin, &content, Some(width));
+                eprint!("{text}");
+                eprintln!();
+            }
         }
         Ok(())
     }

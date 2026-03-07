@@ -2294,6 +2294,22 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             ),
             metadata_json,
         },
+        StatusUpdate::CanvasAction(action) => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[canvas] {}",
+                serde_json::to_string(action).unwrap_or_default()
+            ),
+            metadata_json,
+        },
+        StatusUpdate::AgentMessage {
+            content,
+            message_type,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("[agent_message:{}] {}", message_type, content),
+            metadata_json,
+        },
     }
 }
 

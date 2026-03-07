@@ -313,7 +313,7 @@ impl IMessageChannel {
     /// Send a message via osascript (AppleScript).
     async fn send_via_osascript(recipient: &str, text: &str) -> Result<(), ChannelError> {
         // Escape text for AppleScript
-        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = escape_applescript(text);
 
         // Split long messages
         let chunks = split_message(&escaped);

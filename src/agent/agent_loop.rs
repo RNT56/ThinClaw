@@ -17,6 +17,7 @@ use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
+use crate::agent::subagent_executor::SubagentExecutor;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
@@ -78,6 +79,12 @@ pub struct AgentDeps {
     pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     /// Optional multi-agent router for workspace isolation & priority-based routing.
     pub agent_router: Option<Arc<AgentRouter>>,
+    /// Shared canvas panel store for the A2UI / Canvas tool integration.
+    /// When present, the agent loop auto-populates panels from canvas tool
+    /// outputs and the HTTP gateway serves them at `/canvas/`.
+    pub canvas_store: Option<crate::channels::canvas_gateway::CanvasStore>,
+    /// Optional sub-agent executor for spawning parallel agentic loops.
+    pub subagent_executor: Option<Arc<SubagentExecutor>>,
 }
 
 /// The main agent that coordinates all components.
@@ -95,6 +102,8 @@ pub struct Agent {
     pub(super) routine_config: Option<RoutineConfig>,
     /// Multi-agent router for workspace isolation & routing.
     pub(super) agent_router: Arc<AgentRouter>,
+    /// Sub-agent executor for parallel agentic loops.
+    pub(super) subagent_executor: Option<Arc<SubagentExecutor>>,
 }
 
 impl Agent {
@@ -134,6 +143,8 @@ impl Agent {
             .clone()
             .unwrap_or_else(|| Arc::new(AgentRouter::new()));
 
+        let subagent_executor = deps.subagent_executor.clone();
+
         Self {
             config,
             deps,
@@ -147,6 +158,7 @@ impl Agent {
             hygiene_config,
             routine_config,
             agent_router,
+            subagent_executor,
         }
     }
 
@@ -216,9 +228,19 @@ impl Agent {
         self.deps.skill_catalog.as_ref()
     }
 
+    /// Get the sub-agent executor (public for Tauri/API integration).
+    pub fn subagent_executor(&self) -> Option<&Arc<SubagentExecutor>> {
+        self.subagent_executor.as_ref()
+    }
+
     /// Get the extension manager (public for Tauri/API integration).
     pub fn extension_manager(&self) -> Option<&Arc<ExtensionManager>> {
         self.deps.extension_manager.as_ref()
+    }
+
+    /// Get the canvas panel store (public for Tauri/API integration).
+    pub fn canvas_store(&self) -> Option<&crate::channels::canvas_gateway::CanvasStore> {
+        self.deps.canvas_store.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.

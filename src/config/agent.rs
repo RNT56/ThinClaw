@@ -45,6 +45,13 @@ pub struct AgentConfig {
     /// When a model matches, its override takes precedence over global thinking settings.
     /// Format of env var: `MODEL_THINKING_OVERRIDE=model1:true:16000,model2:false`
     pub model_thinking_overrides: HashMap<String, ModelThinkingOverride>,
+    /// Workspace mode: "unrestricted", "sandboxed", or "project".
+    /// - unrestricted: full filesystem access (Cursor-style)
+    /// - sandboxed: file tools confined to workspace_root
+    /// - project: shell cwd = workspace_root, but file tools can access anywhere
+    pub workspace_mode: String,
+    /// Root directory for sandboxed/project modes. None = user home.
+    pub workspace_root: Option<std::path::PathBuf>,
 }
 
 impl AgentConfig {
@@ -100,6 +107,9 @@ impl AgentConfig {
                 settings.agent.auto_approve_tools,
             )?,
             model_thinking_overrides: parse_model_thinking_overrides()?,
+            workspace_mode: optional_env("WORKSPACE_MODE")?
+                .unwrap_or_else(|| "sandboxed".to_string()),
+            workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
         })
     }
 

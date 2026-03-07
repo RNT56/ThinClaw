@@ -12,7 +12,23 @@ use super::INJECTED_VARS;
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
-    // Check real env vars first (always win over injected secrets)
+    // Check injected secrets overlay FIRST (keychain / secrets store).
+    //
+    // This overlay is populated by `inject_llm_keys_from_secrets()` from
+    // the encrypted secrets store (keychain). It must take priority over
+    // `std::env::var()` because `.env` files loaded by dotenvy also set
+    // real process env vars, and those can contain stale API keys that
+    // should be superseded by the keychain-stored value.
+    //
+    // Priority: INJECTED_VARS (keychain) > std::env::var (.env + shell) > None
+    if let Ok(guard) = INJECTED_VARS.read()
+        && let Some(val) = guard.get(key)
+        && !val.is_empty()
+    {
+        return Ok(Some(val.clone()));
+    }
+
+    // Fall back to real env vars (explicit shell exports + .env files)
     match std::env::var(key) {
         Ok(val) if val.is_empty() => {}
         Ok(val) => return Ok(Some(val)),
@@ -23,12 +39,6 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
             )));
         }
     }
-
-    // Fall back to thread-safe overlay (secrets injected from DB)
-    if let Ok(guard) = INJECTED_VARS.read()
-        && let Some(val) = guard.get(key) {
-            return Ok(Some(val.clone()));
-        }
 
     Ok(None)
 }

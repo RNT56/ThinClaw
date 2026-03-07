@@ -222,10 +222,18 @@ impl LlmConfig {
             LlmBackend::OpenAiCompatible
         };
 
-        // Resolve provider-specific configs based on backend
+        // Resolve provider-specific configs based on backend.
+        //
+        // Model resolution priority for ALL backends:
+        //   1. Provider-specific env var (OPENAI_MODEL, ANTHROPIC_MODEL, etc.)
+        //   2. settings.selected_model (set by Scrappy UI or setup wizard)
+        //   3. Hardcoded default
+
         let openai = if backend == LlmBackend::OpenAi {
             let api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+            let model = optional_env("OPENAI_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "gpt-4o".to_string());
             let base_url = optional_env("OPENAI_BASE_URL")?;
             Some(OpenAiDirectConfig {
                 api_key,
@@ -239,6 +247,7 @@ impl LlmConfig {
         let anthropic = if backend == LlmBackend::Anthropic {
             let api_key = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
             let model = optional_env("ANTHROPIC_MODEL")?
+                .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
@@ -254,7 +263,9 @@ impl LlmConfig {
             let base_url = optional_env("OLLAMA_BASE_URL")?
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
+            let model = optional_env("OLLAMA_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
         } else {
             None
@@ -287,7 +298,9 @@ impl LlmConfig {
 
         let tinfoil = if backend == LlmBackend::Tinfoil {
             let api_key = optional_env("TINFOIL_API_KEY")?.map(SecretString::from);
-            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+            let model = optional_env("TINFOIL_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "kimi-k2-5".to_string());
             Some(TinfoilConfig { api_key, model })
         } else {
             None
@@ -528,5 +541,99 @@ mod tests {
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
         );
+    }
+
+    /// Helper to clear provider-specific env vars so tests are isolated.
+    fn clear_provider_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OPENAI_MODEL");
+            std::env::remove_var("ANTHROPIC_MODEL");
+            std::env::remove_var("OLLAMA_MODEL");
+            std::env::remove_var("TINFOIL_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_uses_selected_model_when_env_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-5.2".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let openai = cfg.openai.expect("openai config should be present");
+        assert_eq!(openai.model, "gpt-5.2");
+    }
+
+    #[test]
+    fn openai_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_MODEL", "gpt-4-turbo");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-5.2".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let openai = cfg.openai.expect("openai config should be present");
+        assert_eq!(openai.model, "gpt-4-turbo");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_MODEL");
+        }
+    }
+
+    #[test]
+    fn anthropic_uses_selected_model_when_env_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-5".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let anthropic = cfg.anthropic.expect("anthropic config should be present");
+        assert_eq!(anthropic.model, "claude-opus-5");
+    }
+
+    #[test]
+    fn anthropic_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("ANTHROPIC_MODEL", "claude-3-haiku");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-5".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let anthropic = cfg.anthropic.expect("anthropic config should be present");
+        assert_eq!(anthropic.model, "claude-3-haiku");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_MODEL");
+        }
     }
 }

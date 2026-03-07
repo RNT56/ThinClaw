@@ -375,6 +375,31 @@ impl Channel for GatewayChannel {
                 ),
                 thread_id: thread_id.clone(),
             },
+            StatusUpdate::CanvasAction(action) => {
+                // Serialize the canvas action and send as a status event so
+                // SSE clients can render panels/notifications in real-time.
+                let payload = serde_json::to_string(&action).unwrap_or_default();
+                SseEvent::Status {
+                    message: format!("[canvas] {}", payload),
+                    thread_id: thread_id.clone(),
+                }
+            }
+            StatusUpdate::AgentMessage {
+                content,
+                message_type,
+            } => {
+                // Agent progress messages are sent as Response events so they
+                // appear as persistent chat messages, not transient status.
+                let prefix = match message_type.as_str() {
+                    "warning" => "⚠️ ",
+                    "question" => "❓ ",
+                    _ => "",
+                };
+                SseEvent::Response {
+                    content: format!("{}{}", prefix, content),
+                    thread_id: thread_id.unwrap_or_default(),
+                }
+            }
         };
 
         self.state.sse.broadcast(event);

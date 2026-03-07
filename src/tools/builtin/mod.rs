@@ -1,5 +1,6 @@
 //! Built-in tools that come with the agent.
 
+mod agent_control;
 mod browser;
 mod camera_capture;
 mod canvas;
@@ -18,10 +19,12 @@ mod screen_capture;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod slack_actions;
+pub mod subagent;
 mod telegram_actions;
 mod time;
 mod tts;
 
+pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
 pub use browser::BrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
@@ -31,7 +34,7 @@ pub use echo::EchoTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };
-pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
@@ -47,6 +50,7 @@ pub use screen_capture::ScreenCaptureTool;
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use slack_actions::SlackActionsTool;
+pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use tts::TtsTool;

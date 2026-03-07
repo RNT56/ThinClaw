@@ -221,6 +221,10 @@ pub struct Reasoning {
     model_name: Option<String>,
     /// Whether this is a group chat context.
     is_group_chat: bool,
+    /// Workspace mode: "unrestricted", "sandboxed", or "project".
+    workspace_mode: Option<String>,
+    /// Workspace root directory (for sandboxed/project modes).
+    workspace_root: Option<String>,
 }
 
 impl Reasoning {
@@ -234,6 +238,8 @@ impl Reasoning {
             channel: None,
             model_name: None,
             is_group_chat: false,
+            workspace_mode: None,
+            workspace_root: None,
         }
     }
 
@@ -277,9 +283,33 @@ impl Reasoning {
         self
     }
 
-    /// Mark this as a group chat context, enabling group-specific guidance.
+    /// Set whether this is a group chat context.
     pub fn with_group_chat(mut self, is_group: bool) -> Self {
         self.is_group_chat = is_group;
+        self
+    }
+
+    /// Set workspace mode and optional root directory.
+    ///
+    /// The mode determines what filesystem guidance is injected into the system prompt:
+    /// - `"unrestricted"` — full filesystem access (Cursor-style coding assistant)
+    /// - `"sandboxed"` — file tools confined to workspace_root
+    /// - `"project"` — shell cwd defaults to workspace_root, file tools unrestricted
+    pub fn with_workspace_mode(
+        mut self,
+        mode: impl Into<String>,
+        root: Option<impl Into<String>>,
+    ) -> Self {
+        let m = mode.into();
+        if !m.is_empty() {
+            self.workspace_mode = Some(m);
+        }
+        if let Some(r) = root {
+            let r = r.into();
+            if !r.is_empty() {
+                self.workspace_root = Some(r);
+            }
+        }
         self
     }
 
@@ -868,6 +898,9 @@ Respond with a JSON plan in this format:
         // Group chat guidance
         let group_section = self.build_group_section();
 
+        // Workspace capabilities (based on sandbox mode)
+        let workspace_section = self.build_workspace_capabilities_section(context);
+
         format!(
             r#"You are IronClaw Agent, a secure autonomous assistant.
 
@@ -903,10 +936,11 @@ Example:
 - Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
-- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
 {}{}"#,
             tools_section,
             extensions_section,
+            workspace_section,
             channel_section,
             runtime_section,
             group_section,
@@ -934,6 +968,85 @@ Example:
          Use `tool_search` to find extensions by name. Refer to them by their kind \
          (channel, tool, or server) — not as \"MCP server\" generically."
             .to_string()
+    }
+
+    /// Build workspace capabilities section based on the active sandbox mode.
+    ///
+    /// This dynamically informs the LLM what filesystem access it has,
+    /// adapted to the user's chosen workspace configuration.
+    fn build_workspace_capabilities_section(&self, context: &ReasoningContext) -> String {
+        // Only include when dev tools are available
+        let has_dev_tools = context
+            .available_tools
+            .iter()
+            .any(|t| t.name == "write_file" || t.name == "shell");
+        if !has_dev_tools {
+            return String::new();
+        }
+
+        let mode = self.workspace_mode.as_deref().unwrap_or("unrestricted");
+        let root_display = self.workspace_root.as_deref().unwrap_or("~/");
+
+        match mode {
+            "sandboxed" => format!(
+                "\n\n## Desktop Capabilities (Sandboxed)\n\n\
+                 You are running on the user's local machine with **sandboxed filesystem access**.\n\
+                 All file operations are confined to: `{root}`\n\n\
+                 **Available tools:**\n\
+                 - `write_file` — Create or overwrite files (within `{root}`)\n\
+                 - `read_file` — Read files (within `{root}`)\n\
+                 - `shell` — Run shell commands\n\
+                 - `list_dir` — Browse directories (within `{root}`)\n\
+                 - `apply_patch` — Edit existing files (within `{root}`)\n\
+                 - `grep` — Search file contents (within `{root}`)\n\n\
+                 When creating files, place them inside `{root}`. You cannot access files outside this directory.\n\n\
+                 **When the user asks you to create something** (website, script, app):\n\
+                 1. Use `write_file` to create the file(s) inside `{root}`\n\
+                 2. Use `shell` to open or run the result (e.g. `open {root}/site.html`)\n\
+                 3. Iterate if the user asks for changes\n\n\
+                 **Never say 'I can't create files' — use your tools to do it directly.**",
+                root = root_display,
+            ),
+            "project" => format!(
+                "\n\n## Desktop Capabilities (Project Mode)\n\n\
+                 You are running on the user's local machine with **full filesystem access**.\n\
+                 Your working directory is: `{root}`\n\n\
+                 **Available tools:**\n\
+                 - `write_file` — Create or overwrite any file on the system\n\
+                 - `read_file` — Read any file the user has access to\n\
+                 - `shell` — Run shell commands (defaults to `{root}`)\n\
+                 - `list_dir` — Browse any directory\n\
+                 - `apply_patch` — Edit existing files with surgical precision\n\
+                 - `grep` — Search file contents\n\n\
+                 Shell commands start in `{root}` by default. Use relative paths for project files.\n\
+                 You can still access files outside the project when needed.\n\n\
+                 **When the user asks you to create something** (website, script, app):\n\
+                 1. Use `write_file` to create file(s) — prefer `{root}` for project files\n\
+                 2. Use `shell` to open or run the result\n\
+                 3. Iterate if the user asks for changes\n\n\
+                 **Never say 'I can't create files' — use your tools to do it directly.**",
+                root = root_display,
+            ),
+            // "unrestricted" or any other value
+            _ => "\n\n## Desktop Capabilities\n\n\
+                 You are running on the user's local machine and have **full filesystem access** \
+                 via your tools. You can — and should — create files, run commands, and produce \
+                 real, working results. Never tell the user to create a file manually when you \
+                 can do it yourself.\n\n\
+                 **Available tools:**\n\
+                 - `write_file` — Create or overwrite any file on the system\n\
+                 - `read_file` — Read any file the user has access to\n\
+                 - `shell` — Run any shell command (open files, install packages, execute scripts, compile code)\n\
+                 - `list_dir` — Browse directories\n\
+                 - `apply_patch` — Edit existing files with surgical precision\n\
+                 - `grep` — Search file contents\n\n\
+                 **When the user asks you to create something** (website, script, app, document):\n\
+                 1. Use `write_file` to create the file(s) in a sensible location (e.g. `~/Desktop/`, `/tmp/`, or the user's project directory)\n\
+                 2. Use `shell` to open or run the result (e.g. `open ~/Desktop/site.html` on macOS)\n\
+                 3. Iterate if the user asks for changes — read the file, modify it, and re-open\n\n\
+                 **Never say 'I can't create files' — you can and should use your tools to do it directly.**"
+                .to_string(),
+        }
     }
 
     fn build_channel_section(&self) -> String {

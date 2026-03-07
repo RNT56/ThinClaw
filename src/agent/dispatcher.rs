@@ -105,7 +105,14 @@ impl Agent {
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
-            .with_group_chat(is_group_chat);
+            .with_group_chat(is_group_chat)
+            .with_workspace_mode(
+                &self.config.workspace_mode,
+                self.config
+                    .workspace_root
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+            );
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
@@ -794,7 +801,7 @@ impl Agent {
                             }
                             PreflightOutcome::Runnable => {
                                 // Retrieve the execution result for this slot
-                                let tool_result =
+                                let mut tool_result =
                                     exec_results[pf_idx].take().unwrap_or_else(|| {
                                         Err(crate::error::ToolError::ExecutionFailed {
                                             name: tc.name.clone(),
@@ -818,6 +825,177 @@ impl Agent {
                                             &message.metadata,
                                         )
                                         .await;
+                                }
+
+                                // ── Canvas tool interception ────────────────────
+                                // If the tool is `canvas` and succeeded, parse the
+                                // result as a CanvasAction, emit it as a status
+                                // update, and persist it in the CanvasStore.
+                                if tc.name == "canvas" {
+                                    if let Ok(ref output) = tool_result {
+                                        if let Ok(action) =
+                                            serde_json::from_str::<
+                                                crate::tools::builtin::CanvasAction,
+                                            >(output)
+                                        {
+                                            // Emit the action to the channel for
+                                            // real-time rendering in the frontend.
+                                            let _ = self
+                                                .channels
+                                                .send_status(
+                                                    &message.channel,
+                                                    StatusUpdate::CanvasAction(action.clone()),
+                                                    &message.metadata,
+                                                )
+                                                .await;
+
+                                            // Persist in the CanvasStore for HTTP
+                                            // access at /canvas/.
+                                            if let Some(ref store) = self.deps.canvas_store {
+                                                match &action {
+                                                    crate::tools::builtin::CanvasAction::Show {
+                                                        panel_id,
+                                                        title,
+                                                        components,
+                                                        ..
+                                                    } => {
+                                                        store
+                                                            .upsert(
+                                                                panel_id.clone(),
+                                                                title.clone(),
+                                                                serde_json::to_value(components)
+                                                                    .unwrap_or_default(),
+                                                                None,
+                                                            )
+                                                            .await;
+                                                    }
+                                                    crate::tools::builtin::CanvasAction::Update {
+                                                        panel_id,
+                                                        components,
+                                                    } => {
+                                                        // Update: keep existing title
+                                                        let existing_title = store
+                                                            .get(panel_id)
+                                                            .await
+                                                            .map(|p| p.title)
+                                                            .unwrap_or_else(|| {
+                                                                panel_id.clone()
+                                                            });
+                                                        store
+                                                            .upsert(
+                                                                panel_id.clone(),
+                                                                existing_title,
+                                                                serde_json::to_value(components)
+                                                                    .unwrap_or_default(),
+                                                                None,
+                                                            )
+                                                            .await;
+                                                    }
+                                                    crate::tools::builtin::CanvasAction::Dismiss {
+                                                        panel_id,
+                                                    } => {
+                                                        store.dismiss(panel_id).await;
+                                                    }
+                                                    crate::tools::builtin::CanvasAction::Notify {
+                                                        ..
+                                                    } => {
+                                                        // Notifications are transient;
+                                                        // no store persistence needed.
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── emit_user_message interception ───────────────
+                                // When the agent calls emit_user_message, forward
+                                // the message to the user's channel as a visible
+                                // status update. The loop continues normally.
+                                if tc.name == "emit_user_message" {
+                                    if let Ok(ref output) = tool_result {
+                                        if let Ok(parsed) =
+                                            serde_json::from_str::<serde_json::Value>(output)
+                                        {
+                                            if let Some(msg) =
+                                                parsed.get("message").and_then(|v| v.as_str())
+                                            {
+                                                let msg_type = parsed
+                                                    .get("message_type")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("progress")
+                                                    .to_string();
+                                                let _ = self
+                                                    .channels
+                                                    .send_status(
+                                                        &message.channel,
+                                                        StatusUpdate::AgentMessage {
+                                                            content: msg.to_string(),
+                                                            message_type: msg_type,
+                                                        },
+                                                        &message.metadata,
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── spawn_subagent interception ───────────────────
+                                // The spawn_subagent tool outputs a JSON request.
+                                // We intercept it here to execute the actual spawning
+                                // via the SubagentExecutor and replace the tool result
+                                // with the sub-agent's output.
+                                if tc.name == "spawn_subagent" {
+                                    if let Ok(ref output) = tool_result {
+                                        if let Ok(parsed) =
+                                            serde_json::from_str::<serde_json::Value>(output)
+                                        {
+                                            if parsed.get("action").and_then(|v| v.as_str())
+                                                == Some("spawn_subagent")
+                                            {
+                                                if let Some(executor) =
+                                                    self.subagent_executor.as_ref()
+                                                {
+                                                    if let Some(req_val) = parsed.get("request") {
+                                                        if let Ok(request) = serde_json::from_value::<
+                                                            crate::agent::subagent_executor::SubagentSpawnRequest,
+                                                        >(
+                                                            req_val.clone()
+                                                        ) {
+                                                            let exec_result = executor
+                                                                .spawn(
+                                                                    request,
+                                                                    &message.channel,
+                                                                    &message.metadata,
+                                                                )
+                                                                .await;
+
+                                                            tool_result = match exec_result {
+                                                                Ok(result) => Ok(
+                                                                    serde_json::to_string(&result)
+                                                                        .unwrap_or_default(),
+                                                                ),
+                                                                Err(e) => Ok(
+                                                                    serde_json::json!({
+                                                                        "error": e.to_string(),
+                                                                        "success": false,
+                                                                    })
+                                                                    .to_string(),
+                                                                ),
+                                                            };
+                                                        }
+                                                    }
+                                                } else {
+                                                    tool_result = Ok(serde_json::json!({
+                                                        "error": "Sub-agent system not initialized",
+                                                        "success": false,
+                                                    })
+                                                    .to_string());
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // Record result in thread
@@ -1211,6 +1389,8 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_sender: None,
             agent_router: None,
+            canvas_store: None,
+            subagent_executor: None,
         };
 
         Agent::new(
@@ -1232,6 +1412,8 @@ mod tests {
                 thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
                 model_thinking_overrides: std::collections::HashMap::new(),
+                workspace_mode: "unrestricted".to_string(),
+                workspace_root: None,
             },
             deps,
             Arc::new(ChannelManager::new()),

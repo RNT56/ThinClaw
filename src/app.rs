@@ -680,7 +680,39 @@ impl AppBuilder {
         let builder_registered_dev_tools = self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
         if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
-            tools.register_dev_tools();
+            // Resolve workspace mode → (base_dir, working_dir) for tool registration
+            let mode = self.config.agent.workspace_mode.as_str();
+            let root = self.config.agent.workspace_root.clone();
+
+            match mode {
+                "sandboxed" => {
+                    // Full sandbox: file tools restricted + shell cwd set
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("OpenClaw")
+                            .join("Projects")
+                    });
+                    // Ensure directory exists
+                    let _ = std::fs::create_dir_all(&dir);
+                    tracing::info!("[app] Workspace mode: sandboxed → {}", dir.display());
+                    tools.register_dev_tools_with_config(Some(dir.clone()), Some(dir));
+                }
+                "project" => {
+                    // Project mode: working dir set, no file sandbox
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    tracing::info!("[app] Workspace mode: project → {}", dir.display());
+                    tools.register_dev_tools_with_config(None, Some(dir));
+                }
+                _ => {
+                    // Unrestricted: no constraints
+                    tracing::info!("[app] Workspace mode: unrestricted");
+                    tools.register_dev_tools();
+                }
+            }
         }
 
         // Register TTS tool (always available — uses OpenAI TTS API)
