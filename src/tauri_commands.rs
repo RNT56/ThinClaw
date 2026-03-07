@@ -590,6 +590,96 @@ pub async fn canvas_panel_dismiss(
     Ok(store.dismiss(panel_id).await)
 }
 
+// ── 19. openclaw_channel_status_list ──────────────────────────────────
+
+use crate::channels::ChannelManager;
+use crate::channels::status_view::ChannelStatusEntry;
+
+/// Get live channel status entries (message counters, uptime, state).
+///
+/// Maps to: `openclaw_channel_status_list`
+/// Response: `Vec<ChannelStatusEntry>`
+pub async fn channel_status_list(
+    manager: &ChannelManager,
+) -> Result<Vec<ChannelStatusEntry>, String> {
+    Ok(manager.status_entries().await)
+}
+
+// ── 20. openclaw_routine_create ────────────────────────────────────────
+
+use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
+
+/// Parameters for creating a new routine (Scrappy sends this from the UI).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RoutineCreateParams {
+    pub name: String,
+    pub description: String,
+    pub user_id: String,
+    pub trigger: Trigger,
+    pub action: RoutineAction,
+    #[serde(default)]
+    pub notify: Option<NotifyConfig>,
+    /// Optional directory to write the routine file.
+    /// Defaults to `~/.ironclaw/routines/`.
+    pub routines_dir: Option<std::path::PathBuf>,
+}
+
+/// Create and persist a new routine as a JSON file.
+///
+/// Routines in IronClaw are file-backed (not database-backed).
+/// Each routine is saved as `{id}.json` under the routines directory.
+///
+/// Maps to: `openclaw_routine_create`
+/// Params: `RoutineCreateParams`
+/// Response: `Routine` (the saved object with a generated ID)
+pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
+    let now = chrono::Utc::now();
+    let routine = Routine {
+        id: uuid::Uuid::new_v4(),
+        name: params.name,
+        description: params.description,
+        user_id: params.user_id,
+        enabled: true,
+        trigger: params.trigger,
+        action: params.action,
+        guardrails: RoutineGuardrails::default(),
+        notify: params.notify.unwrap_or_default(),
+        last_run_at: None,
+        next_fire_at: None,
+        run_count: 0,
+        consecutive_failures: 0,
+        state: serde_json::Value::Null,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Determine the routines directory.
+    let dir = params.routines_dir.unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw")
+            .join("routines")
+    });
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create routines directory: {}", e))?;
+
+    let path = dir.join(format!("{}.json", routine.id));
+    let json = serde_json::to_string_pretty(&routine)
+        .map_err(|e| format!("Failed to serialize routine: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write routine file {:?}: {}", path, e))?;
+
+    tracing::info!(
+        routine_id = %routine.id,
+        routine_name = %routine.name,
+        path = ?path,
+        "Routine created"
+    );
+
+    Ok(routine)
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -613,6 +703,8 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_canvas_panels_list",
         "openclaw_canvas_panel_get",
         "openclaw_canvas_panel_dismiss",
+        "openclaw_channel_status_list",
+        "openclaw_routine_create",
     ]
 }
 
@@ -809,13 +901,15 @@ mod tests {
     #[test]
     fn test_available_commands() {
         let cmds = available_commands();
-        assert_eq!(cmds.len(), 15);
+        assert_eq!(cmds.len(), 20);
         assert!(cmds.contains(&"openclaw_cost_summary"));
         assert!(cmds.contains(&"openclaw_manifest_validate"));
         assert!(cmds.contains(&"openclaw_routing_rules_list"));
         assert!(cmds.contains(&"openclaw_routing_status"));
         assert!(cmds.contains(&"openclaw_gmail_status"));
         assert!(cmds.contains(&"openclaw_gmail_oauth_start"));
+        assert!(cmds.contains(&"openclaw_channel_status_list"));
+        assert!(cmds.contains(&"openclaw_routine_create"));
     }
 
     #[test]

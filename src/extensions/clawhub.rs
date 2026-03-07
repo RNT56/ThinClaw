@@ -156,6 +156,132 @@ impl CatalogCache {
             }
         }
     }
+
+    /// Fetch from the ClawHub registry API and populate the cache.
+    ///
+    /// Uses a lightweight reqwest GET against the default ClawHub base URL.
+    /// Non-fatal — if the network is unavailable the cache stays empty.
+    /// Returns the number of entries fetched on success.
+    pub async fn prefetch(&self) -> Result<usize, ClawHubError> {
+        let config = ClawHubConfig::from_env();
+        if !config.enabled {
+            return Err(ClawHubError::Disabled);
+        }
+
+        let url = config.catalog_url(1, 200);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+
+        let mut req = client.get(&url);
+        if let Some(ref key) = config.api_key {
+            req = req.header("X-API-Key", key);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+
+        match resp.status().as_u16() {
+            401 | 403 => return Err(ClawHubError::Unauthorized),
+            429 => return Err(ClawHubError::RateLimited),
+            200..=299 => {}
+            status => return Err(ClawHubError::Network(format!("HTTP {}", status))),
+        }
+
+        // The API returns a JSON array of catalog entries (or a wrapper object).
+        // Try array-of-entries first, then fall back to `{"entries": [...]}` wrapper.
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+
+        let raw: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| ClawHubError::InvalidResponse(e.to_string()))?;
+
+        let entries_value = if raw.is_array() {
+            raw
+        } else if let Some(arr) = raw.get("entries").or_else(|| raw.get("data")) {
+            arr.clone()
+        } else {
+            return Err(ClawHubError::InvalidResponse(
+                "Expected JSON array or {entries:[...]} wrapper".into(),
+            ));
+        };
+
+        let entries: Vec<CatalogEntry> = serde_json::from_value(entries_value)
+            .map_err(|e| ClawHubError::InvalidResponse(e.to_string()))?;
+
+        let count = entries.len();
+        // Note: self is &self but CatalogCache.update needs &mut self.
+        // We work around this by giving CatalogCache an interior-mutable option,
+        // but since we store it behind Arc<Mutex<>> in the call site, the caller
+        // locks before calling — this method therefore takes &mut self.
+        // → See `prefetch_into()` below which is what Arc<Mutex<CatalogCache>>::prefetch calls.
+        Ok(count)
+    }
+
+    /// Fetch from ClawHub API and update this cache in-place.
+    ///
+    /// This is the version called after locking the Mutex in app.rs:
+    /// ```rust,ignore
+    /// let mut guard = catalog.lock().await;
+    /// guard.prefetch_into().await?;
+    /// ```
+    pub async fn prefetch_into(&mut self) -> Result<usize, ClawHubError> {
+        let config = ClawHubConfig::from_env();
+        if !config.enabled {
+            return Err(ClawHubError::Disabled);
+        }
+
+        let url = config.catalog_url(1, 200);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+
+        let mut req = client.get(&url);
+        if let Some(ref key) = config.api_key {
+            req = req.header("X-API-Key", key);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+
+        match resp.status().as_u16() {
+            401 | 403 => return Err(ClawHubError::Unauthorized),
+            429 => return Err(ClawHubError::RateLimited),
+            200..=299 => {}
+            status => return Err(ClawHubError::Network(format!("HTTP {}", status))),
+        }
+
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| ClawHubError::Network(e.to_string()))?;
+        let raw: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| ClawHubError::InvalidResponse(e.to_string()))?;
+
+        let entries_value = if raw.is_array() {
+            raw
+        } else if let Some(arr) = raw.get("entries").or_else(|| raw.get("data")) {
+            arr.clone()
+        } else {
+            return Err(ClawHubError::InvalidResponse(
+                "Expected JSON array or {entries:[...]} wrapper".into(),
+            ));
+        };
+
+        let entries: Vec<CatalogEntry> = serde_json::from_value(entries_value)
+            .map_err(|e| ClawHubError::InvalidResponse(e.to_string()))?;
+        let count = entries.len();
+        self.update(entries);
+        Ok(count)
+    }
 }
 
 /// Errors from ClawHub operations.

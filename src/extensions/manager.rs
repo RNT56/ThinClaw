@@ -14,6 +14,7 @@ use crate::channels::ChannelManager;
 use crate::channels::wasm::{
     RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
 };
+use crate::extensions::clawhub::CatalogCache;
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
@@ -97,6 +98,8 @@ pub struct ExtensionManager {
     /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
     sse_sender:
         RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
+    /// In-memory ClawHub catalog — populated by background prefetch at startup.
+    catalog_cache: Arc<tokio::sync::Mutex<CatalogCache>>,
 }
 
 impl ExtensionManager {
@@ -138,7 +141,13 @@ impl ExtensionManager {
             active_channel_names: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
             sse_sender: RwLock::new(None),
+            catalog_cache: Arc::new(tokio::sync::Mutex::new(CatalogCache::new(3600))),
         }
+    }
+
+    /// Get a clone of the shared catalog cache Arc — for background prefetch by `app.rs`.
+    pub fn catalog_cache(&self) -> Arc<tokio::sync::Mutex<CatalogCache>> {
+        Arc::clone(&self.catalog_cache)
     }
 
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.

@@ -836,6 +836,7 @@ async fn main() -> anyhow::Result<()> {
         agent_router: None,
         canvas_store: Some(canvas_store),
         subagent_executor: Some(subagent_executor),
+        cost_tracker: Some(components.cost_tracker),
     };
 
     let agent = Agent::new(

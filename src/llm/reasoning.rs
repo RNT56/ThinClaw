@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 
+use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
 };
@@ -225,6 +226,8 @@ pub struct Reasoning {
     workspace_mode: Option<String>,
     /// Workspace root directory (for sandboxed/project modes).
     workspace_root: Option<String>,
+    /// Shared cost tracker — records every LLM call for the Cost Dashboard.
+    cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
 }
 
 impl Reasoning {
@@ -240,7 +243,16 @@ impl Reasoning {
             is_group_chat: false,
             workspace_mode: None,
             workspace_root: None,
+            cost_tracker: None,
         }
+    }
+
+    /// Wire a shared cost tracker so every LLM call is recorded.
+    ///
+    /// The tracker is read by `tauri_commands::cost_summary()` / `cost_export_csv()`.
+    pub fn with_cost_tracker(mut self, tracker: Arc<tokio::sync::Mutex<CostTracker>>) -> Self {
+        self.cost_tracker = Some(tracker);
+        self
     }
 
     /// Set a custom system prompt from workspace identity files.
@@ -328,7 +340,34 @@ impl Reasoning {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
         };
+        self.record_cost(&usage).await;
         Ok((clean_response(&response.content), usage))
+    }
+
+    /// Record token usage + cost into the shared CostTracker (fire-and-forget).
+    async fn record_cost(&self, usage: &TokenUsage) {
+        let Some(ref tracker) = self.cost_tracker else {
+            return;
+        };
+        let cost_usd = {
+            let (input_rate, output_rate) = self.llm.cost_per_token();
+            let input = rust_decimal::Decimal::from(usage.input_tokens);
+            let output = rust_decimal::Decimal::from(usage.output_tokens);
+            let total = input * input_rate + output * output_rate;
+            use rust_decimal::prelude::ToPrimitive;
+            total.to_f64().unwrap_or(0.0)
+        };
+        let entry = CostEntry {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            agent_id: None,
+            provider: self.llm.active_model_name(),
+            model: self.llm.active_model_name(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_usd,
+            request_id: None,
+        };
+        tracker.lock().await.record(entry);
     }
 
     /// Generate a plan for completing a goal.
@@ -383,6 +422,13 @@ impl Reasoning {
         request.metadata = context.metadata.clone();
 
         let response = self.llm.complete_with_tools(request).await?;
+
+        // Record cost for this tool-selection call.
+        let usage = TokenUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        };
+        self.record_cost(&usage).await;
 
         let reasoning = response.content.unwrap_or_default();
 

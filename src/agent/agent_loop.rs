@@ -85,6 +85,9 @@ pub struct AgentDeps {
     pub canvas_store: Option<crate::channels::canvas_gateway::CanvasStore>,
     /// Optional sub-agent executor for spawning parallel agentic loops.
     pub subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// Shared cost tracker \u2014 receives entries from every LLM call in the agent.
+    /// Read by `openclaw_cost_summary` Tauri command for the Cost Dashboard.
+    pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 /// The main agent that coordinates all components.
@@ -686,6 +689,9 @@ impl Agent {
                     }
                 }
             };
+
+            // Increment received counter for this channel.
+            self.channels.record_received(&message.channel).await;
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {

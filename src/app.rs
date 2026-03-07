@@ -14,9 +14,11 @@ use crate::config::Config;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::extensions::lifecycle_hooks::AuditLogHook;
 use crate::hardware_bridge::{SessionApprovals, ToolBridge};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
+use crate::llm::cost_tracker::{BudgetConfig, CostTracker};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -56,6 +58,10 @@ pub struct AppComponents {
     pub tool_bridge: Option<Arc<dyn ToolBridge>>,
     /// Session-level sensor approvals (cleared on restart).
     pub session_approvals: Arc<SessionApprovals>,
+    /// Shared cost tracker — populated by every LLM call, read by Tauri command.
+    pub cost_tracker: Arc<tokio::sync::Mutex<CostTracker>>,
+    /// Audit log hook — receives real plugin lifecycle events from HookRegistry.
+    pub audit_hook: Arc<AuditLogHook>,
 }
 
 /// Options that control optional init phases.
@@ -715,11 +721,14 @@ impl AppBuilder {
             }
         }
 
-        // Register screen capture tool (desktop-only — requires local system access)
-        if self.config.agent.allow_local_tools {
+        // Register screen capture tool (desktop-only — requires user opt-in via Scrappy UI toggle)
+        let screen_capture_enabled = std::env::var("SCREEN_CAPTURE_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if self.config.agent.allow_local_tools && screen_capture_enabled {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
-            tracing::info!("Registered screen capture tool (desktop mode)");
+            tracing::info!("Registered screen capture tool (enabled via user toggle)");
         }
 
         // Register TTS tool (always available — uses OpenAI TTS API)
@@ -749,6 +758,10 @@ impl AppBuilder {
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
+
+        // Create the audit log hook standalone — it will receive extension lifecycle events
+        // via ExtensionManager::set_audit_hook() called below (different hook subsystem).
+        let audit_hook = Arc::new(AuditLogHook::new());
 
         let (
             mcp_session_manager,
@@ -800,6 +813,12 @@ impl AppBuilder {
         };
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
+
+        // Create the shared cost tracker (budget limits from config/env).
+        let cost_tracker = Arc::new(tokio::sync::Mutex::new(CostTracker::new(
+            BudgetConfig::default(),
+        )));
+
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
@@ -824,6 +843,18 @@ impl AppBuilder {
                 tools.register_sync(Arc::new(bt));
             }
             tracing::info!("Hardware bridge active: {} sensor tools registered", count);
+        }
+
+        // Background prefetch ClawHub catalog so the plugin browser is non-empty on first open.
+        if let Some(ref ext_mgr) = extension_manager {
+            let catalog = ext_mgr.catalog_cache();
+            tokio::spawn(async move {
+                let mut guard = catalog.lock().await;
+                match guard.prefetch_into().await {
+                    Ok(count) => tracing::info!("ClawHub catalog prefetched: {} entries", count),
+                    Err(e) => tracing::debug!("ClawHub prefetch skipped ({})", e),
+                }
+            });
         }
 
         tracing::info!(
@@ -854,6 +885,8 @@ impl AppBuilder {
             dev_loaded_tool_names,
             tool_bridge: self.tool_bridge,
             session_approvals,
+            cost_tracker,
+            audit_hook,
         })
     }
 }

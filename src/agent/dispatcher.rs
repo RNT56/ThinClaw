@@ -113,6 +113,9 @@ impl Agent {
                     .as_ref()
                     .map(|p| p.display().to_string()),
             );
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
+        }
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
@@ -1391,6 +1394,7 @@ mod tests {
             agent_router: None,
             canvas_store: None,
             subagent_executor: None,
+            cost_tracker: None,
         };
 
         Agent::new(
