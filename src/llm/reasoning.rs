@@ -984,10 +984,29 @@ Example:
             return String::new();
         }
 
+        let has_screen_capture = context
+            .available_tools
+            .iter()
+            .any(|t| t.name == "screen_capture");
+
         let mode = self.workspace_mode.as_deref().unwrap_or("unrestricted");
         let root_display = self.workspace_root.as_deref().unwrap_or("~/");
 
-        match mode {
+        let screen_capture_section = if has_screen_capture {
+            "\n\n## Screen Capture & Vision\n\n\
+             You can capture the user's screen using the `screen_capture` tool.\n\
+             - `screen_capture` — Take a screenshot (fullscreen, interactive region, or specific window)\n\n\
+             **When to use screen capture:**\n\
+             - The user asks what's on their screen, to analyze a UI, or to debug a visual issue\n\
+             - You need to see the current state of an app, browser, or desktop\n\
+             - The user asks you to read/capture text from an image on screen\n\n\
+             The screenshot is saved as a PNG file. You can then read or reference it in your response.\n\
+             **Never say 'I can't see your screen' — use `screen_capture` to take a screenshot.**"
+        } else {
+            ""
+        };
+
+        let base = match mode {
             "sandboxed" => format!(
                 "\n\n## Desktop Capabilities (Sandboxed)\n\n\
                  You are running on the user's local machine with **sandboxed filesystem access**.\n\
@@ -1046,7 +1065,9 @@ Example:
                  3. Iterate if the user asks for changes — read the file, modify it, and re-open\n\n\
                  **Never say 'I can't create files' — you can and should use your tools to do it directly.**"
                 .to_string(),
-        }
+        };
+
+        format!("{base}{screen_capture_section}")
     }
 
     fn build_channel_section(&self) -> String {

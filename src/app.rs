@@ -715,6 +715,13 @@ impl AppBuilder {
             }
         }
 
+        // Register screen capture tool (desktop-only — requires local system access)
+        if self.config.agent.allow_local_tools {
+            use crate::tools::builtin::ScreenCaptureTool;
+            tools.register_sync(Arc::new(ScreenCaptureTool::new()));
+            tracing::info!("Registered screen capture tool (desktop mode)");
+        }
+
         // Register TTS tool (always available — uses OpenAI TTS API)
         let tts_output_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
