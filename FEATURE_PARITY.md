@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-05 11:29 CET
+> **Last reconciled:** 2026-03-07 14:23 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -203,6 +203,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `cancel_subagent` tool | ✅ | ✅ | Cancel running sub-agents by UUID; watch channel + task abort ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | Sub-agent lifecycle | ✅ | ✅ | Concurrency limits (default 5), per-agent timeout, status tracking (Running/Completed/Failed/TimedOut/Cancelled), user progress notifications via StatusUpdate::AgentMessage |
 | `/subagents spawn` command | ✅ | ✅ | Command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
+| Workspace sandbox modes | ❌ | ✅ | `WORKSPACE_MODE` config: `unrestricted` (default), `sandboxed` (confined to `WORKSPACE_ROOT`), `project` (working dir set, files unrestricted). Drives tool registration + dynamic system prompt ([`src/config/agent.rs`](src/config/agent.rs)) |
+| Dynamic system prompt | ❌ | ✅ | `Reasoning::build_workspace_capabilities_section()` generates mode-specific Desktop Capabilities based on active workspace config and available tools ([`src/llm/reasoning.rs`](src/llm/reasoning.rs)) |
+| Screen capture tool | ❌ | ✅ | `ScreenCaptureTool` — macOS screencapture/Linux gnome-screenshot/scrot; registered when `ALLOW_LOCAL_TOOLS=true` + `SCREEN_CAPTURE_ENABLED=true` (user opt-in via Scrappy toggle). Dynamic system prompt auto-detects and injects guidance ([`src/tools/builtin/screen_capture.rs`](src/tools/builtin/screen_capture.rs)) |
 | Auth profiles | ✅ | ✅ | Multi-key rotation with health tracking ([`src/safety/auth_profiles.rs`](src/safety/auth_profiles.rs)) |
 | Generic API key rotation | ✅ | ✅ | Multi-strategy rotation with health tracking ([`src/safety/key_rotation.rs`](src/safety/key_rotation.rs)) |
 | Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
@@ -387,6 +390,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Auto-updates | ✅ | ✅ | Done | `tauri-plugin-updater` + `UpdateChecker.tsx` — auto-check, download, install, restart |
 | Voice wake | ✅ | ✅ | Full | VAD-based voice activation + Sherpa-ONNX keyword spotting backend with auto-fallback |
 | iMessage integration | ✅ | ✅ | - | chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics |
+| Workspace sandbox modes | ❌ | ✅ | Done | 3 modes: unrestricted (Cursor-style), sandboxed (confined dir), project (working dir). User selects in Settings. Sets `WORKSPACE_MODE` + `WORKSPACE_ROOT` env vars |
+| OS governance toggles | ❌ | ✅ | Done | Live permission checks: `ACCESSIBILITY_GRANTED` (AXIsProcessTrusted), `SCREEN_RECORDING_GRANTED` (CGPreflightScreenCaptureAccess). Screen capture gated on user toggle (`SCREEN_CAPTURE_ENABLED`) |
+| Screen capture (desktop) | ❌ | ✅ | Done | `ScreenCaptureTool` registered when `ALLOW_LOCAL_TOOLS=true` + `SCREEN_CAPTURE_ENABLED=true`. Agent prompt auto-detects and provides usage guidance |
 
 ### Detailed Coverage Evidence
 
@@ -480,11 +486,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Podman support | ✅ | ✅ | `PodmanConfig` with rootless mode, resource limits, `podman run` arg building ([`src/sandbox/podman.rs`](src/sandbox/podman.rs)) |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | ✅ | Shell tool scrubs env vars + LD*/DYLD* injection blocks + safe bins allowlist |
+| Workspace sandbox modes | ❌ | ✅ | `WORKSPACE_MODE` (unrestricted/sandboxed/project) + `WORKSPACE_ROOT` — file tools + shell confined to workspace when sandboxed ([`src/config/agent.rs`](src/config/agent.rs), [`src/tools/registry.rs`](src/tools/registry.rs)) |
+| Shell sandbox (3-layer) | ❌ | ✅ | When `base_dir` set: (1) Safe bins allowlist auto-enforced, (2) workdir validation (must be under base_dir), (3) command path scanning (`detect_path_escape` + `..` traversal detection). 11 dedicated tests ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs)) |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ✅ | ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
-| Safe bins allowlist | ✅ | ✅ | `IRONCLAW_SAFE_BINS_ONLY` + extensible `IRONCLAW_EXTRA_BINS` |
+| Safe bins allowlist | ✅ | ✅ | `IRONCLAW_SAFE_BINS_ONLY` + extensible `IRONCLAW_EXTRA_BINS` + desktop bins (open, xdg-open, pbcopy, pbpaste, tee, xargs, chmod) |
 | LD*/DYLD* validation | ✅ | ✅ | Blocks `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc. |
-| Path traversal prevention | ✅ | ✅ | Including config includes (OC-06) |
+| Path traversal prevention | ✅ | ✅ | Including config includes (OC-06) + `..` traversal in shell commands |
 | Credential theft via env injection | ✅ | ✅ | Shell env scrubbing + command injection detection + LD*/DYLD* blocking + safe bins |
 | Session file permissions (0o600) | ✅ | ✅ | Handled by OS keychain + filesystem perms |
 | Skill download path restriction | ✅ | ✅ | ([`src/safety/skill_path.rs`](src/safety/skill_path.rs)) |
@@ -493,6 +501,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization |
 | Leak detection | ✅ | ✅ | Secret exfiltration |
 | Dangerous tool re-enable warning | ✅ | ✅ | `DangerousToolTracker` ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs)) |
+| OS governance env vars | ❌ | ✅ | Scrappy live-checks macOS permissions and passes to IronClaw: `ACCESSIBILITY_GRANTED` (AXIsProcessTrusted), `SCREEN_RECORDING_GRANTED` (CGPreflightScreenCaptureAccess), `SCREEN_CAPTURE_ENABLED` (user toggle) |
 
 ### Owner: IronClaw Agent
 
@@ -522,7 +531,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ## 17. Scrappy Feature Surfacing Analysis
 
-> **Last updated:** 2026-03-04 10:48 CET — reconciled after Sprint 12 completion
+> **Last updated:** 2026-03-07 14:23 CET — reconciled with workspace sandbox modes, shell sandboxing, screen capture, OS governance
 >
 > IronClaw has shipped far more capabilities than Scrappy currently exposes through its UI.
 > This section tracks which IronClaw features Scrappy surfaces, which need UI, and wiring gaps.
@@ -536,6 +545,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron/Routines (§14) | `OpenClawAutomations.tsx` | ✅ Wired via `openclaw_cron_*` commands |
 | Channels (§3) | `OpenClawChannels.tsx` | ✅ Wired via `openclaw_channels_list` command |
 | Subagent support (§5) | `SubAgentPanel.tsx` | ✅ Wired via Enhancement 2C |
+| Workspace sandbox modes (§5, §15) | Settings panel — unrestricted/sandboxed/project | ✅ Sets `WORKSPACE_MODE` + `WORKSPACE_ROOT` env vars |
+| OS governance (§15) | Settings panel — screen capture toggle, permission checks | ✅ `ACCESSIBILITY_GRANTED`, `SCREEN_RECORDING_GRANTED`, `SCREEN_CAPTURE_ENABLED` |
+| Screen capture (§5) | Gated on `SCREEN_CAPTURE_ENABLED` toggle | ✅ Wired via OS governance toggle |
 | Fleet/presence (§2, §12) | `FleetCommandCenter.tsx`, `FleetGraph.tsx` | ✅ Wired |
 | Canvas (§2, §12) | `CanvasWindow.tsx` | ✅ Wired with drag/resize/maximize |
 | Exec approvals (§5, §15) | `ApprovalCard.tsx` | ✅ Wired, 3-tier |
@@ -724,7 +736,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 ## 19. IronClaw → Scrappy Integration Tracker
 
-> **Last updated:** 2026-03-05 11:29 CET — Sprint 15 fully complete (all agents). All 13 Tier 4 items end-to-end. Canvas/A2UI ✅ fully done both sides (§22). Tauri commands: 18 total.
+> **Last updated:** 2026-03-07 14:23 CET — Sprint 15 fully complete. Workspace sandbox modes + OS governance + screen capture added. Tauri commands: 18 total.
 
 ### 19.1 Shipped — Scrappy UI Needed or In Progress
 
@@ -827,13 +839,18 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 
 **Tier 4 Score:** ✅ **12/12 end-to-end**
 
-### Tier 5 — Remaining / Next
+### Tier 5 — Recent Additions (2026-03-07)
 
-| # | Action | Notes |
-|---|--------|-------|
-| ~~—~~ | ~~**Canvas / A2UI end-to-end wiring**~~ | ✅ **Done** — §22, all 9 tasks complete (5 IronClaw + 4 Scrappy) |
-| — | **Session pruning UI** | Pruning config in settings (low priority) |
-| — | **Per-conversation channel scoping** | Optional optimization: replace `app.emit()` broadcast with Tauri V2 `Channel<T>` per-invoke |
+| # | Action | Notes | Status |
+|---|--------|-------|--------|
+| ~~—~~ | ~~**Canvas / A2UI end-to-end wiring**~~ | ✅ **Done** — §22, all 9 tasks complete (5 IronClaw + 4 Scrappy) | ✅ |
+| 29 | **Workspace sandbox modes** | 3 modes (unrestricted/sandboxed/project) in Settings. IronClaw: `WORKSPACE_MODE` + `WORKSPACE_ROOT`, dynamic system prompt, tool sandboxing. Scrappy: UI toggle → env vars | ✅ End-to-end |
+| 30 | **Shell sandbox (3-layer)** | Safe bins + workdir validation + path escape + `..` traversal. Desktop bins added (open, pbcopy, tee, xargs, chmod). 11 new tests | ✅ IronClaw |
+| 31 | **Screen capture tool** | `ScreenCaptureTool` gated on `SCREEN_CAPTURE_ENABLED` + `ALLOW_LOCAL_TOOLS`. Dynamic prompt auto-detects. Scrappy: OS governance toggle | ✅ End-to-end |
+| 32 | **OS governance env vars** | Scrappy live-checks: `ACCESSIBILITY_GRANTED` (AXIsProcessTrusted), `SCREEN_RECORDING_GRANTED` (CGPreflightScreenCaptureAccess) | ✅ Scrappy |
+| 33 | **Dynamic system prompt** | `Reasoning::build_workspace_capabilities_section()` — mode-specific guidance + auto-detect screen_capture | ✅ IronClaw |
+| — | **Session pruning UI** | Pruning config in settings (low priority) | 🔮 |
+| — | **Per-conversation channel scoping** | Optional optimization: replace `app.emit()` broadcast with Tauri V2 `Channel<T>` per-invoke | 🔮 |
 
 ### Owner: Scrappy Agent + IronClaw
 
@@ -1031,12 +1048,16 @@ running inside Scrappy.
 
 **Security**
 - ✅ Trusted-proxy auth (`TRUSTED_PROXY_HEADER` + `TRUSTED_PROXY_IPS`)
-- ✅ Safe bins allowlist (`IRONCLAW_SAFE_BINS_ONLY` mode)
+- ✅ Safe bins allowlist (`IRONCLAW_SAFE_BINS_ONLY` mode + desktop-essential bins: `open`, `xdg-open`, `pbcopy`, `pbpaste`, `tee`, `xargs`, `chmod`, `realpath`, `basename`, `dirname`)
 - ✅ LD*/DYLD* env validation (library injection blocking)
 - ✅ Per-group tool policies ([`src/tools/policy.rs`](src/tools/policy.rs): AllowAll/AllowList/DenyList with group→channel→global evaluation, serializable config)
 - ✅ Elevated execution mode — `ElevatedMode` with timeout + command allowlist ([`src/safety/elevated.rs`](src/safety/elevated.rs))
 - ✅ Skill download path restriction — `SkillPathConfig` with path traversal prevention, symlink detection, name sanitization ([`src/safety/skill_path.rs`](src/safety/skill_path.rs))
 - ✅ Dangerous tool re-enable warning — `DangerousToolTracker` with state history and warning generation ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs))
+- ✅ Workspace sandbox modes — `WORKSPACE_MODE` (unrestricted/sandboxed/project) with `WORKSPACE_ROOT`; drives `register_dev_tools_with_config()` + dynamic system prompt ([`src/config/agent.rs`](src/config/agent.rs))
+- ✅ Shell 3-layer sandbox — When `base_dir` set: (1) `check_safe_bins_forced()`, (2) workdir parameter validation, (3) `detect_path_escape()` with `..` traversal detection. 11 tests ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs))
+- ✅ Screen capture opt-in — `ScreenCaptureTool` gated on `SCREEN_CAPTURE_ENABLED` env var (user toggle in Scrappy UI) + `ALLOW_LOCAL_TOOLS` ([`src/app.rs`](src/app.rs))
+- ✅ OS governance env vars — Scrappy passes `ACCESSIBILITY_GRANTED` + `SCREEN_RECORDING_GRANTED` from live macOS permission checks
 
 **Media**
 - ✅ Video keyframe extraction — `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)): ffprobe metadata + ffmpeg keyframe/audio extraction with graceful fallback
