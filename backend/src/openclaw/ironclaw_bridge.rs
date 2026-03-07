@@ -500,13 +500,25 @@ impl IronClawState {
                 } else {
                     std::env::remove_var("IRONCLAW_SAFE_BINS_ONLY");
                 }
+
+                // ── OS Governance: pass live permission status to IronClaw ──
+                // Check actual macOS permission state so IronClaw knows which
+                // OS features are available (screen capture, accessibility).
+                let perms = crate::permissions::get_permission_status();
+                std::env::set_var("ACCESSIBILITY_GRANTED", perms.accessibility.to_string());
+                std::env::set_var(
+                    "SCREEN_RECORDING_GRANTED",
+                    perms.screen_recording.to_string(),
+                );
             }
             tracing::info!(
-                "[ironclaw] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
+                "[ironclaw] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}, ACCESSIBILITY={}, SCREEN_RECORDING={}",
                 allow_local,
                 workspace_mode,
                 workspace_root,
                 workspace_mode == "sandboxed",
+                std::env::var("ACCESSIBILITY_GRANTED").unwrap_or_default(),
+                std::env::var("SCREEN_RECORDING_GRANTED").unwrap_or_default(),
             );
         }
 
