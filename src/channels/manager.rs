@@ -35,6 +35,8 @@ pub struct ChannelManager {
     counters: Arc<RwLock<HashMap<String, Arc<ChannelCounters>>>>,
     /// Time when the manager was created (for uptime calculation).
     started_at: Instant,
+    /// Optional SSE broadcast sender for channel status change events.
+    sse_tx: RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
 }
 
 impl ChannelManager {
@@ -47,7 +49,16 @@ impl ChannelManager {
             inject_rx: tokio::sync::Mutex::new(Some(inject_rx)),
             counters: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
+            sse_tx: RwLock::new(None),
         }
+    }
+
+    /// Set the SSE broadcast sender for channel status events.
+    pub async fn set_sse_sender(
+        &self,
+        tx: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
+    ) {
+        *self.sse_tx.write().await = Some(tx);
     }
 
     /// Get or create the counter entry for a channel (lock-free fast path via read).
@@ -96,17 +107,30 @@ impl ChannelManager {
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
+        let spawn_name = name.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
             let mut stream = stream;
             while let Some(msg) = stream.next().await {
                 if tx.send(msg).await.is_err() {
-                    tracing::warn!(channel = %name, "Inject channel closed, stopping hot-added channel");
+                    tracing::warn!(channel = %spawn_name, "Inject channel closed, stopping hot-added channel");
                     break;
                 }
             }
-            tracing::info!(channel = %name, "Hot-added channel stream ended");
+            tracing::info!(channel = %spawn_name, "Hot-added channel stream ended");
         });
+
+        // Emit channel status change event
+        {
+            let guard = self.sse_tx.read().await;
+            if let Some(ref tx) = *guard {
+                let _ = tx.send(crate::channels::web::types::SseEvent::ChannelStatusChange {
+                    channel: name.clone(),
+                    status: "online".to_string(),
+                    message: Some(format!("Channel '{}' activated", name)),
+                });
+            }
+        }
 
         Ok(())
     }

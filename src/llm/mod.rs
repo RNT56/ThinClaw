@@ -37,8 +37,8 @@ pub use provider::{
     ToolCompletionResponse, ToolDefinition, ToolResult,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TokenUsage, ToolSelection, is_silent_reply,
+    is_silent_reply, ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult,
+    TokenUsage, ToolSelection, SILENT_REPLY_TOKEN,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
@@ -256,31 +256,251 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
 }
 
-/// Build the full LLM provider chain with all configured wrappers.
+/// Create an LLM provider from a catalog entry.
+///
+/// Used to instantiate fallback providers for the FailoverProvider chain.
+/// The provider is identified by its catalog slug and model name.
+fn create_provider_for_catalog_entry(
+    provider_slug: &str,
+    model: &str,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use crate::config::provider_catalog::{endpoint_for, ApiStyle};
+
+    let endpoint = endpoint_for(provider_slug).ok_or_else(|| LlmError::RequestFailed {
+        provider: provider_slug.to_string(),
+        reason: format!("Unknown provider '{}' in catalog", provider_slug),
+    })?;
+
+    // Retrieve API key from the injected vars overlay
+    let api_key_str = crate::config::helpers::optional_env(endpoint.env_key_name).map_err(|e| {
+        LlmError::RequestFailed {
+            provider: provider_slug.to_string(),
+            reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
+        }
+    })?;
+
+    match endpoint.api_style {
+        ApiStyle::OpenAi => {
+            // Native OpenAI provider
+            let key = api_key_str.ok_or_else(|| LlmError::AuthFailed {
+                provider: format!("{} ({} not set)", provider_slug, endpoint.env_key_name),
+            })?;
+
+            use rig::providers::openai;
+            let client: openai::CompletionsClient = openai::Client::builder()
+                .base_url(endpoint.base_url)
+                .api_key(&key)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: provider_slug.to_string(),
+                    reason: format!("Failed to create OpenAI client: {}", e),
+                })?
+                .completions_api();
+
+            let m = client.completion_model(model);
+            tracing::info!(
+                "Created provider '{}' (OpenAI native, model: {})",
+                provider_slug,
+                model
+            );
+            Ok(Arc::new(RigAdapter::new(m, model)))
+        }
+        ApiStyle::Anthropic => {
+            // Native Anthropic provider
+            let key = api_key_str.ok_or_else(|| LlmError::AuthFailed {
+                provider: format!("{} ({} not set)", provider_slug, endpoint.env_key_name),
+            })?;
+
+            use rig::providers::anthropic;
+            let client: anthropic::Client =
+                anthropic::Client::new(&key).map_err(|e| LlmError::RequestFailed {
+                    provider: provider_slug.to_string(),
+                    reason: format!("Failed to create Anthropic client: {}", e),
+                })?;
+
+            let m = client.completion_model(model);
+            tracing::info!(
+                "Created provider '{}' (Anthropic native, model: {})",
+                provider_slug,
+                model
+            );
+            Ok(Arc::new(RigAdapter::new(m, model)))
+        }
+        ApiStyle::OpenAiCompatible => {
+            // OpenAI-compatible endpoint (groq, gemini, mistral, xai, etc.)
+            let key = api_key_str.unwrap_or_else(|| "no-key".to_string());
+
+            use rig::providers::openai;
+            let client: openai::CompletionsClient = openai::Client::builder()
+                .base_url(endpoint.base_url)
+                .api_key(&key)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: provider_slug.to_string(),
+                    reason: format!("Failed to create OpenAI-compatible client: {}", e),
+                })?
+                .completions_api();
+
+            let m = client.completion_model(model);
+            tracing::info!(
+                "Created provider '{}' (OpenAI-compatible, base: {}, model: {})",
+                provider_slug,
+                endpoint.base_url,
+                model
+            );
+            Ok(Arc::new(RigAdapter::new(m, model)))
+        }
+        ApiStyle::Ollama => {
+            // Ollama doesn't need an API key
+            use rig::client::Nothing;
+            use rig::providers::ollama;
+            let base_url = crate::config::helpers::optional_env("OLLAMA_BASE_URL")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| endpoint.base_url.to_string());
+
+            let client: ollama::Client = ollama::Client::builder()
+                .base_url(&base_url)
+                .api_key(Nothing)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: provider_slug.to_string(),
+                    reason: format!("Failed to create Ollama client: {}", e),
+                })?;
+
+            let m = client.completion_model(model);
+            tracing::info!(
+                "Created provider '{}' (Ollama, base: {}, model: {})",
+                provider_slug,
+                base_url,
+                model
+            );
+            Ok(Arc::new(RigAdapter::new(m, model)))
+        }
+    }
+}
+
+/// Create a cheap model provider from a "provider/model" string.
+///
+/// Used for SmartRoutingProvider's cheap model split.
+fn create_cheap_model_provider(cheap_model_spec: &str) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    if let Some((provider, model)) = cheap_model_spec.split_once('/') {
+        create_provider_for_catalog_entry(provider, model)
+    } else {
+        Err(LlmError::RequestFailed {
+            provider: "smart_routing".to_string(),
+            reason: format!(
+                "Invalid cheap_model format '{}'. Expected 'provider/model'.",
+                cheap_model_spec
+            ),
+        })
+    }
+}
+
+/// Build the full LLM provider chain with multi-provider support.
 ///
 /// Applies decorators in this order:
-/// 1. Raw provider (from config)
-/// 2. RetryProvider (per-provider retry with exponential backoff)
-/// 3. SmartRoutingProvider (cheap/primary split when cheap model is configured)
-/// 4. FailoverProvider (fallback model when primary fails)
+/// 1. Raw primary provider (from LlmConfig — the user's selected backend)
+/// 2. FailoverProvider wrapping primary + all enabled fallback providers
+/// 3. RetryProvider (per-provider retry with exponential backoff)
+/// 4. SmartRoutingProvider (cheap/primary split when cheap model is configured)
 /// 5. CircuitBreakerProvider (fast-fail when backend is degraded)
 /// 6. CachedProvider (in-memory response cache)
 ///
-/// Also returns a separate cheap LLM provider for heartbeat/evaluation (not
-/// part of the chain — it's a standalone provider for explicitly cheap tasks).
+/// When `providers_settings` is `Some`, creates additional providers from the
+/// catalog for each enabled provider that has an API key available. This enables
+/// multi-provider failover using the already-implemented `FailoverProvider`.
+///
+/// Also returns a separate cheap LLM provider for heartbeat/evaluation.
 ///
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
 #[allow(clippy::type_complexity)]
 pub fn build_provider_chain(
     config: &LlmConfig,
+    providers_settings: Option<&crate::settings::ProvidersSettings>,
 ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), LlmError> {
     let rel = &config.reliability;
 
-    let llm = create_llm_provider(config)?;
-    tracing::info!("LLM provider initialized: {}", llm.model_name());
+    let primary = create_llm_provider(config)?;
+    let primary_model_name = primary.model_name().to_string();
+    tracing::info!("Primary LLM provider initialized: {}", primary_model_name);
 
-    // 1. Retry
+    // ── 1. Build multi-provider failover chain ───────────────────────────
+    let llm: Arc<dyn LlmProvider> = if let Some(ps) = providers_settings {
+        let mut all_providers: Vec<Arc<dyn LlmProvider>> = vec![primary.clone()];
+
+        // Determine fallback providers from ProvidersSettings.
+        // Use explicit fallback_chain if provided, otherwise auto-build
+        // from enabled providers.
+        let fallbacks: Vec<(String, String)> = if !ps.fallback_chain.is_empty() {
+            // Explicit chain: parse "provider/model" entries
+            ps.fallback_chain
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .split_once('/')
+                        .map(|(p, m)| (p.to_string(), m.to_string()))
+                })
+                .collect()
+        } else {
+            // Auto-build: use all enabled providers that aren't the primary
+            let catalog = crate::config::provider_catalog::catalog();
+            ps.enabled
+                .iter()
+                .filter(|slug| {
+                    // Skip if this is the primary provider
+                    ps.primary.as_deref() != Some(slug.as_str())
+                })
+                .filter_map(|slug| {
+                    let endpoint = catalog.get(slug.as_str())?;
+                    // Determine model: first from allowed_models, else default
+                    let model = ps
+                        .allowed_models
+                        .get(slug.as_str())
+                        .and_then(|m| m.first().cloned())
+                        .unwrap_or_else(|| endpoint.default_model.to_string());
+                    Some((slug.clone(), model))
+                })
+                .collect()
+        };
+
+        for (provider_slug, model) in &fallbacks {
+            match create_provider_for_catalog_entry(provider_slug, model) {
+                Ok(p) => {
+                    tracing::info!(
+                        "Failover provider added: '{}' (model: {})",
+                        provider_slug,
+                        model
+                    );
+                    all_providers.push(p);
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping fallback provider '{}': {}", provider_slug, e);
+                }
+            }
+        }
+
+        if all_providers.len() > 1 {
+            let cooldown = CooldownConfig {
+                failure_threshold: rel.failover_cooldown_threshold,
+                cooldown_duration: std::time::Duration::from_secs(rel.failover_cooldown_secs),
+            };
+            tracing::info!(
+                "FailoverProvider enabled with {} providers (cooldown: {}s, threshold: {})",
+                all_providers.len(),
+                rel.failover_cooldown_secs,
+                rel.failover_cooldown_threshold,
+            );
+            Arc::new(FailoverProvider::with_cooldown(all_providers, cooldown)?)
+        } else {
+            primary
+        }
+    } else {
+        primary
+    };
+
+    // ── 2. Retry ─────────────────────────────────────────────────────────
     let retry_config = RetryConfig {
         max_retries: rel.max_retries,
     };
@@ -294,36 +514,45 @@ pub fn build_provider_chain(
         llm
     };
 
-    // 2. Smart routing (cheap/primary split)
-    // Note: Smart routing only works when the backend supports runtime model switching.
-    // With RigAdapter-based backends, the cheap model would need to be a separate
-    // provider instance. We create it as a separate openai-compatible client.
-    let llm: Arc<dyn LlmProvider> = if let Some(ref _cheap_model) = rel.cheap_model {
-        // Smart routing requires creating a second provider with the cheap model.
-        // For now, we log a warning since RigAdapter doesn't support set_model().
-        // A future enhancement would create a separate client for the cheap model.
-        tracing::warn!(
-            "LLM_CHEAP_MODEL is set but smart routing with separate model instances \
-             is not yet implemented for this backend. Ignoring."
-        );
-        llm
+    // ── 3. Smart routing (cheap/primary split) ───────────────────────────
+    // Determine cheap model: explicit config > providers_settings > none
+    let cheap_model_spec = rel
+        .cheap_model
+        .clone()
+        .or_else(|| providers_settings.and_then(|ps| ps.cheap_model.clone()));
+
+    let cheap_llm: Option<Arc<dyn LlmProvider>> = if let Some(ref spec) = cheap_model_spec {
+        match create_cheap_model_provider(spec) {
+            Ok(p) => {
+                tracing::info!("Smart routing cheap model: {}", spec);
+                Some(p)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create cheap model provider '{}': {}. \
+                     Smart routing disabled.",
+                    spec,
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let llm: Arc<dyn LlmProvider> = if let Some(ref cheap) = cheap_llm {
+        tracing::info!("SmartRoutingProvider enabled (primary + cheap model)");
+        Arc::new(SmartRoutingProvider::new(
+            llm,
+            cheap.clone(),
+            SmartRoutingConfig::default(),
+        ))
     } else {
         llm
     };
 
-    // 3. Failover
-    let llm: Arc<dyn LlmProvider> = if let Some(ref _fallback_model) = rel.fallback_model {
-        // Similar to smart routing — failover needs a separate provider instance.
-        tracing::warn!(
-            "LLM_FALLBACK_MODEL is set but failover with separate model instances \
-             is not yet implemented for this backend. The primary provider will be used alone."
-        );
-        llm
-    } else {
-        llm
-    };
-
-    // 4. Circuit breaker
+    // ── 4. Circuit breaker ───────────────────────────────────────────────
     let llm: Arc<dyn LlmProvider> = if let Some(threshold) = rel.circuit_breaker_threshold {
         let cb_config = CircuitBreakerConfig {
             failure_threshold: threshold,
@@ -340,7 +569,7 @@ pub fn build_provider_chain(
         llm
     };
 
-    // 5. Response cache
+    // ── 5. Response cache ────────────────────────────────────────────────
     let llm: Arc<dyn LlmProvider> = if rel.response_cache_enabled {
         let rc_config = ResponseCacheConfig {
             ttl: std::time::Duration::from_secs(rel.response_cache_ttl_secs),
@@ -355,9 +584,6 @@ pub fn build_provider_chain(
     } else {
         llm
     };
-
-    // No standalone cheap LLM without NearAI backend (RigAdapter can't switch models)
-    let cheap_llm: Option<Arc<dyn LlmProvider>> = None;
 
     Ok((llm, cheap_llm))
 }
@@ -392,10 +618,22 @@ mod tests {
     #[test]
     fn test_build_provider_chain_creates_provider() {
         let config = test_llm_config();
-        let result = build_provider_chain(&config);
+        // Without providers_settings, single-provider mode
+        let result = build_provider_chain(&config, None);
         assert!(result.is_ok());
         let (llm, cheap) = result.unwrap();
         assert_eq!(llm.model_name(), "test-model");
         assert!(cheap.is_none()); // No cheap model configured
+    }
+
+    #[test]
+    fn test_build_provider_chain_with_empty_providers() {
+        let config = test_llm_config();
+        let providers = crate::settings::ProvidersSettings::default();
+        // Empty providers settings should still work (no failover, just primary)
+        let result = build_provider_chain(&config, Some(&providers));
+        assert!(result.is_ok());
+        let (llm, _) = result.unwrap();
+        assert_eq!(llm.model_name(), "test-model");
     }
 }

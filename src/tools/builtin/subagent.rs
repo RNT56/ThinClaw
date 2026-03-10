@@ -34,11 +34,12 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a focused sub-agent to handle a specific task. The sub-agent runs its own \
-         agentic loop with an isolated context and reports results back to you. \
-         Use this to delegate parallel work, break down complex tasks, or run \
-         independent research/analysis. Set wait=true to get results immediately, \
-         or wait=false to run in the background."
+        "Spawn a focused sub-agent to handle a specific task in the background. \
+         The sub-agent runs its own agentic loop with an isolated context and \
+         reports results back automatically when done. You can continue working \
+         while sub-agents operate in parallel. Use this to delegate parallel \
+         work, break down complex tasks, or run independent research/analysis. \
+         Results will be injected back as a new message when the sub-agent finishes."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

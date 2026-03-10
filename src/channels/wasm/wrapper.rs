@@ -2179,12 +2179,12 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: msg.clone(),
             metadata_json,
         },
-        StatusUpdate::ToolStarted { name } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolStarted { name, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolStarted,
             message: format!("Tool started: {}", name),
             metadata_json,
         },
-        StatusUpdate::ToolCompleted { name, success } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolCompleted { name, success, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolCompleted,
             message: format!(
                 "Tool completed: {} ({})",
@@ -2308,6 +2308,37 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
             message: format!("[agent_message:{}] {}", message_type, content),
+            metadata_json,
+        },
+        StatusUpdate::LifecycleStart { run_id } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Thinking,
+            message: format!("lifecycle:start:{}", run_id),
+            metadata_json,
+        },
+        StatusUpdate::LifecycleEnd { run_id, phase } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Done,
+            message: format!("lifecycle:end:{}:{}", phase, run_id),
+            metadata_json,
+        },
+        StatusUpdate::SubagentSpawned { agent_id, name, task } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("[subagent:spawned:{}] {} — {}", agent_id, name, task),
+            metadata_json,
+        },
+        StatusUpdate::SubagentProgress { agent_id, message, category } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("[subagent:progress:{}:{}] {}", agent_id, category, message),
+            metadata_json,
+        },
+        StatusUpdate::SubagentCompleted { agent_id, name, success, duration_ms, .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[subagent:{}:{}] {} ({:.1}s)",
+                if *success { "completed" } else { "failed" },
+                agent_id,
+                name,
+                *duration_ms as f64 / 1000.0
+            ),
             metadata_json,
         },
     }
@@ -2692,6 +2723,7 @@ mod tests {
             .send_status(
                 crate::channels::StatusUpdate::ToolStarted {
                     name: "http_request".into(),
+                    parameters: None,
                 },
                 &metadata,
             )
@@ -2997,6 +3029,7 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::ToolStarted {
                 name: "http_request".to_string(),
+                parameters: None,
             },
             &metadata,
         );
@@ -3017,6 +3050,7 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: true,
+                result_preview: None,
             },
             &metadata,
         );
@@ -3037,6 +3071,7 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: false,
+                result_preview: None,
             },
             &metadata,
         );

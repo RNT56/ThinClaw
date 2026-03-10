@@ -421,6 +421,9 @@ pub enum RoutineError {
 
     #[error("LLM response truncated (finish_reason=length) with no content")]
     TruncatedResponse,
+
+    #[error("Routine execution failed: {reason}")]
+    ExecutionFailed { reason: String },
 }
 
 /// Result type alias for the agent.

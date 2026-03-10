@@ -1,6 +1,6 @@
 //! Agent-callable tools for managing skills (prompt-level extensions).
 //!
-//! Four tools for discovering, installing, listing, and removing skills
+//! Five tools for discovering, reading, installing, listing, and removing skills
 //! entirely through conversation, following the extension_tools pattern.
 
 use std::sync::Arc;
@@ -12,14 +12,95 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
+// ── skill_read ──────────────────────────────────────────────────────────
+
+/// Read a loaded skill's full prompt content on demand.
+///
+/// This enables lazy skill loading: the system prompt announces which skills
+/// are active (name + description only), and the agent calls `skill_read`
+/// to get the full instructions when it needs them.
+pub struct SkillReadTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+}
+
+impl SkillReadTool {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillReadTool {
+    fn name(&self) -> &str {
+        "skill_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read a skill's full instructions by name. Use when you need detailed guidance for a specific skill."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the skill to read (from skill_list or the Skills section)"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let name = require_str(&params, "name")?;
+
+        let guard = self.registry.read().await;
+        let skill = guard
+            .skills()
+            .iter()
+            .find(|s| s.manifest.name.eq_ignore_ascii_case(name));
+
+        match skill {
+            Some(s) => {
+                let output = serde_json::json!({
+                    "name": s.manifest.name,
+                    "version": s.manifest.version,
+                    "description": s.manifest.description,
+                    "trust": s.trust.to_string(),
+                    "content": s.prompt_content,
+                });
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            None => {
+                let available: Vec<String> = guard
+                    .skills()
+                    .iter()
+                    .map(|s| s.manifest.name.clone())
+                    .collect();
+                Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' not found. Available skills: {}",
+                    name,
+                    if available.is_empty() { "none".to_string() } else { available.join(", ") }
+                )))
+            }
+        }
+    }
+}
+
 // ── skill_list ──────────────────────────────────────────────────────────
 
 pub struct SkillListTool {
-    registry: Arc<std::sync::RwLock<SkillRegistry>>,
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
 }
 
 impl SkillListTool {
-    pub fn new(registry: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
         Self { registry }
     }
 }
@@ -60,8 +141,7 @@ impl Tool for SkillListTool {
 
         let guard = self
             .registry
-            .read()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            .read().await;
 
         let skills: Vec<serde_json::Value> = guard
             .skills()
@@ -110,13 +190,13 @@ impl Tool for SkillListTool {
 // ── skill_search ────────────────────────────────────────────────────────
 
 pub struct SkillSearchTool {
-    registry: Arc<std::sync::RwLock<SkillRegistry>>,
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
 }
 
 impl SkillSearchTool {
     pub fn new(
-        registry: Arc<std::sync::RwLock<SkillRegistry>>,
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
     ) -> Self {
         Self { registry, catalog }
@@ -168,8 +248,7 @@ impl Tool for SkillSearchTool {
         let installed_names: Vec<String> = {
             let guard = self
                 .registry
-                .read()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .read().await;
             guard
                 .skills()
                 .iter()
@@ -204,8 +283,7 @@ impl Tool for SkillSearchTool {
         let local_matches: Vec<serde_json::Value> = {
             let guard = self
                 .registry
-                .read()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .read().await;
             guard
                 .skills()
                 .iter()
@@ -246,13 +324,13 @@ impl Tool for SkillSearchTool {
 // ── skill_install ───────────────────────────────────────────────────────
 
 pub struct SkillInstallTool {
-    registry: Arc<std::sync::RwLock<SkillRegistry>>,
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
 }
 
 impl SkillInstallTool {
     pub fn new(
-        registry: Arc<std::sync::RwLock<SkillRegistry>>,
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
     ) -> Self {
         Self { registry, catalog }
@@ -315,8 +393,7 @@ impl Tool for SkillInstallTool {
         let (user_dir, skill_name_from_parse) = {
             let guard = self
                 .registry
-                .read()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .read().await;
 
             // Parse to extract the name (cheap, in-memory)
             let normalized = crate::skills::normalize_line_endings(&content);
@@ -348,8 +425,7 @@ impl Tool for SkillInstallTool {
         let installed_name = {
             let mut guard = self
                 .registry
-                .write()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .write().await;
             guard
                 .commit_install(&skill_name, loaded_skill)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -618,11 +694,11 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
 // ── skill_remove ────────────────────────────────────────────────────────
 
 pub struct SkillRemoveTool {
-    registry: Arc<std::sync::RwLock<SkillRegistry>>,
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
 }
 
 impl SkillRemoveTool {
-    pub fn new(registry: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
         Self { registry }
     }
 }
@@ -662,8 +738,7 @@ impl Tool for SkillRemoveTool {
         let skill_path = {
             let guard = self
                 .registry
-                .read()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .read().await;
             guard
                 .validate_remove(name)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
@@ -678,8 +753,7 @@ impl Tool for SkillRemoveTool {
         {
             let mut guard = self
                 .registry
-                .write()
-                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                .write().await;
             guard
                 .commit_remove(name)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -703,11 +777,11 @@ impl Tool for SkillRemoveTool {
 mod tests {
     use super::*;
 
-    fn test_registry() -> Arc<std::sync::RwLock<SkillRegistry>> {
+    fn test_registry() -> Arc<tokio::sync::RwLock<SkillRegistry>> {
         let dir = tempfile::tempdir().unwrap();
         // Keep the tempdir so it lives for the test duration
         let path = dir.keep();
-        Arc::new(std::sync::RwLock::new(SkillRegistry::new(path)))
+        Arc::new(tokio::sync::RwLock::new(SkillRegistry::new(path)))
     }
 
     fn test_catalog() -> Arc<SkillCatalog> {

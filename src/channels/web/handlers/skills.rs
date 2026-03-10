@@ -19,12 +19,7 @@ pub async fn skills_list_handler(
         "Skills system not enabled".to_string(),
     ))?;
 
-    let guard = registry.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let guard = registry.read().await;
 
     let skills: Vec<SkillInfo> = guard
         .skills()
@@ -85,12 +80,7 @@ pub async fn skills_search_handler(
     // Search local skills
     let query_lower = req.query.to_lowercase();
     let installed: Vec<SkillInfo> = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
+        let guard = registry.read().await;
         guard
             .skills()
             .iter()
@@ -160,12 +150,7 @@ pub async fn skills_install_handler(
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse) = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
+        let guard = registry.read().await;
 
         let normalized = crate::skills::normalize_line_endings(&content);
         let parsed = crate::skills::parser::parse_skill_md(&normalized)
@@ -194,12 +179,7 @@ pub async fn skills_install_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Commit: brief write lock for in-memory addition
-    let mut guard = registry.write().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let mut guard = registry.write().await;
 
     match guard.commit_install(&skill_name, loaded_skill) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
@@ -234,12 +214,7 @@ pub async fn skills_remove_handler(
 
     // Validate removal under a brief read lock
     let skill_path = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
+        let guard = registry.read().await;
         guard
             .validate_remove(&name)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
@@ -251,12 +226,7 @@ pub async fn skills_remove_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Remove from in-memory registry under a brief write lock
-    let mut guard = registry.write().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let mut guard = registry.write().await;
 
     match guard.commit_remove(&name) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(

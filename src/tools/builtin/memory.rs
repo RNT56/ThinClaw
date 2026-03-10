@@ -20,20 +20,33 @@ use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
-/// Identity files that the LLM may only APPEND to (never fully overwrite).
+/// Files the LLM may only APPEND to — never fully overwrite.
 ///
-/// These files are loaded into the system prompt, so a full overwrite would be
-/// dangerous (prompt injection could nuke the entire personality). But the agent
-/// must be able to EVOLVE them — updating its name, refining its values, learning
-/// about the user — so we allow append-only writes.
-const APPEND_ONLY_IDENTITY_FILES: &[&str] =
-    &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+/// `IDENTITY.md` is the only truly protected file because it records the agent's
+/// established name and creature. Nuking it completely would cause the agent to
+/// lose its identity. All other personality files (SOUL.md, USER.md, AGENTS.md)
+/// are freely rewritable so the agent can restructure and evolve them without
+/// accreting stale content.
+const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
+
+/// Files the agent may FULLY REWRITE (replace entire content, append: false).
+///
+/// These personality/preference files accumulate stale sections over time if only
+/// appended to. After the bootstrap ritual, the agent should use memory_write with
+/// append: false to fully restructure them into clean, well-formatted markdown.
+const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::SOUL, paths::AGENTS, paths::USER];
 
 /// Tool for searching workspace memory.
 ///
 /// Performs hybrid search (FTS + semantic) across all memory documents.
 /// The agent should call this tool before answering questions about
 /// prior work, decisions, preferences, or any historical context.
+use crate::workspace::SearchConfig;
+
+/// Tool for searching workspace memory.
+///
+/// Performs hybrid BM25 + vector semantic search over MEMORY.md and daily logs.
+/// Applies MMR re-ranking and temporal decay by default for better result quality.
 pub struct MemorySearchTool {
     workspace: Arc<Workspace>,
 }
@@ -54,7 +67,8 @@ impl Tool for MemorySearchTool {
     fn description(&self) -> &str {
         "Search past memories, decisions, and context. MUST be called before answering \
          questions about prior work, decisions, dates, people, preferences, or todos. \
-         Returns relevant snippets with relevance scores."
+         Returns relevant snippets with relevance scores and source paths. \
+         Results are MMR-diversified (no near-duplicate daily notes) and recency-weighted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -67,10 +81,20 @@ impl Tool for MemorySearchTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 5, max: 20)",
-                    "default": 5,
+                    "description": "Maximum number of results to return (default: 6, max: 20)",
+                    "default": 6,
                     "minimum": 1,
                     "maximum": 20
+                },
+                "mmr": {
+                    "type": "boolean",
+                    "description": "Enable MMR diversity re-ranking (default: true). Set false only when you want raw ranked results.",
+                    "default": true
+                },
+                "temporal_decay": {
+                    "type": "boolean",
+                    "description": "Downweight older notes (default: true). Set false to treat all notes equally regardless of age.",
+                    "default": true
                 }
             },
             "required": ["query"]
@@ -89,23 +113,53 @@ impl Tool for MemorySearchTool {
         let limit = params
             .get("limit")
             .and_then(|v| v.as_u64())
-            .unwrap_or(5)
+            .unwrap_or(6)
             .min(20) as usize;
+
+        // MMR re-ranking on by default — reduces near-duplicate daily notes.
+        // Lambda 0.7 = slight relevance bias (matches openclaw recommendation).
+        let use_mmr = params
+            .get("mmr")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        // Temporal decay on by default — 30-day half-life so older notes don't
+        // crowd out recent ones on equal semantic similarity.
+        let use_decay = params
+            .get("temporal_decay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let mut config = SearchConfig::default().with_limit(limit);
+        if use_mmr {
+            config = config.with_mmr(0.7);
+        }
+        if use_decay {
+            // 30-day half-life: today = 1.0×, 1 month ago = 0.5×, 3 months ago = 0.125×
+            config = config.with_temporal_decay(30.0);
+        }
 
         let results = self
             .workspace
-            .search(query, limit)
+            .search_with_config(query, config)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
         let output = serde_json::json!({
             "query": query,
-            "results": results.iter().map(|r| serde_json::json!({
-                "content": r.content,
-                "score": r.score,
-                "document_id": r.document_id.to_string(),
-                "is_hybrid_match": r.is_hybrid(),
-            })).collect::<Vec<_>>(),
+            "results": results.iter().map(|r| {
+                let path = r.citation
+                    .as_ref()
+                    .and_then(|c| c.path.as_deref())
+                    .unwrap_or("");
+                serde_json::json!({
+                    "content": r.content,
+                    "score": r.score,
+                    "path": path,
+                    "document_id": r.document_id.to_string(),
+                    "is_hybrid_match": r.is_hybrid(),
+                })
+            }).collect::<Vec<_>>(),
             "result_count": results.len(),
         });
 
@@ -140,12 +194,13 @@ impl Tool for MemoryWriteTool {
 
     fn description(&self) -> &str {
         "Write to persistent memory (database-backed, NOT the local filesystem). \
-         Use for important facts, decisions, preferences, or lessons learned that should \
-         be remembered across sessions. Targets: 'memory' for curated long-term facts, \
-         'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
-         checklist (HEARTBEAT.md), 'IDENTITY.md' / 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
-         for evolving your personality or recording user preferences (append-only), \
-         or provide a custom path for arbitrary file creation."
+         Use for facts, decisions, preferences, or lessons to remember across sessions. \
+         Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
+         'heartbeat' (HEARTBEAT.md checklist), 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
+         (freely rewritable — use append: false to fully restructure after bootstrap), \
+         'IDENTITY.md' (append-only — preserves established name/creature), or a custom path. \
+         ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
+         and clear prose. Never dump raw unformatted text into identity files."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -196,14 +251,13 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        // Identity files (IDENTITY.md, SOUL.md, AGENTS.md, USER.md) may only be
-        // appended to, never fully overwritten. This allows the agent to evolve its
-        // personality while preventing prompt injection from nuking the entire file.
+        // IDENTITY.md is append-only to protect the agent's established name/creature.
         if APPEND_ONLY_IDENTITY_FILES.contains(&target) {
             if !append {
                 return Err(ToolError::NotAuthorized(format!(
-                    "'{}' is an identity file — only append is allowed (set append: true). \
-                     Full overwrites are blocked to protect the agent's core identity.",
+                    "'{}' is append-only. Add an '## Update' section with your changes \
+                     instead of overwriting. To fully restructure SOUL.md / AGENTS.md / \
+                     USER.md, use those targets with append: false.",
                     target,
                 )));
             }
@@ -216,7 +270,35 @@ impl Tool for MemoryWriteTool {
                 "path": target,
                 "append": true,
                 "content_length": content.len(),
-                "note": "Identity file updated (append-only mode)",
+                "note": "Identity file updated (append-only)",
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // SOUL.md / AGENTS.md / USER.md — freely rewritable.
+        // With append: false the agent can fully restructure the file.
+        if FREELY_REWRITABLE_IDENTITY_FILES.contains(&target) {
+            if append {
+                self.workspace
+                    .append(target, content)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+            } else {
+                self.workspace
+                    .write(target, content)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+            }
+            let output = serde_json::json!({
+                "status": if append { "appended" } else { "rewritten" },
+                "path": target,
+                "append": append,
+                "content_length": content.len(),
+                "note": if append {
+                    "Personality file updated (new section appended)"
+                } else {
+                    "Personality file fully restructured — well-formed markdown expected"
+                },
             });
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
@@ -258,7 +340,7 @@ impl Tool for MemoryWriteTool {
                 paths::HEARTBEAT.to_string()
             }
             path => {
-                // Identity files may only be appended to (never fully overwritten).
+                // Path-form check for append-only files (IDENTITY.md).
                 let normalized = path.trim_start_matches('/');
                 if APPEND_ONLY_IDENTITY_FILES
                     .iter()
@@ -266,8 +348,7 @@ impl Tool for MemoryWriteTool {
                 {
                     if !append {
                         return Err(ToolError::NotAuthorized(format!(
-                            "'{}' is an identity file — only append is allowed (set append: true). \
-                             Full overwrites are blocked to protect the agent's core identity.",
+                            "'{}' is append-only. Use append: true to add sections.",
                             path
                         )));
                     }
@@ -280,7 +361,32 @@ impl Tool for MemoryWriteTool {
                         "path": path,
                         "append": true,
                         "content_length": content.len(),
-                        "note": "Identity file updated (append-only mode)",
+                        "note": "Identity file updated (append-only)",
+                    });
+                    return Ok(ToolOutput::success(output, start.elapsed()));
+                }
+
+                // Path-form check for freely rewritable personality files.
+                if FREELY_REWRITABLE_IDENTITY_FILES
+                    .iter()
+                    .any(|p| normalized.eq_ignore_ascii_case(p))
+                {
+                    if append {
+                        self.workspace
+                            .append(path, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    } else {
+                        self.workspace
+                            .write(path, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    }
+                    let output = serde_json::json!({
+                        "status": if append { "appended" } else { "rewritten" },
+                        "path": path,
+                        "append": append,
+                        "content_length": content.len(),
                     });
                     return Ok(ToolOutput::success(output, start.elapsed()));
                 }
@@ -319,9 +425,12 @@ impl Tool for MemoryWriteTool {
     }
 }
 
-/// Tool for reading workspace files.
+/// Tool for reading workspace files, with optional line-range slicing.
 ///
-/// Use this to read the full content of any file in the workspace.
+/// Degrades gracefully when the target file doesn't exist — returns empty
+/// content with `"exists": false` instead of an error. This matches openclaw's
+/// `memory_get` behaviour so agents can safely probe today's daily log before
+/// the first write without wrapping the call in try/catch logic.
 pub struct MemoryReadTool {
     workspace: Arc<Workspace>,
 }
@@ -343,7 +452,8 @@ impl Tool for MemoryReadTool {
         "Read a file from the workspace memory (database-backed storage). \
          Use this to read files shown by memory_tree. NOT for local filesystem files \
          (use read_file for those). Works with identity files, heartbeat checklist, \
-         memory, daily logs, or any custom workspace path."
+         memory, daily logs, or any custom workspace path. \
+         Returns empty content (not an error) if the file does not exist yet."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -352,7 +462,17 @@ impl Tool for MemoryReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md')"
+                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'TOOLS.md')"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "1-indexed line to start reading from (optional). Useful for large files like MEMORY.md.",
+                    "minimum": 1
+                },
+                "num_lines": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return (optional). Use with start_line for targeted reads.",
+                    "minimum": 1
                 }
             },
             "required": ["path"]
@@ -368,17 +488,57 @@ impl Tool for MemoryReadTool {
 
         let path = require_str(&params, "path")?;
 
-        let doc = self
-            .workspace
-            .read(path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {}", e)))?;
+        // Graceful degradation: missing file → empty content, not an error.
+        // Matches openclaw memory_get: { text: "", path } on ENOENT.
+        let doc = match self.workspace.read(path).await {
+            Ok(doc) => doc,
+            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                let output = serde_json::json!({
+                    "path": path,
+                    "content": "",
+                    "word_count": 0,
+                    "exists": false,
+                });
+                return Ok(ToolOutput::success(output, start.elapsed()));
+            }
+            Err(e) => return Err(ToolError::ExecutionFailed(format!("Read failed: {}", e))),
+        };
 
+        // Optional line-range slicing.
+        let content = if params.get("start_line").is_some() || params.get("num_lines").is_some() {
+            let start_line = params
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1) as usize;
+            let num_lines = params
+                .get("num_lines")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+
+            let lines: Vec<&str> = doc.content.lines().collect();
+            let total_lines = lines.len();
+
+            // Convert 1-indexed start_line to 0-indexed.
+            let from = (start_line - 1).min(total_lines);
+            let to = match num_lines {
+                Some(n) => (from + n).min(total_lines),
+                None => total_lines,
+            };
+
+            lines[from..to].join("\n")
+        } else {
+            doc.content.clone()
+        };
+
+        let total_lines = doc.content.lines().count();
         let output = serde_json::json!({
             "path": doc.path,
-            "content": doc.content,
-            "word_count": doc.word_count(),
+            "content": content,
+            "word_count": content.split_whitespace().count(),
+            "total_lines": total_lines,
             "updated_at": doc.updated_at.to_rfc3339(),
+            "exists": true,
         });
 
         Ok(ToolOutput::success(output, start.elapsed()))
@@ -388,6 +548,7 @@ impl Tool for MemoryReadTool {
         false // Internal memory
     }
 }
+
 
 /// Tool for viewing workspace structure as a tree.
 ///
@@ -501,6 +662,110 @@ impl Tool for MemoryTreeTool {
             serde_json::Value::Array(tree),
             start.elapsed(),
         ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false // Internal tool
+    }
+}
+
+/// Tool for deleting a file from workspace memory.
+///
+/// Use this to clean up temporary files like BOOTSTRAP.md after setup,
+/// or remove outdated notes. Identity files are protected.
+pub struct MemoryDeleteTool {
+    workspace: Arc<Workspace>,
+    /// Optional SSE sender for broadcasting lifecycle events (e.g. BootstrapCompleted).
+    sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+}
+
+impl MemoryDeleteTool {
+    /// Create a new memory delete tool.
+    pub fn new(workspace: Arc<Workspace>) -> Self {
+        Self { workspace, sse_sender: None }
+    }
+
+    /// Attach an SSE sender to enable lifecycle event emission.
+    pub fn with_sse_sender(
+        mut self,
+        sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
+    ) -> Self {
+        self.sse_sender = Some(sender);
+        self
+    }
+}
+
+#[async_trait]
+impl Tool for MemoryDeleteTool {
+    fn name(&self) -> &str {
+        "memory_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a file from workspace memory (database-backed storage). \
+         Cannot delete IDENTITY.md (append to it instead). \
+         SOUL.md / AGENTS.md / USER.md can be fully rewritten with memory_write(append: false) \
+         rather than deleted. \
+         Primary use-case: memory_delete('BOOTSTRAP.md') after the identity ritual completes."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to delete (e.g. 'BOOTSTRAP.md', 'daily/2024-01-15.md')"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let path = require_str(&params, "path")?;
+
+        // Only IDENTITY.md is delete-protected.
+        // SOUL/AGENTS/USER should be restructured with memory_write(append: false) instead.
+        let normalized = path.trim_start_matches('/');
+        if APPEND_ONLY_IDENTITY_FILES
+            .iter()
+            .any(|p| normalized.eq_ignore_ascii_case(p))
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "'{}' cannot be deleted. Use memory_write(append: true) to add sections. \
+                 To restructure SOUL.md / AGENTS.md / USER.md entirely, use \
+                 memory_write with append: false instead of deleting.",
+                path
+            )));
+        }
+
+        self.workspace
+            .delete(path)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
+
+        // If BOOTSTRAP.md was deleted, notify the bridge to update frontend state.
+        let is_bootstrap = normalized.eq_ignore_ascii_case(crate::workspace::paths::BOOTSTRAP);
+        if is_bootstrap {
+            if let Some(ref tx) = self.sse_sender {
+                let _ = tx.send(crate::channels::web::types::SseEvent::BootstrapCompleted);
+                tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");
+            }
+        }
+
+        let output = serde_json::json!({
+            "status": "deleted",
+            "path": path,
+        });
+
+        Ok(ToolOutput::success(output, start.elapsed()))
     }
 
     fn requires_sanitization(&self) -> bool {

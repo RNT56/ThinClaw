@@ -1,6 +1,6 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-07 14:23 CET
+> **Last reconciled:** 2026-03-07 18:15 CET
 
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -590,13 +590,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | **LLM routing policy** | `RoutingPolicy` ([`src/llm/routing_policy.rs`](src/llm/routing_policy.rs)) | ✅ Full rule builder — `OpenClawRouting.tsx` (585 LOC) | ✅ 6 CRUD commands via `tauri_commands` | ✅ End-to-end |
 | **ClawHub registry** | `CatalogCache` ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs)) | ✅ Search + install UI tab in Plugins page | ✅ `tauri_commands::clawhub_search()` + `clawhub_prepare_install()` | ✅ End-to-end |
 | **Extension health monitor** | `ExtensionHealthMonitor` ([`src/extensions/ext_health_monitor.rs`](src/extensions/ext_health_monitor.rs)) | ✅ State badges (Running/Connecting/Degraded/Error) via Channel Status panel | ✅ Via `openclaw_channel_status_list` | ✅ End-to-end |
-| **Routine audit log** | `RoutineAuditLog` ([`src/agent/routine_audit.rs`](src/agent/routine_audit.rs)) | ✅ Tabular log with outcome badges, filter, routine selector | ✅ `tauri_commands::routine_audit_list()` | ✅ End-to-end |
+| **Routine audit log** | `Database::list_routine_runs()` ([`src/db/mod.rs`](src/db/mod.rs)) | ✅ Tabular log with outcome badges, filter, routine selector | ✅ `tauri_commands::routine_audit_list()` queries DB | ✅ End-to-end |
 | **Multi-format session export** | `SessionExporter` ([`src/cli/session_export.rs`](src/cli/session_export.rs)) | ✅ `exportSession(key, format)` with backward compat | ✅ `openclaw_export_session` live (md/json/txt/csv/html) | ✅ End-to-end |
 | **Agent management store** | `AgentManagementStore` ([`src/agent/management_api.rs`](src/agent/management_api.rs)) | ✅ Multi-agent picker + API wrapper + extended `AgentProfile` type | ✅ `openclaw_agents_set_default` live (writes to config) | ✅ End-to-end |
 | **Gmail channel** | `GmailChannel` ([`src/channels/gmail.rs`](src/channels/gmail.rs), 700+ LOC) | ✅ Gmail card with real status + automated PKCE via `startGmailOAuth()` | ✅ `openclaw_gmail_status` + `openclaw_gmail_oauth_start` | ✅ End-to-end |
 | **Plugin manifest validator** | `ManifestValidator` ([`src/extensions/manifest_validator.rs`](src/extensions/manifest_validator.rs)) | ✅ Per-extension validate button with inline error/warning display | ✅ `tauri_commands::manifest_validate()` | ✅ End-to-end |
 | **Plugin lifecycle hooks** | `LifecycleHookRegistry` ([`src/extensions/lifecycle_hooks.rs`](src/extensions/lifecycle_hooks.rs)) | ✅ Timeline tab in Plugins page with color-coded events | ✅ `tauri_commands::plugin_lifecycle_list()` | ✅ End-to-end |
-| **Response cache metrics** | `CachedResponseStore` ([`src/llm/response_cache_ext.rs`](src/llm/response_cache_ext.rs)) | ✅ Hits/misses/rate/size cards + efficiency bar | ✅ `tauri_commands::cache_stats()` | ✅ End-to-end |
+| **Response cache metrics** | `CachedResponseStore` ([`src/llm/response_cache_ext.rs`](src/llm/response_cache_ext.rs)) | ✅ Hits/misses/rate/size cards + efficiency bar | ✅ `tauri_commands::cache_stats()` | ✅ Shared instance via `AppComponents.response_cache` → `AgentDeps` → `Reasoning::with_response_cache()` |
 
 ### 17.5 IronClaw Stub Wiring — ✅ ALL WIRED (18 commands)
 
@@ -609,7 +609,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | 2 | `openclaw_cost_export_csv` | `tauri_commands::cost_export_csv()` → `CostTracker::export_csv()` | 14 | ✅ |
 | 3 | `openclaw_clawhub_search` | `tauri_commands::clawhub_search()` → `CatalogCache::search(query)` | 14 | ✅ |
 | 4 | `openclaw_clawhub_install` | `tauri_commands::clawhub_prepare_install()` → cache lookup + path resolution | 14 | ✅ |
-| 5 | `openclaw_routine_audit_list` | `tauri_commands::routine_audit_list()` → `RoutineAuditLog::query_by_routine()` | 14 | ✅ |
+| 5 | `openclaw_routine_audit_list` | `tauri_commands::routine_audit_list()` → `Database::get_routine_by_name()` + `list_routine_runs()` | 14 | ✅ |
 | 6 | `openclaw_cache_stats` | `tauri_commands::cache_stats()` → `CachedResponseStore::stats()` | 14 | ✅ |
 | 7 | `openclaw_plugin_lifecycle_list` | `tauri_commands::plugin_lifecycle_list()` → `AuditLogHook::events_serialized()` | 14 | ✅ |
 | 8 | `openclaw_manifest_validate` | `tauri_commands::manifest_validate()` → `ManifestValidator::validate()` | 14 | ✅ |
@@ -652,7 +652,7 @@ The thinking toggle has been migrated from the localStorage hack to native IronC
 | `openclaw_agents_set_default` | `management_api.rs` | `agent_id: String` | `Result<(), String>` | Follow `State<'_, OpenClawManager> + State<'_, IronClawState>` pattern |
 | `openclaw_clawhub_search` | `clawhub.rs` | `query: String, filters: Option<...>` | Catalog entries | **Proxied** through IronClaw — `CLAWHUB_API_KEY` stays server-side |
 | `openclaw_clawhub_install` | `clawhub.rs` | `plugin_id: String` | `Result<InstallResult, String>` | Installs to `~/.ironclaw/tools/` |
-| `openclaw_routine_audit_list` | `routine_audit.rs` | `routine_key: String, limit: Option<u32>, outcome: Option<String>` | `Vec<RoutineAuditEntry>` | Default limit=20; outcome filter: `"success"` \| `"failure"` \| null |
+| `openclaw_routine_audit_list` | `routine.rs` + `db/mod.rs` | `routine_name: String, user_id: String, limit: Option<i64>` | `Vec<RoutineRun>` (from DB) | Default limit=20; queries DB via `get_routine_by_name()` + `list_routine_runs()` |
 | `openclaw_cache_stats` | `response_cache_ext.rs` | — | `CacheStats { hits, misses, evictions, size, hit_rate }` | |
 | `openclaw_export_session` | `session_export.rs` | `session_key: String, format: Option<String>` | `SessionExportResponse` | **Extend existing** — add `format` param (`"md"` \| `"json"` \| `"csv"` \| `"html"` \| `"txt"`, default `"md"`) |
 | `openclaw_plugin_lifecycle_list` | `lifecycle_hooks.rs` | — | `Vec<(String, LifecycleEvent)>` | |
@@ -694,7 +694,7 @@ Gmail uses a single automated IronClaw command for the full PKCE flow:
 
 #### Known Issues to Fix
 
-1. **`openclaw_cron_history` is a stub** — Returns `[]` always (`rpc.rs:203`). Frontend `handleViewHistory()` in `OpenClawAutomations.tsx` already calls it with `(key, limit)` args. **Action:** Wire to `RoutineAuditLog`. → §17.5 item 5
+1. ~~**`openclaw_cron_history` is a stub**~~ — ✅ **Fixed** — `routine_audit_list()` now queries `Database::list_routine_runs()` directly (migrated from orphaned in-memory `RoutineAuditLog`)
 2. **`openclaw_agents_list` missing fields** — ✅ **Fixed in Sprint 14** — `AgentSummary` extended with `session_count`, `last_active_at`, `update_activity()`, `increment_sessions()`, `find_by_status()`.
 3. **`openclaw_channels_list` reads env vars** — Currently uses `OpenClawManager` + env vars instead of IronClaw Agent API. **Action:** Expose `channels_status()` API on Agent for cleaner integration.
 
@@ -751,7 +751,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 | **ClawHub browser** | ✅ `CatalogCache` | Plugin discovery via `openclaw_clawhub_search/install` | ✅ End-to-end (Scrappy agent confirmed) |
 | **Plugin lifecycle log** | ✅ `AuditLogHook` | Lifecycle event log tab | ✅ End-to-end (Scrappy agent confirmed) |
 | **Extension health badges** | ✅ `ExtensionHealthMonitor` | Health badge on channel/plugin cards | ✅ End-to-end (Scrappy agent confirmed) |
-| **Routine run history** | ✅ `RoutineAuditLog` | Wire to `openclaw_cron_history` | ✅ End-to-end (Scrappy agent confirmed) |
+| **Routine run history** | ✅ `Database::list_routine_runs()` | ✅ Queries DB via `tauri_commands::routine_audit_list()` | ✅ End-to-end (Scrappy agent confirmed) |
 | **Session export formats** | ✅ `SessionExporter` (5 formats) | Format picker + save-to-file | ✅ End-to-end (Scrappy agent confirmed) |
 | **Response cache stats** | ✅ `CachedResponseStore` | Cache stats indicator | ✅ End-to-end (Scrappy agent confirmed) |
 | **Manifest validation feedback** | ✅ `ManifestValidator` | Error/warning badges | ✅ End-to-end (Scrappy agent confirmed) |
@@ -828,7 +828,7 @@ Scrappy has `openclaw.test.ts` (209 lines, Vitest) — mocks `invoke`, asserts c
 | 18 | **LLM cost dashboard** | `CostTracker` | `openclaw_cost_summary` / `_export_csv` | ✅ Full dashboard | ✅ `tauri_commands::cost_summary()` | ✅ End-to-end |
 | 19 | **Channel status panel** | `ChannelStatusView` | `openclaw_channel_status_list` live | ✅ Cards with state badges, SSE | ✅ Reads config + env | ✅ End-to-end |
 | 20 | **ClawHub plugin browser** | `CatalogCache` | `openclaw_clawhub_search` / `_install` | ✅ Search + install UI | ✅ `tauri_commands::clawhub_search()` | ✅ End-to-end |
-| 21 | **Routine run history** | `RoutineAuditLog` | `openclaw_routine_audit_list` | ✅ Tabular log with filters | ✅ `tauri_commands::routine_audit_list()` | ✅ End-to-end |
+| 21 | **Routine run history** | `Database::list_routine_runs()` | `openclaw_routine_audit_list` | ✅ Tabular log with filters | ✅ `tauri_commands::routine_audit_list()` queries DB | ✅ End-to-end |
 | 22 | **Gmail channel card** | `GmailChannel` (700+ LOC) | `openclaw_gmail_status` + `openclaw_gmail_oauth_start` | ✅ Gmail card + `startGmailOAuth()` (automated PKCE) | ✅ Full channel + PKCE endpoint | ✅ End-to-end |
 | 23 | **Extension health badges** | `ExtensionHealthMonitor` | Via Channel Status panel | ✅ State badges | ✅ Via channel status | ✅ End-to-end |
 | 24 | **Session export format picker** | `SessionExporter` | `openclaw_export_session` live | ✅ `exportSession(key, format)` | ✅ md/json/txt/csv/html | ✅ End-to-end |

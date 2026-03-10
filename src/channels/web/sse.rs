@@ -127,6 +127,11 @@ impl SseManager {
                     SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
+                    SseEvent::ChannelStatusChange { .. } => "channel_status_change",
+                    SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
+                    SseEvent::CostAlert { .. } => "cost_alert",
+                    SseEvent::CanvasUpdate { .. } => "canvas_update",
+                    SseEvent::BootstrapCompleted => "bootstrap_completed",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });

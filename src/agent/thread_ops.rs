@@ -298,6 +298,21 @@ impl Agent {
         self.persist_user_message(thread_id, &message.user_id, content)
             .await;
 
+        // ── Lifecycle: start ─────────────────────────────────────────
+        // Emit immediately — before compaction or LLM call — so the
+        // frontend can show a thinking indicator right away.
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                crate::channels::StatusUpdate::LifecycleStart {
+                    run_id: run_id.clone(),
+                },
+                &message.metadata,
+            )
+            .await;
+
         // Send thinking status
         let _ = self
             .channels
@@ -326,6 +341,18 @@ impl Agent {
                 .send_status(
                     &message.channel,
                     StatusUpdate::Status("Interrupted".into()),
+                    &message.metadata,
+                )
+                .await;
+            // Lifecycle end: interrupted
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    crate::channels::StatusUpdate::LifecycleEnd {
+                        run_id: run_id.clone(),
+                        phase: "interrupted".to_string(),
+                    },
                     &message.metadata,
                 )
                 .await;
@@ -370,6 +397,19 @@ impl Agent {
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
 
+                // Lifecycle end: response
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        crate::channels::StatusUpdate::LifecycleEnd {
+                            run_id,
+                            phase: "response".to_string(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -397,6 +437,18 @@ impl Agent {
             Err(e) => {
                 thread.fail_turn(e.to_string());
                 // User message already persisted at turn start; nothing else to save
+                // Lifecycle end: error
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        crate::channels::StatusUpdate::LifecycleEnd {
+                            run_id,
+                            phase: "error".to_string(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
@@ -688,6 +740,7 @@ impl Agent {
                     &message.channel,
                     StatusUpdate::ToolStarted {
                         name: pending.tool_name.clone(),
+                        parameters: Some(pending.parameters.clone()),
                     },
                     &message.metadata,
                 )
@@ -704,6 +757,7 @@ impl Agent {
                     StatusUpdate::ToolCompleted {
                         name: pending.tool_name.clone(),
                         success: tool_result.is_ok(),
+                        result_preview: tool_result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
                     },
                     &message.metadata,
                 )
@@ -845,6 +899,7 @@ impl Agent {
                             &message.channel,
                             StatusUpdate::ToolStarted {
                                 name: tc.name.clone(),
+                                parameters: Some(tc.arguments.clone()),
                             },
                             &message.metadata,
                         )
@@ -861,6 +916,7 @@ impl Agent {
                             StatusUpdate::ToolCompleted {
                                 name: tc.name.clone(),
                                 success: result.is_ok(),
+                                result_preview: result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
                             },
                             &message.metadata,
                         )
@@ -889,6 +945,7 @@ impl Agent {
                                 &channel,
                                 StatusUpdate::ToolStarted {
                                     name: tc.name.clone(),
+                                    parameters: Some(tc.arguments.clone()),
                                 },
                                 &metadata,
                             )
@@ -909,6 +966,7 @@ impl Agent {
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
+                                    result_preview: result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
                                 },
                                 &metadata,
                             )

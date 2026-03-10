@@ -153,6 +153,9 @@ pub async fn routines_trigger_handler(
         crate::agent::routine::RoutineAction::FullJob {
             title, description, ..
         } => format!("{}: {}", title, description),
+        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
+            prompt.clone().unwrap_or_else(|| "Heartbeat check".to_string())
+        }
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
@@ -298,11 +301,16 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
             ("webhook".to_string(), format!("webhook: {}", p))
         }
         crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
+        crate::agent::routine::Trigger::SystemEvent { message, schedule } => {
+            let sched = schedule.as_deref().unwrap_or("on-demand");
+            ("system_event".to_string(), format!("event: {} ({})", &message[..message.len().min(40)], sched))
+        }
     };
 
     let action_type = match &r.action {
         crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
         crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
+        crate::agent::routine::RoutineAction::Heartbeat { .. } => "heartbeat",
     };
 
     let status = if !r.enabled {

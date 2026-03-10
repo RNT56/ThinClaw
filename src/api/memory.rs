@@ -33,6 +33,15 @@ pub async fn write_file(workspace: &Arc<Workspace>, path: &str, content: &str) -
     Ok(())
 }
 
+/// Delete a file from the workspace.
+pub async fn delete_file(workspace: &Arc<Workspace>, path: &str) -> ApiResult<()> {
+    workspace
+        .delete(path)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(())
+}
+
 /// List files in a workspace directory.
 pub async fn list_files(
     workspace: &Arc<Workspace>,

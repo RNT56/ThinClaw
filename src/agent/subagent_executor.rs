@@ -4,16 +4,22 @@
 //! system prompt, and filtered tool set. Results are injected back into the
 //! parent agent's message stream via an mpsc channel.
 //!
+//! ## Bidirectional communication
+//!
+//! Each sub-agent has a pair of channels for communicating with the parent:
+//! - `to_parent_tx`: Sub-agent sends results/questions to the parent
+//! - `from_parent_rx`: Sub-agent receives messages/answers from the parent
+//!
 //! ```text
 //!   Main Agent ─────►  SubagentExecutor::spawn()
 //!                          │
 //!                          ├── tokio::spawn(mini_agentic_loop)
 //!                          │       ├── LLM call with task prompt
 //!                          │       ├── Tool calls (filtered set)
-//!                          │       ├── emit_user_message → forwarded
-//!                          │       └── Return final text response
+//!                          │       ├── emit_user_message → SubagentProgress event
+//!                          │       └── Return final text → SubagentCompleted event
 //!                          │
-//!                          └── inject_tx → parent loop
+//!                          └── result_tx → parent agent re-inject
 //! ```
 
 use std::collections::HashMap;
@@ -21,10 +27,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{mpsc, RwLock, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent::routine::RunStatus;
+use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -67,6 +75,19 @@ impl Default for SubagentConfig {
     }
 }
 
+/// A completed sub-agent result ready for injection into the main agent loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentResultMessage {
+    /// The sub-agent result.
+    pub result: SubagentResult,
+    /// Channel the parent agent was on when it spawned this sub-agent.
+    pub channel_name: String,
+    /// Metadata for routing (contains thread_id etc).
+    pub channel_metadata: serde_json::Value,
+    /// Thread ID of the parent conversation.
+    pub parent_thread_id: String,
+}
+
 /// Result from a completed sub-agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentResult {
@@ -105,6 +126,8 @@ pub struct SubagentHandle {
     pub spawned_at: chrono::DateTime<chrono::Utc>,
     cancel_tx: watch::Sender<bool>,
     join_handle: Option<JoinHandle<SubagentResult>>,
+    /// Send messages from the parent to this sub-agent.
+    pub parent_to_sub_tx: mpsc::Sender<String>,
 }
 
 /// Request to spawn a sub-agent.
@@ -123,6 +146,8 @@ pub struct SubagentSpawnRequest {
     /// Timeout in seconds. Falls back to config default.
     pub timeout_secs: Option<u64>,
     /// If true, the parent waits for the sub-agent to complete.
+    /// DEPRECATED: Sub-agents always run fire-and-forget now.
+    /// Results are injected back via the result channel.
     #[serde(default)]
     pub wait: bool,
 }
@@ -136,32 +161,58 @@ pub struct SubagentExecutor {
     config: SubagentConfig,
     /// Currently active sub-agents.
     active: Arc<RwLock<HashMap<Uuid, SubagentHandle>>>,
+    /// Sender for injecting sub-agent results back to the parent agent.
+    result_tx: mpsc::Sender<SubagentResultMessage>,
+    /// Optional database for finalizing routine runs.
+    store: Option<Arc<dyn crate::db::Database>>,
+    /// Optional SSE broadcast sender for routine lifecycle events.
+    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
 }
 
 impl SubagentExecutor {
     /// Create a new sub-agent executor.
+    ///
+    /// Returns `(executor, result_rx)` — the receiver should be polled by a
+    /// background task that re-injects sub-agent results into the main agent.
     pub fn new(
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
         tools: Arc<ToolRegistry>,
         channels: Arc<ChannelManager>,
         config: SubagentConfig,
-    ) -> Self {
-        Self {
+    ) -> (Self, mpsc::Receiver<SubagentResultMessage>) {
+        let (result_tx, result_rx) = mpsc::channel(32);
+        let executor = Self {
             llm,
             safety,
             tools,
             channels,
             config,
             active: Arc::new(RwLock::new(HashMap::new())),
-        }
+            result_tx,
+            store: None,
+            sse_tx: None,
+        };
+        (executor, result_rx)
     }
 
-    /// Spawn a sub-agent.
+    /// Set the database for routine run finalization.
+    pub fn with_store(mut self, store: Arc<dyn crate::db::Database>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Set the SSE broadcast sender for routine lifecycle events.
+    pub fn with_sse_tx(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
+        self.sse_tx = Some(tx);
+        self
+    }
+
+    /// Spawn a sub-agent as a fire-and-forget background task.
     ///
-    /// If `request.wait` is true, this blocks until the sub-agent completes and
-    /// returns its result directly. If false, it spawns in the background and
-    /// returns immediately with the agent ID.
+    /// Always returns immediately with the agent ID. The sub-agent runs in
+    /// the background and its result is sent through the `result_tx` channel
+    /// when it completes. The `wait` field on the request is ignored.
     pub async fn spawn(
         &self,
         request: SubagentSpawnRequest,
@@ -188,6 +239,8 @@ impl SubagentExecutor {
 
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        // Bidirectional: parent → sub-agent message channel
+        let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
 
         let timeout = Duration::from_secs(
             request
@@ -210,7 +263,6 @@ impl SubagentExecutor {
 
         let name = request.name.clone();
         let task = request.task.clone();
-        let wait = request.wait;
 
         // Clone shared deps for the spawned task
         let llm = self.llm.clone();
@@ -220,24 +272,37 @@ impl SubagentExecutor {
         let ch_name = channel_name.to_string();
         let ch_meta = channel_metadata.clone();
         let allowed = request.allowed_tools.clone();
+        let result_tx = self.result_tx.clone();
+
+        // For the result injection message
+        let parent_thread_id = channel_metadata
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent:main")
+            .to_string();
 
         let agent_name = name.clone();
         let agent_task = task.clone();
 
+        // Clone store + sse_tx for routine finalization inside spawned task
+        let store_for_task = self.store.clone();
+        let sse_tx_for_task = self.sse_tx.clone();
+
+        // Emit SubagentSpawned event
+        let _ = channels
+            .send_status(
+                &ch_name,
+                StatusUpdate::SubagentSpawned {
+                    agent_id: id.to_string(),
+                    name: agent_name.clone(),
+                    task: agent_task.clone(),
+                },
+                &ch_meta,
+            )
+            .await;
+
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
-
-            // Notify user that sub-agent has started
-            let _ = channels
-                .send_status(
-                    &ch_name,
-                    StatusUpdate::AgentMessage {
-                        content: format!("🔀 Sub-agent '{}' started: {}", agent_name, agent_task),
-                        message_type: "progress".to_string(),
-                    },
-                    &ch_meta,
-                )
-                .await;
 
             let result = tokio::time::timeout(
                 timeout,
@@ -251,27 +316,28 @@ impl SubagentExecutor {
                     &ch_name,
                     &ch_meta,
                     cancel_rx,
+                    parent_to_sub_rx,
                     max_iterations,
                     allowed.as_deref(),
+                    &id.to_string(),
                 ),
             )
             .await;
 
             let elapsed = start.elapsed();
 
-            match result {
+            let subagent_result = match result {
                 Ok(Ok((response, iterations))) => {
                     let _ = channels
                         .send_status(
                             &ch_name,
-                            StatusUpdate::AgentMessage {
-                                content: format!(
-                                    "✅ Sub-agent '{}' completed ({} iterations, {:.1}s)",
-                                    agent_name,
-                                    iterations,
-                                    elapsed.as_secs_f64()
-                                ),
-                                message_type: "progress".to_string(),
+                            StatusUpdate::SubagentCompleted {
+                                agent_id: id.to_string(),
+                                name: agent_name.clone(),
+                                success: true,
+                                response: response.clone(),
+                                duration_ms: elapsed.as_millis() as u64,
+                                iterations,
                             },
                             &ch_meta,
                         )
@@ -292,12 +358,13 @@ impl SubagentExecutor {
                     let _ = channels
                         .send_status(
                             &ch_name,
-                            StatusUpdate::AgentMessage {
-                                content: format!(
-                                    "❌ Sub-agent '{}' failed: {}",
-                                    agent_name, err_msg
-                                ),
-                                message_type: "warning".to_string(),
+                            StatusUpdate::SubagentCompleted {
+                                agent_id: id.to_string(),
+                                name: agent_name.clone(),
+                                success: false,
+                                response: err_msg.clone(),
+                                duration_ms: elapsed.as_millis() as u64,
+                                iterations: 0,
                             },
                             &ch_meta,
                         )
@@ -317,13 +384,13 @@ impl SubagentExecutor {
                     let _ = channels
                         .send_status(
                             &ch_name,
-                            StatusUpdate::AgentMessage {
-                                content: format!(
-                                    "⏰ Sub-agent '{}' timed out after {:.0}s",
-                                    agent_name,
-                                    elapsed.as_secs_f64()
-                                ),
-                                message_type: "warning".to_string(),
+                            StatusUpdate::SubagentCompleted {
+                                agent_id: id.to_string(),
+                                name: agent_name.clone(),
+                                success: false,
+                                response: "Timed out".to_string(),
+                                duration_ms: elapsed.as_millis() as u64,
+                                iterations: 0,
                             },
                             &ch_meta,
                         )
@@ -339,7 +406,70 @@ impl SubagentExecutor {
                         error: Some("Timed out".to_string()),
                     }
                 }
+            };
+
+            // ── Routine run finalization ─────────────────────────────
+            // If this subagent was spawned by a routine, finalize the
+            // routine_run record and emit a RoutineLifecycle SSE event.
+            if let (Some(routine_name), Some(run_id_str)) = (
+                ch_meta.get("routine_name").and_then(|v| v.as_str()),
+                ch_meta.get("routine_run_id").and_then(|v| v.as_str()),
+            ) {
+                let run_status = if subagent_result.success {
+                    RunStatus::Ok
+                } else {
+                    RunStatus::Failed
+                };
+                let summary = if subagent_result.success {
+                    Some(subagent_result.response.clone())
+                } else {
+                    Some(subagent_result.error.clone().unwrap_or_else(|| "Unknown error".to_string()))
+                };
+
+                if let Some(ref store) = store_for_task {
+                    if let Ok(run_id) = run_id_str.parse::<Uuid>() {
+                        if let Err(e) = store.complete_routine_run(
+                            run_id, run_status, summary.as_deref(), None,
+                        ).await {
+                            tracing::error!(
+                                routine = %routine_name,
+                                run_id = %run_id_str,
+                                "Failed to finalize routine run from subagent: {}", e
+                            );
+                        } else {
+                            tracing::info!(
+                                routine = %routine_name,
+                                run_id = %run_id_str,
+                                success = %subagent_result.success,
+                                "Finalized routine run from subagent"
+                            );
+                        }
+                    }
+                }
+
+                // Emit SSE lifecycle event
+                if let Some(ref sse_tx) = sse_tx_for_task {
+                    let event_type = if subagent_result.success { "completed" } else { "failed" };
+                    let _ = sse_tx.send(SseEvent::RoutineLifecycle {
+                        routine_name: routine_name.to_string(),
+                        event: event_type.to_string(),
+                        run_id: Some(run_id_str.to_string()),
+                        result_summary: summary.clone(),
+                    });
+                }
             }
+
+            // Inject result back to parent agent via the result channel
+            let _ = result_tx
+                .send(SubagentResultMessage {
+                    result: subagent_result.clone(),
+                    channel_name: ch_name,
+                    channel_metadata: ch_meta,
+                    parent_thread_id,
+                })
+                .await;
+
+            subagent_result
         });
 
         // Track the handle
@@ -354,59 +484,33 @@ impl SubagentExecutor {
                     status: SubagentStatus::Running,
                     spawned_at: chrono::Utc::now(),
                     cancel_tx,
-                    join_handle: if wait { Some(join_handle) } else { None },
+                    join_handle: Some(join_handle),
+                    parent_to_sub_tx,
                 },
             );
         }
 
-        if wait {
-            // Wait for the sub-agent to complete
-            let handle = {
-                let mut active = self.active.write().await;
-                active.get_mut(&id).and_then(|h| h.join_handle.take())
-            };
+        // Always return immediately (fire-and-forget)
+        Ok(SubagentResult {
+            agent_id: id,
+            name,
+            response: format!("Sub-agent spawned (id: {}). Results will arrive when complete.", id),
+            iterations: 0,
+            duration_ms: 0,
+            success: true,
+            error: None,
+        })
+    }
 
-            if let Some(jh) = handle {
-                let result = jh.await.map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: "spawn_subagent".to_string(),
-                        reason: format!("Sub-agent task panicked: {}", e),
-                    })
-                })?;
-
-                // Update status
-                {
-                    let mut active = self.active.write().await;
-                    if let Some(h) = active.get_mut(&id) {
-                        h.status = if result.success {
-                            SubagentStatus::Completed
-                        } else if result.error.as_deref() == Some("Timed out") {
-                            SubagentStatus::TimedOut
-                        } else {
-                            SubagentStatus::Failed(result.error.clone().unwrap_or_default())
-                        };
-                    }
-                }
-
-                Ok(result)
-            } else {
-                Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
-                    name: "spawn_subagent".to_string(),
-                    reason: "Failed to get sub-agent join handle".to_string(),
-                }))
+    /// Send a message from the parent agent to a running sub-agent.
+    pub async fn send_to_subagent(&self, agent_id: Uuid, message: String) -> bool {
+        let active = self.active.read().await;
+        if let Some(handle) = active.get(&agent_id) {
+            if handle.status == SubagentStatus::Running {
+                return handle.parent_to_sub_tx.send(message).await.is_ok();
             }
-        } else {
-            // Fire and forget — return immediately with the ID
-            Ok(SubagentResult {
-                agent_id: id,
-                name,
-                response: format!("Sub-agent spawned (id: {})", id),
-                iterations: 0,
-                duration_ms: 0,
-                success: true,
-                error: None,
-            })
         }
+        false
     }
 
     /// Cancel a running sub-agent.
@@ -457,6 +561,20 @@ impl SubagentExecutor {
         let mut active = self.active.write().await;
         active.retain(|_, h| h.status == SubagentStatus::Running || h.spawned_at > cutoff);
     }
+
+    /// Mark a sub-agent as completed (called when the join handle resolves).
+    pub async fn mark_completed(&self, agent_id: Uuid, success: bool, error: Option<String>) {
+        let mut active = self.active.write().await;
+        if let Some(h) = active.get_mut(&agent_id) {
+            h.status = if success {
+                SubagentStatus::Completed
+            } else if error.as_deref() == Some("Timed out") {
+                SubagentStatus::TimedOut
+            } else {
+                SubagentStatus::Failed(error.unwrap_or_default())
+            };
+        }
+    }
 }
 
 /// Info about a sub-agent (serializable).
@@ -485,8 +603,10 @@ async fn run_subagent_loop(
     channel_name: &str,
     channel_metadata: &serde_json::Value,
     cancel_rx: watch::Receiver<bool>,
+    mut parent_rx: mpsc::Receiver<String>,
     max_iterations: usize,
     allowed_tools: Option<&[String]>,
+    agent_id: &str,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
 
@@ -516,6 +636,14 @@ async fn run_subagent_loop(
                 name: "subagent".to_string(),
                 reason: "Cancelled".to_string(),
             }));
+        }
+
+        // Check for messages from the parent (non-blocking)
+        while let Ok(parent_msg) = parent_rx.try_recv() {
+            context_messages.push(ChatMessage::user(format!(
+                "[Message from main agent]: {}",
+                parent_msg
+            )));
         }
 
         // Force text on last iteration
@@ -553,7 +681,7 @@ async fn run_subagent_loop(
 
                 // Execute each tool call
                 for tc in tool_calls {
-                    // Handle emit_user_message specially — forward to user
+                    // Handle emit_user_message specially — forward as SubagentProgress
                     if tc.name == "emit_user_message" {
                         let content_val = tc
                             .arguments
@@ -569,9 +697,10 @@ async fn run_subagent_loop(
                         let _ = channels
                             .send_status(
                                 channel_name,
-                                StatusUpdate::AgentMessage {
-                                    content: content_val.to_string(),
-                                    message_type: msg_type.to_string(),
+                                StatusUpdate::SubagentProgress {
+                                    agent_id: agent_id.to_string(),
+                                    message: content_val.to_string(),
+                                    category: msg_type.to_string(),
                                 },
                                 channel_metadata,
                             )
@@ -607,6 +736,19 @@ async fn run_subagent_loop(
                         ));
                         continue;
                     }
+
+                    // Emit tool progress
+                    let _ = channels
+                        .send_status(
+                            channel_name,
+                            StatusUpdate::SubagentProgress {
+                                agent_id: agent_id.to_string(),
+                                message: format!("Using tool: {}", tc.name),
+                                category: "tool".to_string(),
+                            },
+                            channel_metadata,
+                        )
+                        .await;
 
                     // Execute normal tool
                     let tool = match tools.get(&tc.name).await {
@@ -723,5 +865,37 @@ mod tests {
         assert_eq!(req.name, "test");
         assert!(req.wait);
         assert!(req.allowed_tools.is_none());
+    }
+
+    #[test]
+    fn test_spawn_request_serialization() {
+        let request = SubagentSpawnRequest {
+            name: "researcher".to_string(),
+            task: "Find papers about AI".to_string(),
+            system_prompt: None,
+            model: None,
+            allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
+            timeout_secs: Some(120),
+            wait: true,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("researcher"));
+        assert!(json.contains("Find papers about AI"));
+
+        let deserialized: SubagentSpawnRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "researcher");
+        assert_eq!(deserialized.allowed_tools.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_spawn_request_defaults() {
+        let json = r#"{"name":"test","task":"do work"}"#;
+        let request: SubagentSpawnRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.name, "test");
+        assert!(request.system_prompt.is_none());
+        assert!(request.model.is_none());
+        assert!(request.allowed_tools.is_none());
+        assert!(request.timeout_secs.is_none());
+        assert!(!request.wait);
     }
 }

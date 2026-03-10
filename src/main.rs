@@ -787,6 +787,11 @@ async fn main() -> anyhow::Result<()> {
     // Clone the SSE sender for the routine engine before the extension manager consumes it.
     let routine_sse_sender = sse_sender.clone();
 
+    // Wire SSE sender into channel manager for ChannelStatusChange events.
+    if let Some(ref sender) = sse_sender {
+        channels.set_sse_sender(sender.clone()).await;
+    }
+
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some(sender) = sse_sender
@@ -796,13 +801,24 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sub-agent system ────────────────────────────────────────────────
     let subagent_executor = {
-        let executor = std::sync::Arc::new(ironclaw::agent::SubagentExecutor::new(
+        let (executor, _result_rx) = ironclaw::agent::SubagentExecutor::new(
             components.llm.clone(),
             components.safety.clone(),
             components.tools.clone(),
             channels.clone(),
             ironclaw::agent::SubagentConfig::default(),
-        ));
+        );
+
+        // Wire store + SSE for routine run finalization by subagents
+        let mut executor = executor;
+        if let Some(ref db) = components.db {
+            executor = executor.with_store(Arc::clone(db));
+        }
+        if let Some(ref sender) = routine_sse_sender {
+            executor = executor.with_sse_tx(sender.clone());
+        }
+
+        let executor = std::sync::Arc::new(executor);
 
         // Register sub-agent tools with the executor
         components.tools.register_sync(std::sync::Arc::new(
@@ -815,7 +831,7 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::tools::builtin::CancelSubagentTool::new(executor.clone()),
         ));
 
-        tracing::info!("Sub-agent system initialized");
+        tracing::info!("Sub-agent system initialized (with routine finalization support)");
         executor
     };
 
@@ -837,6 +853,8 @@ async fn main() -> anyhow::Result<()> {
         canvas_store: Some(canvas_store),
         subagent_executor: Some(subagent_executor),
         cost_tracker: Some(components.cost_tracker),
+        response_cache: Some(components.response_cache),
+        routing_policy: Some(components.routing_policy),
     };
 
     let agent = Agent::new(

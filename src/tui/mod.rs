@@ -826,7 +826,7 @@ impl From<StatusUpdate> for TuiUpdate {
         match status {
             StatusUpdate::StreamChunk(chunk) => TuiUpdate::StreamChunk(chunk),
             StatusUpdate::Thinking(text) => TuiUpdate::Thinking(text),
-            StatusUpdate::ToolStarted { name } => TuiUpdate::ToolStarted { name },
+            StatusUpdate::ToolStarted { name, .. } => TuiUpdate::ToolStarted { name },
             StatusUpdate::ToolResult { name, preview } => TuiUpdate::ToolResult {
                 name,
                 result: preview,
@@ -835,6 +835,7 @@ impl From<StatusUpdate> for TuiUpdate {
             StatusUpdate::ToolCompleted {
                 name,
                 success: false,
+                ..
             } => TuiUpdate::ToolResult {
                 name,
                 result: "Failed".to_string(),

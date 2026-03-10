@@ -42,13 +42,17 @@ pub use job::{
 };
 pub use json::JsonTool;
 pub use location::LocationTool;
-pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
+pub use memory::{
+    MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+};
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
 pub use screen_capture::ScreenCaptureTool;
 pub use shell::ShellTool;
-pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
+pub use skill_tools::{
+    SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool,
+};
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
 pub use telegram_actions::TelegramActionsTool;

@@ -90,7 +90,9 @@ pub enum SoftwareType {
 pub enum Language {
     Rust,
     Python,
+    #[serde(alias = "typescript")]
     TypeScript,
+    #[serde(alias = "javascript")]
     JavaScript,
     Go,
     Bash,
@@ -841,8 +843,10 @@ Respond with a JSON object containing:
 - description: What the software should do
 - software_type: One of "wasm_tool", "cli_binary", "library", "script", "web_service"
   (PREFER "wasm_tool" for agent-usable tools)
-- language: One of "rust", "python", "typescript", "javascript", "go", "bash"
+- language: One of "rust", "python", "type_script", "java_script", "go", "bash"
   (PREFER "rust" for wasm_tool)
+  NOTE: Use "type_script" (with underscore) not "typescript".
+  NOTE: Use "java_script" (with underscore) not "javascript".
 - input_spec: Expected input format (optional)
 - output_spec: Expected output format (optional)
 - dependencies: List of external dependencies needed
@@ -951,7 +955,7 @@ impl Tool for BuildSoftwareTool {
                 },
                 "language": {
                     "type": "string",
-                    "enum": ["rust", "python", "typescript", "bash"],
+                    "enum": ["rust", "python", "typescript", "javascript", "go", "bash"],
                     "description": "Programming language to use (optional, will be inferred)"
                 }
             },
@@ -993,7 +997,9 @@ impl Tool for BuildSoftwareTool {
             requirement.language = match lang_str {
                 "rust" => Language::Rust,
                 "python" => Language::Python,
-                "typescript" => Language::TypeScript,
+                "typescript" | "type_script" => Language::TypeScript,
+                "javascript" | "java_script" => Language::JavaScript,
+                "go" => Language::Go,
                 "bash" => Language::Bash,
                 _ => requirement.language,
             };

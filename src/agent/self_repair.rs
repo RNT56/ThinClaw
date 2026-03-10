@@ -61,6 +61,12 @@ pub trait SelfRepair: Send + Sync {
 
     /// Attempt to repair a broken tool.
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError>;
+
+    /// Dismiss a broken tool by resetting its failure counter.
+    ///
+    /// Called when repair returns `ManualRequired` to prevent infinite
+    /// re-detection every cycle.
+    async fn dismiss_broken_tool(&self, tool_name: &str);
 }
 
 /// Default self-repair implementation.
@@ -121,6 +127,19 @@ impl SelfRepair for DefaultSelfRepair {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
                 && ctx.state == JobState::Stuck
             {
+                // Skip routine-dispatched jobs — these are managed by the
+                // worker's finalize_routine_run() and should not be interfered
+                // with by the self-repair mechanism.
+                if ctx.metadata.get("routine_dispatched")
+                    == Some(&serde_json::Value::Bool(true))
+                {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        "Skipping routine-dispatched stuck job (managed by worker)"
+                    );
+                    continue;
+                }
+
                 let stuck_duration = ctx
                     .started_at
                     .map(|start| {
@@ -319,6 +338,14 @@ impl SelfRepair for DefaultSelfRepair {
             }
         }
     }
+
+    async fn dismiss_broken_tool(&self, tool_name: &str) {
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.mark_tool_repaired(tool_name).await {
+                tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
+            }
+        }
+    }
 }
 
 /// Background repair task that periodically checks for and repairs issues.
@@ -369,6 +396,16 @@ impl RepairTask {
             for tool in broken_tools {
                 tracing::info!("Attempting to repair broken tool: {}", tool.name);
                 match self.repair.repair_broken_tool(&tool).await {
+                    Ok(RepairResult::ManualRequired { message }) => {
+                        tracing::warn!(
+                            "Manual intervention needed for tool '{}': {} — clearing failure counter to stop re-detection",
+                            tool.name,
+                            message,
+                        );
+                        // Clear the failure counter so this tool isn't
+                        // endlessly re-detected every cycle.
+                        self.repair.dismiss_broken_tool(&tool.name).await;
+                    }
                     Ok(result) => {
                         tracing::info!("Tool repair result: {:?}", result);
                     }

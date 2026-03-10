@@ -32,15 +32,26 @@ const WORKSPACE_FILES: &[&str] = &[
 
 /// Check whether `path` resolves to a workspace file that should be written
 /// through `memory_write` instead of `write_file`.
+///
+/// Only blocks files that live directly in the workspace root. Files inside
+/// project subdirectories (e.g. `clawi-site/README.md`) are safe to write
+/// via the filesystem tool.
 fn is_workspace_path(path: &str) -> bool {
-    let filename = std::path::Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or(path);
+    let p = std::path::Path::new(path);
+    let filename = p.file_name().and_then(|f| f.to_str()).unwrap_or(path);
 
-    WORKSPACE_FILES.contains(&filename)
-        || path.starts_with("daily/")
-        || path.starts_with("context/")
+    // Check if the file is directly in the root (no parent directory component)
+    // e.g. "README.md" → blocked, but "clawi-site/README.md" → allowed
+    let is_root_level = p.parent().is_none_or(|parent| {
+        parent.as_os_str().is_empty() || parent == std::path::Path::new(".")
+    });
+
+    if is_root_level && WORKSPACE_FILES.contains(&filename) {
+        return true;
+    }
+
+    // daily/ and context/ directories are always memory-managed
+    path.starts_with("daily/") || path.starts_with("context/")
 }
 
 /// Maximum file size for reading (1MB).

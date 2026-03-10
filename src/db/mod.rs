@@ -293,6 +293,20 @@ pub trait RoutineStore: Send + Sync {
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
+
+    /// Mark all RUNNING routine runs as failed.
+    ///
+    /// Called at startup to clean up orphaned runs from a previous process
+    /// that crashed or was killed before the worker could update the status.
+    /// Without this, routines with `max_concurrent = 1` would be permanently
+    /// blocked.
+    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError>;
+
+    /// Delete all run records for a specific routine.
+    async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError>;
+
+    /// Delete ALL routine run records across all routines.
+    async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError>;
 }
 
 #[async_trait]

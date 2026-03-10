@@ -13,13 +13,12 @@ use futures::StreamExt;
 
 use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
-use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::subagent_executor::SubagentExecutor;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
+use crate::agent::{Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -69,7 +68,7 @@ pub struct AgentDeps {
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
@@ -85,9 +84,16 @@ pub struct AgentDeps {
     pub canvas_store: Option<crate::channels::canvas_gateway::CanvasStore>,
     /// Optional sub-agent executor for spawning parallel agentic loops.
     pub subagent_executor: Option<Arc<SubagentExecutor>>,
-    /// Shared cost tracker \u2014 receives entries from every LLM call in the agent.
+    /// Shared cost tracker — receives entries from every LLM call in the agent.
     /// Read by `openclaw_cost_summary` Tauri command for the Cost Dashboard.
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Shared response cache — populated by Reasoning after each LLM call,
+    /// read by `openclaw_cache_stats` Tauri command for the Cache Dashboard.
+    pub response_cache:
+        Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
+    /// Smart routing policy — selects provider/model based on request context.
+    /// Read/written by `openclaw_routing_*` Tauri commands, consulted before each LLM call.
+    pub routing_policy: Option<Arc<tokio::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>>,
 }
 
 /// The main agent that coordinates all components.
@@ -130,7 +136,7 @@ impl Agent {
 
         let session_manager = session_manager.unwrap_or_else(|| Arc::new(SessionManager::new()));
 
-        let scheduler = Arc::new(Scheduler::new(
+        let mut scheduler = Scheduler::new(
             config.clone(),
             context_manager.clone(),
             deps.llm.clone(),
@@ -138,7 +144,12 @@ impl Agent {
             deps.tools.clone(),
             deps.store.clone(),
             deps.hooks.clone(),
-        ));
+        );
+        // Wire SSE sender so routine-spawned workers can emit completion events
+        if let Some(ref sender) = deps.sse_sender {
+            scheduler = scheduler.with_sse_sender(sender.clone());
+        }
+        let scheduler = Arc::new(scheduler);
 
         // Use provided agent router or create a default one.
         let agent_router = deps
@@ -222,7 +233,7 @@ impl Agent {
     }
 
     /// Get the skill registry (public for Tauri/API integration).
-    pub fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
+    pub fn skill_registry(&self) -> Option<&Arc<tokio::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
     }
 
@@ -247,18 +258,12 @@ impl Agent {
     }
 
     /// Select active skills for a message using deterministic prefiltering.
-    pub(super) fn select_active_skills(
+    pub(super) async fn select_active_skills(
         &self,
         message_content: &str,
     ) -> Vec<crate::skills::LoadedSkill> {
         if let Some(registry) = self.skill_registry() {
-            let guard = match registry.read() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::error!("Skill registry lock poisoned: {}", e);
-                    return vec![];
-                }
-            };
+            let guard = registry.read().await;
             let available = guard.skills();
             let skills_cfg = &self.deps.skills_config;
             let selected = crate::skills::prefilter_skills(
@@ -298,6 +303,9 @@ pub struct BackgroundTasksHandle {
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
     health_monitor: Option<Arc<crate::channels::ChannelHealthMonitor>>,
+    /// Receiver for system events (heartbeat messages injected by the routine engine).
+    /// The message loop polls this to process heartbeat turns when the dispatcher is idle.
+    pub system_event_rx: Option<tokio::sync::mpsc::Receiver<IncomingMessage>>,
 }
 
 impl BackgroundTasksHandle {
@@ -390,6 +398,16 @@ impl Agent {
                             ));
                             let _ = repair_channels.broadcast_all("default", response).await;
                         }
+                        Ok(RepairResult::ManualRequired { message }) => {
+                            tracing::warn!(
+                                "Manual intervention needed for tool '{}': {} — clearing failure counter to stop re-detection",
+                                tool.name,
+                                message,
+                            );
+                            // Clear the failure counter so this tool isn't
+                            // endlessly re-detected every cycle.
+                            repair.dismiss_broken_tool(&tool.name).await;
+                        }
                         Ok(result) => {
                             tracing::info!("Tool repair result: {:?}", result);
                         }
@@ -413,91 +431,57 @@ impl Agent {
             }
         });
 
-        // ── Heartbeat ───────────────────────────────────────────────────
-        let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
-            if hb_config.enabled {
+        // ── Memory hygiene background task ─────────────────────────────
+        // The old HeartbeatRunner included both heartbeat checks AND memory
+        // hygiene. Heartbeat checks are now fully handled by the routine engine
+        // (upsert_heartbeat_routine below). This task only does memory hygiene.
+        let heartbeat_handle = {
+            let hygiene_cfg = self
+                .hygiene_config
+                .as_ref()
+                .map(|h| h.to_workspace_config())
+                .unwrap_or_default();
+
+            if hygiene_cfg.enabled {
                 if let Some(workspace) = self.workspace() {
-                    let config = AgentHeartbeatConfig::default()
-                        .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
+                    let ws = Arc::clone(workspace);
+                    let interval_secs = self.heartbeat_config
+                        .as_ref()
+                        .map(|c| c.interval_secs)
+                        .unwrap_or(1800);
 
-                    // Set up notification channel
-                    let (notify_tx, mut notify_rx) =
-                        tokio::sync::mpsc::channel::<OutgoingResponse>(16);
-
-                    // Spawn notification forwarder that routes through channel manager
-                    let notify_channel = hb_config.notify_channel.clone();
-                    let notify_user = hb_config.notify_user.clone();
-                    let notify_topic_id = hb_config.notify_topic_id;
-                    let channels = self.channels.clone();
-                    tokio::spawn(async move {
-                        while let Some(mut response) = notify_rx.recv().await {
-                            // Inject forum topic ID for Telegram topic targeting
-                            if let Some(topic_id) = notify_topic_id {
-                                if let serde_json::Value::Object(ref mut map) = response.metadata {
-                                    map.insert(
-                                        "message_thread_id".to_string(),
-                                        serde_json::json!(topic_id),
-                                    );
-                                } else {
-                                    response.metadata = serde_json::json!({
-                                        "message_thread_id": topic_id,
-                                    });
-                                }
-                            }
-                            let user = notify_user.as_deref().unwrap_or("default");
-
-                            // Try the configured channel first, fall back to
-                            // broadcasting on all channels.
-                            let targeted_ok = if let Some(ref channel) = notify_channel {
-                                channels
-                                    .broadcast(channel, user, response.clone())
-                                    .await
-                                    .is_ok()
-                            } else {
-                                false
-                            };
-
-                            if !targeted_ok {
-                                let results = channels.broadcast_all(user, response).await;
-                                for (ch, result) in results {
-                                    if let Err(e) = result {
-                                        tracing::warn!(
-                                            "Failed to broadcast heartbeat to {}: {}",
-                                            ch,
-                                            e
-                                        );
-                                    }
-                                }
+                    Some(tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(interval_secs),
+                        );
+                        // Don't run immediately on startup
+                        interval.tick().await;
+                        loop {
+                            interval.tick().await;
+                            let report =
+                                crate::workspace::hygiene::run_if_due(&ws, &hygiene_cfg).await;
+                            if report.had_work() {
+                                tracing::info!(
+                                    daily_logs_deleted = report.daily_logs_deleted,
+                                    "Memory hygiene deleted stale documents"
+                                );
                             }
                         }
-                    });
-
-                    let hygiene = self
-                        .hygiene_config
-                        .as_ref()
-                        .map(|h| h.to_workspace_config())
-                        .unwrap_or_default();
-
-                    Some(spawn_heartbeat(
-                        config,
-                        hygiene,
-                        workspace.clone(),
-                        self.cheap_llm().clone(),
-                        self.safety().clone(),
-                        Some(notify_tx),
-                    ))
+                    }))
                 } else {
-                    tracing::warn!("Heartbeat enabled but no workspace available");
                     None
                 }
             } else {
+                tracing::debug!("Memory hygiene disabled");
                 None
             }
-        } else {
-            None
         };
 
         // ── Routine engine ──────────────────────────────────────────────
+        // Create the system event channel for heartbeat → main session injection.
+        let (system_event_tx, system_event_rx) =
+            tokio::sync::mpsc::channel::<IncomingMessage>(16);
+
         let routine_handle = if let Some(ref rt_config) = self.routine_config {
             if rt_config.enabled {
                 if let (Some(store), Some(workspace)) = (self.store(), self.workspace()) {
@@ -519,6 +503,14 @@ impl Agent {
                         engine = engine.with_sse_sender(sender.clone());
                     }
 
+                    // Wire the system event sender for main-session heartbeat injection
+                    engine = engine.with_system_event_tx(system_event_tx.clone());
+
+                    // Wire the subagent executor for non-heartbeat automation execution
+                    if let Some(ref executor) = self.deps.subagent_executor {
+                        engine = engine.with_subagent_executor(Arc::clone(executor));
+                    }
+
                     let engine = Arc::new(engine);
 
                     // Register routine tools
@@ -528,6 +520,18 @@ impl Agent {
 
                     // Load initial event cache
                     engine.refresh_event_cache().await;
+
+                    // ── Auto-register heartbeat as a routine ─────────────
+                    if let Some(ref hb_config) = self.heartbeat_config {
+                        if hb_config.enabled {
+                            if let Err(e) = upsert_heartbeat_routine(
+                                store,
+                                hb_config,
+                            ).await {
+                                tracing::error!("Failed to register heartbeat routine: {}", e);
+                            }
+                        }
+                    }
 
                     // Spawn notification forwarder
                     let channels = self.channels.clone();
@@ -590,6 +594,7 @@ impl Agent {
             heartbeat_handle,
             routine_handle,
             health_monitor,
+            system_event_rx: Some(system_event_rx),
         }
     }
 
@@ -625,7 +630,10 @@ impl Agent {
         let mut message_stream = self.channels.start_all().await?;
 
         // Start background tasks
-        let bg = self.start_background_tasks().await;
+        let mut bg = self.start_background_tasks().await;
+
+        // Extract system event receiver for the message loop
+        let mut system_event_rx = bg.system_event_rx.take();
 
         // ── Config file watcher ─────────────────────────────────────
         let config_watcher = {
@@ -688,6 +696,21 @@ impl Agent {
                         }
                     }
                 }
+                // System events (heartbeat messages) — processed when idle.
+                // Uses biased; so channel messages take priority (heartbeat only fires
+                // when the message_stream has nothing queued).
+                Some(m) = async {
+                    match system_event_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    tracing::info!(
+                        source = %m.channel,
+                        "Processing system event (heartbeat) in main session"
+                    );
+                    m
+                }
             };
 
             // Increment received counter for this channel.
@@ -695,6 +718,13 @@ impl Agent {
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
+                    // Suppress HEARTBEAT_OK responses from heartbeat messages
+                    let is_heartbeat = message.channel == "heartbeat";
+                    if is_heartbeat && response.contains("HEARTBEAT_OK") {
+                        tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
+                        continue;
+                    }
+
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
@@ -1018,6 +1048,115 @@ impl Agent {
         self.process_interrupt(session, thread_id).await?;
         Ok(())
     }
+}
+
+/// Register (or update) the heartbeat as a routine in the DB.
+///
+/// Creates a `__heartbeat__` routine with a cron trigger matching
+/// the configured interval. If the routine already exists, it checks
+/// whether the config has changed and updates if necessary.
+async fn upsert_heartbeat_routine(
+    store: &Arc<dyn Database>,
+    hb_config: &HeartbeatConfig,
+) -> Result<(), Error> {
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+        normalize_cron_expr,
+    };
+
+    let interval_mins = (hb_config.interval_secs / 60).max(1);
+    let cron_5field = format!("*/{} * * * *", interval_mins);
+    let schedule = normalize_cron_expr(&cron_5field);
+
+    let action = RoutineAction::Heartbeat {
+        light_context: hb_config.light_context,
+        prompt: hb_config.prompt.clone(),
+        include_reasoning: hb_config.include_reasoning,
+        active_start_hour: hb_config.active_start_hour,
+        active_end_hour: hb_config.active_end_hour,
+        target: hb_config.target.clone(),
+    };
+
+    let existing = store.get_routine_by_name("default", "__heartbeat__").await;
+
+    match existing {
+        Ok(Some(mut routine)) => {
+            // Update trigger if interval changed
+            let needs_update = match &routine.trigger {
+                Trigger::Cron { schedule: s } => *s != schedule,
+                _ => true,
+            };
+
+            if needs_update || !routine.enabled {
+                routine.trigger = Trigger::Cron {
+                    schedule: schedule.clone(),
+                };
+                routine.next_fire_at = next_cron_fire(&schedule).unwrap_or(None);
+                routine.enabled = true;
+                routine.action = action;
+                routine.updated_at = chrono::Utc::now();
+                store
+                    .update_routine(&routine)
+                    .await
+                    .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
+                tracing::info!(
+                    "Updated heartbeat routine: schedule='{}', next_fire={:?}",
+                    schedule,
+                    routine.next_fire_at
+                );
+            } else {
+                tracing::debug!("Heartbeat routine already up-to-date");
+            }
+        }
+        Ok(None) => {
+            // Create new heartbeat routine
+            let next_fire = next_cron_fire(&schedule).unwrap_or(None);
+            let routine = Routine {
+                id: uuid::Uuid::new_v4(),
+                name: "__heartbeat__".to_string(),
+                description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
+                user_id: "default".to_string(),
+                enabled: true,
+                trigger: Trigger::Cron { schedule: schedule.clone() },
+                action,
+                guardrails: RoutineGuardrails {
+                    cooldown: std::time::Duration::from_secs(hb_config.interval_secs / 2),
+                    max_concurrent: 1,
+                    dedup_window: None,
+                },
+                notify: NotifyConfig {
+                    on_attention: true,
+                    on_failure: true,
+                    on_success: false, // HEARTBEAT_OK = silent
+                    ..Default::default()
+                },
+                last_run_at: None,
+                next_fire_at: next_fire,
+                run_count: 0,
+                consecutive_failures: 0,
+                state: serde_json::json!({}),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+
+            store
+                .create_routine(&routine)
+                .await
+                .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
+
+            tracing::info!(
+                "Created heartbeat routine: id={}, schedule='{}', next_fire={:?}",
+                routine.id,
+                schedule,
+                next_fire
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to check existing heartbeat routine: {}", e);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

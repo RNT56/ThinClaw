@@ -91,6 +91,24 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/status" {
+            return Submission::SystemCommand {
+                command: "status".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/context" || lower == "/context list" {
+            return Submission::SystemCommand {
+                command: "context".to_string(),
+                args: vec!["list".to_string()],
+            };
+        }
+        if lower == "/context detail" {
+            return Submission::SystemCommand {
+                command: "context".to_string(),
+                args: vec!["detail".to_string()],
+            };
+        }
         if lower.starts_with("/model") {
             let args: Vec<String> = trimmed
                 .split_whitespace()

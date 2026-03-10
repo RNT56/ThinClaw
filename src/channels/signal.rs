@@ -881,7 +881,7 @@ impl Channel for SignalChannel {
 
         // Send tool started notification (debug mode only)
         if self.is_debug()
-            && let StatusUpdate::ToolStarted { name } = &status
+            && let StatusUpdate::ToolStarted { name, .. } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let message = format!("\u{25CB} Running tool: {}", name);
@@ -890,7 +890,7 @@ impl Channel for SignalChannel {
 
         // Send tool completed notification (debug mode only)
         if self.is_debug()
-            && let StatusUpdate::ToolCompleted { name, success } = &status
+            && let StatusUpdate::ToolCompleted { name, success, .. } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let (icon, color) = if *success {

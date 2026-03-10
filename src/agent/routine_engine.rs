@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
@@ -23,6 +23,7 @@ use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
+use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
@@ -47,6 +48,12 @@ pub struct RoutineEngine {
     scheduler: Option<Arc<Scheduler>>,
     /// Optional SSE broadcast sender for emitting routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Optional sender for injecting messages into the main session.
+    /// Used by Heartbeat action with `light_context: false` to run inside
+    /// the main conversational context with full session history.
+    system_event_tx: Option<mpsc::Sender<IncomingMessage>>,
+    /// Optional subagent executor for running non-heartbeat automations as subagents.
+    subagent_executor: Option<Arc<SubagentExecutor>>,
 }
 
 impl RoutineEngine {
@@ -68,12 +75,26 @@ impl RoutineEngine {
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
             sse_tx: None,
+            system_event_tx: None,
+            subagent_executor: None,
         }
     }
 
     /// Set the SSE broadcast sender for emitting routine lifecycle events.
     pub fn with_sse_sender(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
         self.sse_tx = Some(tx);
+        self
+    }
+
+    /// Set the system event sender for main-session heartbeat injection.
+    pub fn with_system_event_tx(mut self, tx: mpsc::Sender<IncomingMessage>) -> Self {
+        self.system_event_tx = Some(tx);
+        self
+    }
+
+    /// Set the subagent executor for running non-heartbeat automations.
+    pub fn with_subagent_executor(mut self, executor: Arc<SubagentExecutor>) -> Self {
+        self.subagent_executor = Some(executor);
         self
     }
 
@@ -179,11 +200,52 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = if let Trigger::Cron { ref schedule } = routine.trigger {
-                Some(schedule.clone())
-            } else {
-                None
+            let detail = match &routine.trigger {
+                Trigger::Cron { schedule } => Some(schedule.clone()),
+                Trigger::SystemEvent { schedule, .. } => schedule.clone(),
+                _ => None,
             };
+
+            // SystemEvent trigger: inject message into heartbeat queue instead of
+            // running the routine's action. This is the cron→heartbeat bridge.
+            if let Trigger::SystemEvent { message, .. } = &routine.trigger {
+                if let Some(ref tx) = self.system_event_tx {
+                    let msg = IncomingMessage::new("heartbeat", "system_event", message)
+                        .with_metadata(serde_json::json!({
+                            "source": "system_event",
+                            "routine_name": routine.name,
+                        }));
+                    if let Err(e) = tx.send(msg).await {
+                        tracing::error!(
+                            routine = %routine.name,
+                            "Failed to inject system event into heartbeat queue: {}", e
+                        );
+                    } else {
+                        tracing::info!(
+                            routine = %routine.name,
+                            "Injected system event into heartbeat queue"
+                        );
+                    }
+                    // Update runtime state: advance next_fire_at, bump run_count
+                    let next = detail
+                        .as_ref()
+                        .and_then(|s| next_cron_fire(s).unwrap_or(None));
+                    let _ = self.store.update_routine_runtime(
+                        routine.id,
+                        Utc::now(),
+                        next,
+                        routine.run_count + 1,
+                        routine.consecutive_failures,
+                        &routine.state,
+                    ).await;
+                } else {
+                    tracing::warn!(
+                        routine = %routine.name,
+                        "SystemEvent trigger but no system_event_tx — ignoring"
+                    );
+                }
+                continue;
+            }
 
             self.spawn_fire(routine, "cron", detail);
         }
@@ -242,6 +304,8 @@ impl RoutineEngine {
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
             sse_tx: self.sse_tx.clone(),
+            system_event_tx: self.system_event_tx.clone(),
+            subagent_executor: self.subagent_executor.clone(),
         };
 
         tokio::spawn(async move {
@@ -275,6 +339,8 @@ impl RoutineEngine {
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
             sse_tx: self.sse_tx.clone(),
+            system_event_tx: self.system_event_tx.clone(),
+            subagent_executor: self.subagent_executor.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -324,6 +390,10 @@ struct EngineContext {
     scheduler: Option<Arc<Scheduler>>,
     /// Optional SSE broadcast sender for routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Optional sender for injecting messages into the main session.
+    system_event_tx: Option<mpsc::Sender<IncomingMessage>>,
+    /// Optional subagent executor for non-heartbeat automations.
+    subagent_executor: Option<Arc<SubagentExecutor>>,
 }
 
 impl EngineContext {
@@ -341,12 +411,11 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
     // Broadcast routine start event
-    ctx.broadcast_sse(SseEvent::Status {
-        message: format!(
-            "⏳ Routine '{}' started ({})",
-            routine.name, run.trigger_type
-        ),
-        thread_id: None,
+    ctx.broadcast_sse(SseEvent::RoutineLifecycle {
+        routine_name: routine.name.clone(),
+        event: "started".to_string(),
+        run_id: Some(run.id.to_string()),
+        result_summary: None,
     });
 
     let result = match &routine.action {
@@ -359,7 +428,25 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             title,
             description,
             max_iterations,
-        } => execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await,
+        } => {
+            if ctx.subagent_executor.is_some() {
+                execute_as_subagent(&ctx, &routine, &run, title, description).await
+            } else {
+                execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await
+            }
+        }
+        RoutineAction::Heartbeat {
+            light_context,
+            prompt,
+            include_reasoning,
+            active_start_hour,
+            active_end_hour,
+            target,
+        } => execute_heartbeat(
+            &ctx, &routine, &run,
+            *light_context, prompt.as_deref(), *include_reasoning,
+            *active_start_hour, *active_end_hour, target,
+        ).await,
     };
 
     // Decrement running count
@@ -373,6 +460,24 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             (RunStatus::Failed, Some(e.to_string()), None)
         }
     };
+
+    // RunStatus::Running means the job was dispatched to a worker or subagent.
+    // The worker/subagent handles its own DB completion + SSE lifecycle event,
+    // so skip all post-processing here to avoid conflicts.
+    if status == RunStatus::Running {
+        // Still update the routine's cron schedule so next_fire_at advances
+        let now = Utc::now();
+        let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
+            next_cron_fire(schedule).unwrap_or(None)
+        } else {
+            None
+        };
+        let _ = ctx.store.update_routine_runtime(
+            routine.id, now, next_fire, routine.run_count + 1,
+            routine.consecutive_failures, &routine.state,
+        ).await;
+        return;
+    }
 
     // Complete the run record
     if let Err(e) = ctx
@@ -422,25 +527,17 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     )
     .await;
 
-    // Broadcast routine completion event
-    let icon = match status {
-        RunStatus::Ok => "✅",
-        RunStatus::Attention => "🔔",
-        RunStatus::Failed => "❌",
-        RunStatus::Running => "⏳",
+    let event_type = match status {
+        RunStatus::Ok => "completed",
+        RunStatus::Attention => "attention",
+        RunStatus::Failed => "failed",
+        RunStatus::Running => unreachable!(), // handled above
     };
-    ctx.broadcast_sse(SseEvent::Status {
-        message: format!(
-            "{} Routine '{}' completed ({}){}",
-            icon,
-            routine.name,
-            status,
-            summary
-                .as_deref()
-                .map(|s| format!(": {}", &s[..s.len().min(200)]))
-                .unwrap_or_default()
-        ),
-        thread_id: None,
+    ctx.broadcast_sse(SseEvent::RoutineLifecycle {
+        routine_name: routine.name.clone(),
+        event: event_type.to_string(),
+        run_id: Some(run.id.to_string()),
+        result_summary: summary.clone(),
     });
 }
 
@@ -458,12 +555,81 @@ fn sanitize_routine_name(name: &str) -> String {
         .collect()
 }
 
+/// Execute a non-heartbeat automation as a subagent.
+///
+/// Routes through the SubagentExecutor for UI isolation (dedicated split pane),
+/// fresh context per run, and proper cancellation support. The subagent executor
+/// handles its own SSE lifecycle events via SubagentSpawned / SubagentProgress /
+/// SubagentCompleted status updates. Returns `RunStatus::Running` so the calling
+/// `execute_routine` skips premature `complete_routine_run`.
+async fn execute_as_subagent(
+    ctx: &EngineContext,
+    routine: &Routine,
+    run: &RoutineRun,
+    title: &str,
+    description: &str,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let executor = ctx
+        .subagent_executor
+        .as_ref()
+        .ok_or_else(|| RoutineError::ExecutionFailed {
+            reason: "SubagentExecutor not available".into(),
+        })?;
+
+    let request = SubagentSpawnRequest {
+        name: format!("Automation: {}", routine.name),
+        task: description.to_string(),
+        system_prompt: Some(format!(
+            "You are executing the automation '{}'. \
+             Complete the task thoroughly and report results via `emit_user_message`. \
+             Use tools as needed. When finished, return a clear summary.\n\n\
+             Title: {}\n\nDescription: {}",
+            routine.name, title, description
+        )),
+        model: None,
+        allowed_tools: None,
+        timeout_secs: Some(300),
+        wait: false,
+    };
+
+    // Pass routine metadata through channel_metadata so SubagentExecutor
+    // can finalize the routine_run on completion.
+    let channel_metadata = serde_json::json!({
+        "thread_id": "agent:main",
+        "routine_name": routine.name,
+        "routine_run_id": run.id.to_string(),
+    });
+
+    match executor.spawn(request, "tauri", &channel_metadata).await {
+        Ok(result) => {
+            // Broadcast "dispatched" SSE so the UI shows the subagent panel
+            ctx.broadcast_sse(SseEvent::RoutineLifecycle {
+                routine_name: routine.name.clone(),
+                event: "dispatched".to_string(),
+                run_id: Some(run.id.to_string()),
+                result_summary: Some(format!(
+                    "Subagent spawned (id: {}) — running with full tool access",
+                    result.agent_id
+                )),
+            });
+
+            Ok((RunStatus::Running, Some(format!(
+                "Subagent spawned (id: {})",
+                result.agent_id
+            )), None))
+        }
+        Err(e) => Err(RoutineError::ExecutionFailed {
+            reason: format!("Failed to spawn subagent: {}", e),
+        }),
+    }
+}
+
 /// Execute a full-job routine by dispatching to the scheduler.
 ///
-/// Fire-and-forget: creates a job via `Scheduler::dispatch_job` (which handles
-/// creation, metadata, persistence, and scheduling), links the routine run to
-/// the job, and returns immediately. The job runs independently via the
-/// existing Worker/Scheduler with full tool access.
+/// Uses `dispatch_job_for_routine` so the spawned worker carries routine
+/// metadata and can emit a real `RoutineLifecycle` SSE event on actual
+/// completion — not just on dispatch. Returns `RunStatus::Running` so
+/// `execute_routine` knows NOT to emit a premature "completed" event.
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
@@ -482,7 +648,14 @@ async fn execute_full_job(
     let metadata = serde_json::json!({ "max_iterations": max_iterations });
 
     let job_id = scheduler
-        .dispatch_job(&routine.user_id, title, description, Some(metadata))
+        .dispatch_job_for_routine(
+            &routine.user_id,
+            title,
+            description,
+            Some(metadata),
+            routine.name.clone(),
+            run.id.to_string(),
+        )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
             reason: format!("failed to dispatch job: {e}"),
@@ -496,7 +669,15 @@ async fn execute_full_job(
         );
     }
 
-    // Broadcast job dispatch event
+    // Broadcast "dispatched" SSE so the UI shows a queued state, NOT success
+    ctx.broadcast_sse(SseEvent::RoutineLifecycle {
+        routine_name: routine.name.clone(),
+        event: "dispatched".to_string(),
+        run_id: Some(run.id.to_string()),
+        result_summary: Some(format!("Job {job_id} queued — worker running with full tool access")),
+    });
+
+    // Also broadcast the generic job started event for job view
     ctx.broadcast_sse(SseEvent::JobStarted {
         job_id: job_id.to_string(),
         title: format!("Routine '{}': {}", routine.name, title),
@@ -507,13 +688,169 @@ async fn execute_full_job(
         routine = %routine.name,
         job_id = %job_id,
         max_iterations = max_iterations,
-        "Dispatched full job for routine"
+        "Dispatched full job for routine — worker will emit completion SSE"
     );
 
     let summary = format!(
         "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
     );
-    Ok((RunStatus::Ok, Some(summary), None))
+    // Return RunStatus::Running — execute_routine will skip emitting "completed"
+    // for this case; the worker emits the real event via WorkerDeps::sse_tx.
+    Ok((RunStatus::Running, Some(summary), None))
+}
+
+/// Default heartbeat prompt body.
+const DEFAULT_HEARTBEAT_PROMPT: &str = "\
+Read the HEARTBEAT.md checklist below and follow it strictly. \
+Do not infer or repeat old tasks from prior chats. Check each item and report findings.\n\
+\n\
+If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
+\n\
+If something needs attention, provide a concise summary of what needs action. \
+Use `emit_user_message` to deliver your findings to the user.\n\
+\n\
+You may edit HEARTBEAT.md to add, remove, or update checklist items as needed.";
+
+/// Execute a heartbeat routine.
+///
+/// In `light_context` mode (default), dispatches as a full worker job with
+/// HEARTBEAT.md + daily logs as the prompt — isolated from the main session
+/// but with full tool access.
+///
+/// When `light_context` is false, injects the heartbeat prompt into the main
+/// session via `system_event_tx` for full conversational context.
+async fn execute_heartbeat(
+    ctx: &EngineContext,
+    routine: &Routine,
+    run: &RoutineRun,
+    light_context: bool,
+    custom_prompt: Option<&str>,
+    _include_reasoning: bool,
+    active_start_hour: Option<u8>,
+    active_end_hour: Option<u8>,
+    _target: &str,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    // 0. Active hours check
+    if let (Some(s), Some(e)) = (active_start_hour, active_end_hour) {
+        let now_hour = chrono::Local::now().hour() as u8;
+        let in_window = if s <= e {
+            now_hour >= s && now_hour < e
+        } else {
+            now_hour >= s || now_hour < e
+        };
+        if !in_window {
+            tracing::debug!(
+                routine = %routine.name,
+                hour = now_hour,
+                active = %format!("{:02}:00-{:02}:00", s, e),
+                "Heartbeat outside active hours — skipping"
+            );
+            return Ok((RunStatus::Ok, Some("Skipped — outside active hours".to_string()), None));
+        }
+    }
+
+    // 1. Read HEARTBEAT.md
+    let checklist = match ctx.workspace.heartbeat_checklist().await {
+        Ok(Some(content)) if !crate::agent::heartbeat::is_effectively_empty(&content) => content,
+        Ok(_) => {
+            tracing::debug!(routine = %routine.name, "HEARTBEAT.md is empty or missing — skipping");
+            return Ok((RunStatus::Ok, Some("HEARTBEAT_OK — checklist empty".to_string()), None));
+        }
+        Err(e) => {
+            return Err(RoutineError::ExecutionFailed {
+                reason: format!("Failed to read HEARTBEAT.md: {}", e),
+            });
+        }
+    };
+
+    // 2. Build daily log context
+    let mut daily_context = String::new();
+    let today = chrono::Utc::now().date_naive();
+
+    if let Ok(doc) = ctx.workspace.today_log().await {
+        if !doc.content.trim().is_empty() {
+            let capped = crate::agent::heartbeat::cap_daily_log(&doc.content, 3000);
+            daily_context.push_str(&format!(
+                "\n\n## Daily Log — {} (today)\n\n{}",
+                today.format("%Y-%m-%d"),
+                capped
+            ));
+        }
+    }
+
+    if let Some(yesterday) = today.pred_opt() {
+        if let Ok(doc) = ctx.workspace.daily_log(yesterday).await {
+            if !doc.content.trim().is_empty() {
+                let capped = crate::agent::heartbeat::cap_daily_log(&doc.content, 2000);
+                daily_context.push_str(&format!(
+                    "\n\n## Daily Log — {} (yesterday)\n\n{}",
+                    yesterday.format("%Y-%m-%d"),
+                    capped
+                ));
+            }
+        }
+    }
+
+    // 3. Build the full prompt
+    let prompt_body = custom_prompt.unwrap_or(DEFAULT_HEARTBEAT_PROMPT);
+    let full_prompt = format!(
+        "{}\n\n## HEARTBEAT.md\n\n{}{}",
+        prompt_body, checklist, daily_context
+    );
+
+    if !light_context {
+        // ── Main-session injection mode ──────────────────────────────
+        // Inject the heartbeat prompt into the main session via system_event_tx.
+        // The dispatcher processes it as a normal turn with full session history
+        // and tool access. The response flows through normal SSE → chat.
+        if let Some(ref tx) = ctx.system_event_tx {
+            let message = IncomingMessage::new("heartbeat", "system", &full_prompt)
+                .with_metadata(serde_json::json!({
+                    "source": "heartbeat",
+                    "routine_name": routine.name,
+                    "run_id": run.id.to_string(),
+                }));
+
+            if let Err(e) = tx.send(message).await {
+                return Err(RoutineError::ExecutionFailed {
+                    reason: format!("Failed to inject heartbeat into main session: {}", e),
+                });
+            }
+
+            tracing::info!(
+                routine = %routine.name,
+                "Injected heartbeat into main session — dispatcher will process with full context"
+            );
+
+            // Return Running — the dispatcher handles completion.
+            // The main session will produce the response (HEARTBEAT_OK or findings).
+            return Ok((
+                RunStatus::Running,
+                Some("Injected into main session — awaiting agent response".to_string()),
+                None,
+            ));
+        } else {
+            tracing::warn!(
+                routine = %routine.name,
+                "No system_event_tx available — falling back to light_context mode"
+            );
+            // Fall through to light_context mode below
+        }
+    }
+
+    // ── Light-context mode: dispatch as isolated worker job ──────────
+    // Uses the same worker pipeline as FullJob but with the heartbeat
+    // prompt as the job description.
+    let title = format!("Heartbeat: {}", routine.name);
+    execute_full_job(
+        ctx,
+        routine,
+        run,
+        &title,
+        &full_prompt,
+        5, // Lower max_iterations for heartbeat (vs 10 for full jobs)
+    )
+    .await
 }
 
 /// Execute a lightweight routine (single LLM call).

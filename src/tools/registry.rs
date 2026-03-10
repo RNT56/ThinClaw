@@ -20,8 +20,8 @@ use crate::tools::builtin::{
     AgentThinkTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool,
     DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool, JobEventsTool,
     JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool,
-    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MemoryDeleteTool, PromptQueue, ReadFileTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
     ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
     WriteFileTool,
 };
@@ -51,6 +51,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "memory_write",
     "memory_read",
     "memory_tree",
+    "memory_delete",
     "create_job",
     "list_jobs",
     "job_status",
@@ -68,6 +69,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_delete",
     "routine_history",
     "skill_list",
+    "skill_read",
     "skill_search",
     "skill_install",
     "skill_remove",
@@ -192,6 +194,46 @@ impl ToolRegistry {
             .read()
             .await
             .values()
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect()
+    }
+
+    /// Get tool definitions filtered for autonomous execution (routines, workers).
+    ///
+    /// Excludes:
+    /// - Tools returning `ApprovalRequirement::Always` (need explicit human approval)
+    /// - Sub-agent tools (need dispatcher interception not available in plan path)
+    pub async fn tool_definitions_for_autonomous(&self) -> Vec<ToolDefinition> {
+        use crate::tools::tool::ApprovalRequirement;
+
+        /// Tools that depend on dispatcher interception and cannot work in the
+        /// autonomous plan-execution path.  `emit_user_message` is NOT listed
+        /// here because the worker now delivers it via SSE.
+        const DISPATCHER_ONLY_TOOLS: &[&str] = &[
+            "spawn_subagent",
+            "list_subagents",
+            "cancel_subagent",
+        ];
+
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| {
+                // Exclude tools that always require explicit approval
+                if tool.requires_approval(&serde_json::json!({})) == ApprovalRequirement::Always {
+                    return false;
+                }
+                // Exclude tools that require dispatcher interception
+                if DISPATCHER_ONLY_TOOLS.contains(&tool.name()) {
+                    return false;
+                }
+                true
+            })
             .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
@@ -337,13 +379,22 @@ impl ToolRegistry {
     ///
     /// Memory tools require a workspace for persistence. Call this after
     /// `register_builtin_tools()` if you have a workspace available.
-    pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
+    pub fn register_memory_tools(
+        &self,
+        workspace: Arc<Workspace>,
+        sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    ) {
         self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
+        self.register_sync(Arc::new(MemoryTreeTool::new(Arc::clone(&workspace))));
+        let mut delete_tool = MemoryDeleteTool::new(workspace);
+        if let Some(tx) = sse_sender {
+            delete_tool = delete_tool.with_sse_sender(tx);
+        }
+        self.register_sync(Arc::new(delete_tool));
 
-        tracing::info!("Registered 4 memory tools");
+        tracing::info!("Registered 5 memory tools");
     }
 
     /// Register job management tools.
@@ -421,9 +472,10 @@ impl ToolRegistry {
     /// These allow the LLM to manage prompt-level skills through conversation.
     pub fn register_skill_tools(
         &self,
-        registry: Arc<std::sync::RwLock<SkillRegistry>>,
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
     ) {
+        self.register_sync(Arc::new(SkillReadTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillSearchTool::new(
             Arc::clone(&registry),
@@ -434,7 +486,7 @@ impl ToolRegistry {
             Arc::clone(&catalog),
         )));
         self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
-        tracing::info!("Registered 4 skill management tools");
+        tracing::info!("Registered 5 skill management tools");
     }
 
     /// Register routine management tools.
@@ -491,9 +543,13 @@ impl ToolRegistry {
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
+        base_dir: Option<std::path::PathBuf>,
+        working_dir: Option<std::path::PathBuf>,
     ) {
-        // First register dev tools needed by the builder
-        self.register_dev_tools();
+        // Register dev tools respecting workspace sandbox config.
+        // Previously this always called register_dev_tools() (= None, None),
+        // bypassing sandboxing entirely. Now callers pass the resolved dirs.
+        self.register_dev_tools_with_config(base_dir, working_dir);
 
         // Create the builder (arg order: config, llm, safety, tools)
         let builder = Arc::new(LlmSoftwareBuilder::new(

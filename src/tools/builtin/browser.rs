@@ -25,6 +25,17 @@ use tokio::sync::RwLock;
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
+// ── Limits ───────────────────────────────────────────────────────────
+
+/// Maximum number of open tabs before the oldest is auto-closed.
+const MAX_TABS: usize = 8;
+
+/// Character limit for `get_text` content returned to the LLM.
+const TEXT_CHAR_LIMIT: usize = 16_000;
+
+/// Navigation page-load timeout.
+const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ── Navigation guard ─────────────────────────────────────────────────
 
 /// Blocked URL schemes.
@@ -174,15 +185,29 @@ impl BrowserTool {
     }
 
     /// Get or launch the browser instance.
+    ///
+    /// If Chrome was previously launched but has since crashed (CDP connection
+    /// lost), the dead instance is dropped and a fresh one is started.
     async fn ensure_browser(&self) -> Result<(), ToolError> {
         let mut guard = self.instance.write().await;
-        if guard.is_some() {
-            return Ok(());
+
+        // If we have an instance, verify Chrome is still alive by pinging CDP.
+        if let Some(ref instance) = *guard {
+            // `browser.pages()` makes a CDP call — if the process died this
+            // will return an error, signalling we must re-launch.
+            if instance.browser.pages().await.is_err() {
+                tracing::warn!("Chrome process appears dead, re-launching");
+                *guard = None;
+            } else {
+                return Ok(());
+            }
         }
 
         let chrome_path = Self::find_chrome().ok_or_else(|| {
             ToolError::ExecutionFailed(
-                "Chrome/Chromium not found. Install Chrome or set the path.".to_string(),
+                "Chrome/Chromium not found. Install Google Chrome from https://www.google.com/chrome \
+                 or Chromium from https://www.chromium.org. \
+                 Expected at: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
             )
         })?;
 
@@ -193,10 +218,15 @@ impl BrowserTool {
         let config = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(&self.profile_dir)
-            .window_size(1280, 720)
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-extensions")
+            .window_size(1280, 900)
+            // Use the new headless mode via the proper builder method.
+            .new_headless_mode()
+            .no_sandbox()
+            // Only pass args NOT already in chromiumoxide's DEFAULT_ARGS.
+            .arg("disable-gpu")
+            .arg("no-default-browser-check")
+            // Realistic user-agent for better site compatibility.
+            .arg("user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
             .build()
             .map_err(|e| ToolError::ExecutionFailed(format!("BrowserConfig error: {e}")))?;
 
@@ -220,6 +250,9 @@ impl BrowserTool {
     }
 
     /// Navigate to a URL.
+    ///
+    /// Opens a new tab and sets it as the current page. When the tab count
+    /// exceeds [`MAX_TABS`], the oldest tab is closed automatically.
     async fn navigate(&self, url: &str) -> Result<serde_json::Value, ToolError> {
         is_url_allowed(url).map_err(ToolError::ExecutionFailed)?;
         self.ensure_browser().await?;
@@ -233,8 +266,16 @@ impl BrowserTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Navigation failed: {e}")))?;
 
-        // Wait for the page to load (with timeout)
-        let _ = tokio::time::timeout(Duration::from_secs(30), page.wait_for_navigation()).await;
+        // Wait for the page to load (with timeout).
+        match tokio::time::timeout(PAGE_LOAD_TIMEOUT, page.wait_for_navigation()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::debug!("Navigation wait error (non-fatal): {e}");
+            }
+            Err(_) => {
+                tracing::debug!("Page load timed out after {:?}, proceeding anyway", PAGE_LOAD_TIMEOUT);
+            }
+        }
 
         let page_url = page
             .url()
@@ -242,6 +283,17 @@ impl BrowserTool {
             .ok()
             .flatten()
             .unwrap_or_else(|| url.to_string());
+
+        // Evict the oldest tab if we've hit the limit.
+        if instance.pages.len() >= MAX_TABS {
+            let evicted = instance.pages.remove(0);
+            let _ = evicted.page.close().await;
+            tracing::debug!("Evicted oldest tab (limit={MAX_TABS})");
+            // Adjust current_page index after removal.
+            if let Some(ref mut cp) = instance.current_page {
+                *cp = cp.saturating_sub(1);
+            }
+        }
 
         let idx = instance.pages.len();
         instance.pages.push(PageState {
@@ -254,6 +306,7 @@ impl BrowserTool {
             "status": "navigated",
             "url": page_url,
             "tab_index": idx,
+            "open_tabs": instance.pages.len(),
         }))
     }
 
@@ -530,9 +583,9 @@ impl BrowserTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Screenshot failed: {e}")))?;
 
-        // Save to temp file
-        let screenshot_path =
-            std::env::temp_dir().join(format!("browser_screenshot_{}.png", uuid::Uuid::new_v4()));
+        // Save to temp file — use a deterministic name so repeated screenshots
+        // from the same session overwrite rather than accumulating.
+        let screenshot_path = std::env::temp_dir().join("ironclaw_browser_screenshot.png");
 
         tokio::fs::write(&screenshot_path, &screenshot_bytes)
             .await
@@ -569,7 +622,7 @@ impl BrowserTool {
         }))
     }
 
-    /// Get the page's text content (simplified).
+    /// Get the page's content as clean Markdown (preserves structure for LLM comprehension).
     async fn get_text(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
@@ -579,20 +632,49 @@ impl BrowserTool {
 
         let page_url = state.page.url().await.ok().flatten().unwrap_or_default();
 
+        // Extract a structured Markdown representation of the page.
+        // Preserves headings, links, lists, and paragraph structure — far more
+        // useful than flat innerText for LLM comprehension.
+        let extractor_js = r#"(function(){
+function w(el,d){if(!el||el.nodeType===8)return '';if(el.nodeType===3)return el.textContent||'';
+const tag=el.tagName?el.tagName.toLowerCase():'';
+const st=el.nodeType===1?window.getComputedStyle(el):null;
+if(st&&(st.display==='none'||st.visibility==='hidden'))return '';
+if(['script','style','noscript','nav','footer','aside','header'].includes(tag))return '';
+const ch=Array.from(el.childNodes).map(c=>w(c,d+1)).join('');
+switch(tag){
+case 'h1':return '\n# '+ch.trim()+'\n';case 'h2':return '\n## '+ch.trim()+'\n';
+case 'h3':return '\n### '+ch.trim()+'\n';case 'h4':return '\n#### '+ch.trim()+'\n';
+case 'p':return '\n'+ch.trim()+'\n';case 'li':return '\n- '+ch.trim();
+case 'ul':case 'ol':return ch+'\n';case 'br':return '\n';
+case 'a':const href=el.getAttribute('href')||'';const t=ch.trim();
+if(!t||href.startsWith('javascript:'))return t;if(href.startsWith('#'))return t;
+return '['+t+']('+href+')';
+case 'strong':case 'b':return '**'+ch+'**';case 'em':case 'i':return '*'+ch+'*';
+case 'code':return '`'+ch+'`';case 'pre':return '\n```\n'+el.innerText+'\n```\n';
+case 'table':return '\n'+Array.from(el.querySelectorAll('tr')).map(r=>
+Array.from(r.querySelectorAll('td,th')).map(c=>c.innerText.trim()).join(' | ')).join('\n')+'\n';
+default:const bl=['div','section','article','main','figure'].includes(tag);
+return bl?'\n'+ch+'\n':ch;}}
+const m=document.querySelector('main,[role="main"],article,.content,.main-content,#content,#main')||document.body;
+return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
+})()"#;
+
         let eval_result = state
             .page
-            .evaluate_expression("document.body?.innerText || ''")
+            .evaluate_expression(extractor_js)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to get text: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to extract page content: {e}")))?;
 
         let text = eval_result.into_value::<String>().unwrap_or_default();
 
-        // Truncate if too long
-        let truncated = if text.len() > 8000 {
+        // Truncate on a char boundary (not byte boundary) to avoid panics on
+        // multi-byte UTF-8 text.
+        let truncated = if text.chars().count() > TEXT_CHAR_LIMIT {
+            let safe: String = text.chars().take(TEXT_CHAR_LIMIT).collect();
             format!(
-                "{}...\n[truncated — {} chars total]",
-                &text[..8000],
-                text.len()
+                "{safe}\n\n[… truncated — {} chars total. Use snapshot + scroll for more.]\n",
+                text.chars().count()
             )
         } else {
             text
@@ -600,8 +682,89 @@ impl BrowserTool {
 
         Ok(serde_json::json!({
             "url": page_url,
-            "text": truncated,
+            "content": truncated,
+            "format": "markdown",
             "length": truncated.len(),
+        }))
+    }
+
+    /// Close all open tabs and release the browser instance, reclaiming
+    /// resources. The next `execute` call will re-launch Chrome as needed.
+    async fn close_session(&self) -> Result<serde_json::Value, ToolError> {
+        let mut guard = self.instance.write().await;
+        if let Some(mut instance) = guard.take() {
+            let tab_count = instance.pages.len();
+            for state in instance.pages.drain(..) {
+                let _ = state.page.close().await;
+            }
+            // Drop the browser, which kills the Chrome process.
+            drop(instance);
+            tracing::info!("Browser session closed ({tab_count} tabs)");
+            Ok(serde_json::json!({
+                "status": "session_closed",
+                "tabs_closed": tab_count,
+            }))
+        } else {
+            Ok(serde_json::json!({
+                "status": "no_session",
+                "message": "No browser session was active",
+            }))
+        }
+    }
+
+    /// List open tabs.
+    async fn list_tabs(&self) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().unwrap();
+
+        let mut tabs = Vec::new();
+        for (i, state) in instance.pages.iter().enumerate() {
+            let url = state.page.url().await.ok().flatten().unwrap_or_default();
+            let is_current = instance.current_page == Some(i);
+            tabs.push(serde_json::json!({
+                "index": i,
+                "url": url,
+                "current": is_current,
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "tabs": tabs,
+            "count": instance.pages.len(),
+            "max_tabs": MAX_TABS,
+        }))
+    }
+
+    /// Switch to a tab by index.
+    async fn switch_tab(&self, tab_index: usize) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().unwrap();
+
+        if tab_index >= instance.pages.len() {
+            return Err(ToolError::InvalidParameters(format!(
+                "Tab index {} out of range (0..{})",
+                tab_index,
+                instance.pages.len()
+            )));
+        }
+
+        instance.current_page = Some(tab_index);
+        let url = instance.pages[tab_index]
+            .page
+            .url()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        Ok(serde_json::json!({
+            "status": "switched",
+            "tab_index": tab_index,
+            "url": url,
         }))
     }
 }
@@ -617,7 +780,7 @@ impl Tool for BrowserTool {
          click elements, type text, take screenshots, and evaluate JavaScript. \
          Use 'snapshot' after navigation to see what's on the page — it returns an \
          accessibility tree with numbered refs (e.g., ref=\"e1\") that you can use \
-         with 'click' and 'type' actions."
+         with 'click' and 'type' actions. Use 'close' when finished browsing."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -626,7 +789,7 @@ impl Tool for BrowserTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["navigate", "snapshot", "click", "type", "screenshot", "evaluate", "get_text"],
+                    "enum": ["navigate", "snapshot", "click", "type", "screenshot", "evaluate", "get_text", "close", "tabs", "switch_tab"],
                     "description": "The browser action to perform"
                 },
                 "url": {
@@ -644,6 +807,10 @@ impl Tool for BrowserTool {
                 "expression": {
                     "type": "string",
                     "description": "JavaScript expression to evaluate (for 'evaluate' action)"
+                },
+                "tab_index": {
+                    "type": "integer",
+                    "description": "Tab index to switch to (for 'switch_tab' action)"
                 }
             },
             "required": ["action"]
@@ -698,9 +865,22 @@ impl Tool for BrowserTool {
                 self.evaluate(expression).await?
             }
             "get_text" => self.get_text().await?,
+            "close" => self.close_session().await?,
+            "tabs" => self.list_tabs().await?,
+            "switch_tab" => {
+                let tab_index = params
+                    .get("tab_index")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(
+                            "'switch_tab' requires 'tab_index' parameter".into(),
+                        )
+                    })? as usize;
+                self.switch_tab(tab_index).await?
+            }
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
-                    "Unknown action: '{action}'. Use: navigate, snapshot, click, type, screenshot, evaluate, get_text"
+                    "Unknown action: '{action}'. Use: navigate, snapshot, click, type, screenshot, evaluate, get_text, close, tabs, switch_tab"
                 )));
             }
         };
@@ -717,6 +897,12 @@ impl Tool for BrowserTool {
 
     fn requires_sanitization(&self) -> bool {
         true // External web content must be sanitized
+    }
+
+    /// Browser operations (especially navigation + JS eval) can take longer
+    /// than the default 60s timeout.
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(120)
     }
 }
 
@@ -754,5 +940,11 @@ mod tests {
         let schema = tool.parameters_schema();
         let action = schema["properties"]["action"].clone();
         assert!(action["enum"].as_array().unwrap().len() >= 7);
+    }
+
+    #[test]
+    fn test_execution_timeout_override() {
+        let tool = BrowserTool::new(PathBuf::from("/tmp/test-browser"));
+        assert_eq!(tool.execution_timeout(), Duration::from_secs(120));
     }
 }

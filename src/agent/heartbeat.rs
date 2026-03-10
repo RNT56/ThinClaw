@@ -207,6 +207,39 @@ impl HeartbeatRunner {
             Err(e) => return HeartbeatResult::Failed(format!("Failed to read checklist: {}", e)),
         };
 
+        // ── Read daily logs so the LLM has real context ─────────────────
+        // Without this, the agent can't evaluate checklist items that
+        // reference "daily logs" or "recent activity". We inject today's
+        // and yesterday's logs (capped to avoid token explosion).
+        let mut daily_context = String::new();
+        let today = chrono::Utc::now().date_naive();
+
+        // Today's log
+        if let Ok(doc) = self.workspace.today_log().await {
+            if !doc.content.trim().is_empty() {
+                let capped = cap_daily_log(&doc.content, 3000);
+                daily_context.push_str(&format!(
+                    "\n\n## Daily Log — {} (today)\n\n{}",
+                    today.format("%Y-%m-%d"),
+                    capped
+                ));
+            }
+        }
+
+        // Yesterday's log
+        if let Some(yesterday) = today.pred_opt() {
+            if let Ok(doc) = self.workspace.daily_log(yesterday).await {
+                if !doc.content.trim().is_empty() {
+                    let capped = cap_daily_log(&doc.content, 2000);
+                    daily_context.push_str(&format!(
+                        "\n\n## Daily Log — {} (yesterday)\n\n{}",
+                        yesterday.format("%Y-%m-%d"),
+                        capped
+                    ));
+                }
+            }
+        }
+
         // Build the heartbeat prompt
         let prompt = format!(
             "Read the HEARTBEAT.md checklist below and follow it strictly. \
@@ -218,8 +251,9 @@ impl HeartbeatRunner {
              \n\
              ## HEARTBEAT.md\n\
              \n\
-             {}",
-            checklist
+             {}{}",
+            checklist,
+            daily_context
         );
 
         // Get the system prompt for context
@@ -315,7 +349,7 @@ impl HeartbeatRunner {
 ///
 /// This skips the LLM call when the user hasn't added real tasks yet,
 /// saving API costs.
-fn is_effectively_empty(content: &str) -> bool {
+pub fn is_effectively_empty(content: &str) -> bool {
     let without_comments = strip_html_comments(content);
 
     without_comments.lines().all(|line| {
@@ -330,7 +364,7 @@ fn is_effectively_empty(content: &str) -> bool {
 }
 
 /// Remove HTML comments from content.
-fn strip_html_comments(content: &str) -> String {
+pub fn strip_html_comments(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut rest = content;
     while let Some(start) = rest.find("<!--") {
@@ -342,6 +376,23 @@ fn strip_html_comments(content: &str) -> String {
     }
     result.push_str(rest);
     result
+}
+
+/// Cap a daily log to `max_chars`, truncating on a line boundary.
+///
+/// Keeps the most recent entries (end of file) since daily logs are
+/// append-only with newest entries last.
+pub fn cap_daily_log(content: &str, max_chars: usize) -> String {
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    // Take from the end so we get the most recent entries
+    let tail = &content[content.len() - max_chars..];
+    // Find the first newline to start on a clean line boundary
+    match tail.find('\n') {
+        Some(idx) => format!("[...truncated...]\n{}", &tail[idx + 1..]),
+        None => format!("[...truncated...]\n{}", tail),
+    }
 }
 
 /// Spawn the heartbeat runner as a background task.

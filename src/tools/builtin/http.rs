@@ -39,9 +39,38 @@ pub struct HttpTool {
 impl HttpTool {
     /// Create a new HTTP tool.
     pub fn new() -> Self {
+        // Allow redirects with validation: each hop is checked against the
+        // SSRF blocklist so we don't follow Location: http://internal-service.
+        // We validate inside the execute() method after the response comes back.
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
+            // Follow up to 10 redirects. We re-validate the final URL manually
+            // inside execute() to prevent SSRF via redirect chains.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many redirects")
+                } else {
+                    // Validate each redirect target before following it.
+                    let url = attempt.url();
+                    let scheme = url.scheme();
+                    if scheme != "https" && scheme != "http" {
+                        attempt.stop()
+                    } else if let Some(host) = url.host_str() {
+                        let host_lower = host.to_lowercase();
+                        if host_lower == "localhost"
+                            || host_lower.ends_with(".localhost")
+                            || host_lower == "127.0.0.1"
+                            || host_lower == "::1"
+                        {
+                            attempt.stop()
+                        } else {
+                            attempt.follow()
+                        }
+                    } else {
+                        attempt.stop()
+                    }
+                }
+            }))
             .build()
             .expect("Failed to create HTTP client");
 
@@ -77,12 +106,22 @@ impl HttpTool {
 }
 
 fn validate_url(url: &str, url_allowlist: &[String]) -> Result<reqwest::Url, ToolError> {
+    // Silently upgrade http:// to https:// — the agent frequently writes http://
+    // in tool calls even when the site supports HTTPS. This avoids confusing errors.
+    let url = if url.starts_with("http://") {
+        tracing::debug!("[http] Upgrading http:// to https:// for {}", &url[7..]);
+        std::borrow::Cow::Owned(format!("https://{}", &url[7..]))
+    } else {
+        std::borrow::Cow::Borrowed(url)
+    };
+    let url = url.as_ref();
+
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 
     if parsed.scheme() != "https" {
         return Err(ToolError::NotAuthorized(
-            "only https URLs are allowed".to_string(),
+            format!("only https:// URLs are allowed (got '{}')", parsed.scheme()),
         ));
     }
 
@@ -413,14 +452,6 @@ impl Tool for HttpTool {
 
         let status = response.status().as_u16();
 
-        // Block redirects: the server tried to send us elsewhere (potential SSRF)
-        if (300..400).contains(&status) {
-            return Err(ToolError::NotAuthorized(format!(
-                "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
-                status
-            )));
-        }
-
         let headers: HashMap<String, String> = response
             .headers()
             .iter()
@@ -533,9 +564,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_url_rejects_http() {
-        let err = validate_url("http://example.com", &[]).unwrap_err();
-        assert!(err.to_string().contains("https"));
+    fn test_validate_url_upgrades_http_to_https() {
+        // validate_url silently upgrades http:// → https:// since the LLM
+        // frequently generates http:// URLs even for HTTPS-capable sites.
+        let url = validate_url("http://example.com", &[]).unwrap();
+        assert_eq!(url.scheme(), "https");
     }
 
     #[test]

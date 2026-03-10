@@ -19,6 +19,8 @@ use crate::hardware_bridge::{SessionApprovals, ToolBridge};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::llm::cost_tracker::{BudgetConfig, CostTracker};
+use crate::llm::response_cache_ext::{CacheConfig, CachedResponseStore};
+use crate::llm::routing_policy::RoutingPolicy;
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -48,7 +50,7 @@ pub struct AppComponents {
     pub log_broadcaster: Arc<LogBroadcaster>,
     pub context_manager: Arc<ContextManager>,
     pub hooks: Arc<HookRegistry>,
-    pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
@@ -62,6 +64,10 @@ pub struct AppComponents {
     pub cost_tracker: Arc<tokio::sync::Mutex<CostTracker>>,
     /// Audit log hook — receives real plugin lifecycle events from HookRegistry.
     pub audit_hook: Arc<AuditLogHook>,
+    /// Shared response cache — populated by Reasoning, read by `openclaw_cache_stats`.
+    pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
+    /// Smart routing policy — rules + latency tracker, used by dispatcher before LLM calls.
+    pub routing_policy: Arc<tokio::sync::RwLock<RoutingPolicy>>,
 }
 
 /// Options that control optional init phases.
@@ -89,6 +95,9 @@ pub struct AppBuilder {
     pg_pool: Option<deadpool_postgres::Pool>,
     #[cfg(feature = "libsql")]
     libsql_db: Option<Arc<libsql::Database>>,
+
+    // Multi-provider cloud intelligence settings (from Settings)
+    providers_settings: Option<crate::settings::ProvidersSettings>,
 }
 
 impl AppBuilder {
@@ -115,6 +124,7 @@ impl AppBuilder {
             pg_pool: None,
             #[cfg(feature = "libsql")]
             libsql_db: None,
+            providers_settings: None,
         }
     }
 
@@ -125,6 +135,17 @@ impl AppBuilder {
     /// be injected into the config overlay.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Inject multi-provider cloud intelligence settings.
+    ///
+    /// When set, `init_llm()` will create a multi-provider chain with
+    /// failover and smart routing based on these settings.
+    /// In Scrappy mode, these come from the Cloud Intelligence UI.
+    /// In headless mode, they come from config.toml / DB settings.
+    pub fn with_providers_settings(mut self, settings: crate::settings::ProvidersSettings) -> Self {
+        self.providers_settings = Some(settings);
         self
     }
 
@@ -233,11 +254,37 @@ impl AppBuilder {
             }
         }
 
+        // Extract ProvidersSettings from DB settings if not already injected.
+        // This enables headless deployments to configure multi-provider failover
+        // via config.toml or DB settings without needing Scrappy's UI.
+        if self.providers_settings.is_none() {
+            match db.get_all_settings("default").await {
+                Ok(map) => {
+                    let settings = crate::settings::Settings::from_db_map(&map);
+                    if !settings.providers.enabled.is_empty() {
+                        tracing::info!(
+                            "Multi-provider settings loaded from DB: {} provider(s) enabled",
+                            settings.providers.enabled.len()
+                        );
+                        self.providers_settings = Some(settings.providers);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Could not load providers settings from DB: {}", e);
+                }
+            }
+        }
+
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
         tokio::spawn(async move {
             if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
                 tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+            match db_cleanup.cleanup_stale_routine_runs().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("Cleaned up {} orphaned RUNNING routine runs", n),
+                Err(e) => tracing::warn!("Failed to cleanup stale routine runs: {}", e),
             }
         });
 
@@ -350,11 +397,15 @@ impl AppBuilder {
     ///
     /// Delegates to `build_provider_chain` which applies all decorators
     /// (retry, smart routing, failover, circuit breaker, response cache).
+    /// When `providers_settings` is available, enables multi-provider failover.
     #[allow(clippy::type_complexity)]
     pub fn init_llm(
         &self,
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        let (llm, cheap_llm) = crate::llm::build_provider_chain(&self.config.llm)?;
+        let (llm, cheap_llm) = crate::llm::build_provider_chain(
+            &self.config.llm,
+            self.providers_settings.as_ref(),
+        )?;
         Ok((llm, cheap_llm))
     }
 
@@ -411,7 +462,8 @@ impl AppBuilder {
                 ws = ws.with_embeddings(emb.clone());
             }
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws));
+            tools.register_memory_tools(Arc::clone(&ws), None);
+
             Some(ws)
         } else {
             None
@@ -421,11 +473,48 @@ impl AppBuilder {
         if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
+            // Resolve workspace directories — same logic as the non-builder path below.
+            // The builder must respect sandboxed/project/unrestricted just like raw dev tools.
+            let mode = self.config.agent.workspace_mode.as_str();
+            let root = self.config.agent.workspace_root.clone();
+
+            let (builder_base_dir, builder_working_dir) = match mode {
+                "sandboxed" => {
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("Library")
+                            .join("Application Support")
+                            .join("OpenClaw")
+                            .join("agent_workspace")
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    tracing::info!("[app] Builder workspace: sandboxed → {}", dir.display());
+                    (Some(dir.clone()), Some(dir))
+                }
+                "project" => {
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    tracing::info!("[app] Builder workspace: project → {}", dir.display());
+                    (None, Some(dir))
+                }
+                _ => {
+                    // Unrestricted: full filesystem access — no restrictions at all.
+                    // Intended for remote/server deployments or power users.
+                    tracing::info!("[app] Builder workspace: unrestricted (full filesystem access)");
+                    (None, None)
+                }
+            };
+
             tools
                 .register_builder_tool(
                     llm.clone(),
                     safety.clone(),
                     Some(self.config.builder.to_builder_config()),
+                    builder_base_dir,
+                    builder_working_dir,
                 )
                 .await;
             tracing::info!("Builder mode enabled");
@@ -681,8 +770,8 @@ impl AppBuilder {
             Some(manager)
         };
 
-        // register_builder_tool() already calls register_dev_tools() internally,
-        // so only register them here when the builder didn't already do it.
+        // register_builder_tool() now registers dev tools with the correct workspace dirs
+        // internally (sandbox/project/unrestricted). Only register here when builder is off.
         let builder_registered_dev_tools = self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
         if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
@@ -694,10 +783,13 @@ impl AppBuilder {
                 "sandboxed" => {
                     // Full sandbox: file tools restricted + shell cwd set
                     let dir = root.unwrap_or_else(|| {
+                        // Resolve from TAURI app data dir via env — set during bridge init
                         dirs::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("Library")
+                            .join("Application Support")
                             .join("OpenClaw")
-                            .join("Projects")
+                            .join("agent_workspace")
                     });
                     // Ensure directory exists
                     let _ = std::fs::create_dir_all(&dir);
@@ -714,10 +806,13 @@ impl AppBuilder {
                     tools.register_dev_tools_with_config(None, Some(dir));
                 }
                 _ => {
-                    // Unrestricted: no constraints
-                    tracing::info!("[app] Workspace mode: unrestricted");
+                    // Unrestricted: full filesystem access — no base_dir, no working_dir forced.
+                    // The agent can write to any absolute path the user/LLM specifies.
+                    // (This mode is intended for remote/server deployments or power users.)
+                    tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
                     tools.register_dev_tools();
                 }
+
             }
         }
 
@@ -760,7 +855,7 @@ impl AppBuilder {
         let hooks = Arc::new(HookRegistry::new());
 
         // Create the audit log hook standalone — it will receive extension lifecycle events
-        // via ExtensionManager::set_audit_hook() called below (different hook subsystem).
+        // via ExtensionManager::set_lifecycle_audit_hook() wired below.
         let audit_hook = Arc::new(AuditLogHook::new());
 
         let (
@@ -770,6 +865,36 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+
+        // Wire the lifecycle audit hook into the extension manager so
+        // install/activate/remove events are recorded for the UI.
+        if let Some(ref ext_mgr) = extension_manager {
+            ext_mgr
+                .set_lifecycle_audit_hook(Arc::clone(&audit_hook))
+                .await;
+        }
+
+        // Register lifecycle hooks: bundled (AuditLogHook) + plugin + workspace.
+        // Without this, the HookRegistry remains empty in Scrappy/Tauri mode.
+        let active_tool_names = tools.list().await;
+        let hook_bootstrap = crate::hooks::bootstrap_hooks(
+            &hooks,
+            workspace.as_ref(),
+            &self.config.wasm.tools_dir,
+            &self.config.channels.wasm_channels_dir,
+            &active_tool_names,
+            &[],  // WASM channel names are loaded separately in the bridge
+            &dev_loaded_tool_names,
+        )
+        .await;
+        tracing::info!(
+            bundled = hook_bootstrap.bundled_hooks,
+            plugin = hook_bootstrap.plugin_hooks,
+            workspace = hook_bootstrap.workspace_hooks,
+            outbound_webhooks = hook_bootstrap.outbound_webhooks,
+            errors = hook_bootstrap.errors,
+            "Lifecycle hooks initialized"
+        );
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -804,7 +929,7 @@ impl AppBuilder {
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
             }
-            let registry = Arc::new(std::sync::RwLock::new(registry));
+            let registry = Arc::new(tokio::sync::RwLock::new(registry));
             let catalog = crate::skills::catalog::shared_catalog();
             tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
             (Some(registry), Some(catalog))
@@ -815,9 +940,20 @@ impl AppBuilder {
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
 
         // Create the shared cost tracker (budget limits from config/env).
-        let cost_tracker = Arc::new(tokio::sync::Mutex::new(CostTracker::new(
-            BudgetConfig::default(),
-        )));
+        let cost_tracker = {
+            let mut tracker = CostTracker::new(BudgetConfig::default());
+
+            // Restore persisted entries from the IronClaw DB.
+            if let Some(ref db) = self.db {
+                match db.get_setting("default", "cost_entries").await {
+                    Ok(Some(json)) => tracker.from_json(&json),
+                    Ok(None) => tracing::debug!("[cost] No persisted cost entries in DB"),
+                    Err(e) => tracing::warn!("[cost] Failed to load cost entries from DB: {}", e),
+                }
+            }
+
+            Arc::new(tokio::sync::Mutex::new(tracker))
+        };
 
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
@@ -887,6 +1023,10 @@ impl AppBuilder {
             session_approvals,
             cost_tracker,
             audit_hook,
+            response_cache: Arc::new(tokio::sync::RwLock::new(CachedResponseStore::new(
+                CacheConfig::default(),
+            ))),
+            routing_policy: Arc::new(tokio::sync::RwLock::new(RoutingPolicy::from_env())),
         })
     }
 }

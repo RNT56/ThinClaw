@@ -3,6 +3,12 @@
 //! Accumulates per-request cost records, provides daily/monthly
 //! aggregation, per-agent/model grouping, budget alerts, and CSV export.
 //!
+//! **Persistence**: Call [`CostTracker::to_json()`] to get a serializable
+//! snapshot and [`CostTracker::from_json()`] to restore entries.
+//! The caller is responsible for persisting via `SettingsStore::set_setting()`
+//! and loading via `SettingsStore::get_setting()` — this keeps the tracker
+//! independent of any specific database backend.
+//!
 //! The [`CostSummary`] struct provides the serializable response shape
 //! for the `openclaw_cost_summary` Tauri command (see §17.4 integration contract).
 
@@ -10,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// A single cost entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostEntry {
     pub timestamp: String,
     pub agent_id: Option<String>,
@@ -63,6 +69,11 @@ impl CostTracker {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
+    }
+
+    /// Clear all entries (reset).
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 
     /// Total cost across all entries.
@@ -167,6 +178,41 @@ impl CostTracker {
         self.entries.is_empty()
     }
 
+    /// Total input tokens across all entries.
+    pub fn total_input_tokens(&self) -> u64 {
+        self.entries.iter().map(|e| e.input_tokens as u64).sum()
+    }
+
+    /// Total output tokens across all entries.
+    pub fn total_output_tokens(&self) -> u64 {
+        self.entries.iter().map(|e| e.output_tokens as u64).sum()
+    }
+
+    /// Serialize all entries to a JSON value for DB persistence.
+    ///
+    /// Store the result via `SettingsStore::set_setting("default", "cost_entries", &value)`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.entries).unwrap_or_default()
+    }
+
+    /// Restore entries from a JSON value loaded from the DB.
+    ///
+    /// Typically called with the result of `SettingsStore::get_setting("default", "cost_entries")`.
+    /// Invalid or missing data is silently ignored (starts fresh).
+    pub fn from_json(&mut self, value: &serde_json::Value) {
+        if let Ok(entries) = serde_json::from_value::<Vec<CostEntry>>(value.clone()) {
+            self.entries = VecDeque::from(entries);
+            // Trim to max_entries
+            while self.entries.len() > self.max_entries {
+                self.entries.pop_front();
+            }
+            tracing::info!(
+                "[cost] Restored {} entries from database",
+                self.entries.len()
+            );
+        }
+    }
+
     /// Build a serializable summary matching the `openclaw_cost_summary` response shape.
     ///
     /// Aggregates totals, daily/monthly breakdowns, per-model/per-agent groupings,
@@ -188,8 +234,19 @@ impl CostTracker {
             }
         }
 
+        let total_cost = self.total_cost();
+        let total_requests = self.entries.len() as u64;
+
         CostSummary {
-            total_cost_usd: self.total_cost(),
+            total_cost_usd: total_cost,
+            total_input_tokens: self.total_input_tokens(),
+            total_output_tokens: self.total_output_tokens(),
+            total_requests,
+            avg_cost_per_request: if total_requests > 0 {
+                total_cost / total_requests as f64
+            } else {
+                0.0
+            },
             daily,
             monthly,
             by_model: self.cost_by_model().into_iter().collect::<BTreeMap<_, _>>(),
@@ -206,6 +263,10 @@ impl CostTracker {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostSummary {
     pub total_cost_usd: f64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_requests: u64,
+    pub avg_cost_per_request: f64,
     pub daily: BTreeMap<String, f64>,
     pub monthly: BTreeMap<String, f64>,
     pub by_model: BTreeMap<String, f64>,

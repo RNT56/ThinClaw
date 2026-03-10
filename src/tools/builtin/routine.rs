@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    normalize_cron_expr,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -44,7 +45,10 @@ impl Tool for RoutineCreateTool {
     fn description(&self) -> &str {
         "Create a new routine (scheduled or event-driven task). \
          Supports cron schedules, event pattern matching, webhooks, and manual triggers. \
-         Use this when the user wants something to happen periodically or reactively."
+         Use this when the user wants something to happen periodically or reactively. \
+         CRON FORMAT: Uses 7 fields — sec min hour dom month dow year. \
+         Standard 5-field expressions (min hour dom month dow) are automatically \
+         expanded by prepending '0' (sec) and appending '*' (any year)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -66,7 +70,7 @@ impl Tool for RoutineCreateTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron expression (for cron trigger). E.g. '0 9 * * MON-FRI' for weekdays at 9am. Uses 6-field cron (sec min hour day month weekday)."
+                    "description": "Cron schedule expression. IMPORTANT: uses 7-field format: 'sec min hour dom month dow year'. Standard 5-field Unix cron is auto-converted. Examples: '0 9 * * MON-FRI *' = weekdays 9am; '0 0 9 * * SUN *' = every Sunday at 9am; '0 30 14 1 * * *' = 1st of month 14:30; '0 0 */2 * * * *' = every 2 hours; '0 0 10 * * MON *' = Mondays 10am. Alternatively pass 5-field standard cron like '30 9 * * MON-FRI' and it will be auto-expanded."
                 },
                 "event_pattern": {
                     "type": "string",
@@ -120,7 +124,7 @@ impl Tool for RoutineCreateTool {
         // Build trigger
         let trigger = match trigger_type {
             "cron" => {
-                let schedule =
+                let raw_schedule =
                     params
                         .get("schedule")
                         .and_then(|v| v.as_str())
@@ -129,12 +133,18 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
-                // Validate cron expression
-                next_cron_fire(schedule).map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
+                // Normalize 5-field or 6-field expressions to the 7-field format
+                // required by the `cron` crate (sec min hour dom month dow year).
+                let schedule = normalize_cron_expr(raw_schedule);
+                // Validate the (possibly normalized) expression
+                next_cron_fire(&schedule).map_err(|e| {
+                    ToolError::InvalidParameters(format!(
+                        "invalid cron schedule '{}' (normalized from '{}'): {}",
+                        schedule, raw_schedule, e
+                    ))
                 })?;
                 Trigger::Cron {
-                    schedule: schedule.to_string(),
+                    schedule,
                 }
             }
             "event" => {
@@ -163,6 +173,18 @@ impl Tool for RoutineCreateTool {
                 secret: None,
             },
             "manual" => Trigger::Manual,
+            "system_event" => {
+                let message = params
+                    .get("trigger_message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("heartbeat check")
+                    .to_string();
+                let schedule = params
+                    .get("trigger_schedule")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Trigger::SystemEvent { message, schedule }
+            }
             other => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unknown trigger_type: {other}"
@@ -421,18 +443,20 @@ impl Tool for RoutineUpdateTool {
             match &mut routine.action {
                 RoutineAction::Lightweight { prompt: p, .. } => *p = prompt.to_string(),
                 RoutineAction::FullJob { description: d, .. } => *d = prompt.to_string(),
+                RoutineAction::Heartbeat { prompt: p, .. } => *p = Some(prompt.to_string()),
             }
         }
 
-        if let Some(schedule) = params.get("schedule").and_then(|v| v.as_str()) {
-            // Validate
-            next_cron_fire(schedule)
+        if let Some(raw_schedule) = params.get("schedule").and_then(|v| v.as_str()) {
+            // Normalize then validate
+            let schedule = normalize_cron_expr(raw_schedule);
+            next_cron_fire(&schedule)
                 .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
 
             routine.trigger = Trigger::Cron {
-                schedule: schedule.to_string(),
+                schedule: schedule.clone(),
             };
-            routine.next_fire_at = next_cron_fire(schedule).unwrap_or(None);
+            routine.next_fire_at = next_cron_fire(&schedule).unwrap_or(None);
         }
 
         self.store

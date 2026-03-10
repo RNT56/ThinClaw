@@ -465,10 +465,10 @@ impl Channel for ReplChannel {
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
                 eprintln!("  \x1b[90m\u{25CB} {display}\x1b[0m");
             }
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, .. } => {
                 eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
             }
-            StatusUpdate::ToolCompleted { name, success } => {
+            StatusUpdate::ToolCompleted { name, success, .. } => {
                 if success {
                     eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
                 } else {
@@ -628,6 +628,31 @@ impl Channel for ReplChannel {
                 let text = termimad::FmtText::from(&skin, &content, Some(width));
                 eprint!("{text}");
                 eprintln!();
+            }
+            // Lifecycle events are informational for the frontend;
+            // the REPL already shows a streaming indicator via is_streaming.
+            StatusUpdate::LifecycleStart { .. } | StatusUpdate::LifecycleEnd { .. } => {}
+
+            // Sub-agent lifecycle events
+            StatusUpdate::SubagentSpawned { name, task, .. } => {
+                eprintln!("  \x1b[36m🔀 Sub-agent '{name}' spawned: {task}\x1b[0m");
+            }
+            StatusUpdate::SubagentProgress { message, .. } => {
+                let display = truncate_for_preview(&message, CLI_STATUS_MAX);
+                eprintln!("  \x1b[90m   ↳ {display}\x1b[0m");
+            }
+            StatusUpdate::SubagentCompleted {
+                name,
+                success,
+                duration_ms,
+                ..
+            } => {
+                let secs = duration_ms as f64 / 1000.0;
+                if success {
+                    eprintln!("  \x1b[32m✅ Sub-agent '{name}' completed ({secs:.1}s)\x1b[0m");
+                } else {
+                    eprintln!("  \x1b[31m❌ Sub-agent '{name}' failed ({secs:.1}s)\x1b[0m");
+                }
             }
         }
         Ok(())

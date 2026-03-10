@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::agent::worker::{Worker, WorkerDeps};
+use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
@@ -51,6 +52,8 @@ pub struct Scheduler {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
+    /// Optional SSE sender propagated to routine-spawned workers.
+    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -76,9 +79,16 @@ impl Scheduler {
             tools,
             store,
             hooks,
+            sse_tx: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Attach an SSE broadcast sender so routine-spawned workers can emit lifecycle events.
+    pub fn with_sse_sender(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
+        self.sse_tx = Some(tx);
+        self
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -125,6 +135,140 @@ impl Scheduler {
         Ok(job_id)
     }
 
+    /// Like `dispatch_job` but wires routine metadata into the worker so it can
+    /// emit a real `RoutineLifecycle` SSE event when the job actually completes
+    /// (instead of when it was merely dispatched to the scheduler).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_job_for_routine(
+        &self,
+        user_id: &str,
+        title: &str,
+        description: &str,
+        metadata: Option<serde_json::Value>,
+        routine_name: String,
+        routine_run_id: String,
+    ) -> Result<Uuid, JobError> {
+        let job_id = self
+            .context_manager
+            .create_job_for_user(user_id, title, description)
+            .await?;
+
+        if let Some(meta) = metadata {
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    // Merge routine_dispatched flag into metadata
+                    let mut merged = meta;
+                    if let Some(obj) = merged.as_object_mut() {
+                        obj.insert("routine_dispatched".to_string(), serde_json::Value::Bool(true));
+                    }
+                    ctx.metadata = merged;
+                })
+                .await?;
+        } else {
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.metadata = serde_json::json!({ "routine_dispatched": true });
+                })
+                .await?;
+        }
+
+        if let Some(ref store) = self.store {
+            let ctx = self.context_manager.get_context(job_id).await?;
+            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
+                id: job_id,
+                reason: format!("failed to persist job: {e}"),
+            })?;
+        }
+
+        self.schedule_for_routine(job_id, routine_name, routine_run_id).await?;
+        Ok(job_id)
+    }
+
+    /// Internal: schedule with routine context wired into WorkerDeps.
+    async fn schedule_for_routine(
+        &self,
+        job_id: Uuid,
+        routine_name: String,
+        routine_run_id: String,
+    ) -> Result<(), JobError> {
+        {
+            let mut jobs = self.jobs.write().await;
+
+            if jobs.contains_key(&job_id) {
+                return Ok(());
+            }
+
+            if jobs.len() >= self.config.max_parallel_jobs {
+                return Err(JobError::MaxJobsExceeded {
+                    max: self.config.max_parallel_jobs,
+                });
+            }
+
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.transition_to(
+                        JobState::InProgress,
+                        Some("Scheduled for execution".to_string()),
+                    )
+                })
+                .await?
+                .map_err(|s| JobError::ContextError {
+                    id: job_id,
+                    reason: s,
+                })?;
+
+            let (tx, rx) = mpsc::channel(16);
+
+            let deps = WorkerDeps {
+                context_manager: self.context_manager.clone(),
+                llm: self.llm.clone(),
+                safety: self.safety.clone(),
+                tools: self.tools.clone(),
+                store: self.store.clone(),
+                hooks: self.hooks.clone(),
+                timeout: self.config.job_timeout,
+                use_planning: self.config.use_planning,
+                sse_tx: self.sse_tx.clone(),
+                routine_name: Some(routine_name),
+                routine_run_id: Some(routine_run_id),
+            };
+            let worker = Worker::new(job_id, deps);
+
+            let handle = tokio::spawn(async move {
+                if let Err(e) = worker.run(rx).await {
+                    tracing::error!("Worker for routine job {} failed: {}", job_id, e);
+                }
+            });
+
+            if tx.send(WorkerMessage::Start).await.is_err() {
+                tracing::error!(job_id = %job_id, "Routine worker died before receiving Start message");
+            }
+
+            jobs.insert(job_id, ScheduledJob { handle, tx });
+        }
+
+        let jobs = Arc::clone(&self.jobs);
+        tokio::spawn(async move {
+            loop {
+                let finished = {
+                    let jobs_read = jobs.read().await;
+                    match jobs_read.get(&job_id) {
+                        Some(scheduled) => scheduled.handle.is_finished(),
+                        None => true,
+                    }
+                };
+                if finished {
+                    jobs.write().await.remove(&job_id);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        tracing::info!("Scheduled routine job {} for execution", job_id);
+        Ok(())
+    }
+
     /// Schedule a job for execution.
     pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
         // Hold write lock for the entire check-insert sequence to prevent
@@ -169,6 +313,9 @@ impl Scheduler {
                 hooks: self.hooks.clone(),
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
+                sse_tx: None,
+                routine_name: None,
+                routine_run_id: None,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -401,7 +548,9 @@ impl Scheduler {
             .into());
         }
 
-        if tool.requires_approval(&params).is_required() {
+        // In autonomous context (scheduler), auto-approve `UnlessAutoApproved`.
+        // Only block tools that unconditionally require explicit approval.
+        if tool.requires_approval(&params) == crate::tools::ApprovalRequirement::Always {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }

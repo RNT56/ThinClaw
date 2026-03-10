@@ -116,9 +116,18 @@ pub enum StatusUpdate {
     /// Agent is thinking/processing.
     Thinking(String),
     /// Tool execution started.
-    ToolStarted { name: String },
+    ToolStarted {
+        name: String,
+        /// Tool input parameters (optional — may be omitted for performance).
+        parameters: Option<serde_json::Value>,
+    },
     /// Tool execution completed.
-    ToolCompleted { name: String, success: bool },
+    ToolCompleted {
+        name: String,
+        success: bool,
+        /// Brief preview of the result (truncated to keep events small).
+        result_preview: Option<String>,
+    },
     /// Brief preview of tool execution output.
     ToolResult { name: String, preview: String },
     /// Streaming text chunk.
@@ -174,6 +183,61 @@ pub enum StatusUpdate {
     AgentMessage {
         content: String,
         message_type: String,
+    },
+
+    /// Run lifecycle start — emitted immediately when a run is accepted,
+    /// before any LLM call. Lets the frontend show a thinking indicator
+    /// instantly, matching openclaw's `lifecycle: phase=start` event.
+    LifecycleStart {
+        /// Unique ID for this run (correlates Start ↔ End events).
+        run_id: String,
+    },
+
+    /// Run lifecycle end — emitted after the final response is produced
+    /// or when the run terminates (error or interrupt).
+    LifecycleEnd {
+        /// Unique ID matching the corresponding LifecycleStart.
+        run_id: String,
+        /// How the run ended: "response" | "interrupted" | "error".
+        phase: String,
+    },
+
+    // ── Sub-agent lifecycle events ─────────────────────────────────────
+
+    /// A sub-agent was spawned by the main agent.
+    SubagentSpawned {
+        /// Unique sub-agent ID.
+        agent_id: String,
+        /// Human-readable name (e.g., "researcher").
+        name: String,
+        /// Task description.
+        task: String,
+    },
+
+    /// A running sub-agent reports progress (tool use, thinking, etc.).
+    SubagentProgress {
+        /// Sub-agent ID.
+        agent_id: String,
+        /// Progress message.
+        message: String,
+        /// Message category: "tool" | "thinking" | "question".
+        category: String,
+    },
+
+    /// A sub-agent completed, failed, or was cancelled.
+    SubagentCompleted {
+        /// Sub-agent ID.
+        agent_id: String,
+        /// Sub-agent name.
+        name: String,
+        /// Whether it succeeded.
+        success: bool,
+        /// The sub-agent's final response / findings.
+        response: String,
+        /// Duration in milliseconds.
+        duration_ms: u64,
+        /// Number of tool iterations used.
+        iterations: usize,
     },
 }
 

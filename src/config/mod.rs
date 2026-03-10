@@ -18,6 +18,7 @@ mod llm;
 pub mod mdns_discovery;
 pub mod model_compat;
 pub mod network_modes;
+pub mod provider_catalog;
 mod routines;
 mod safety;
 mod sandbox;
@@ -226,36 +227,68 @@ impl Config {
 /// are checked by `optional_env()` BEFORE `std::env::var()`, so keychain
 /// keys take priority over stale values in `.env` files.
 ///
-/// We intentionally do NOT check `std::env::var()` here. `.env` files loaded
-/// by dotenvy set real process env vars, and those can contain outdated API
-/// keys from initial setup. The keychain is the canonical, user-updateable
-/// source of truth.
+/// Dynamically queries the provider catalog so new providers added to the
+/// catalog are automatically covered. Falls back to legacy hardcoded
+/// mappings for backwards compatibility.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
 ) {
-    let mappings = [
-        ("llm_openai_api_key", "OPENAI_API_KEY"),
-        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
-        ("llm_compatible_api_key", "LLM_API_KEY"),
-        ("llm_tinfoil_api_key", "TINFOIL_API_KEY"),
-    ];
-
     let mut injected = HashMap::new();
 
-    for (secret_name, env_var) in mappings {
-        match secrets.get_decrypted(user_id, secret_name).await {
+    // Dynamically inject keys for ALL known providers from the catalog.
+    // Each catalog entry has a `secret_name` (SecretsStore key) and
+    // `env_key_name` (env var the config resolver reads).
+    let catalog = crate::config::provider_catalog::catalog();
+    for (slug, endpoint) in catalog {
+        match secrets.get_decrypted(user_id, endpoint.secret_name).await {
             Ok(decrypted) => {
-                injected.insert(env_var.to_string(), decrypted.expose().to_string());
-                tracing::debug!("Loaded secret '{}' for env var '{}'", secret_name, env_var);
+                injected.insert(
+                    endpoint.env_key_name.to_string(),
+                    decrypted.expose().to_string(),
+                );
+                tracing::debug!(
+                    "Loaded secret for provider '{}' (env: {})",
+                    slug,
+                    endpoint.env_key_name
+                );
             }
             Err(_) => {
-                // Secret doesn't exist, that's fine
+                // Also try the provider slug directly (e.g., "groq" as secret name)
+                if endpoint.secret_name != *slug {
+                    if let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await {
+                        injected.insert(
+                            endpoint.env_key_name.to_string(),
+                            decrypted.expose().to_string(),
+                        );
+                        tracing::debug!(
+                            "Loaded secret for provider '{}' via slug (env: {})",
+                            slug,
+                            endpoint.env_key_name
+                        );
+                    }
+                }
             }
         }
     }
 
+    // Legacy generic compatible key (used by openrouter and custom LLM)
+    if !injected.contains_key("LLM_API_KEY") {
+        if let Ok(decrypted) = secrets
+            .get_decrypted(user_id, "llm_compatible_api_key")
+            .await
+        {
+            injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
+            tracing::debug!("Loaded legacy llm_compatible_api_key for LLM_API_KEY");
+        }
+    }
+
+    let count = injected.len();
     update_injected_vars(injected);
+    tracing::info!(
+        "Secret injection complete: {} key(s) loaded into overlay",
+        count
+    );
 }
 
 /// Replace the injected vars overlay atomically.
@@ -283,23 +316,39 @@ fn update_injected_vars(new_vars: HashMap<String, String>) {
 ///
 /// Returns the number of secrets that were (re)loaded.
 pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id: &str) -> usize {
-    let mappings = [
-        ("llm_openai_api_key", "OPENAI_API_KEY"),
-        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
-        ("llm_compatible_api_key", "LLM_API_KEY"),
-        ("llm_tinfoil_api_key", "TINFOIL_API_KEY"),
-    ];
-
     let mut injected = HashMap::new();
 
-    for (secret_name, env_var) in mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
-            injected.insert(env_var.to_string(), decrypted.expose().to_string());
-            tracing::debug!(
-                "Refreshed secret '{}' for env var '{}'",
-                secret_name,
-                env_var
+    // Dynamically refresh keys for ALL known providers from the catalog.
+    let catalog = crate::config::provider_catalog::catalog();
+    for (slug, endpoint) in catalog {
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, endpoint.secret_name).await {
+            injected.insert(
+                endpoint.env_key_name.to_string(),
+                decrypted.expose().to_string(),
             );
+            tracing::debug!(
+                "Refreshed secret for provider '{}' (env: {})",
+                slug,
+                endpoint.env_key_name
+            );
+        } else if endpoint.secret_name != *slug {
+            // Try slug-based lookup as fallback
+            if let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await {
+                injected.insert(
+                    endpoint.env_key_name.to_string(),
+                    decrypted.expose().to_string(),
+                );
+            }
+        }
+    }
+
+    // Legacy generic compatible key
+    if !injected.contains_key("LLM_API_KEY") {
+        if let Ok(decrypted) = secrets
+            .get_decrypted(user_id, "llm_compatible_api_key")
+            .await
+        {
+            injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
         }
     }
 

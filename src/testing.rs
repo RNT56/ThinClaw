@@ -300,6 +300,8 @@ impl TestHarnessBuilder {
             canvas_store: None,
             subagent_executor: None,
             cost_tracker: None,
+            response_cache: None,
+            routing_policy: None,
         };
 
         TestHarness {

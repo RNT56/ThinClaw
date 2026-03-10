@@ -228,6 +228,7 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
             }
             crate::agent::routine::Trigger::Webhook { .. } => "webhook".to_string(),
             crate::agent::routine::Trigger::Manual => "manual".to_string(),
+            crate::agent::routine::Trigger::SystemEvent { .. } => "sys_event".to_string(),
         };
 
         let desc = if r.description.len() > 30 {
@@ -259,7 +260,8 @@ async fn add_routine(
     prompt: String,
     description: Option<String>,
 ) -> anyhow::Result<()> {
-    // Validate cron schedule
+    // Auto-normalize 5/6-field to 7-field
+    let schedule = crate::agent::routine::normalize_cron_expr(&schedule);
     crate::agent::routine::next_cron_fire(&schedule)
         .map_err(|e| anyhow::anyhow!("Invalid cron schedule: {}", e))?;
 
@@ -316,15 +318,16 @@ async fn edit_routine(
     let mut changes = Vec::new();
 
     if let Some(new_schedule) = schedule {
-        // Validate the new cron schedule.
-        crate::agent::routine::next_cron_fire(&new_schedule)
+        // Auto-normalize 5/6-field to 7-field, then validate.
+        let normalized = crate::agent::routine::normalize_cron_expr(&new_schedule);
+        crate::agent::routine::next_cron_fire(&normalized)
             .map_err(|e| anyhow::anyhow!("Invalid cron schedule: {}", e))?;
 
         routine.trigger = crate::agent::routine::Trigger::Cron {
-            schedule: new_schedule.clone(),
+            schedule: normalized.clone(),
         };
-        routine.next_fire_at = crate::agent::routine::next_cron_fire(&new_schedule)?;
-        changes.push(format!("schedule → {}", new_schedule));
+        routine.next_fire_at = crate::agent::routine::next_cron_fire(&normalized)?;
+        changes.push(format!("schedule → {}", normalized));
     }
 
     if let Some(new_prompt) = prompt {
@@ -334,6 +337,9 @@ async fn edit_routine(
             }
             crate::agent::routine::RoutineAction::FullJob { description, .. } => {
                 *description = new_prompt.clone();
+            }
+            crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
+                *prompt = Some(new_prompt.clone());
             }
         }
         changes.push("prompt updated".to_string());
@@ -415,6 +421,9 @@ async fn trigger_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyh
             title, description, ..
         } => {
             format!("{}: {}", title, description)
+        }
+        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
+            prompt.clone().unwrap_or_else(|| "Heartbeat check".to_string())
         }
     };
 
@@ -502,33 +511,23 @@ async fn show_runs(
 fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     use std::str::FromStr;
 
+    // Auto-normalize 5/6-field to 7-field so lint works with standard cron
+    let normalized = crate::agent::routine::normalize_cron_expr(expression);
+    if normalized != expression {
+        println!("ℹ️  Auto-normalized: \"{}\" → \"{}\"", expression, normalized);
+    }
+
     // Try to parse the cron expression
-    let schedule = match cron::Schedule::from_str(expression) {
+    let schedule = match cron::Schedule::from_str(&normalized) {
         Ok(s) => s,
         Err(e) => {
-            println!("\u{274c} Invalid cron expression: \"{}\"", expression);
+            println!("❌ Invalid cron expression: \"{}\"", normalized);
             println!("   Error: {}", e);
-            println!();
-
-            // Hint: common mistake is using 5-field (standard) vs 7-field (cron crate)
-            let field_count = expression.split_whitespace().count();
-            if field_count == 5 {
-                println!("   \u{1f4a1} Hint: This crate uses 7-field cron expressions:");
-                println!("      sec min hour day-of-month month day-of-week year");
-                println!("      Try prepending '0 ' for seconds and appending ' *' for year:");
-                println!("      \"0 {} *\"", expression);
-            } else if field_count == 6 {
-                println!(
-                    "   \u{1f4a1} Hint: 6-field expression detected. Try appending ' *' for year:"
-                );
-                println!("      \"{}  *\"", expression);
-            }
-
             return Err(anyhow::anyhow!("Invalid cron expression"));
         }
     };
 
-    println!("\u{2705} Valid cron expression: \"{}\"", expression);
+    println!("✅ Valid cron expression: \"{}\"", normalized);
     println!();
 
     // Show next N fire times

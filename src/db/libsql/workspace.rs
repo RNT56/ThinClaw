@@ -512,6 +512,19 @@ impl WorkspaceStore for LibSqlBackend {
         let pre_limit = config.pre_fusion_limit as i64;
 
         let fts_results = if config.use_fts {
+            // Sanitize query for FTS5: quote each word individually so special
+            // characters (hyphens, colons, etc.) aren't interpreted as FTS5
+            // operators. e.g. "time-sensitive notes" → `"time" "sensitive" "notes"`
+            let sanitized_query: String = query
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|w| !w.is_empty())
+                .map(|w| format!("\"{}\"", w))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if sanitized_query.is_empty() {
+                Vec::new()
+            } else {
             let mut rows = conn
                 .query(
                     r#"
@@ -524,7 +537,7 @@ impl WorkspaceStore for LibSqlBackend {
                     ORDER BY rank
                     LIMIT ?4
                     "#,
-                    params![user_id, agent_id_str.as_deref(), query, pre_limit],
+                    params![user_id, agent_id_str.as_deref(), sanitized_query, pre_limit],
                 )
                 .await
                 .map_err(|e| WorkspaceError::SearchFailed {
@@ -549,6 +562,7 @@ impl WorkspaceStore for LibSqlBackend {
                 });
             }
             results
+            } // end: else (sanitized_query not empty)
         } else {
             Vec::new()
         };

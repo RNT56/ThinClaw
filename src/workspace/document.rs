@@ -27,6 +27,12 @@ pub mod paths {
     pub const DAILY_DIR: &str = "daily/";
     /// Context directory (for identity-related docs).
     pub const CONTEXT_DIR: &str = "context/";
+    /// First-run identity ritual. Deleted by the agent after bootstrap is complete.
+    pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
+    /// Startup hook — tasks to run silently on every agent boot.
+    pub const BOOT: &str = "BOOT.md";
+    /// Tool catalogue / notes per environment (agent discovers available tools here).
+    pub const TOOLS: &str = "TOOLS.md";
 }
 
 /// A memory document stored in the database.

@@ -74,6 +74,16 @@ pub enum Trigger {
     },
     /// Only fires via tool call or CLI.
     Manual,
+    /// System event: when this trigger fires (via cron), it injects a message
+    /// into the heartbeat's system event queue. The heartbeat picks up the
+    /// message on its next tick. This enables "check X at 9am" patterns.
+    SystemEvent {
+        /// The message to inject into the heartbeat queue.
+        message: String,
+        /// Optional cron schedule for when to inject the event.
+        #[serde(default)]
+        schedule: Option<String>,
+    },
 }
 
 impl Trigger {
@@ -84,6 +94,7 @@ impl Trigger {
             Trigger::Event { .. } => "event",
             Trigger::Webhook { .. } => "webhook",
             Trigger::Manual => "manual",
+            Trigger::SystemEvent { .. } => "system_event",
         }
     }
 
@@ -128,6 +139,21 @@ impl Trigger {
                 Ok(Trigger::Webhook { path, secret })
             }
             "manual" => Ok(Trigger::Manual),
+            "system_event" => {
+                let message = config
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "message".into(),
+                    })?
+                    .to_string();
+                let schedule = config
+                    .get("schedule")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok(Trigger::SystemEvent { message, schedule })
+            }
             other => Err(RoutineError::UnknownTriggerType {
                 trigger_type: other.to_string(),
             }),
@@ -147,6 +173,10 @@ impl Trigger {
                 "secret": secret,
             }),
             Trigger::Manual => serde_json::json!({}),
+            Trigger::SystemEvent { message, schedule } => serde_json::json!({
+                "message": message,
+                "schedule": schedule,
+            }),
         }
     }
 }
@@ -176,6 +206,33 @@ pub enum RoutineAction {
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
     },
+    /// Periodic heartbeat: reads HEARTBEAT.md and runs a full agent turn.
+    ///
+    /// When `light_context` is true, runs as an isolated worker job with
+    /// only HEARTBEAT.md + daily logs as context (cheap, no session history).
+    /// When false, injects into the main session for full conversational
+    /// context and tool access within that session.
+    Heartbeat {
+        /// When true, run in isolation with only HEARTBEAT.md context.
+        /// When false, inject into the main session for full context.
+        #[serde(default = "default_true")]
+        light_context: bool,
+        /// Custom heartbeat prompt body. None = default prompt.
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Include LLM reasoning chain in the output.
+        #[serde(default)]
+        include_reasoning: bool,
+        /// Start hour of active window (0-23, local). None = always active.
+        #[serde(default)]
+        active_start_hour: Option<u8>,
+        /// End hour of active window (0-23, local). None = always active.
+        #[serde(default)]
+        active_end_hour: Option<u8>,
+        /// Output target: "chat" | "none" | channel name.
+        #[serde(default = "default_heartbeat_target")]
+        target: String,
+    },
 }
 
 fn default_max_tokens() -> u32 {
@@ -186,12 +243,21 @@ fn default_max_iterations() -> u32 {
     10
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_heartbeat_target() -> String {
+    "chat".to_string()
+}
+
 impl RoutineAction {
     /// The string tag stored in the DB action_type column.
     pub fn type_tag(&self) -> &'static str {
         match self {
             RoutineAction::Lightweight { .. } => "lightweight",
             RoutineAction::FullJob { .. } => "full_job",
+            RoutineAction::Heartbeat { .. } => "heartbeat",
         }
     }
 
@@ -254,6 +320,41 @@ impl RoutineAction {
                     max_iterations,
                 })
             }
+            "heartbeat" => {
+                let light_context = config
+                    .get("light_context")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let prompt = config
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let include_reasoning = config
+                    .get("include_reasoning")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let active_start_hour = config
+                    .get("active_start_hour")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8);
+                let active_end_hour = config
+                    .get("active_end_hour")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8);
+                let target = config
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("chat")
+                    .to_string();
+                Ok(RoutineAction::Heartbeat {
+                    light_context,
+                    prompt,
+                    include_reasoning,
+                    active_start_hour,
+                    active_end_hour,
+                    target,
+                })
+            }
             other => Err(RoutineError::UnknownActionType {
                 action_type: other.to_string(),
             }),
@@ -280,6 +381,21 @@ impl RoutineAction {
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
+            }),
+            RoutineAction::Heartbeat {
+                light_context,
+                prompt,
+                include_reasoning,
+                active_start_hour,
+                active_end_hour,
+                target,
+            } => serde_json::json!({
+                "light_context": light_context,
+                "prompt": prompt,
+                "include_reasoning": include_reasoning,
+                "active_start_hour": active_start_hour,
+                "active_end_hour": active_end_hour,
+                "target": target,
             }),
         }
     }
@@ -392,6 +508,28 @@ pub fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Normalize a cron expression to the 7-field format required by the `cron` crate.
+///
+/// The `cron` crate (v0.13) uses: `sec min hour dom month dow year`
+///
+/// LLMs almost universally produce standard 5-field Unix cron: `min hour dom month dow`
+/// or occasionally 6-field AWS/Quartz cron: `sec min hour dom month dow`
+///
+/// Mapping:
+/// - 5 fields → prepend `0` (seconds) and append `*` (any year)
+/// - 6 fields → append `*` (any year)
+/// - 7 fields → pass through unchanged
+/// - Other → pass through and let the parser reject it with a clear error
+pub fn normalize_cron_expr(expr: &str) -> String {
+    let trimmed = expr.trim();
+    let field_count = trimmed.split_whitespace().count();
+    match field_count {
+        5 => format!("0 {trimmed} *"), // prepend sec=0, append year=*
+        6 => format!("{trimmed} *"),   // append year=*
+        _ => trimmed.to_string(),      // 7 or invalid — pass through
+    }
+}
+
 /// Parse a cron expression and compute the next fire time from now.
 pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
     let cron_schedule =
@@ -404,7 +542,8 @@ pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineEr
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
+        content_hash, next_cron_fire, normalize_cron_expr, RoutineAction, RoutineGuardrails,
+        RunStatus, Trigger,
     };
 
     #[test]
@@ -485,8 +624,8 @@ mod tests {
 
     #[test]
     fn test_next_cron_fire_valid() {
-        // Every minute should always have a next fire
-        let next = next_cron_fire("* * * * * *").expect("valid cron");
+        // Every minute should always have a next fire (7-field)
+        let next = next_cron_fire("* * * * * * *").expect("valid cron");
         assert!(next.is_some());
     }
 
@@ -494,6 +633,56 @@ mod tests {
     fn test_next_cron_fire_invalid() {
         let result = next_cron_fire("not a cron");
         assert!(result.is_err());
+    }
+
+    // ── normalize_cron_expr tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_5field_to_7field() {
+        // Standard Unix cron: "min hour dom month dow"  → "0 min hour dom month dow *"
+        let result = normalize_cron_expr("30 9 * * MON-FRI");
+        assert_eq!(result, "0 30 9 * * MON-FRI *");
+    }
+
+    #[test]
+    fn test_normalize_6field_to_7field() {
+        // 6-field (with seconds, no year): "sec min hour dom month dow" → append "*"
+        let result = normalize_cron_expr("0 30 9 * * MON-FRI");
+        assert_eq!(result, "0 30 9 * * MON-FRI *");
+    }
+
+    #[test]
+    fn test_normalize_7field_passthrough() {
+        // Already 7-field — unchanged
+        let expr = "0 30 9 * * MON-FRI *";
+        let result = normalize_cron_expr(expr);
+        assert_eq!(result, expr);
+    }
+
+    #[test]
+    fn test_normalize_then_validate_5field() {
+        // A 5-field expression normalized to 7-field must parse and fire
+        let normalized = normalize_cron_expr("0 9 * * MON-FRI");
+        let next = next_cron_fire(&normalized).expect("valid after normalization");
+        assert!(next.is_some());
+    }
+
+    #[test]
+    fn test_normalize_every_2h() {
+        // "0 */2 * * *" (5-field every 2 hours) → 7-field
+        let normalized = normalize_cron_expr("0 */2 * * *");
+        assert_eq!(normalized, "0 0 */2 * * * *");
+        let next = next_cron_fire(&normalized).expect("valid");
+        assert!(next.is_some());
+    }
+
+    #[test]
+    fn test_normalize_sunday_weekly() {
+        // "0 10 * * SUN" common LLM output for "every Sunday at 10am"
+        let normalized = normalize_cron_expr("0 10 * * SUN");
+        assert_eq!(normalized, "0 0 10 * * SUN *");
+        let next = next_cron_fire(&normalized).expect("valid");
+        assert!(next.is_some());
     }
 
     #[test]

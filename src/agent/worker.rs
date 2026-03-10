@@ -7,8 +7,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use std::sync::Mutex as StdMutex;
+
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
+use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
@@ -34,12 +37,23 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
+    /// Optional SSE sender for emitting RoutineLifecycle events when this
+    /// worker was spawned by a routine (via execute_full_job).
+    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Routine name if this worker was dispatched from a routine.
+    pub routine_name: Option<String>,
+    /// Routine run ID for correlation.
+    pub routine_run_id: Option<String>,
 }
 
 /// Worker that executes a single job.
 pub struct Worker {
     job_id: Uuid,
     deps: WorkerDeps,
+    /// Captures the last meaningful output from the worker for use in the
+    /// finalization SSE event. Updated by emit_user_message interception
+    /// and the LLM's final text response.
+    last_output: StdMutex<Option<String>>,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -50,7 +64,19 @@ struct ToolExecResult {
 impl Worker {
     /// Create a new worker for a specific job.
     pub fn new(job_id: Uuid, deps: WorkerDeps) -> Self {
-        Self { job_id, deps }
+        Self { job_id, deps, last_output: StdMutex::new(None) }
+    }
+
+    /// Store the last meaningful output for finalization.
+    fn set_last_output(&self, output: &str) {
+        if let Ok(mut guard) = self.last_output.lock() {
+            *guard = Some(output.to_string());
+        }
+    }
+
+    /// Take the stored output (if any) for finalization.
+    fn take_last_output(&self) -> Option<String> {
+        self.last_output.lock().ok().and_then(|mut g| g.take())
     }
 
     // Convenience accessors to avoid deps.field everywhere
@@ -112,6 +138,13 @@ impl Worker {
         }
     }
 
+    /// Broadcast an SSE event to all frontend subscribers (if connected).
+    fn emit_sse(&self, event: SseEvent) {
+        if let Some(ref tx) = self.deps.sse_tx {
+            let _ = tx.send(event);
+        }
+    }
+
     /// Run the worker until the job is complete or stopped.
     pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
         tracing::info!("Worker starting for job {}", self.job_id);
@@ -144,6 +177,16 @@ Description: {}
 
 You have access to tools to complete this job. Plan your approach and execute tools as needed.
 You may request multiple tools at once if they can be executed in parallel.
+
+IMPORTANT: Use `emit_user_message` to send your results and findings to the user. This is \
+how you deliver output — the user sees these messages in real-time in their chat interface. \
+Use it for interim progress updates (message_type: "progress") and for your final results \
+(message_type: "interim_result"). Do NOT just write results to memory files — the user needs \
+to see them directly.
+
+You can also use the `canvas` tool to display rich structured content (tables, panels, etc.) \
+in the user's UI.
+
 Report when the job is complete or if you encounter issues you cannot resolve."#,
             job_ctx.title, job_ctx.description
         )));
@@ -158,6 +201,21 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         match result {
             Ok(Ok(())) => {
                 tracing::info!("Worker for job {} completed successfully", self.job_id);
+                // Ensure the job reaches a terminal state even when the execution
+                // loop returned Ok(()) without explicitly calling mark_completed()
+                // (e.g., stop signal, cancellation, plan finishing).
+                let already_terminal = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .ok()
+                    .map(|c| matches!(c.state, JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled))
+                    .unwrap_or(false);
+                if !already_terminal {
+                    if let Err(e) = self.mark_completed().await {
+                        tracing::warn!("Failed to mark job {} completed: {}", self.job_id, e);
+                    }
+                }
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
@@ -168,6 +226,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 self.mark_stuck("Execution timeout").await?;
             }
         }
+
+        // ── Single finalization point for routine run records ──────────
+        // All exit paths above converge here. We read the job's final
+        // state once and map it to a RunStatus + SSE event. This keeps
+        // routine lifecycle concerns out of the individual mark_* methods.
+        self.finalize_routine_run().await;
 
         Ok(())
     }
@@ -189,8 +253,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
         let mut iteration = 0;
 
-        // Initial tool definitions for planning (will be refreshed in loop)
-        reason_ctx.available_tools = self.tools().tool_definitions().await;
+        // Initial tool definitions for planning (will be refreshed in loop).
+        // Filter to only tools usable in autonomous context: exclude tools
+        // requiring explicit approval (Always) and tools that need dispatcher
+        // interception (spawn_subagent).
+        reason_ctx.available_tools = self.tools().tool_definitions_for_autonomous().await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -238,9 +305,33 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             None
         };
 
-        // If we have a plan, execute it
+        // If we have a plan, execute it — but fall through to direct
+        // selection if the plan didn't finish the job.
         if let Some(ref plan) = plan {
-            return self.execute_plan(rx, reasoning, reason_ctx, plan).await;
+            self.execute_plan(rx, reasoning, reason_ctx, plan).await?;
+
+            // Check whether the job reached a terminal state.
+            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await {
+                if matches!(
+                    ctx.state,
+                    JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled
+                ) {
+                    return Ok(());
+                }
+            }
+            tracing::info!(
+                "Job {} falling back to direct tool selection after plan",
+                self.job_id
+            );
+
+            // ── Post-plan context compaction ──────────────────────────
+            // Plan execution creates many tool_result messages with synthetic
+            // IDs (plan_{job_id}_{i}). When the direct selection loop runs,
+            // these become orphaned (no matching assistant tool_calls) and
+            // get rewritten as user messages by sanitize_tool_messages(),
+            // ballooning the prompt (e.g., 24KB → 73KB). Compact to keep
+            // only the system prompt, original task, and plan summary.
+            compact_post_plan(&mut reason_ctx.messages, &plan.goal);
         }
 
         // Otherwise, use direct tool selection loop
@@ -274,7 +365,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
 
             // Refresh tool definitions so newly built tools become visible
-            reason_ctx.available_tools = self.tools().tool_definitions().await;
+            reason_ctx.available_tools = self.tools().tool_definitions_for_autonomous().await;
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -290,6 +381,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         // "not done", or "unfinished". Only the LLM's own response
                         // (not tool output) can trigger this.
                         if crate::util::llm_signals_completion(&response) {
+                            self.set_last_output(&response);
                             self.mark_completed().await?;
                             return Ok(());
                         }
@@ -480,8 +572,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     name: tool_name.to_string(),
                 })?;
 
-        // Tools requiring approval are blocked in autonomous jobs
-        if tool.requires_approval(params).is_required() {
+        // In autonomous workers (routines), `UnlessAutoApproved` tools are
+        // auto-approved — there is no human to prompt.  Only block tools
+        // that unconditionally require explicit approval (`Always`).
+        if tool.requires_approval(params) == crate::tools::ApprovalRequirement::Always {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }
@@ -750,6 +844,44 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     "output": crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
                 }));
 
+                // ── emit_user_message interception ───────────────────────
+                // Deliver the message to the frontend via SSE so routine
+                // output appears in the live chat / notification area.
+                if selection.tool_name == "emit_user_message" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
+                        let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or_default();
+                        let msg_type = parsed.get("message_type").and_then(|v| v.as_str()).unwrap_or("progress");
+                        if !msg.is_empty() {
+                            self.set_last_output(msg);
+                            self.emit_sse(SseEvent::RoutineLifecycle {
+                                routine_name: self.deps.routine_name.clone().unwrap_or_else(|| "job".to_string()),
+                                event: "message".to_string(),
+                                run_id: self.deps.routine_run_id.clone(),
+                                result_summary: Some(format!("[{}] {}", msg_type, msg)),
+                            });
+                        }
+                    }
+                }
+
+                // ── canvas interception ──────────────────────────────────
+                // Push canvas actions via SSE so the frontend CanvasProvider
+                // picks them up, even from autonomous workers.
+                if selection.tool_name == "canvas" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
+                        if let Some(action) = parsed.get("action").and_then(|a| a.as_str()) {
+                            let panel_id = parsed.get("panel_id")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("default")
+                                .to_string();
+                            self.emit_sse(SseEvent::CanvasUpdate {
+                                panel_id,
+                                action: action.to_string(),
+                                content: Some(parsed.clone()),
+                            });
+                        }
+                    }
+                }
+
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
                 // own structured response (in execution_loop) can mark a job done.
@@ -869,16 +1001,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
         if crate::util::llm_signals_completion(&response) {
+            self.set_last_output(&response);
             self.mark_completed().await?;
         } else {
-            // Job not complete, could re-plan or fall back to direct selection
+            // Job not complete — return Ok(()) so the caller can fall back
+            // to the direct tool selection loop (which uses the proper
+            // OpenAI tool-calling protocol with native schema support).
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
             );
-            // Continue with standard execution loop by returning (will be picked up by main loop)
-            self.mark_stuck("Plan completed but job incomplete - needs re-planning")
-                .await?;
         }
 
         Ok(())
@@ -890,6 +1022,96 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         params: &serde_json::Value,
     ) -> Result<String, Error> {
         Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await
+    }
+
+    /// Single finalization point for routine run records.
+    ///
+    /// Called once at the end of `run()` after all exit paths have converged.
+    /// Reads the job's actual final state and maps it to the appropriate
+    /// RunStatus, then updates the DB record and emits the SSE lifecycle event.
+    ///
+    /// This replaces the previous pattern of calling `complete_routine_run`
+    /// inside each `mark_*` method, which was fragile and easy to miss.
+    async fn finalize_routine_run(&self) {
+        // Only relevant when dispatched from a routine.
+        let (run_id_str, routine_name) = match (&self.deps.routine_run_id, &self.deps.routine_name) {
+            (Some(rid), Some(rn)) => (rid.clone(), rn.clone()),
+            _ => return,
+        };
+
+        let run_id = match run_id_str.parse::<Uuid>() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        // Derive RunStatus + summary from the job's actual terminal state.
+        let (status, event, summary) = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => {
+                // Extract the reason from the last state transition (if any).
+                let reason = ctx
+                    .transitions
+                    .last()
+                    .and_then(|t| t.reason.clone());
+                match ctx.state {
+                    JobState::Completed => (
+                        crate::agent::routine::RunStatus::Ok,
+                        "completed",
+                        "Job completed successfully".to_string(),
+                    ),
+                    JobState::Failed => (
+                        crate::agent::routine::RunStatus::Failed,
+                        "failed",
+                        reason.unwrap_or_else(|| "Job failed".to_string()),
+                    ),
+                    JobState::Stuck => (
+                        crate::agent::routine::RunStatus::Failed,
+                        "failed",
+                        reason.unwrap_or_else(|| "Job stuck".to_string()),
+                    ),
+                    JobState::Cancelled => (
+                        crate::agent::routine::RunStatus::Failed,
+                        "failed",
+                        "Job cancelled".to_string(),
+                    ),
+                    other => (
+                        crate::agent::routine::RunStatus::Failed,
+                        "failed",
+                        format!("Job ended in unexpected state: {:?}", other),
+                    ),
+                }
+            }
+            Err(e) => (
+                crate::agent::routine::RunStatus::Failed,
+                "failed",
+                format!("Could not read final job state: {}", e),
+            ),
+        };
+
+        // Use the last meaningful output from the worker (LLM's final response
+        // or last emit_user_message) as the result_summary for the SSE event
+        // and DB record. Falls back to the generic status string.
+        let rich_summary = self.take_last_output().unwrap_or_else(|| summary.clone());
+
+        // Update the routine run record in the database.
+        if let Some(store) = self.store().cloned() {
+            let summary_ref = rich_summary.clone();
+            if let Err(e) = store
+                .complete_routine_run(run_id, status, Some(&summary_ref), None)
+                .await
+            {
+                tracing::error!(run_id = %run_id, "Failed to complete routine run: {}", e);
+            }
+        }
+
+        // Emit the SSE lifecycle event for the UI.
+        if let Some(ref tx) = self.deps.sse_tx {
+            let _ = tx.send(SseEvent::RoutineLifecycle {
+                routine_name,
+                event: event.to_string(),
+                run_id: Some(run_id_str),
+                result_summary: Some(rich_summary),
+            });
+        }
     }
 
     async fn mark_completed(&self) -> Result<(), Error> {
@@ -917,6 +1139,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             JobState::Completed,
             Some("Job completed successfully".to_string()),
         );
+
+        // NOTE: Routine run finalization (DB + SSE) is handled by
+        // finalize_routine_run() at the end of run(), not here.
 
         // ── Post-completion evaluation (fire-and-forget) ────────────
         let job_id = self.job_id;
@@ -985,6 +1210,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }),
         );
         self.persist_status(JobState::Failed, Some(reason.to_string()));
+
+        // NOTE: Routine run finalization (DB + SSE) is handled by
+        // finalize_routine_run() at the end of run(), not here.
+
         Ok(())
     }
 
@@ -1005,6 +1234,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }),
         );
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
+
+        // NOTE: Routine run finalization (DB + SSE) is handled by
+        // finalize_routine_run() at the end of run(), not here.
+
         Ok(())
     }
 }
@@ -1118,6 +1351,9 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookRegistry::new()),
             timeout: Duration::from_secs(30),
             use_planning: false,
+            sse_tx: None,
+            routine_name: None,
+            routine_run_id: None,
         };
 
         Worker::new(job_id, deps)
@@ -1314,4 +1550,54 @@ mod tests {
             "Missing tool should produce an error, not a panic"
         );
     }
+}
+
+/// Compact context messages after plan execution to prevent orphaned tool_result bloat.
+///
+/// Keeps:
+/// - All System messages (system prompt, instructions)
+/// - The first User message (the original task)
+/// - A synthetic assistant summary of the plan
+///
+/// Strips:
+/// - Plan-era tool_result messages (with synthetic `plan_*` IDs)
+/// - Plan-era assistant messages with tool_calls
+/// - Intermediate user messages from orphan rewrites
+fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
+    use crate::llm::Role;
+
+    let pre_count = messages.len();
+    let pre_chars: usize = messages.iter().map(|m| m.estimated_chars()).sum();
+
+    let mut compacted = Vec::new();
+    let mut first_user_seen = false;
+
+    for msg in messages.iter() {
+        match msg.role {
+            Role::System => {
+                compacted.push(msg.clone());
+            }
+            Role::User if !first_user_seen => {
+                compacted.push(msg.clone());
+                first_user_seen = true;
+            }
+            _ => {} // Skip all plan-era messages
+        }
+    }
+
+    // Add a summary note about the completed plan
+    compacted.push(ChatMessage::assistant(format!(
+        "I executed a plan to accomplish: {}. \
+         The plan has been completed. Now I'll check for any remaining work \
+         or deliver final results.",
+        plan_goal,
+    )));
+
+    let post_chars: usize = compacted.iter().map(|m| m.estimated_chars()).sum();
+    tracing::info!(
+        "Post-plan compaction: {} messages ({} chars) → {} messages ({} chars)",
+        pre_count, pre_chars, compacted.len(), post_chars
+    );
+
+    *messages = compacted;
 }

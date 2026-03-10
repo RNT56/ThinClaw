@@ -200,7 +200,7 @@ impl GatewayChannel {
     }
 
     /// Inject the skill registry for skill management API.
-    pub fn with_skill_registry(mut self, sr: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
+    pub fn with_skill_registry(mut self, sr: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
         self.rebuild_state(|s| s.skill_registry = Some(sr));
         self
     }
@@ -303,11 +303,11 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted {
+            StatusUpdate::ToolStarted { name, .. } => SseEvent::ToolStarted {
                 name,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolCompleted { name, success } => SseEvent::ToolCompleted {
+            StatusUpdate::ToolCompleted { name, success, .. } => SseEvent::ToolCompleted {
                 name,
                 success,
                 thread_id: thread_id.clone(),
@@ -400,6 +400,32 @@ impl Channel for GatewayChannel {
                     thread_id: thread_id.unwrap_or_default(),
                 }
             }
+            StatusUpdate::LifecycleStart { run_id } => SseEvent::Status {
+                message: format!("{{\"lifecycle\":\"start\",\"runId\":\"{}\"}}", run_id),
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::LifecycleEnd { run_id, phase } => SseEvent::Status {
+                message: format!(
+                    "{{\"lifecycle\":\"end\",\"runId\":\"{}\",\"phase\":\"{}\"}}",
+                    run_id, phase
+                ),
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::SubagentSpawned { name, task, .. } => SseEvent::Status {
+                message: format!("{{\"subagent\":\"spawned\",\"name\":\"{}\",\"task\":\"{}\"}}", name, task),
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::SubagentProgress { message, category, .. } => SseEvent::Status {
+                message: format!("{{\"subagent\":\"progress\",\"category\":\"{}\",\"message\":\"{}\"}}", category, message),
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::SubagentCompleted { name, success, duration_ms, .. } => SseEvent::Status {
+                message: format!(
+                    "{{\"subagent\":\"completed\",\"name\":\"{}\",\"success\":{},\"duration_ms\":{}}}",
+                    name, success, duration_ms
+                ),
+                thread_id: thread_id.clone(),
+            },
         };
 
         self.state.sse.broadcast(event);

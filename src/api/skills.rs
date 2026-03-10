@@ -2,9 +2,9 @@
 //!
 //! Extracted from `channels/web/handlers/skills.rs`.
 //!
-//! NOTE: `SkillRegistry` is behind `Arc<RwLock<SkillRegistry>>` in the agent
-//! deps, so the API takes that wrapped type. The `SkillCatalog` has its own
-//! query/install interface.
+//! NOTE: `SkillRegistry` is behind `Arc<tokio::sync::RwLock<SkillRegistry>>` in agent
+//! deps. Using `tokio::sync::RwLock` ensures locks are never held across `.await`
+//! points on a Tokio worker thread (std::sync::RwLock would block the executor).
 
 use std::sync::Arc;
 
@@ -15,10 +15,10 @@ use crate::skills::catalog::SkillCatalog;
 use super::error::ApiResult;
 
 /// List installed skills with their metadata.
-pub fn list_skills(
-    skill_registry: &std::sync::RwLock<SkillRegistry>,
+pub async fn list_skills(
+    skill_registry: &tokio::sync::RwLock<SkillRegistry>,
 ) -> ApiResult<SkillListResponse> {
-    let registry = skill_registry.read().unwrap();
+    let registry = skill_registry.read().await;
     let skills = registry.skills();
 
     let skill_infos: Vec<SkillInfo> = skills
@@ -43,12 +43,12 @@ pub fn list_skills(
 /// Search the skill catalog and installed skills.
 pub async fn search_skills(
     skill_catalog: &Arc<SkillCatalog>,
-    skill_registry: &std::sync::RwLock<SkillRegistry>,
+    skill_registry: &tokio::sync::RwLock<SkillRegistry>,
     query: &str,
 ) -> ApiResult<SkillSearchResponse> {
     let outcome = skill_catalog.search(query).await;
 
-    let registry = skill_registry.read().unwrap();
+    let registry = skill_registry.read().await;
     let installed: Vec<SkillInfo> = registry
         .skills()
         .iter()
@@ -75,15 +75,11 @@ pub async fn search_skills(
 }
 
 /// Install a skill from content.
-///
-/// The write lock is held across `.await` because `SkillRegistry::install_skill`
-/// requires `&mut self`. This is acceptable for an infrequent admin operation.
-#[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
 pub async fn install_skill(
-    skill_registry: &std::sync::RwLock<SkillRegistry>,
+    skill_registry: &tokio::sync::RwLock<SkillRegistry>,
     content: &str,
 ) -> ApiResult<ActionResponse> {
-    let mut registry = skill_registry.write().unwrap();
+    let mut registry = skill_registry.write().await;
     match registry.install_skill(content).await {
         Ok(name) => Ok(ActionResponse::ok(format!("Installed skill '{}'", name))),
         Err(e) => Ok(ActionResponse::fail(e.to_string())),
@@ -91,12 +87,11 @@ pub async fn install_skill(
 }
 
 /// Remove a skill by name.
-#[allow(clippy::await_holding_lock, clippy::readonly_write_lock)]
 pub async fn remove_skill(
-    skill_registry: &std::sync::RwLock<SkillRegistry>,
+    skill_registry: &tokio::sync::RwLock<SkillRegistry>,
     name: &str,
 ) -> ApiResult<ActionResponse> {
-    let mut registry = skill_registry.write().unwrap();
+    let mut registry = skill_registry.write().await;
     match registry.remove_skill(name).await {
         Ok(()) => Ok(ActionResponse::ok(format!("Removed skill '{}'", name))),
         Err(e) => Ok(ActionResponse::fail(e.to_string())),

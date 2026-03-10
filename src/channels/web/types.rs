@@ -212,6 +212,50 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+
+    /// Channel connectivity status change (channel came online/offline/degraded).
+    #[serde(rename = "channel_status_change")]
+    ChannelStatusChange {
+        channel: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Routine lifecycle event (started, completed, failed).
+    #[serde(rename = "routine_lifecycle")]
+    RoutineLifecycle {
+        routine_name: String,
+        event: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result_summary: Option<String>,
+    },
+
+    /// Cost budget alert (approaching or exceeding daily/hourly limits).
+    #[serde(rename = "cost_alert")]
+    CostAlert {
+        alert_type: String,
+        current_cost_usd: f64,
+        limit_usd: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Canvas / A2UI panel update pushed to the frontend.
+    #[serde(rename = "canvas_update")]
+    CanvasUpdate {
+        panel_id: String,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<serde_json::Value>,
+    },
+
+    /// Agent completed its bootstrap ritual (BOOTSTRAP.md deleted).
+    /// Frontend should update bootstrapNeeded → false.
+    #[serde(rename = "bootstrap_completed")]
+    BootstrapCompleted,
 }
 
 // --- Memory ---
@@ -711,6 +755,11 @@ impl WsServerMessage {
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ChannelStatusChange { .. } => "channel_status_change",
+            SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
+            SseEvent::CostAlert { .. } => "cost_alert",
+            SseEvent::CanvasUpdate { .. } => "canvas_update",
+            SseEvent::BootstrapCompleted => "bootstrap_completed",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {

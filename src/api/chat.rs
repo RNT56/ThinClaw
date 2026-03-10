@@ -53,6 +53,23 @@ pub async fn send_message(
     content: &str,
     deliver: bool,
 ) -> ApiResult<SendMessageResult> {
+    send_message_full(agent, session_key, content, deliver, None).await
+}
+
+/// Full-featured send_message with optional routine engine for event triggers.
+///
+/// In Tauri mode, `agent.run()` is never called — this function replicates
+/// the missing features from the message loop:
+///   - `channels.record_received()` — stats tracking
+///   - `BeforeOutbound` hook — allows hooks to modify/suppress outbound responses
+///   - `check_event_triggers()` — fires event-triggered routines on message patterns
+pub async fn send_message_full(
+    agent: Arc<Agent>,
+    session_key: &str,
+    content: &str,
+    deliver: bool,
+    routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
+) -> ApiResult<SendMessageResult> {
     if content.trim().is_empty() {
         return Err(ApiError::InvalidInput("Message content is empty".into()));
     }
@@ -74,6 +91,9 @@ pub async fn send_message(
 
     let msg_id = msg.id;
 
+    // Record received (stats tracking — parity with run() loop)
+    agent.channels().record_received(&msg.channel).await;
+
     // Clone what the spawned task needs
     let agent_ref = Arc::clone(&agent);
     let msg_clone = msg.clone();
@@ -82,22 +102,46 @@ pub async fn send_message(
     tokio::spawn(async move {
         match agent_ref.handle_message_external(&msg_clone).await {
             Ok(Some(response)) if !response.is_empty() => {
-                // Response is delivered via send_status / respond on the channel —
-                // the agent loop already handles this. Nothing extra to do here
-                // since handle_message_external returns the text, but the
-                // channel has already consumed it via the Agent's internal loop.
-                //
-                // In Tauri mode (direct API), we need to respond manually since
-                // there's no message loop consuming the return value.
-                if let Err(e) = agent_ref
-                    .channels()
-                    .respond(
-                        &msg_clone,
-                        crate::channels::OutgoingResponse::text(response),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %e, "Failed to deliver turn response to channel");
+                // BeforeOutbound hook — allow hooks to modify or suppress outbound
+                let event = crate::hooks::HookEvent::Outbound {
+                    user_id: msg_clone.user_id.clone(),
+                    channel: msg_clone.channel.clone(),
+                    content: response.clone(),
+                    thread_id: msg_clone.thread_id.clone(),
+                };
+                match agent_ref.hooks().run(&event).await {
+                    Err(err) => {
+                        tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                        // Hook blocked the response — don't deliver
+                    }
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_content),
+                    }) => {
+                        // Hook modified the response content
+                        if let Err(e) = agent_ref
+                            .channels()
+                            .respond(
+                                &msg_clone,
+                                crate::channels::OutgoingResponse::text(new_content),
+                            )
+                            .await
+                        {
+                            tracing::error!(error = %e, "Failed to deliver hook-modified response");
+                        }
+                    }
+                    _ => {
+                        // No modification — deliver original response
+                        if let Err(e) = agent_ref
+                            .channels()
+                            .respond(
+                                &msg_clone,
+                                crate::channels::OutgoingResponse::text(response),
+                            )
+                            .await
+                        {
+                            tracing::error!(error = %e, "Failed to deliver turn response to channel");
+                        }
+                    }
                 }
             }
             Ok(_) => {
@@ -118,6 +162,15 @@ pub async fn send_message(
                         &serde_json::Value::Null,
                     )
                     .await;
+            }
+        }
+
+        // Check event triggers (parity with run() loop)
+        // Fires event-triggered routines that match on message patterns.
+        if let Some(ref engine) = routine_engine {
+            let fired = engine.check_event_triggers(&msg_clone).await;
+            if fired > 0 {
+                tracing::debug!("Fired {} event-triggered routines from send_message", fired);
             }
         }
     });

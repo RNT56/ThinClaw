@@ -362,17 +362,14 @@ impl Agent {
             "help" => Ok(SubmissionResult::response(concat!(
                 "System:\n",
                 "  /help             Show this help\n",
+                "  /status           Session status, context usage, model info\n",
+                "  /context          List context sources injected into the prompt\n",
+                "  /context detail   Show full injected context\n",
                 "  /model [name]     Show or switch the active model\n",
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
                 "  /ping             Connectivity check\n",
-                "\n",
-                "Jobs:\n",
-                "  /job <desc>       Create a new job\n",
-                "  /status [id]      Check job status\n",
-                "  /cancel <id>      Cancel a job\n",
-                "  /list             List all jobs\n",
                 "\n",
                 "Session:\n",
                 "  /undo             Undo last turn\n",
@@ -499,6 +496,73 @@ impl Agent {
                 }
             }
 
+            "status" => {
+                let model = self.llm().active_model_name();
+                let workspace_mode = &self.config.workspace_mode;
+                Ok(SubmissionResult::response(format!(
+                    "Agent status\n\
+                     ──────────────────────\n\
+                     ✅ Reachable\n\
+                     Model:     {model}\n\
+                     Workspace: {workspace_mode}",
+                )))
+            }
+
+            "context" => {
+                let detail = args.first().map(|s| s.as_str()) == Some("detail");
+                let ws = self.workspace();
+
+                let mut sections = Vec::new();
+
+                // Always-present sections
+                sections.push(("Safety guardrails", true, String::new()));
+                sections.push(("Tool list", true, {
+                    let tools = self.tools().list().await;
+                    format!("{} tools: {}", tools.len(), tools.join(", "))
+                }));
+
+                // Workspace sections (identity files)
+                if let Some(workspace) = ws {
+                    let paths = [
+                        (crate::workspace::paths::AGENTS, "AGENTS.md"),
+                        (crate::workspace::paths::SOUL, "SOUL.md"),
+                        (crate::workspace::paths::USER, "USER.md"),
+                        (crate::workspace::paths::IDENTITY, "IDENTITY.md"),
+                        (crate::workspace::paths::MEMORY, "MEMORY.md"),
+                        (crate::workspace::paths::HEARTBEAT, "HEARTBEAT.md"),
+                        (crate::workspace::paths::BOOT, "BOOT.md"),
+                    ];
+                    for (path, label) in paths {
+                        match workspace.read(path).await {
+                            Ok(doc) if !doc.content.is_empty() => {
+                                let preview = if detail {
+                                    doc.content.clone()
+                                } else {
+                                    let first_line = doc.content.lines().next().unwrap_or("");
+                                    format!("{} ({} chars)", first_line, doc.content.len())
+                                };
+                                sections.push((label, true, preview));
+                            }
+                            Ok(_) => sections.push((label, false, "(empty)".to_string())),
+                            Err(_) => sections.push((label, false, "(not found)".to_string())),
+                        }
+                    }
+                } else {
+                    sections.push(("Workspace", false, "(no workspace connected)".to_string()));
+                }
+
+                let mut out = String::from("Context sources\n──────────────────────\n");
+                for (label, active, preview) in sections {
+                    let icon = if active { "✅" } else { "❌" };
+                    if detail && !preview.is_empty() {
+                        out.push_str(&format!("\n{} {}\n{}\n", icon, label, preview));
+                    } else {
+                        out.push_str(&format!("{} {}  {}\n", icon, label, preview));
+                    }
+                }
+                Ok(SubmissionResult::response(out))
+            }
+
             _ => Ok(SubmissionResult::error(format!(
                 "Unknown command: {}. Try /help",
                 command
@@ -512,15 +576,7 @@ impl Agent {
             return Ok(SubmissionResult::error("Skills system not enabled."));
         };
 
-        let guard = match registry.read() {
-            Ok(g) => g,
-            Err(e) => {
-                return Ok(SubmissionResult::error(format!(
-                    "Skill registry lock error: {}",
-                    e
-                )));
-            }
-        };
+        let guard = registry.read().await;
 
         let skills = guard.skills();
         if skills.is_empty() {
@@ -602,9 +658,8 @@ impl Agent {
         }
 
         // Show matching installed skills
-        if let Some(registry) = self.skill_registry()
-            && let Ok(guard) = registry.read()
-        {
+        if let Some(registry) = self.skill_registry() {
+            let guard = registry.read().await;
             let query_lower = query.to_lowercase();
             let matches: Vec<_> = guard
                 .skills()

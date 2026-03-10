@@ -999,7 +999,7 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
-    /// List all enabled cron routines whose next_fire_at <= now.
+    /// List all enabled cron/system_event routines whose next_fire_at <= now.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
         let now = Utc::now();
@@ -1008,7 +1008,7 @@ impl Store {
                 r#"
                 SELECT * FROM routines
                 WHERE enabled
-                  AND trigger_type = 'cron'
+                  AND trigger_type IN ('cron', 'system_event')
                   AND next_fire_at IS NOT NULL
                   AND next_fire_at <= $1
                 "#,
@@ -1205,6 +1205,44 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    /// Mark all RUNNING routine runs as failed (startup cleanup).
+    pub async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
+        let conn = self.conn().await?;
+        let now = Utc::now();
+        let count = conn
+            .execute(
+                r#"
+                UPDATE routine_runs SET
+                    status = 'failed',
+                    completed_at = $1,
+                    result_summary = 'Orphaned: process restarted while routine was running'
+                WHERE status = 'running'
+                "#,
+                &[&now],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM routine_runs WHERE routine_id = $1",
+                &[&routine_id],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute("DELETE FROM routine_runs", &[])
+            .await?;
+        Ok(count)
     }
 }
 

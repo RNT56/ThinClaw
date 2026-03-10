@@ -3,6 +3,9 @@
 //! Holds references to channel runtime, WASM tool runtime, MCP infrastructure,
 //! secrets store, and tool registry. All extension operations (search, install,
 //! auth, activate, list, remove) flow through here.
+//!
+//! Lifecycle events (install, activate, deactivate, remove) are forwarded to an
+//! optional [`AuditLogHook`] for the plugin lifecycle audit trail.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -100,6 +103,8 @@ pub struct ExtensionManager {
         RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
     /// In-memory ClawHub catalog — populated by background prefetch at startup.
     catalog_cache: Arc<tokio::sync::Mutex<CatalogCache>>,
+    /// Optional lifecycle audit hook for recording install/activate/remove events.
+    lifecycle_audit_hook: RwLock<Option<Arc<crate::extensions::lifecycle_hooks::AuditLogHook>>>,
 }
 
 impl ExtensionManager {
@@ -142,6 +147,7 @@ impl ExtensionManager {
             activation_errors: RwLock::new(HashMap::new()),
             sse_sender: RwLock::new(None),
             catalog_cache: Arc::new(tokio::sync::Mutex::new(CatalogCache::new(3600))),
+            lifecycle_audit_hook: RwLock::new(None),
         }
     }
 
@@ -185,6 +191,22 @@ impl ExtensionManager {
         sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
     ) {
         *self.sse_sender.write().await = Some(sender);
+    }
+
+    /// Set the lifecycle audit hook for recording plugin install/activate/remove events.
+    pub async fn set_lifecycle_audit_hook(
+        &self,
+        hook: Arc<crate::extensions::lifecycle_hooks::AuditLogHook>,
+    ) {
+        *self.lifecycle_audit_hook.write().await = Some(hook);
+    }
+
+    /// Fire a lifecycle event to the audit hook (if set).
+    async fn fire_lifecycle_event(&self, event: crate::extensions::lifecycle_hooks::LifecycleEvent) {
+        if let Some(ref hook) = *self.lifecycle_audit_hook.read().await {
+            use crate::extensions::lifecycle_hooks::LifecycleHook;
+            hook.on_event(&event);
+        }
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -238,18 +260,48 @@ impl ExtensionManager {
         tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
+        let kind_label = kind_hint.map(|k| format!("{:?}", k)).unwrap_or_else(|| "unknown".into());
+        self.fire_lifecycle_event(
+            crate::extensions::lifecycle_hooks::LifecycleEvent::Installing {
+                name: name.to_string(),
+                kind: kind_label,
+            },
+        )
+        .await;
+
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
         if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
-            return self.install_from_entry(&entry).await.map_err(|e| {
+            let result = self.install_from_entry(&entry).await.map_err(|e| {
                 tracing::error!(extension = %name, error = %e, "Extension install failed");
                 e
             });
+            match &result {
+                Ok(_) => {
+                    self.fire_lifecycle_event(
+                        crate::extensions::lifecycle_hooks::LifecycleEvent::Installed {
+                            name: name.to_string(),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    self.fire_lifecycle_event(
+                        crate::extensions::lifecycle_hooks::LifecycleEvent::Failed {
+                            name: name.to_string(),
+                            event: "install".into(),
+                            reason: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            return result;
         }
 
         // If a URL was provided, determine kind and install
         if let Some(url) = url {
             let kind = kind_hint.unwrap_or_else(|| infer_kind_from_url(url));
-            return match kind {
+            let result = match kind {
                 ExtensionKind::McpServer => self.install_mcp_from_url(name, url).await,
                 ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
                 ExtensionKind::WasmChannel => {
@@ -260,6 +312,27 @@ impl ExtensionManager {
                 tracing::error!(extension = %name, url = %url, error = %e, "Extension install from URL failed");
                 e
             });
+            match &result {
+                Ok(_) => {
+                    self.fire_lifecycle_event(
+                        crate::extensions::lifecycle_hooks::LifecycleEvent::Installed {
+                            name: name.to_string(),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    self.fire_lifecycle_event(
+                        crate::extensions::lifecycle_hooks::LifecycleEvent::Failed {
+                            name: name.to_string(),
+                            event: "install".into(),
+                            reason: e.to_string(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            return result;
         }
 
         let err = ExtensionError::NotFound(format!(
@@ -294,11 +367,42 @@ impl ExtensionManager {
         Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
-        match kind {
+        self.fire_lifecycle_event(
+            crate::extensions::lifecycle_hooks::LifecycleEvent::Activating {
+                name: name.to_string(),
+            },
+        )
+        .await;
+
+        let result = match kind {
             ExtensionKind::McpServer => self.activate_mcp(name).await,
             ExtensionKind::WasmTool => self.activate_wasm_tool(name).await,
             ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
+        };
+
+        match &result {
+            Ok(r) => {
+                self.fire_lifecycle_event(
+                    crate::extensions::lifecycle_hooks::LifecycleEvent::Activated {
+                        name: name.to_string(),
+                        tools: r.tools_loaded.clone(),
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                self.fire_lifecycle_event(
+                    crate::extensions::lifecycle_hooks::LifecycleEvent::Failed {
+                        name: name.to_string(),
+                        event: "activate".into(),
+                        reason: e.to_string(),
+                    },
+                )
+                .await;
+            }
         }
+
+        result
     }
 
     /// List extensions with their status.
@@ -455,7 +559,14 @@ impl ExtensionManager {
         Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
-        match kind {
+        self.fire_lifecycle_event(
+            crate::extensions::lifecycle_hooks::LifecycleEvent::Uninstalling {
+                name: name.to_string(),
+            },
+        )
+        .await;
+
+        let result: Result<String, ExtensionError> = match kind {
             ExtensionKind::McpServer => {
                 // Unregister tools with this server's prefix
                 let tool_names: Vec<String> = self
@@ -541,7 +652,30 @@ impl ExtensionManager {
                     name
                 ))
             }
+        };
+
+        match &result {
+            Ok(_) => {
+                self.fire_lifecycle_event(
+                    crate::extensions::lifecycle_hooks::LifecycleEvent::Uninstalled {
+                        name: name.to_string(),
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                self.fire_lifecycle_event(
+                    crate::extensions::lifecycle_hooks::LifecycleEvent::Failed {
+                        name: name.to_string(),
+                        event: "remove".into(),
+                        reason: e.to_string(),
+                    },
+                )
+                .await;
+            }
         }
+
+        result
     }
 
     // ── MCP config helpers (DB with disk fallback) ─────────────────────

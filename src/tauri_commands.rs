@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use crate::agent::routine_audit::{RoutineAuditLog, RoutineRun};
+use crate::agent::routine::RoutineRun;
 use crate::channels::gmail_wiring::GmailConfig;
 use crate::cli::oauth_defaults::{self, GmailOAuthConfig};
 use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
@@ -46,6 +46,22 @@ pub fn cost_summary(tracker: &CostTracker) -> Result<CostSummary, String> {
 /// Response: `String` (CSV text)
 pub fn cost_export_csv(tracker: &CostTracker) -> Result<String, String> {
     Ok(tracker.export_csv())
+}
+
+// ── 2b. openclaw_cost_reset ──────────────────────────────────────────
+
+/// Clear all cost tracking data.
+///
+/// Maps to: `openclaw_cost_reset`
+/// Response: `()`
+///
+/// The caller is responsible for persisting the empty state to the DB
+/// via `SettingsStore::set_setting("default", "cost_entries", &tracker.to_json())`.
+pub fn cost_reset(tracker: &mut CostTracker) -> Result<(), String> {
+    let count = tracker.len();
+    tracker.clear();
+    tracing::info!("[cost] Reset: cleared {} entries", count);
+    Ok(())
 }
 
 // ── 3. openclaw_clawhub_search ────────────────────────────────────────
@@ -112,22 +128,38 @@ pub fn clawhub_prepare_install(
 
 // ── 5. openclaw_routine_audit_list ────────────────────────────────────
 
-/// Query routine audit log.
+/// Query routine run history from the database.
+///
+/// `RoutineEngine` persists every run via `store.create_routine_run()` /
+/// `store.complete_routine_run()`. This command reads that data back.
 ///
 /// Maps to: `openclaw_routine_audit_list`
-/// Params: `routine_key: String, limit: Option<u32>, outcome: Option<String>`
+/// Params: `routine_name: String, user_id: String, limit: Option<i64>`
 /// Response: `Vec<RoutineRun>`
-pub fn routine_audit_list(
-    log: &RoutineAuditLog,
-    routine_key: &str,
-    limit: Option<u32>,
-    outcome_filter: Option<&str>,
+pub async fn routine_audit_list(
+    store: &dyn crate::db::Database,
+    routine_name: &str,
+    user_id: &str,
+    limit: Option<i64>,
 ) -> Result<Vec<RoutineRun>, String> {
-    Ok(log
-        .query_by_routine(routine_key, limit, outcome_filter)
-        .into_iter()
-        .cloned()
-        .collect())
+    // Look up the routine by name to get its UUID.
+    let routine = store
+        .get_routine_by_name(user_id, routine_name)
+        .await
+        .map_err(|e| format!("DB error looking up routine '{}': {}", routine_name, e))?
+        .ok_or_else(|| {
+            format!(
+                "Routine '{}' not found for user '{}'",
+                routine_name, user_id
+            )
+        })?;
+
+    let runs = store
+        .list_routine_runs(routine.id, limit.unwrap_or(20))
+        .await
+        .map_err(|e| format!("DB error listing runs: {}", e))?;
+
+    Ok(runs)
 }
 
 // ── 6. openclaw_cache_stats ───────────────────────────────────────────
@@ -711,7 +743,7 @@ pub fn available_commands() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::routine_audit::{RoutineOutcome, RoutineRun, TriggerKind};
+    // RoutineRun tests removed — routine_audit_list now queries the DB (integration test needed)
     use crate::extensions::lifecycle_hooks::{LifecycleEvent, LifecycleHook};
     use crate::llm::cost_tracker::{BudgetConfig, CostEntry};
     use crate::llm::response_cache_ext::CacheConfig;
@@ -811,37 +843,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_routine_audit_list() {
-        let mut log = RoutineAuditLog::new(100);
-        log.push(RoutineRun {
-            id: "run-1".into(),
-            routine_name: "daily-backup".into(),
-            started_at: "2026-03-04T01:00:00Z".into(),
-            outcome: RoutineOutcome::Success { duration_ms: 500 },
-            triggered_by: TriggerKind::Cron,
-            job_id: None,
-            agent_id: None,
-        });
-        log.push(RoutineRun {
-            id: "run-2".into(),
-            routine_name: "daily-backup".into(),
-            started_at: "2026-03-04T02:00:00Z".into(),
-            outcome: RoutineOutcome::Failed {
-                error: "timeout".into(),
-                duration_ms: 30000,
-            },
-            triggered_by: TriggerKind::Cron,
-            job_id: None,
-            agent_id: None,
-        });
-
-        let runs = routine_audit_list(&log, "daily-backup", None, None).unwrap();
-        assert_eq!(runs.len(), 2);
-
-        let successes = routine_audit_list(&log, "daily-backup", None, Some("success")).unwrap();
-        assert_eq!(successes.len(), 1);
-    }
+    // NOTE: test_routine_audit_list removed — the function now queries
+    // the Database (async + requires a real or mock DB). The DB-backed
+    // routine_run persistence is tested via routine_engine integration tests.
 
     #[test]
     fn test_cache_stats_facade() {

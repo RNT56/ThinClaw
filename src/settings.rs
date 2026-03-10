@@ -3,9 +3,50 @@
 //! Stores user preferences in ~/.ironclaw/settings.json.
 //! Settings are loaded with env var > settings.json > default priority.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// Multi-provider cloud intelligence configuration.
+///
+/// Enables IronClaw to manage multiple LLM providers with failover,
+/// smart routing, and model allowlists — whether running headless
+/// (config.toml / env vars) or inside Scrappy (UI-driven).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProvidersSettings {
+    /// Enabled cloud provider IDs (e.g., ["anthropic", "openai", "groq"]).
+    /// Only providers listed here will be used for failover.
+    #[serde(default)]
+    pub enabled: Vec<String>,
+
+    /// Starred/primary provider (e.g., "anthropic").
+    /// This provider's model is tried first before any fallbacks.
+    #[serde(default)]
+    pub primary: Option<String>,
+
+    /// Primary model for the starred provider (e.g., "claude-sonnet-4-20250514").
+    /// If not set, the provider's default model from the catalog is used.
+    #[serde(default)]
+    pub primary_model: Option<String>,
+
+    /// Cheap/fast model for lightweight tasks (routing, heartbeat, eval).
+    /// Format: "provider/model" (e.g., "groq/llama-3.1-8b-instant").
+    /// When set, SmartRoutingProvider is wired to split cheap vs primary tasks.
+    #[serde(default)]
+    pub cheap_model: Option<String>,
+
+    /// Per-provider model allowlists.
+    /// Key: provider ID, Value: list of allowed model IDs.
+    /// If a provider is enabled but not listed here, ALL its models are allowed.
+    #[serde(default)]
+    pub allowed_models: HashMap<String, Vec<String>>,
+
+    /// Explicit fallback chain (e.g., ["openai/gpt-4o", "local/model"]).
+    /// If empty, auto-generated from enabled providers.
+    #[serde(default)]
+    pub fallback_chain: Vec<String>,
+}
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,6 +138,11 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Multi-provider cloud intelligence configuration.
+    /// Enables failover, smart routing, and model allowlists.
+    #[serde(default)]
+    pub providers: ProvidersSettings,
 }
 
 /// Source for the secrets master key.
@@ -285,10 +331,44 @@ pub struct HeartbeatSettings {
     /// User ID to notify on heartbeat findings.
     #[serde(default)]
     pub notify_user: Option<String>,
+
+    // ── Phase 3: Enhanced heartbeat config ──────────────────────────
+    /// Use lightweight context (only HEARTBEAT.md, no session history).
+    /// Default: true (cheaper). Set to false for full conversational context.
+    #[serde(default = "default_true")]
+    pub light_context: bool,
+
+    /// Include LLM reasoning in heartbeat output.
+    #[serde(default)]
+    pub include_reasoning: bool,
+
+    /// Output target: "chat" | "none" | channel name.
+    /// Default: "chat" — findings appear in the chat.
+    #[serde(default = "default_heartbeat_target")]
+    pub target: String,
+
+    /// Start hour for active window (0-23). Heartbeat only runs during
+    /// active hours. Null = always active.
+    #[serde(default)]
+    pub active_start_hour: Option<u8>,
+
+    /// End hour for active window (0-23). Heartbeat only runs during
+    /// active hours. Null = always active.
+    #[serde(default)]
+    pub active_end_hour: Option<u8>,
+
+    /// Custom heartbeat prompt body. When set, replaces the default
+    /// OpenClaw-style prompt. The agent can modify this at runtime.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {
     1800 // 30 minutes
+}
+
+fn default_heartbeat_target() -> String {
+    "chat".to_string()
 }
 
 impl Default for HeartbeatSettings {
@@ -298,6 +378,12 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            light_context: true,
+            include_reasoning: false,
+            target: default_heartbeat_target(),
+            active_start_hour: None,
+            active_end_hour: None,
+            prompt: None,
         }
     }
 }

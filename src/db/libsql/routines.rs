@@ -171,7 +171,7 @@ impl RoutineStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'cron' AND next_fire_at IS NOT NULL AND next_fire_at <= ?1",
+                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type IN ('cron', 'system_event') AND next_fire_at IS NOT NULL AND next_fire_at <= ?1",
                     ROUTINE_COLUMNS
                 ),
                 params![now],
@@ -401,5 +401,45 @@ impl RoutineStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        let count = conn
+            .execute(
+                r#"
+                UPDATE routine_runs SET
+                    status = 'failed',
+                    completed_at = ?1,
+                    result_summary = 'Orphaned: process restarted while routine was running'
+                WHERE status = 'running'
+                "#,
+                params![now],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(count)
+    }
+
+    async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM routine_runs WHERE routine_id = ?1",
+                params![routine_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(count)
+    }
+
+    async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+        let count = conn
+            .execute("DELETE FROM routine_runs", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(count)
     }
 }
