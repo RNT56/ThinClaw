@@ -1,5 +1,14 @@
 use sqlx::sqlite::SqlitePoolOptions;
 use std::fs;
+use std::sync::OnceLock;
+
+/// Global log broadcaster — shared between the tracing subscriber (WebLogLayer)
+/// and the IronClaw bridge so all tracing::* events reach the UI Logs panel.
+///
+/// Initialized once in `run()` before any threads are spawned.
+pub(crate) static GLOBAL_LOG_BROADCASTER: OnceLock<
+    Arc<ironclaw::channels::web::log_layer::LogBroadcaster>,
+> = OnceLock::new();
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -109,7 +118,40 @@ struct TrayState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt::init();
+    // ── Tracing / Logging init ───────────────────────────────────────────
+    // IronClaw's init_tracing() installs:
+    //   1. A reloadable EnvFilter (ironclaw=debug by default)
+    //   2. A fmt layer writing to stderr (visible in terminal / macOS Console)
+    //   3. A WebLogLayer that feeds LogBroadcaster → UI Logs tab
+    //
+    // We MUST NOT call tracing_subscriber::fmt::init() before this — doing so
+    // sets the global subscriber and silences all ironclaw tracing::* calls.
+    //
+    // The broadcaster is stored in a OnceLock so it survives bridge restarts.
+    use std::sync::OnceLock;
+    static TRACING_INIT: OnceLock<()> = OnceLock::new();
+    TRACING_INIT.get_or_init(|| {
+        // Default: show ironclaw internals at debug level, noisy crates at warn
+        if std::env::var("RUST_LOG").is_err() {
+            // Safety: single-threaded at app startup, before any threads are spawned.
+            // set_var is unavoidable here — tracing_subscriber reads it during init.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(
+                    "RUST_LOG",
+                    "ironclaw=debug,backend=info,tower_http=warn,sqlx=warn,hyper=warn",
+                );
+            }
+        }
+        // Create a shared broadcaster and install the full tracing stack.
+        let broadcaster =
+            std::sync::Arc::new(ironclaw::channels::web::log_layer::LogBroadcaster::new());
+        // Store globally so the bridge can retrieve it.
+        GLOBAL_LOG_BROADCASTER
+            .set(std::sync::Arc::clone(&broadcaster))
+            .ok();
+        ironclaw::channels::web::log_layer::init_tracing(broadcaster);
+    });
 
     let specta_builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
         greet,
@@ -205,8 +247,8 @@ pub fn run() {
         openclaw::commands::openclaw_save_gateway_settings,
         openclaw::commands::openclaw_add_agent_profile,
         openclaw::commands::openclaw_remove_agent_profile,
-        openclaw::extra_commands::openclaw_switch_to_profile,
-        openclaw::extra_commands::openclaw_test_connection,
+        openclaw::commands::openclaw_switch_to_profile,
+        openclaw::commands::openclaw_test_connection,
         openclaw::fleet::openclaw_get_fleet_status,
         openclaw::fleet::openclaw_broadcast_command,
         openclaw::commands::openclaw_start_gateway,
@@ -225,12 +267,14 @@ pub fn run() {
         openclaw::commands::openclaw_get_memory,
         openclaw::commands::openclaw_get_file,
         openclaw::commands::openclaw_write_file,
+        openclaw::commands::openclaw_delete_file,
         openclaw::commands::openclaw_save_memory,
         openclaw::commands::openclaw_list_workspace_files,
         openclaw::commands::openclaw_cron_list,
         openclaw::commands::openclaw_cron_run,
         openclaw::commands::openclaw_cron_history,
         openclaw::commands::openclaw_cron_lint,
+        openclaw::commands::openclaw_routine_create,
         openclaw::commands::openclaw_channels_list,
         openclaw::commands::openclaw_skills_list,
         openclaw::commands::openclaw_skills_status,
@@ -257,6 +301,12 @@ pub fn run() {
         openclaw::commands::openclaw_set_setup_completed,
         openclaw::commands::openclaw_toggle_auto_start,
         openclaw::commands::openclaw_set_dev_mode_wizard,
+        // Autonomy & bootstrap
+        openclaw::commands::openclaw_set_autonomy_mode,
+        openclaw::commands::openclaw_get_autonomy_mode,
+        openclaw::commands::openclaw_set_bootstrap_completed,
+        openclaw::commands::openclaw_check_bootstrap_needed,
+        openclaw::commands::openclaw_trigger_bootstrap,
         openclaw::commands::openclaw_set_hf_token,
         openclaw::commands::openclaw_save_implicit_provider_key,
         openclaw::commands::openclaw_get_implicit_provider_key,
@@ -271,12 +321,20 @@ pub fn run() {
         openclaw::commands::openclaw_agents_list,
         openclaw::commands::openclaw_canvas_push,
         openclaw::commands::openclaw_canvas_navigate,
+        openclaw::commands::openclaw_canvas_panels_list,
+        openclaw::commands::openclaw_canvas_panel_get,
+        openclaw::commands::openclaw_canvas_panel_dismiss,
+        openclaw::commands::openclaw_routine_delete,
+        openclaw::commands::openclaw_routine_toggle,
+        openclaw::commands::openclaw_heartbeat_set_interval,
         // New feature commands
         openclaw::commands::openclaw_set_thinking,
         openclaw::commands::openclaw_memory_search,
         openclaw::commands::openclaw_export_session,
         // Hooks & extensions management
         openclaw::commands::openclaw_hooks_list,
+        openclaw::commands::openclaw_hooks_register,
+        openclaw::commands::openclaw_hooks_unregister,
         openclaw::commands::openclaw_extensions_list,
         openclaw::commands::openclaw_extension_activate,
         openclaw::commands::openclaw_extension_remove,
@@ -292,11 +350,13 @@ pub fn run() {
         // Sprint 13 — New backend APIs
         openclaw::commands::openclaw_cost_summary,
         openclaw::commands::openclaw_cost_export_csv,
+        openclaw::commands::openclaw_cost_reset,
         openclaw::commands::openclaw_channel_status_list,
         openclaw::commands::openclaw_agents_set_default,
         openclaw::commands::openclaw_clawhub_search,
         openclaw::commands::openclaw_clawhub_install,
         openclaw::commands::openclaw_routine_audit_list,
+        openclaw::commands::openclaw_clear_routine_runs,
         openclaw::commands::openclaw_cache_stats,
         openclaw::commands::openclaw_plugin_lifecycle_list,
         openclaw::commands::openclaw_manifest_validate,
@@ -345,6 +405,12 @@ pub fn run() {
         cloud::commands::cloud_get_recovery_key,
         cloud::commands::cloud_import_recovery_key,
         cloud::commands::cloud_get_storage_breakdown,
+        // Workspace path & Finder reveal
+        openclaw::commands::openclaw_get_workspace_path,
+        openclaw::commands::openclaw_reveal_workspace,
+        openclaw::commands::openclaw_list_agent_workspace_files,
+        openclaw::commands::openclaw_write_agent_workspace_file,
+        openclaw::commands::openclaw_reveal_file,
     ]);
 
     #[cfg(debug_assertions)]

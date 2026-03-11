@@ -61,6 +61,10 @@ export interface OpenClawStatus {
     setup_completed: boolean;
     auto_start_gateway: boolean;
     dev_mode_wizard: boolean;
+    /** When true, the agent runs tools without per-tool approval prompts. */
+    auto_approve_tools: boolean;
+    /** Whether the first-run identity bootstrap ritual has been completed. */
+    bootstrap_completed: boolean;
     custom_llm_url: string | null;
     custom_llm_key: string | null;
     custom_llm_model: string | null;
@@ -128,12 +132,17 @@ export interface OpenClawRpcResponse {
 }
 
 export interface CronJob {
-    key: string;
+    key: string;            // UUID of the routine
+    name: string;           // display name
     description: string;
-    schedule: string;
-    nextRun?: string;
+    schedule: string;       // 7-field cron expression
+    nextRun?: string;       // ISO timestamp
+    lastRun?: string;       // ISO timestamp
     lastStatus?: 'ok' | 'error' | string;
-    lastRun?: string;
+    enabled?: boolean;
+    run_count?: number;
+    action_type?: 'lightweight' | 'full_job' | 'heartbeat' | string;
+    trigger_type?: 'cron' | 'event' | 'webhook' | 'manual' | 'system_event' | string;
 }
 
 export interface CronHistoryItem {
@@ -379,6 +388,14 @@ export async function writeOpenClawFile(path: string, content: string): Promise<
 }
 
 /**
+ * Delete a file from the OpenClaw DB workspace.
+ * Core seeded files (SOUL.md, IDENTITY.md, etc.) are protected.
+ */
+export async function deleteOpenClawFile(path: string): Promise<void> {
+    return invoke('openclaw_delete_file', { path });
+}
+
+/**
  * Open a path in the system file manager
  */
 export async function openPath(path: string): Promise<void> {
@@ -403,6 +420,33 @@ export async function runOpenClawCron(key: string): Promise<OpenClawRpcResponse>
 
 export async function getOpenClawCronHistory(key: string, limit: number): Promise<CronHistoryItem[]> {
     return invoke('openclaw_cron_history', { key, limit });
+}
+
+export interface RoutineAuditEntry {
+    routine_key: string;
+    started_at: string;
+    completed_at: string | null;
+    outcome: 'success' | 'failure' | 'skipped' | 'timeout' | string;
+    duration_ms: number | null;
+    error: string | null;
+}
+
+/** Fetch routine execution history from the RoutineAuditLog. */
+export async function getRoutineAuditList(
+    routineKey: string,
+    limit?: number,
+    outcome?: string,
+): Promise<RoutineAuditEntry[]> {
+    return invoke('openclaw_routine_audit_list', {
+        routineKey,
+        limit: limit ?? null,
+        outcome: outcome ?? null,
+    });
+}
+
+/** Clear routine run history. If routineKey is provided, clears only that routine's runs. */
+export async function clearRoutineRuns(routineKey?: string): Promise<void> {
+    await invoke('openclaw_clear_routine_runs', { key: routineKey ?? null });
 }
 
 // ============================================================================
@@ -438,6 +482,25 @@ export interface CronLintResult {
 
 export async function lintCronExpression(expression: string): Promise<CronLintResult> {
     return invoke('openclaw_cron_lint', { expression });
+}
+
+export interface CreateRoutineResult {
+    id: string;
+    name: string;
+    description: string;
+    schedule: string;
+    task: string;
+    created_at: string;
+}
+
+/** Create a new scheduled routine. */
+export async function createRoutine(
+    name: string,
+    description: string,
+    schedule: string,
+    task: string,
+): Promise<CreateRoutineResult> {
+    return invoke('openclaw_routine_create', { name, description, schedule, task });
 }
 
 export async function getOpenClawSkillsList(): Promise<Skill[]> {
@@ -500,11 +563,32 @@ export async function patchOpenClawConfig(patch: any): Promise<void> {
     return invoke('openclaw_config_patch', { patch });
 }
 
-export async function getOpenClawSystemPresence(): Promise<any> {
+export async function getOpenClawSystemPresence(): Promise<AgentRuntimePresence> {
     return invoke('openclaw_system_presence');
 }
 
-export async function getOpenClawLogsTail(limit: number): Promise<{ lines: string[] }> {
+/** Live runtime data for the Agent Runtime / Presence panel. */
+export interface AgentRuntimePresence {
+    online: boolean;
+    engine: string;
+    mode: string;
+    session_count: number;
+    sub_agent_count: number;
+    tool_count: number;
+    hook_count: number;
+    channel_count: number;
+    routine_engine_running: boolean;
+    uptime_secs: number | null;
+}
+
+export interface LogLine {
+    timestamp: string;
+    level: string;
+    target: string;
+    message: string;
+}
+
+export async function getOpenClawLogsTail(limit: number): Promise<{ logs: LogLine[]; lines: string[] }> {
     return invoke('openclaw_logs_tail', { limit });
 }
 
@@ -837,6 +921,30 @@ export async function listHooks(): Promise<HooksListResponse> {
     return invoke('openclaw_hooks_list');
 }
 
+export interface HookRegisterResponse {
+    ok: boolean;
+    hooks_registered: number;
+    webhooks_registered: number;
+    errors: number;
+    message: string | null;
+}
+
+export interface HookUnregisterResponse {
+    ok: boolean;
+    removed: boolean;
+    message: string | null;
+}
+
+/** Register a hook bundle from a JSON configuration. */
+export async function registerHookBundle(bundleJson: string, source?: string): Promise<HookRegisterResponse> {
+    return invoke('openclaw_hooks_register', { input: { bundle_json: bundleJson, source: source || null } });
+}
+
+/** Unregister (remove) a hook by name. */
+export async function unregisterHook(hookName: string): Promise<HookUnregisterResponse> {
+    return invoke('openclaw_hooks_unregister', { hookName });
+}
+
 export interface ExtensionInfoItem {
     name: string;
     kind: string;
@@ -1021,6 +1129,10 @@ export async function compactSession(sessionKey: string): Promise<CompactSession
 
 export interface CostSummary {
     total_cost_usd: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_requests: number;
+    avg_cost_per_request: number;
     daily: Record<string, number>;
     monthly: Record<string, number>;
     by_model: Record<string, number>;
@@ -1037,6 +1149,11 @@ export async function getCostSummary(): Promise<CostSummary> {
 /** Export cost data as CSV string. */
 export async function exportCostCsv(): Promise<string> {
     return invoke('openclaw_cost_export_csv');
+}
+
+/** Reset (clear) all cost tracking data. Persists empty state to DB. */
+export async function resetCostData(): Promise<void> {
+    return invoke('openclaw_cost_reset');
 }
 
 // --- Channel Status ---
@@ -1089,27 +1206,9 @@ export async function installFromClawHub(pluginId: string): Promise<void> {
     return invoke('openclaw_clawhub_install', { pluginId });
 }
 
-// --- Routine Audit ---
-
-export interface RoutineAuditEntry {
-    routine_key: string;
-    started_at: string;
-    completed_at: string | null;
-    outcome: 'success' | 'failure' | 'timeout';
-    duration_ms: number | null;
-    error: string | null;
-}
-
-/** List routine audit entries with optional outcome filter. */
-export async function getRoutineAuditList(
-    routineKey: string,
-    limit?: number,
-    outcome?: 'success' | 'failure'
-): Promise<RoutineAuditEntry[]> {
-    return invoke('openclaw_routine_audit_list', { routineKey, limit: limit ?? null, outcome: outcome ?? null });
-}
 
 // --- Cache Stats ---
+
 
 export interface CacheStats {
     hits: number;
@@ -1271,4 +1370,141 @@ export interface GmailStatusResponse {
 /** Get Gmail channel configuration status. */
 export async function getGmailStatus(): Promise<GmailStatusResponse> {
     return invoke('openclaw_gmail_status');
+}
+
+// ============================================================================
+// Canvas Panel Management
+// ============================================================================
+
+export interface CanvasPanelSummary {
+    panel_id: string;
+    title: string;
+}
+
+export interface CanvasPanelData {
+    panel_id: string;
+    title: string;
+    components: unknown;
+    metadata?: unknown;
+}
+
+/** List all active canvas panels. */
+export async function listCanvasPanels(): Promise<{ panels: CanvasPanelSummary[] }> {
+    return safeInvoke('openclaw_canvas_panels_list');
+}
+
+/** Get full data for a specific canvas panel. */
+export async function getCanvasPanel(panelId: string): Promise<CanvasPanelData | null> {
+    return safeInvoke('openclaw_canvas_panel_get', { panelId });
+}
+
+/** Dismiss (remove) a canvas panel. */
+export async function dismissCanvasPanel(panelId: string): Promise<boolean> {
+    return safeInvoke('openclaw_canvas_panel_dismiss', { panelId });
+}
+
+// ============================================================================
+// Routine Delete / Toggle
+// ============================================================================
+
+/** Delete a routine by ID or name. */
+export async function deleteRoutine(routineId: string): Promise<{ ok: boolean; deleted_id: string }> {
+    return safeInvoke('openclaw_routine_delete', { routineId });
+}
+
+/** Toggle a routine enabled/disabled. */
+export async function toggleRoutine(routineId: string, enabled: boolean): Promise<{ ok: boolean; id: string; enabled: boolean }> {
+    return safeInvoke('openclaw_routine_toggle', { routineId, enabled });
+}
+
+// ============================================================================
+// Autonomy mode
+// ============================================================================
+
+/**
+ * Enable or disable fully autonomous tool execution.
+ * When enabled, the agent runs tools without per-tool approval prompts.
+ * When disabled, the user approves each tool call (human-in-the-loop).
+ * Takes effect on the next engine start.
+ */
+export async function setAutonomyMode(enabled: boolean): Promise<void> {
+    return safeInvoke('openclaw_set_autonomy_mode', { enabled });
+}
+
+/** Get the current autonomy mode setting. */
+export async function getAutonomyMode(): Promise<boolean> {
+    return safeInvoke('openclaw_get_autonomy_mode');
+}
+
+// ============================================================================
+// Bootstrap ritual
+// ============================================================================
+
+/**
+ * Mark the first-run identity bootstrap ritual as completed.
+ * Called by the frontend after the agent has finished naming itself.
+ */
+export async function setBootstrapCompleted(completed: boolean): Promise<void> {
+    return safeInvoke('openclaw_set_bootstrap_completed', { completed });
+}
+
+/**
+ * Check whether the bootstrap ritual needs to run.
+ * Returns true if the agent has NOT yet completed the identity ritual.
+ */
+export async function checkBootstrapNeeded(): Promise<boolean> {
+    return safeInvoke('openclaw_check_bootstrap_needed');
+}
+
+/**
+ * Re-trigger the bootstrap ritual (Reinitiate Identity Ritual).
+ * Resets bootstrap_completed so the modal shows on next startup.
+ */
+export async function triggerBootstrap(): Promise<void> {
+    return safeInvoke('openclaw_trigger_bootstrap');
+}
+
+// ── Workspace path & Finder reveal ────────────────────────────────────────────
+
+/** Returns the local filesystem workspace root (e.g. ~/Scrappy). */
+export async function getWorkspacePath(): Promise<string> {
+    return safeInvoke('openclaw_get_workspace_path');
+}
+
+/** Opens the local workspace directory in Finder and returns the path. */
+export async function revealWorkspace(): Promise<string> {
+    return safeInvoke('openclaw_reveal_workspace');
+}
+
+export interface WorkspaceFile {
+    path: string;
+    absolute_path: string;
+    size: number;
+    modified_ms: number;
+}
+
+/** Lists all real files inside the agent_workspace filesystem directory. */
+export async function listAgentWorkspaceFiles(): Promise<WorkspaceFile[]> {
+    return safeInvoke('openclaw_list_agent_workspace_files');
+}
+
+/** Reveals a specific file in Finder (macOS) / Explorer (Windows). */
+export async function revealFile(absolutePath: string): Promise<void> {
+    return safeInvoke('openclaw_reveal_file', { path: absolutePath });
+}
+
+/**
+ * Write content to a file in the agent's local `agent_workspace` directory.
+ * Returns the absolute path of the written file.
+ */
+export async function writeAgentWorkspaceFile(relativePath: string, content: string): Promise<string> {
+    return safeInvoke('openclaw_write_agent_workspace_file', { relativePath, content });
+}
+
+/**
+ * Update the heartbeat interval (in minutes) at runtime.
+ * Takes effect immediately — updates the DB routine schedule and persists to config.
+ */
+export async function setHeartbeatInterval(intervalMinutes: number): Promise<any> {
+    return safeInvoke('openclaw_heartbeat_set_interval', { intervalMinutes });
 }

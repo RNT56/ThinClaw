@@ -8,8 +8,10 @@ use super::super::config::{AgentProfile, CustomSecret};
 /// OpenClaw status response
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct OpenClawStatus {
-    pub gateway_running: bool,
-    pub ws_connected: bool,
+    #[serde(alias = "gateway_running")]
+    pub engine_running: bool,
+    #[serde(alias = "ws_connected")]
+    pub engine_connected: bool,
     pub slack_enabled: bool,
     pub telegram_enabled: bool,
     pub port: u16,
@@ -35,12 +37,19 @@ pub struct OpenClawStatus {
     pub groq_granted: bool,
     pub custom_secrets: Vec<CustomSecret>,
     pub node_host_enabled: bool,
+    pub allow_local_tools: bool,
+    pub workspace_mode: String,
+    pub workspace_root: Option<String>,
     pub local_inference_enabled: bool,
     pub selected_cloud_brain: Option<String>,
     pub selected_cloud_model: Option<String>,
     pub setup_completed: bool,
     pub auto_start_gateway: bool,
     pub dev_mode_wizard: bool,
+    /// Whether the agent runs tools without individual approval prompts.
+    pub auto_approve_tools: bool,
+    /// Whether the first-run identity bootstrap ritual has been completed.
+    pub bootstrap_completed: bool,
     pub custom_llm_url: Option<String>,
     pub custom_llm_key: Option<String>,
     pub custom_llm_model: Option<String>,
@@ -154,8 +163,10 @@ pub struct OpenClawRpcResponse {
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct OpenClawDiagnostics {
     pub timestamp: String,
-    pub gateway_running: bool,
-    pub ws_connected: bool,
+    #[serde(alias = "gateway_running")]
+    pub engine_running: bool,
+    #[serde(alias = "ws_connected")]
+    pub engine_connected: bool,
     pub version: String,
     pub platform: String,
     pub port: Option<u16>,
@@ -233,7 +244,7 @@ pub struct HookInfoItem {
     pub name: String,
     pub hook_points: Vec<String>,
     pub failure_mode: String,
-    pub timeout_ms: u64,
+    pub timeout_ms: u32,
     pub priority: u32,
 }
 
@@ -242,6 +253,34 @@ pub struct HookInfoItem {
 pub struct HooksListResponse {
     pub hooks: Vec<HookInfoItem>,
     pub total: u32,
+}
+
+/// Input for registering a hook bundle (rules and/or outbound webhooks).
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+pub struct HookRegisterInput {
+    /// JSON string containing the hook bundle configuration.
+    /// Can be a single rule object or a full bundle with `rules` and `outbound_webhooks`.
+    pub bundle_json: String,
+    /// Optional human-readable source label (defaults to "ui").
+    pub source: Option<String>,
+}
+
+/// Response after registering hooks from a bundle.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct HookRegisterResponse {
+    pub ok: bool,
+    pub hooks_registered: u32,
+    pub webhooks_registered: u32,
+    pub errors: u32,
+    pub message: Option<String>,
+}
+
+/// Response for unregistering a hook by name.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct HookUnregisterResponse {
+    pub ok: bool,
+    pub removed: bool,
+    pub message: Option<String>,
 }
 
 /// Extension (plugin) information for UI display
@@ -354,6 +393,10 @@ pub struct CompactSessionResponse {
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct CostSummary {
     pub total_cost_usd: f64,
+    pub total_input_tokens: f64,
+    pub total_output_tokens: f64,
+    pub total_requests: f64,
+    pub avg_cost_per_request: f64,
     pub daily: std::collections::HashMap<String, f64>,
     pub monthly: std::collections::HashMap<String, f64>,
     pub by_model: std::collections::HashMap<String, f64>,
@@ -371,9 +414,9 @@ pub struct ChannelStatusEntry {
     pub channel_type: String, // "wasm" | "native" | "builtin"
     pub state: String, // "Running" | "Connecting" | "Degraded" | "Disconnected" | "Error"
     pub enabled: bool,
-    pub uptime_secs: Option<u64>,
-    pub messages_sent: u64,
-    pub messages_received: u64,
+    pub uptime_secs: Option<u32>,
+    pub messages_sent: u32,
+    pub messages_received: u32,
     pub last_error: Option<String>,
     pub stream_mode: String,
 }
@@ -385,17 +428,17 @@ pub struct RoutineAuditEntry {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub outcome: String, // "success" | "failure" | "timeout"
-    pub duration_ms: Option<u64>,
+    pub duration_ms: Option<u32>,
     pub error: Option<String>,
 }
 
 /// Response cache statistics
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct CacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub evictions: u64,
-    pub size_bytes: u64,
+    pub hits: u32,
+    pub misses: u32,
+    pub evictions: u32,
+    pub size_bytes: u32,
     pub hit_rate: f64,
 }
 
@@ -413,4 +456,88 @@ pub struct LifecycleEventItem {
 pub struct ManifestValidationResponse {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// A single LLM routing rule — matches requests based on criteria and
+/// routes to a specific model / provider.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct RoutingRule {
+    /// Unique identifier (UUID)
+    pub id: String,
+    /// Human-readable label, e.g. "Code tasks → GPT-4"
+    pub label: String,
+    /// Match criterion kind: "keyword" | "context_length" | "provider" | "always"
+    pub match_kind: String,
+    /// Match value — interpretation depends on `match_kind`:
+    /// - keyword: comma-separated keywords (e.g. "code,debug,refactor")
+    /// - context_length: threshold in tokens (e.g. "32000")
+    /// - provider: provider name (e.g. "anthropic")
+    /// - always: ignored
+    pub match_value: String,
+    /// Target model identifier, e.g. "gpt-4o", "claude-sonnet-4-20250514"
+    pub target_model: String,
+    /// Optional target provider override
+    pub target_provider: Option<String>,
+    /// Priority — lower number = higher priority
+    pub priority: u32,
+    /// Whether this rule is currently active
+    pub enabled: bool,
+}
+
+/// Response for routing rules list
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct RoutingRulesResponse {
+    pub rules: Vec<RoutingRule>,
+    pub smart_routing_enabled: bool,
+}
+
+/// Result from the Gmail OAuth PKCE flow.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct GmailOAuthResult {
+    pub success: bool,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u32>,
+    pub scope: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Human-readable routing rule summary from IronClaw's RoutingPolicy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct RoutingRuleSummary {
+    pub index: u32,
+    pub kind: String,
+    pub description: String,
+    pub provider: Option<String>,
+}
+
+/// Per-provider latency data for routing UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct LatencyEntry {
+    pub provider: String,
+    pub avg_latency_ms: f64,
+}
+
+/// Full routing policy status for the routing UI dashboard.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct RoutingStatusResponse {
+    pub enabled: bool,
+    pub default_provider: String,
+    pub rule_count: u32,
+    pub rules: Vec<RoutingRuleSummary>,
+    pub latency_data: Vec<LatencyEntry>,
+}
+
+/// Gmail channel configuration status.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct GmailStatusResponse {
+    pub enabled: bool,
+    pub configured: bool,
+    pub status: String,
+    pub project_id: String,
+    pub subscription_id: String,
+    pub label_filters: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub missing_fields: Vec<String>,
+    pub oauth_configured: bool,
 }

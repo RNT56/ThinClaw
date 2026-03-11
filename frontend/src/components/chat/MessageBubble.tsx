@@ -1,5 +1,5 @@
 import ReactMarkdown from 'react-markdown';
-import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon, Volume2, Monitor, Cloud } from 'lucide-react';
+import { Check, Copy, Paperclip, Download, Maximize2, Loader2, Pencil, Sparkles, CheckCircle2, Image as ImageIcon, Volume2, Monitor, Cloud, Zap } from 'lucide-react';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { cn } from '../../lib/utils';
@@ -387,6 +387,7 @@ type ExtendedMessage = Message & {
     is_summary?: boolean | null;
     original_messages?: Message[] | null;
     isStreaming?: boolean;
+    tokensPerSec?: number;
 };
 
 function MessageBubbleContent({ message, conversationId, isLastUser, onResend, skipAnimation }: { message: ExtendedMessage, conversationId: string | null, isLast?: boolean, isLastUser?: boolean, onResend?: (id: string, content: string) => void, skipAnimation?: boolean }) {
@@ -648,6 +649,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                             components={{
                                                 a: ({ node, href, children, ...props }) => {
                                                     const isLocalPath = href && (href.startsWith('/') || href.startsWith('file://') || (typeof children === 'string' && (children.startsWith('/') || children.startsWith('./'))));
+                                                    const isExternalUrl = href && (href.startsWith('http://') || href.startsWith('https://'));
 
                                                     return (
                                                         <a
@@ -662,6 +664,14 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                                                     e.preventDefault();
                                                                     revealPath(href.replace('file://', ''));
                                                                     toast.info("Revealing in Finder", { description: href });
+                                                                } else if (isExternalUrl && href) {
+                                                                    e.preventDefault();
+                                                                    import('@tauri-apps/plugin-opener').then(({ openUrl }) => {
+                                                                        openUrl(href);
+                                                                    }).catch(() => {
+                                                                        // Fallback: open in new tab
+                                                                        window.open(href, '_blank', 'noopener,noreferrer');
+                                                                    });
                                                                 }
                                                             }}
                                                         >
@@ -736,6 +746,22 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                     </div>
                 )}
             </div>
+
+            {/* Inference Speed */}
+            {!isUser && message.tokensPerSec != null && message.tokensPerSec > 0 && (
+                <div className={cn(
+                    "flex items-center gap-1 mt-1.5 text-[10px] font-mono transition-all duration-300",
+                    message.isStreaming
+                        ? "text-emerald-400/80"
+                        : "text-zinc-500/60"
+                )}>
+                    <Zap className="w-2.5 h-2.5" />
+                    <span>{message.tokensPerSec} tok/s</span>
+                    {message.isStreaming && (
+                        <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+                    )}
+                </div>
+            )}
         </div>
     );
 }
@@ -747,7 +773,9 @@ export const MessageBubble = memo(MessageBubbleContent, (prev, next) => {
     if (prev.message.realId !== next.message.realId) return false;
 
     if (prev.message.content !== next.message.content) return false;
+    // Check streaming / speed
     if (prev.message.isStreaming !== next.message.isStreaming) return false;
+    if (prev.message.tokensPerSec !== next.message.tokensPerSec) return false;
     if (prev.isLast !== next.isLast) return false;
     if (prev.isLastUser !== next.isLastUser) return false;
 

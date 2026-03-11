@@ -29,7 +29,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
     const modesToShow = sidebarOpen ? MODES : [activeModeData];
 
     return (
-        <div className="mt-auto pt-4 border-t border-border/50 space-y-2">
+        <div className="pt-4 border-t border-border/50 space-y-2">
             {/* Mode Icons Row */}
             <motion.div
                 className={cn(

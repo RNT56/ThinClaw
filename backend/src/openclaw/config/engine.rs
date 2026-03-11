@@ -197,75 +197,15 @@ impl OpenClawConfig {
         models_allowlist.insert("local/model".to_string(), serde_json::json!({}));
 
         // Full catalog of known models per provider (superset).
-        // This is kept as a UI reference for the model toggle checkboxes.
-        // It is NOT used to generate models.providers entries anymore.
-        let _all_known_models: Vec<(&str, Vec<(&str, &str)>)> = vec![
-            (
-                "anthropic",
-                vec![
-                    ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-                    ("claude-haiku-4-5", "Claude Haiku 4.5"),
-                    ("claude-opus-4-6", "Claude Opus 4.6"),
-                ],
-            ),
-            (
-                "openai",
-                vec![
-                    ("gpt-5-nano", "GPT-5 Nano"),
-                    ("gpt-5-mini", "GPT-5 Mini"),
-                    ("gpt-5.2", "GPT-5.2"),
-                    ("gpt-5.2-pro", "GPT-5.2 Pro"),
-                    ("o3", "o3"),
-                    ("o4-mini", "o4 Mini"),
-                ],
-            ),
-            (
-                "openrouter",
-                vec![
-                    ("z-ai/glm-4.7-flash", "GLM 4.7 Flash"),
-                    ("z-ai/glm-5", "GLM 5"),
-                    ("minimax/minimax-m2.5", "MiniMax M2.5"),
-                    ("qwen/qwen3-max-thinking", "Qwen3 Max Thinking"),
-                    ("qwen/qwen3-max", "Qwen3 Max"),
-                    ("qwen/qwen3-coder-next", "Qwen3 Coder Next"),
-                    ("anthropic/claude-opus-4.6", "Claude Opus 4.6"),
-                    ("moonshotai/kimi-k2.5", "Kimi K2.5"),
-                    ("mistralai/mistral-large-2512", "Mistral Large 2512"),
-                    ("deepseek/deepseek-v3.2-speciale", "DeepSeek V3.2 Speciale"),
-                    ("x-ai/grok-4.1-fast", "Grok 4.1 Fast"),
-                    ("perplexity/sonar-pro-search", "Sonar Pro Search"),
-                    ("openai/gpt-5.2-codex", "GPT-5.2 Codex"),
-                    ("openai/o3-deep-research", "o3 Deep Research"),
-                    ("openai/o4-mini-deep-research", "o4 Mini Deep Research"),
-                    ("meta-llama/llama-4-maverick", "Llama 4 Maverick"),
-                    ("meta-llama/llama-4-scout", "Llama 4 Scout"),
-                ],
-            ),
-            (
-                "gemini",
-                vec![
-                    ("gemini-3.0-flash", "Gemini 3.0 Flash"),
-                    ("gemini-3-pro", "Gemini 3 Pro"),
-                    ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
-                ],
-            ),
-            (
-                "groq",
-                vec![
-                    (
-                        "meta-llama/llama-4-maverick-17b-128-instruct",
-                        "Llama 4 Maverick 17B",
-                    ),
-                    (
-                        "meta-llama/llama-4-scout-17b-16e-instruct",
-                        "Llama 4 Scout 17B",
-                    ),
-                    ("moonshotai/kimi-k2-instruct-0905", "Kimi K2 Instruct"),
-                    ("openai/gpt-oss-120b", "GPT-OSS 120B"),
-                    ("groq/compound", "Groq Compound"),
-                ],
-            ),
-        ];
+        // NOTE: The hardcoded model catalog was removed (2026-03-06).
+        //
+        // The frontend's CloudBrainConfigModal now uses dynamic API discovery
+        // (via CloudModelRegistry / useCloudModels hook) to fetch available
+        // models from each provider. This means new models (e.g. GPT-5.3-Codex)
+        // appear automatically without code changes.
+        //
+        // The enabled_cloud_models map (set by the user in the UI) still
+        // controls which models the agent is ALLOWED to use.
 
         // Only the local provider needs explicit models.providers config
         let (local_port, local_token, context_size, _model_family) =

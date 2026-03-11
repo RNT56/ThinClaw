@@ -103,6 +103,12 @@ pub struct OpenClawIdentity {
     pub auto_start_gateway: bool,
     #[serde(default)]
     pub dev_mode_wizard: bool,
+    /// When true, the agent skips per-tool approval prompts (fully autonomous mode).
+    #[serde(default)]
+    pub auto_approve_tools: bool,
+    /// Whether the agent has completed the first-run identity bootstrap ritual.
+    #[serde(default)]
+    pub bootstrap_completed: bool,
     #[serde(default)]
     pub custom_llm_url: Option<String>,
     // custom_llm_key → Keychain
@@ -210,6 +216,10 @@ pub struct OpenClawConfig {
     pub selected_cloud_model: Option<String>,
     pub auto_start_gateway: bool,
     pub dev_mode_wizard: bool,
+    /// When true, the agent skips per-tool approval prompts.
+    pub auto_approve_tools: bool,
+    /// Whether the first-run identity bootstrap has been completed.
+    pub bootstrap_completed: bool,
     pub custom_llm_url: Option<String>,
     pub custom_llm_key: Option<String>,
     pub custom_llm_model: Option<String>,

@@ -28,7 +28,7 @@ vi.mock('../../lib/bindings', () => ({
         getModelMetadata: vi.fn().mockResolvedValue({ status: 'ok', data: {} }),
         updateUserConfig: vi.fn().mockResolvedValue(undefined),
         startChatServer: vi.fn().mockResolvedValue(undefined),
-        openclawGetStatus: vi.fn().mockResolvedValue({ status: 'ok', data: { gateway_running: false } }),
+        openclawGetStatus: vi.fn().mockResolvedValue({ status: 'ok', data: { engine_running: false } }),
         getChatServerConfig: vi.fn().mockResolvedValue(null),
         openclawStopGateway: vi.fn().mockResolvedValue(undefined),
         openclawStartGateway: vi.fn().mockResolvedValue(undefined),
@@ -38,7 +38,7 @@ vi.mock('../../lib/bindings', () => ({
 // Mock openclaw lib so GatewayTab/SecretsTab don't need real IPC
 vi.mock('../../lib/openclaw', () => ({
     getOpenClawStatus: vi.fn().mockResolvedValue({
-        gateway_running: false, ws_connected: false, port: 18789,
+        engine_running: false, engine_connected: false, port: 18789,
         gateway_mode: 'local', slack_enabled: false, telegram_enabled: false,
         remote_url: null, remote_token: null, device_id: '', auth_token: '',
         state_dir: '', node_host_enabled: false, local_inference_enabled: false,

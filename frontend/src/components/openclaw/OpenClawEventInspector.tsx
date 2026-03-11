@@ -17,12 +17,12 @@ interface EventEntry {
 
 const KIND_CONFIG: Record<string, { icon: typeof Activity; color: string }> = {
     'AssistantText': { icon: MessageSquare, color: 'text-blue-400' },
-    'AssistantInternal': { icon: Eye, color: 'text-purple-400' },
-    'ToolCall': { icon: Wrench, color: 'text-amber-400' },
-    'ToolResult': { icon: Wrench, color: 'text-emerald-400' },
-    'StatusUpdate': { icon: Activity, color: 'text-cyan-400' },
+    'AssistantInternal': { icon: Eye, color: 'text-primary' },
+    'ToolCall': { icon: Wrench, color: 'text-muted-foreground' },
+    'ToolResult': { icon: Wrench, color: 'text-primary' },
+    'StatusUpdate': { icon: Activity, color: 'text-primary' },
     'Error': { icon: AlertTriangle, color: 'text-red-400' },
-    'CanvasUpdate': { icon: Zap, color: 'text-pink-400' },
+    'CanvasUpdate': { icon: Zap, color: 'text-primary' },
 };
 
 let nextId = 0;
@@ -99,19 +99,19 @@ export function OpenClawEventInspector() {
                 <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
                         <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center">
-                            <Activity className="w-4.5 h-4.5 text-cyan-400" />
+                            <Activity className="w-4.5 h-4.5 text-primary" />
                         </div>
                         <div>
                             <h2 className="text-base font-semibold text-zinc-100">Event Inspector</h2>
-                            <p className="text-xs text-zinc-500">{events.length} events captured</p>
+                            <p className="text-xs text-muted-foreground/60">{events.length} events captured</p>
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => setPaused(!paused)}
                             className={`p-2 rounded-lg border transition-all ${paused
-                                ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
-                                : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
+                                ? 'bg-amber-500/10 border-amber-500/30 text-muted-foreground'
+                                : 'bg-white/5 border-border/40 text-muted-foreground hover:text-white'
                                 }`}
                             title={paused ? 'Resume' : 'Pause'}
                         >
@@ -120,15 +120,15 @@ export function OpenClawEventInspector() {
                         <button
                             onClick={() => setShowFilters(!showFilters)}
                             className={`p-2 rounded-lg border transition-all ${showFilters || selectedKinds.size > 0
-                                ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400'
-                                : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
+                                ? 'bg-cyan-500/10 border-cyan-500/30 text-primary'
+                                : 'bg-white/5 border-border/40 text-muted-foreground hover:text-white'
                                 }`}
                         >
                             <Filter className="w-3.5 h-3.5" />
                         </button>
                         <button
                             onClick={() => setEvents([])}
-                            className="p-2 rounded-lg bg-white/5 border border-white/10 text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                            className="p-2 rounded-lg bg-white/5 border border-border/40 text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-all"
                             title="Clear"
                         >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -138,13 +138,13 @@ export function OpenClawEventInspector() {
 
                 {/* Search */}
                 <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/60" />
                     <input
                         type="text"
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Filter events..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50"
                     />
                 </div>
 
@@ -159,13 +159,13 @@ export function OpenClawEventInspector() {
                         >
                             <div className="flex flex-wrap gap-1.5">
                                 {allKinds.map(kind => {
-                                    const cfg = KIND_CONFIG[kind] || { icon: Zap, color: 'text-zinc-400' };
+                                    const cfg = KIND_CONFIG[kind] || { icon: Zap, color: 'text-muted-foreground' };
                                     const active = selectedKinds.size === 0 || selectedKinds.has(kind);
                                     return (
                                         <button
                                             key={kind}
                                             onClick={() => toggleKind(kind)}
-                                            className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-all ${active ? `${cfg.color} bg-white/5 border-white/10` : 'text-zinc-600 bg-transparent border-transparent'
+                                            className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-all ${active ? `${cfg.color} bg-white/5 border-border/40` : 'text-zinc-600 bg-transparent border-transparent'
                                                 }`}
                                         >
                                             {kind}
@@ -197,7 +197,7 @@ export function OpenClawEventInspector() {
             {/* Events List */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 pb-5 space-y-1 mt-2 font-mono text-xs">
                 {filtered.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-zinc-500">
+                    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground/60">
                         <Activity className="w-8 h-8 mb-3 opacity-30" />
                         <p className="text-sm font-sans">
                             {events.length === 0 ? 'Waiting for events...' : 'No matching events'}
@@ -205,14 +205,14 @@ export function OpenClawEventInspector() {
                     </div>
                 ) : (
                     filtered.map((evt) => {
-                        const cfg = KIND_CONFIG[evt.kind] || { icon: Zap, color: 'text-zinc-400' };
+                        const cfg = KIND_CONFIG[evt.kind] || { icon: Zap, color: 'text-muted-foreground' };
                         const EvtIcon = cfg.icon;
                         const expanded = expandedId === evt.id;
                         return (
                             <motion.div
                                 key={evt.id}
                                 layout
-                                className="rounded border border-white/[0.04] hover:border-white/10 transition-all cursor-pointer"
+                                className="rounded border border-white/[0.04] hover:border-border/40 transition-all cursor-pointer"
                                 onClick={() => setExpandedId(expanded ? null : evt.id)}
                             >
                                 <div className="flex items-center gap-2 px-2 py-1.5">
@@ -233,7 +233,7 @@ export function OpenClawEventInspector() {
                                             exit={{ height: 0, opacity: 0 }}
                                             className="overflow-hidden"
                                         >
-                                            <pre className="px-2 pb-2 text-zinc-400 whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+                                            <pre className="px-2 pb-2 text-muted-foreground whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
                                                 {JSON.stringify(evt.raw, null, 2)}
                                             </pre>
                                         </motion.div>

@@ -31,6 +31,9 @@ static LLM_TOKEN_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?s)<think>.*?</think>").unwrap(),
         // Bare role markers that sometimes leak mid-text
         Regex::new(r"(?m)^(user|assistant|system|tool)>\s*$").unwrap(),
+        // Mistral-style raw tool call tokens: [TOOL_CALLS]name[ARGS]{...}
+        // Small models sometimes emit these as text instead of using the function calling API.
+        Regex::new(r"\[TOOL_CALLS\]\w+\[ARGS\]\{[^}]*\}").unwrap(),
     ]
 });
 
@@ -94,5 +97,19 @@ mod tests {
         let input = "Part 1\n\n\n\n\nPart 2";
         let result = strip_llm_tokens(input);
         assert_eq!(result, "Part 1\n\nPart 2");
+    }
+
+    #[test]
+    fn test_strip_mistral_tool_calls() {
+        let input = "Loading identity...[TOOL_CALLS]memory_read[ARGS]{\"path\": \"SOUL.md\"}[TOOL_CALLS]memory_read[ARGS]{\"path\": \"USER.md\"}";
+        let result = strip_llm_tokens(input);
+        assert_eq!(result, "Loading identity...");
+    }
+
+    #[test]
+    fn test_strip_tool_calls_with_surrounding_text() {
+        let input = "Let me check.\n[TOOL_CALLS]memory_search[ARGS]{\"query\": \"user preferences\"}\nHere's what I found:";
+        let result = strip_llm_tokens(input);
+        assert_eq!(result, "Let me check.\n\nHere's what I found:");
     }
 }

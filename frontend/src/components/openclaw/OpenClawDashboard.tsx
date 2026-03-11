@@ -38,7 +38,7 @@ function StatCard({ title, value, icon: Icon, status = 'info', description, clas
     };
 
     return (
-        <div className={cn("p-4 rounded-xl border border-white/10 bg-card/50 backdrop-blur-sm shadow-sm", className)}>
+        <div className={cn("p-4 rounded-xl border border-border/40 bg-card/50 backdrop-blur-sm shadow-sm", className)}>
             <div className="flex items-start justify-between mb-2">
                 <div className={cn("p-2 rounded-lg", statusColors[status])}>
                     <Icon className="w-5 h-5" />
@@ -110,7 +110,7 @@ export function OpenClawDashboard() {
                         fetchData();
                         toast.success('Dashboard data refreshed');
                     }}
-                    className="p-2 mr-1 rounded-lg hover:bg-white/5 transition-colors border border-white/10"
+                    className="p-2 mr-1 rounded-lg hover:bg-white/5 transition-colors border border-border/40"
                 >
                     <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                 </button>
@@ -133,18 +133,18 @@ export function OpenClawDashboard() {
             {/* Top Level Stats */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard
-                    title="Gateway Status"
-                    value={status?.gateway_running ? 'Running' : 'Offline'}
+                    title="Engine Status"
+                    value={status?.engine_running ? 'Running' : 'Offline'}
                     icon={Shield}
-                    status={status?.gateway_running ? 'success' : 'error'}
-                    description={status?.gateway_mode === 'local' ? 'Local Sidecar' : 'Remote Gateway'}
+                    status={status?.engine_running ? 'success' : 'error'}
+                    description={status?.gateway_mode === 'local' ? 'In-Process Engine' : 'Remote Gateway'}
                 />
                 <StatCard
-                    title="WS Connection"
-                    value={status?.ws_connected ? 'Active' : 'Disconnected'}
+                    title="Engine Link"
+                    value={status?.engine_connected ? 'Active' : 'Disconnected'}
                     icon={Zap}
-                    status={status?.ws_connected ? 'success' : 'error'}
-                    description={status?.ws_connected ? 'Linked to Control Plane' : 'Link interrupted'}
+                    status={status?.engine_connected ? 'success' : 'error'}
+                    description={status?.engine_connected ? 'Linked to Control Plane' : 'Link interrupted'}
                 />
                 <StatCard
                     title="Active Instances"
@@ -165,7 +165,7 @@ export function OpenClawDashboard() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Identity & Security */}
                 <div className="col-span-1 lg:col-span-2 space-y-6">
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-white/10">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
                         <div className="flex items-center gap-3 mb-6">
                             <div className="p-2 bg-primary/10 rounded-lg">
                                 <Activity className="w-5 h-5 text-primary" />
@@ -206,7 +206,7 @@ export function OpenClawDashboard() {
 
                     {/* Channel Integration Status */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-white/10">
+                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-primary" />
@@ -222,7 +222,7 @@ export function OpenClawDashboard() {
                                 {status?.slack_enabled ? 'Real-time bidirectional message routing active.' : 'Slack integration is currently disabled.'}
                             </p>
                         </div>
-                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-white/10">
+                        <div className="p-5 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
                             <div className="flex items-center justify-between mb-4">
                                 <div className="flex items-center gap-2">
                                     <MessageSquare className="w-4 h-4 text-primary" />
@@ -243,7 +243,7 @@ export function OpenClawDashboard() {
 
                 {/* System Specs & Files */}
                 <div className="space-y-6">
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-white/10">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
                         <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
                             <Database className="w-4 h-4 text-primary" />
                             Storage Paths
@@ -258,7 +258,7 @@ export function OpenClawDashboard() {
                         </div>
                     </div>
 
-                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-white/10">
+                    <div className="p-6 rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm border-border/40">
                         <h3 className="text-sm font-semibold mb-4 flex items-center gap-2">
                             <Binary className="w-4 h-4 text-primary" />
                             Software Version

@@ -1,0 +1,18 @@
+# .taurignore — files excluded from the Tauri dev watcher (won't trigger a rebuild)
+# See: https://tauri.app/reference/cli/#dev
+#
+# The agent (IronClaw) can write arbitrary files to the backend directory when
+# workspace_mode=unrestricted and the user hasn't configured a custom workspace root.
+# Without this file, any agent-created file would trigger a cargo rebuild and crash
+# the running app in dev mode.
+#
+# Only .rs files and cargo manifests should trigger a rebuild.
+
+# Ignore everything by default, then re-include Rust source
+*
+!src/
+!src/**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!.taurignore

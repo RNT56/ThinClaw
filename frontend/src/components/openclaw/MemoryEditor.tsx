@@ -72,7 +72,7 @@ export function MemoryEditor() {
     return (
         <div className="flex flex-col h-full bg-[#0d1117] text-gray-300 font-mono text-sm">
             {/* Toolbar */}
-            <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-black/20">
+            <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-black/20">
                 <div className="flex items-center gap-2">
                     <FileText className="w-4 h-4 text-purple-400" />
                     <span className="font-bold text-xs uppercase tracking-wider text-gray-400">

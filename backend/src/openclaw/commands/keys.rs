@@ -778,6 +778,145 @@ pub async fn openclaw_toggle_node_host(
     Ok(())
 }
 
+/// Toggle local dev tools (shell, write_file, read_file, etc.) for OpenClaw
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_toggle_local_tools(
+    state: State<'_, OpenClawManager>,
+    sidecar: State<'_, SidecarManager>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    info!("[openclaw] Toggling local tools to: {}", enabled);
+    cfg.allow_local_tools = enabled;
+    cfg.save_identity().map_err(|e| {
+        let err = format!("Failed to save identity: {}", e);
+        error!("[openclaw] {}", err);
+        err
+    })?;
+
+    // Regenerate config to reflect the change
+    let existing_openclaw_engine = cfg.load_config().ok();
+    let local_llm = sidecar.get_chat_config();
+    let openclaw_engine = cfg.generate_config(
+        existing_openclaw_engine
+            .as_ref()
+            .map(|m| m.channels.slack.clone()),
+        existing_openclaw_engine
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        local_llm.clone(),
+    );
+
+    cfg.write_config(&openclaw_engine, local_llm).map_err(|e| {
+        let err = format!("Failed to write openclaw_engine config: {}", e);
+        error!("[openclaw] {}", err);
+        err
+    })?;
+
+    *state.config.write().await = Some(cfg);
+
+    Ok(())
+}
+
+/// Set workspace mode and optional root directory for the agent
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_set_workspace_mode(
+    state: State<'_, OpenClawManager>,
+    sidecar: State<'_, SidecarManager>,
+    mode: String,
+    root: Option<String>,
+) -> Result<String, String> {
+    // Validate mode
+    if !matches!(mode.as_str(), "unrestricted" | "sandboxed" | "project") {
+        return Err(format!(
+            "Invalid workspace mode '{}'. Must be 'unrestricted', 'sandboxed', or 'project'.",
+            mode
+        ));
+    }
+
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    // Resolve the workspace root:
+    // - If the user provided one, validate and use it
+    // - If not and mode needs one, auto-generate in the app data dir
+    let resolved_root = if mode == "unrestricted" {
+        None
+    } else if let Some(ref root_path) = root {
+        if !root_path.is_empty() {
+            let path = std::path::Path::new(root_path);
+            if !path.is_absolute() {
+                return Err("Workspace root must be an absolute path.".to_string());
+            }
+            if let Err(e) = std::fs::create_dir_all(path) {
+                return Err(format!("Failed to create workspace directory: {}", e));
+            }
+            Some(root_path.clone())
+        } else {
+            // Empty string → auto-generate
+            let default_dir = cfg.base_dir.join("agent_workspace");
+            let _ = std::fs::create_dir_all(&default_dir);
+            Some(default_dir.to_string_lossy().to_string())
+        }
+    } else {
+        // No root provided → auto-generate default workspace inside app data
+        let default_dir = cfg.base_dir.join("agent_workspace");
+        let _ = std::fs::create_dir_all(&default_dir);
+        Some(default_dir.to_string_lossy().to_string())
+    };
+
+    let display_root = resolved_root.clone().unwrap_or_else(|| "none".to_string());
+
+    info!(
+        "[openclaw] Setting workspace mode to: {} (root: {})",
+        mode, display_root
+    );
+    cfg.workspace_mode = mode;
+    cfg.workspace_root = resolved_root;
+    cfg.save_identity().map_err(|e| {
+        let err = format!("Failed to save identity: {}", e);
+        error!("[openclaw] {}", err);
+        err
+    })?;
+
+    // Regenerate config to reflect the change
+    let existing_openclaw_engine = cfg.load_config().ok();
+    let local_llm = sidecar.get_chat_config();
+    let openclaw_engine = cfg.generate_config(
+        existing_openclaw_engine
+            .as_ref()
+            .map(|m| m.channels.slack.clone()),
+        existing_openclaw_engine
+            .as_ref()
+            .map(|m| m.channels.telegram.clone()),
+        local_llm.clone(),
+    );
+
+    cfg.write_config(&openclaw_engine, local_llm).map_err(|e| {
+        let err = format!("Failed to write openclaw_engine config: {}", e);
+        error!("[openclaw] {}", err);
+        err
+    })?;
+
+    let result_path = cfg
+        .workspace_root
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    *state.config.write().await = Some(cfg);
+
+    Ok(result_path)
+}
+
 /// Toggle local inference (exposing local LLM) for OpenClaw
 #[tauri::command]
 #[specta::specta]

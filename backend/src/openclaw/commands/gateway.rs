@@ -1,9 +1,13 @@
-//! Engine lifecycle commands: start, stop, status, diagnostics, sync
+//! Engine lifecycle commands: start, stop, status, diagnostics, sync.
 //!
-//! IronClaw is embedded as an in-process library crate — there is no HTTP
-//! server or gateway. The `start`/`stop` commands control the IronClaw agent
-//! lifecycle. All communication uses native Tauri IPC (`invoke` + `emit`).
-//! Config reads come from `OpenClawConfig` (Scrappy's identity.json).
+//! Dual-mode operation:
+//!   Local mode:  IronClaw runs in-process via TauriChannel (default)
+//!   Remote mode: Scrappy connects to an external IronClaw HTTP gateway
+//!                via RemoteGatewayProxy — no local engine is started
+//!
+//! The mode is selected by `identity.json:gateway_mode`:
+//!   "local"  (or empty) → start embedded IronClaw engine
+//!   "remote"            → connect to remote_url with remote_token
 
 use tauri::State;
 use tracing::info;
@@ -146,6 +150,14 @@ pub async fn openclaw_get_status(
         dev_mode_wizard: config
             .as_ref()
             .map(|cfg| cfg.dev_mode_wizard)
+            .unwrap_or(false),
+        auto_approve_tools: config
+            .as_ref()
+            .map(|cfg| cfg.auto_approve_tools)
+            .unwrap_or(false),
+        bootstrap_completed: config
+            .as_ref()
+            .map(|cfg| cfg.bootstrap_completed)
             .unwrap_or(false),
         custom_llm_url: config.as_ref().and_then(|cfg| cfg.custom_llm_url.clone()),
         custom_llm_key: config.as_ref().and_then(|cfg| cfg.custom_llm_key.clone()),
@@ -300,17 +312,19 @@ pub async fn openclaw_sync_local_llm(
     Ok(())
 }
 
-/// Start the IronClaw engine.
+/// Start the IronClaw gateway.
 ///
-/// Initializes the agent, starts background tasks, emits Connected event.
-/// If already running, this is a no-op (returns Ok).
+/// Behavior depends on `identity.json:gateway_mode`:
+///   "local" (default):
+///     - Waits for local inference engine if configured
+///     - Starts the IronClaw in-process engine via IronClawState::start()
+///   "remote":
+///     - Reads remote_url + remote_token from config
+///     - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
+///     - No local engine is started
 ///
-/// When local inference is selected and the engine isn't ready yet, this
-/// command will poll the sidecar/engine status for up to 30 seconds before
-/// proceeding — covering the common case where MLX is still booting.
-///
-/// **Note:** Named `start_gateway` for backward compatibility with the frontend;
-/// there is no actual HTTP gateway — this starts the IronClaw in-process engine.
+/// In both modes, the frontend receives the same events via `openclaw-event`
+/// and invokes the same Tauri commands — all routing is transparent.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_start_gateway(
@@ -318,11 +332,85 @@ pub async fn openclaw_start_gateway(
     ironclaw: State<'_, IronClawState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    info!("[ironclaw] Engine start requested");
-
-    // ── Check if local inference engine needs to be awaited ──────────
     let oc_config = state.get_config().await;
+
+    // ── Determine mode ──────────────────────────────────────────────────────
+    let mode = oc_config
+        .as_ref()
+        .map(|c| c.gateway_mode.clone())
+        .unwrap_or_default();
+
+    info!("[ironclaw] Engine start requested (mode={})", mode);
+
+    if mode == "remote" {
+        // ── Remote mode: connect to external IronClaw gateway ───────────
+        let remote_url = oc_config
+            .as_ref()
+            .and_then(|c| c.remote_url.clone())
+            .ok_or_else(|| {
+                "Remote mode selected but no remote_url configured. Set it in Gateway Settings."
+                    .to_string()
+            })?;
+
+        let remote_token = oc_config
+            .as_ref()
+            .and_then(|c| c.remote_token.clone())
+            .unwrap_or_default();
+
+        // Already in remote mode and connected? No-op.
+        if ironclaw.is_remote_mode().await {
+            // Check if it's the same URL
+            if let Some(existing) = ironclaw.remote_proxy().await {
+                if existing.base_url() == remote_url {
+                    info!(
+                        "[ironclaw] Already connected to remote {} — no-op",
+                        remote_url
+                    );
+                    return Ok(());
+                }
+            }
+            // Different URL — disconnect first, then reconnect below
+            ironclaw.disconnect_remote().await;
+        }
+
+        let proxy =
+            crate::openclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token);
+
+        // Verify connectivity before activating
+        proxy
+            .health_check()
+            .await
+            .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
+
+        // Start SSE subscription (forwards remote events as Tauri events)
+        proxy
+            .start_sse_subscription(app_handle.clone())
+            .await
+            .map_err(|e| format!("Failed to start SSE subscription: {}", e))?;
+
+        // Activate in IronClawState
+        ironclaw.connect_remote(proxy).await;
+
+        // Emit Connected event so frontend updates status
+        use tauri::Emitter;
+        let _ = app_handle.emit(
+            "openclaw-event",
+            &crate::openclaw::ui_types::UiEvent::Connected { protocol: 2 },
+        );
+
+        info!("[ironclaw] Remote gateway connected: {}", remote_url);
+        return Ok(());
+    }
+
+    // ── Local mode (default): start in-process IronClaw engine ─────────────
+    if ironclaw.is_remote_mode().await {
+        // Switching from remote → local: disconnect proxy first
+        ironclaw.disconnect_remote().await;
+    }
+
+    // Wait for local inference engine if needed
     let local_inference = oc_config
         .as_ref()
         .map(|c| c.local_inference_enabled)
@@ -398,25 +486,31 @@ pub async fn openclaw_start_gateway(
     }
 }
 
-/// Stop the IronClaw engine gracefully.
+/// Stop the IronClaw gateway.
 ///
-/// Shuts down background tasks, channels, and emits Disconnected event.
-/// If already stopped, this is a no-op (returns Ok).
-///
-/// **Note:** Named `stop_gateway` for backward compatibility; stops in-process engine.
+/// - Local mode: shuts down in-process engine gracefully.
+/// - Remote mode: closes the SSE subscription and clears the proxy.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_stop_gateway(
     _state: State<'_, OpenClawManager>,
     ironclaw: State<'_, IronClawState>,
 ) -> Result<(), String> {
-    info!("[ironclaw] Engine stop requested");
+    info!(
+        "[ironclaw] Gateway stop requested (mode={})",
+        ironclaw.mode_label().await
+    );
 
-    let was_running = ironclaw.stop().await;
-    if was_running {
-        info!("[ironclaw] Engine stopped successfully");
+    if ironclaw.is_remote_mode().await {
+        ironclaw.disconnect_remote().await;
+        info!("[ironclaw] Remote proxy disconnected");
     } else {
-        info!("[ironclaw] Engine was already stopped");
+        let was_running = ironclaw.stop().await;
+        if was_running {
+            info!("[ironclaw] Engine stopped successfully");
+        } else {
+            info!("[ironclaw] Engine was already stopped");
+        }
     }
 
     Ok(())
@@ -456,7 +550,7 @@ pub async fn openclaw_get_diagnostics(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<OpenClawDiagnostics, String> {
     let cfg = state.get_config().await;
-    let engine_running = ironclaw.is_initialized();
+    let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
 
     let (port, state_dir, slack_enabled, telegram_enabled) = if let Some(ref cfg) = cfg {
         let (slack, telegram) = if let Ok(openclaw_engine) = cfg.load_config() {
@@ -488,4 +582,77 @@ pub async fn openclaw_get_diagnostics(
         slack_enabled,
         telegram_enabled,
     })
+}
+
+/// Test connectivity to a remote IronClaw gateway.
+///
+/// Called by the frontend's "Test Connection" button in Gateway Settings.
+/// Returns Ok(true) if reachable and healthy, Err if not reachable.
+///
+/// This was previously a stub (command registered but returning error).
+/// Now fully implemented using RemoteGatewayProxy.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_test_connection(url: String, token: Option<String>) -> Result<bool, String> {
+    let clean_url = url.trim_end_matches('/').to_string();
+    let token_str = token.as_deref().unwrap_or("");
+
+    let proxy = crate::openclaw::remote_proxy::RemoteGatewayProxy::new(&clean_url, token_str);
+    proxy.health_check().await
+}
+
+/// Switch the active agent to a different profile.
+///
+/// Stops the current connection (local engine or remote proxy),
+/// updates gateway settings from the selected profile, and
+/// restarts the connection with the new configuration.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_switch_to_profile(
+    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
+    app_handle: tauri::AppHandle,
+    profile_id: String,
+) -> Result<(), String> {
+    info!("[ironclaw] Switching to profile: {}", profile_id);
+
+    let mut cfg = if let Some(c) = state.get_config().await {
+        c
+    } else {
+        state.init_config().await?
+    };
+
+    // Find the requested profile
+    let profile = cfg
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .cloned()
+        .ok_or_else(|| format!("Profile '{}' not found", profile_id))?;
+
+    // Update gateway settings from profile
+    cfg.gateway_mode = profile.mode.clone();
+    cfg.remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
+        Some(profile.url.clone())
+    } else {
+        None
+    };
+    // Token: update in config (stored separately from Keychain for profiles)
+    if let Some(token) = &profile.token {
+        cfg.remote_token = Some(token.clone());
+    }
+
+    // Persist updated config
+    cfg.save_identity().map_err(|e| e.to_string())?;
+    *state.config.write().await = Some(cfg);
+
+    info!(
+        "[ironclaw] Profile '{}' (mode={}) activated - restarting gateway...",
+        profile.name, profile.mode
+    );
+
+    // Restart with new settings
+    openclaw_start_gateway(state, ironclaw, sidecar, engine_manager, app_handle).await
 }

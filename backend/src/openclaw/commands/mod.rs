@@ -14,7 +14,7 @@ use super::config::OpenClawConfig;
 
 mod gateway;
 mod keys;
-mod rpc;
+pub(crate) mod rpc;
 mod sessions;
 pub mod types;
 

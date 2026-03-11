@@ -65,10 +65,10 @@ export function OpenClawSidebar({
             const s = await openclaw.getOpenClawStatus();
             setStatus(s);
 
-            if (s.gateway_running && activePage === 'chat') {
+            if (s.engine_running && activePage === 'chat') {
                 const res = await openclaw.getOpenClawSessions();
                 setSessions(res.sessions);
-            } else if (!s.gateway_running) {
+            } else if (!s.engine_running) {
                 // Clear stale sessions when gateway is down (e.g. after factory reset)
                 setSessions([]);
             }
@@ -188,13 +188,13 @@ export function OpenClawSidebar({
 
     return (
         <motion.div
-            className="flex flex-col flex-1 h-full"
+            className="flex flex-col flex-1 h-full min-h-0"
             variants={containerVariants}
             initial="hidden"
             animate="visible"
         >
-            {/* Header */}
-            <div className="flex items-center gap-3 px-1 mb-4">
+            {/* Header — fixed */}
+            <div className="flex items-center gap-3 px-1 mb-4 shrink-0">
                 <button
                     onClick={onBack}
                     className="w-8 h-8 rounded-lg bg-muted/50 hover:bg-muted flex items-center justify-center shrink-0 transition-colors"
@@ -207,8 +207,8 @@ export function OpenClawSidebar({
                 </div>
             </div>
 
-            {/* Agent Switcher */}
-            <div className={cn("mb-6 px-3 relative", !sidebarOpen && "px-1")}>
+            {/* Agent Switcher — fixed */}
+            <div className={cn("mb-3 px-3 relative shrink-0", !sidebarOpen && "px-1")}>
                 <button
                     onClick={() => sidebarOpen && setIsAgentListOpen(!isAgentListOpen)}
                     className={cn(
@@ -219,7 +219,7 @@ export function OpenClawSidebar({
                 >
                     <div className={cn(
                         "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors",
-                        status?.gateway_running ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
+                        status?.engine_running ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
                     )}>
                         <ActiveAgentIcon className="w-4 h-4" />
                     </div>
@@ -229,8 +229,8 @@ export function OpenClawSidebar({
                             <div className="flex-1 text-left min-w-0">
                                 <p className="text-xs font-bold text-foreground truncate">{activeAgentName}</p>
                                 <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
-                                    <span className={cn("w-1.5 h-1.5 rounded-full", status?.gateway_running ? "bg-emerald-500 animate-pulse" : "bg-red-500")} />
-                                    {status?.gateway_running ? "Online" : "Offline"}
+                                    <span className={cn("w-1.5 h-1.5 rounded-full", status?.engine_running ? "bg-emerald-500 animate-pulse" : "bg-red-500")} />
+                                    {status?.engine_running ? "Online" : "Offline"}
                                 </p>
                             </div>
                             <ChevronDown className={cn("w-3 h-3 text-muted-foreground transition-transform", isAgentListOpen && "rotate-180")} />
@@ -318,81 +318,133 @@ export function OpenClawSidebar({
                 )}
             </div>
 
-            {/* Navigation */}
-            <div className="space-y-1 mb-6">
-                {[
-                    { id: 'dashboard', label: 'Dashboard', icon: Layout },
-                    { id: 'chat', label: 'Live Chat', icon: MessageCircle },
-                    { id: 'fleet', label: 'Fleet Command', icon: Server },
-                    { id: 'brain', label: 'The Brain', icon: Brain },
-                    { id: 'memory', label: 'Temporal Memory', icon: History },
-                    { id: 'channels', label: 'Channels', icon: Smartphone },
-                    { id: 'channel-status', label: 'Channel Status', icon: Zap },
-                    { id: 'presence', label: 'Presence', icon: Cpu },
-                    { id: 'automations', label: 'Automations', icon: Timer },
-                    { id: 'routine-audit', label: 'Routine Audit', icon: FileText },
-                    { id: 'skills', label: 'Skills', icon: Package },
-                    { id: 'hooks', label: 'Hooks', icon: Anchor },
-                    { id: 'plugins', label: 'Plugins', icon: Plug },
-                    { id: 'config', label: 'Config Editor', icon: Settings2 },
-                    { id: 'tool-policies', label: 'Tool Policies', icon: Wrench },
-                    { id: 'pairing', label: 'DM Pairing', icon: KeyRound },
-                    { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
-                    { id: 'routing', label: 'Routing', icon: GitBranch },
-                    { id: 'cache-stats', label: 'Cache Stats', icon: Database },
-                    { id: 'event-inspector', label: 'Event Inspector', icon: Activity },
-                    { id: 'doctor', label: 'Doctor', icon: Stethoscope },
-                    { id: 'system-control', label: 'System', icon: Shield },
-                ].map((item) => {
-                    const isDisabled = item.id === 'skills' && !gatewayRunning;
-                    return (
-                        <motion.button
-                            key={item.id}
-                            variants={itemVariants}
-                            onClick={() => !isDisabled && onSelectPage(item.id as OpenClawPage)}
-                            disabled={isDisabled}
-                            className={cn(
-                                "flex items-center gap-2 rounded-lg transition-all duration-300",
-                                sidebarOpen ? "w-full px-3 py-2" : "w-10 h-10 justify-center mx-auto",
-                                activePage === item.id
-                                    ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20"
-                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                                isDisabled && "opacity-40 cursor-not-allowed grayscale-[0.5] hover:bg-transparent"
-                            )}
-                            title={isDisabled ? `${item.label} (Requires active Gateway)` : (!sidebarOpen ? item.label : undefined)}
-                        >
-                            <item.icon className={cn("w-4 h-4 shrink-0 transition-colors duration-300", activePage === item.id && !isDisabled ? "text-primary" : "group-hover:text-primary")} />
-                            <span className={cn("transition-all duration-300 text-sm", sidebarOpen ? "opacity-100" : "opacity-0 hidden")}>
-                                {item.label}
-                            </span>
-                        </motion.button>
-                    );
-                })}
-            </div>
+            {/* ── Scrollable area: nav + sessions ── */}
+            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
 
-            {/* Content List (Sessions) */}
-            <div className="flex-1 overflow-y-auto space-y-1">
+                {/* Navigation — grouped into sections */}
+                <div className="space-y-3 pb-2">
+                    {([
+                        {
+                            label: 'Core',
+                            items: [
+                                { id: 'dashboard', label: 'Dashboard', icon: Layout },
+                                { id: 'chat', label: 'Live Chat', icon: MessageCircle },
+                                // Fleet Command only shown when remote agent profiles exist
+                                ...((status?.profiles?.length ?? 0) > 0
+                                    ? [{ id: 'fleet', label: 'Fleet Command', icon: Server }]
+                                    : []),
+                            ]
+                        },
+                        {
+                            label: 'Knowledge',
+                            items: [
+                                { id: 'brain', label: 'The Brain', icon: Brain },
+                                { id: 'memory', label: 'Temporal Memory', icon: History },
+                                { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
+                                { id: 'cache-stats', label: 'Cache Stats', icon: Database },
+                            ]
+                        },
+                        {
+                            label: 'Channels',
+                            items: [
+                                { id: 'channels', label: 'Channels', icon: Smartphone },
+                                { id: 'channel-status', label: 'Channel Status', icon: Zap },
+                                { id: 'presence', label: 'Presence', icon: Cpu },
+                                { id: 'pairing', label: 'DM Pairing', icon: KeyRound },
+                                { id: 'routing', label: 'Routing', icon: GitBranch },
+                            ]
+                        },
+                        {
+                            label: 'Automation',
+                            items: [
+                                { id: 'automations', label: 'Automations', icon: Timer },
+                                { id: 'routine-audit', label: 'Routine Audit', icon: FileText },
+                                { id: 'hooks', label: 'Hooks', icon: Anchor },
+                            ]
+                        },
+                        {
+                            label: 'Tooling',
+                            items: [
+                                { id: 'skills', label: 'Skills', icon: Package },
+                                { id: 'plugins', label: 'Plugins', icon: Plug },
+                                { id: 'tool-policies', label: 'Tool Policies', icon: Wrench },
+                                { id: 'config', label: 'Config Editor', icon: Settings2 },
+                            ]
+                        },
+                        {
+                            label: 'System',
+                            items: [
+                                { id: 'event-inspector', label: 'Event Inspector', icon: Activity },
+                                { id: 'doctor', label: 'Doctor', icon: Stethoscope },
+                                { id: 'system-control', label: 'System', icon: Shield },
+                            ]
+                        },
+                    ] as const).map((group) => (
+                        <div key={group.label}>
+                            {sidebarOpen && (
+                                <p className="px-3 mb-1 text-[9px] font-bold uppercase tracking-widest text-muted-foreground/40 select-none">
+                                    {group.label}
+                                </p>
+                            )}
+                            <div className="space-y-0.5">
+                                {(group.items as readonly { id: string; label: string; icon: React.ElementType }[]).map((item) => {
+                                    const isDisabled = item.id === 'skills' && !gatewayRunning;
+                                    return (
+                                        <motion.button
+                                            key={item.id}
+                                            variants={itemVariants}
+                                            onClick={() => !isDisabled && onSelectPage(item.id as OpenClawPage)}
+                                            disabled={isDisabled}
+                                            className={cn(
+                                                "flex items-center gap-2 rounded-lg transition-all duration-200",
+                                                sidebarOpen ? "w-full px-3 py-1.5" : "w-10 h-9 justify-center mx-auto",
+                                                activePage === item.id
+                                                    ? "bg-accent text-foreground font-semibold shadow-sm ring-1 ring-primary/20"
+                                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                                                isDisabled && "opacity-40 cursor-not-allowed grayscale-[0.5] hover:bg-transparent"
+                                            )}
+                                            title={isDisabled ? `${item.label} (Requires active Gateway)` : (!sidebarOpen ? item.label : undefined)}
+                                        >
+                                            <item.icon className={cn("w-3.5 h-3.5 shrink-0 transition-colors duration-200", activePage === item.id && !isDisabled ? "text-primary" : "")} />
+                                            <span className={cn("text-xs transition-all duration-200", sidebarOpen ? "opacity-100" : "opacity-0 hidden")}>
+                                                {item.label}
+                                            </span>
+                                        </motion.button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* Sessions list — only on chat page */}
                 {activePage === 'chat' && (
-                    <>
+                    <div className="border-t border-border/40 pt-3 pb-2 space-y-0.5">
+                        {sidebarOpen && (
+                            <p className="px-3 mb-1 text-[9px] font-bold uppercase tracking-widest text-muted-foreground/40 select-none">
+                                Sessions
+                            </p>
+                        )}
+
                         {gatewayRunning && (
                             <button
                                 onClick={onNewSession}
                                 className={cn(
-                                    "flex items-center gap-2 rounded-lg bg-primary/10 text-primary text-xs font-bold uppercase tracking-wider transition-all duration-300 mb-4 border border-primary/10 hover:bg-primary/20",
-                                    sidebarOpen ? "w-full px-3 py-2.5 justify-start" : "w-10 h-10 justify-center mx-auto"
+                                    "flex items-center gap-2 rounded-lg bg-primary/10 text-primary text-xs font-bold uppercase tracking-wider transition-all mb-2 border border-primary/10 hover:bg-primary/20",
+                                    sidebarOpen ? "w-full px-3 py-1.5 justify-start" : "w-10 h-9 justify-center mx-auto"
                                 )}
                             >
-                                <MessageCircle className="w-4 h-4" />
+                                <MessageCircle className="w-3.5 h-3.5" />
                                 <span className={cn(sidebarOpen ? "block" : "hidden")}>New Session</span>
                             </button>
                         )}
 
                         {!gatewayRunning ? (
-                            <div className={cn("text-center py-8 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
+                            <div className={cn("text-center py-6 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
                                 <p>Gateway not running</p>
                             </div>
                         ) : sessions.length === 0 ? (
-                            <div className={cn("text-center py-8 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
+                            <div className={cn("text-center py-6 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
                                 <p>No sessions found</p>
                             </div>
                         ) : (
@@ -402,24 +454,22 @@ export function OpenClawSidebar({
                                         onClick={() => onSelectSession(session.session_key)}
                                         className={cn(
                                             "w-full text-left rounded-lg transition-all",
-                                            sidebarOpen ? "px-3 py-2 hover:bg-accent pr-8" : "w-10 h-10 flex items-center justify-center hover:bg-accent mx-auto",
+                                            sidebarOpen ? "px-3 py-1.5 hover:bg-accent pr-8" : "w-10 h-9 flex items-center justify-center hover:bg-accent mx-auto",
                                             selectedSessionKey === session.session_key && "bg-accent border border-white/5"
                                         )}
                                     >
                                         {sidebarOpen ? (
                                             <div className="flex items-start gap-2">
-                                                <MessageCircle className={cn("w-4 h-4 mt-0.5 shrink-0", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
+                                                <MessageCircle className={cn("w-3.5 h-3.5 mt-0.5 shrink-0", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
                                                 <div className="flex-1 min-w-0">
-                                                    <p className={cn("text-sm truncate", session.session_key === 'agent:main' ? "font-bold text-blue-100" : "font-medium")}>
+                                                    <p className={cn("text-xs truncate", session.session_key === 'agent:main' ? "font-bold text-blue-100" : "font-medium")}>
                                                         {session.session_key === 'agent:main' ? 'OpenClaw Core' : (session.title || session.session_key.split(':').pop()?.slice(0, 8))}
                                                     </p>
-                                                    <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                                                        <span>{session.source || 'system'}</span>
-                                                    </div>
+                                                    <p className="text-[10px] text-muted-foreground truncate">{session.source || 'system'}</p>
                                                 </div>
                                             </div>
                                         ) : (
-                                            <MessageCircle className={cn("w-4 h-4", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
+                                            <MessageCircle className={cn("w-3.5 h-3.5", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
                                         )}
                                     </button>
                                     {sidebarOpen && session.session_key !== 'agent:main' && (
@@ -433,34 +483,34 @@ export function OpenClawSidebar({
                                             )}
                                             title={pendingDeleteKey === session.session_key ? "Click again to confirm delete" : "Delete Session"}
                                         >
-                                            <Trash2 className="w-3.5 h-3.5" />
+                                            <Trash2 className="w-3 h-3" />
                                         </button>
                                     )}
                                 </div>
                             ))
                         )}
-                    </>
+                    </div>
                 )}
             </div>
 
-            {/* Bottom Actions */}
-            <div className="mt-auto pt-4 border-t border-border/50 space-y-1">
+            {/* Bottom Actions — sticky pinned */}
+            <div className="shrink-0 pt-2 border-t border-border/50 space-y-0.5">
                 <button
                     onClick={() => onNavigateToSettings('openclaw-gateway')}
                     className={cn(
-                        "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-300 rounded-lg hover:bg-accent",
-                        sidebarOpen ? "w-full px-3 py-2" : "w-10 h-10 justify-center mx-auto"
+                        "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-200 rounded-lg hover:bg-accent",
+                        sidebarOpen ? "w-full px-3 py-2" : "w-10 h-9 justify-center mx-auto"
                     )}
                 >
                     <Settings className="w-4 h-4" />
                     {sidebarOpen && "Gateway Settings"}
                 </button>
-                {activePage === 'chat' && status?.gateway_running && (
+                {activePage === 'chat' && status?.engine_running && (
                     <button
                         onClick={fetchData}
                         className={cn(
-                            "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-300 rounded-lg hover:bg-accent",
-                            sidebarOpen ? "w-full px-3 py-2" : "w-10 h-10 justify-center mx-auto"
+                            "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-200 rounded-lg hover:bg-accent",
+                            sidebarOpen ? "w-full px-3 py-2" : "w-10 h-9 justify-center mx-auto"
                         )}
                     >
                         <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />

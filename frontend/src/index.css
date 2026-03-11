@@ -34,6 +34,13 @@
 
     --radius: 0.5rem;
 
+    /* Theme-derived accent palette fallbacks (Zinc) */
+    --chart-1: 240 10% 35%;
+    --chart-2: 240 8% 50%;
+    --chart-3: 200 15% 45%;
+    --chart-4: 260 12% 42%;
+    --chart-5: 220 10% 55%;
+
     /* Syntax Highlighting Fallbacks */
     --hljs-bg: 0 0% 99%;
     --hljs-color: 240 10% 20%;
@@ -67,6 +74,13 @@
     --border: 240 3.7% 15.9%;
     --input: 240 3.7% 15.9%;
     --ring: 240 4.9% 83.9%;
+
+    /* Theme-derived accent palette fallbacks (Zinc dark) */
+    --chart-1: 240 10% 70%;
+    --chart-2: 240 8% 60%;
+    --chart-3: 200 15% 65%;
+    --chart-4: 260 12% 62%;
+    --chart-5: 220 10% 55%;
   }
 }
 

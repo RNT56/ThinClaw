@@ -8,10 +8,10 @@ import * as openclawApi from '../../lib/openclaw';
 import { toast } from 'sonner';
 
 const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle2; color: string; bg: string }> = {
-    pass: { icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/30' },
+    pass: { icon: CheckCircle2, color: 'text-primary', bg: 'bg-emerald-500/10 border-emerald-500/30' },
     fail: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/30' },
-    warn: { icon: AlertTriangle, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/30' },
-    skip: { icon: MinusCircle, color: 'text-zinc-500', bg: 'bg-white/5 border-white/10' },
+    warn: { icon: AlertTriangle, color: 'text-muted-foreground', bg: 'bg-amber-500/10 border-amber-500/30' },
+    skip: { icon: MinusCircle, color: 'text-muted-foreground/60', bg: 'bg-white/5 border-border/40' },
 };
 
 const CHECK_ICONS: Record<string, typeof Server> = {
@@ -58,7 +58,7 @@ export function OpenClawDoctor() {
                         </div>
                         <div>
                             <h2 className="text-base font-semibold text-zinc-100">System Doctor</h2>
-                            <p className="text-xs text-zinc-500">
+                            <p className="text-xs text-muted-foreground/60">
                                 {lastRun ? `Last run: ${lastRun.toLocaleTimeString()}` : 'Not yet run'}
                             </p>
                         </div>
@@ -83,12 +83,12 @@ export function OpenClawDoctor() {
                         <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-4">
                                 <span className="text-2xl font-bold text-zinc-100">{healthPercent}%</span>
-                                <span className="text-xs text-zinc-500 uppercase tracking-wider">System Health</span>
+                                <span className="text-xs text-muted-foreground/60 uppercase tracking-wider">System Health</span>
                             </div>
                             <div className="flex items-center gap-3 text-xs">
-                                <span className="text-emerald-400">✓ {diagnostics.passed}</span>
+                                <span className="text-primary">✓ {diagnostics.passed}</span>
                                 <span className="text-red-400">✗ {diagnostics.failed}</span>
-                                <span className="text-zinc-500">— {diagnostics.skipped}</span>
+                                <span className="text-muted-foreground/60">— {diagnostics.skipped}</span>
                             </div>
                         </div>
                         <div className="h-2 bg-white/5 rounded-full overflow-hidden">
@@ -109,7 +109,7 @@ export function OpenClawDoctor() {
             {/* Checks */}
             <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-2">
                 {loading && !diagnostics ? (
-                    <div className="flex items-center justify-center py-16 text-zinc-500">
+                    <div className="flex items-center justify-center py-16 text-muted-foreground/60">
                         <Activity className="w-6 h-6 animate-pulse mr-2" />
                         Running diagnostics...
                     </div>
@@ -133,7 +133,7 @@ export function OpenClawDoctor() {
                                             <span className="text-sm font-medium text-zinc-200">{check.name}</span>
                                             <StatusIcon className={`w-3.5 h-3.5 ${cfg.color}`} />
                                         </div>
-                                        <p className="text-xs text-zinc-500 mt-0.5">{check.detail}</p>
+                                        <p className="text-xs text-muted-foreground/60 mt-0.5">{check.detail}</p>
                                     </div>
                                     <span className={`text-[10px] uppercase tracking-wider font-mono ${cfg.color}`}>
                                         {check.status}
@@ -143,7 +143,7 @@ export function OpenClawDoctor() {
                         );
                     })
                 ) : (
-                    <div className="flex flex-col items-center justify-center py-16 text-zinc-500">
+                    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground/60">
                         <Stethoscope className="w-8 h-8 mb-3 opacity-30" />
                         <p className="text-sm">Click "Re-run" to start diagnostics</p>
                     </div>

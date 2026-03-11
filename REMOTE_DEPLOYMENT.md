@@ -1,99 +1,107 @@
-# 🌐 Remote OpenClaw Deployment Guide (Updated)
+# 🌐 Remote OpenClaw Deployment Guide
 
-This guide explains how to deploy the **OpenClaw Agent** on a remote server. We offer two methods:
-1. **[Recommended] Automated Deployment Script:** A one-command setup using official Ansible playbooks.
-2. **Docker Manual Setup:** A simpler, container-focused method for quick testing.
+This guide explains how to run the **IronClaw Agent** on a remote server and connect to it using the Scrappy Desktop App.
+
+When Scrappy is in **Remote Mode**, the frontend UI doesn't run the heavy agent process locally. Instead, it connects to an external IronClaw gateway via HTTP/SSE. This allows you to run your agent on a powerful server while controlling it from your personal mac or laptop.
 
 ---
 
-## 🚀 Option 1: Automated Deployment Script (Recommended)
-**Best for:** Production servers (VPS, Dedicated), Home Labs, Secure remote access.
+## 🎯 OS Compatibility
 
-We provide a helper script that downloads and runs the official `openclaw-ansible` playbook.
-It handles:
-- **System Hardening:** Installs UFW (Firewall), Fail2ban.
-- **VPN:** Installs Tailscale for secure, private access without exposing ports.
-- **Dependencies:** Installs Docker, Node.js, and Systemd services.
-- **Auto-Start:** Ensures the agent runs on boot.
+### Does Remote Deploy work with macOS or Windows?
+**Yes!** The Remote Deploy architecture works on **any OS** (macOS, Windows, Linux).
+However, the method you use to set it up will differ:
 
-### 1. Prerequisites
-- A fresh Ubuntu/Debian server or a Mac.
-- SSH access to the server.
-- [Ansible](https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html) installed locally (`brew install ansible` on Mac).
+1. **"Deploy New Agent" Wizard in Scrappy UI:**
+   This built-in wizard uses an SSH connection and Bash script to automatically install Docker and start the agent. **This wizard only works if the target server is a Linux machine** (e.g. Ubuntu/Debian).
 
-### 2. Run the Script
-From the project root:
+2. **Manual Setup + "Connect Existing" Wizard:**
+   If your remote machine is macOS or Windows (or a customized Linux server), you simply start the agent manually on that machine, and then use the **"Connect Existing"** tab in the Scrappy UI.
 
+> **Note on Ansible:** The legacy "one-command Ansible script" (`deploy-remote.sh`) has been officially deprecated and removed. It relied on complex systemic dependencies (Node.js, auto-installing Tailscale, specific OS versions) and a separate repository structure. The new Docker Compose architecture handles everything in a much cleaner, self-contained way.
+
+---
+
+## 🚀 Option 1: Automated Deployment from Scrappy (Linux Targets Only)
+
+If you have a fresh Ubuntu/Debian server (like a DigitalOcean droplet or AWS EC2), you can deploy directly from Scrappy in one click.
+
+1. Go to **Settings > Gateway** in the Scrappy App.
+2. Click **Deploy New Remote Agent**.
+3. Enter your server's **SSH Host IP** and **SSH User** (e.g. `root`).
+4. Click **Deploy via SSH**.
+5. Scrappy will securely copy the deployment files, install Docker on the remote server, and spin up the IronClaw agent.
+6. Once finished, click **Save & Connect**.
+
+*Prerequisites: Your local machine must have SSH access to the target server via standard key pairs (e.g., `~/.ssh/id_rsa`). Port 18789 must be open on the server's firewall.*
+
+---
+
+## 🐳 Option 2: Manual Setup on ANY OS (No Scrappy UI Required)
+
+If you want to run the agent on macOS, Windows, or if the auto-deploy wizard doesn't fit your needs, you can start the IronClaw gateway manually.
+
+### Step 1: Transfer the Deployment Files
+Copy the `ironclaw/deploy` folder from the Scrappy source code to your target machine.
+
+### Step 2: Configure the Environment
+Inside the `deploy` folder on your remote machine:
+1. Rename `.env.template` to `.env`.
+2. Open `.env` in a text editor.
+3. Generate a secure random password and set it as `GATEWAY_AUTH_TOKEN`.
+   *(Example: Run `openssl rand -hex 32` or just use a long strong password)*
+4. Set at least one LLM API key (e.g., `ANTHROPIC_API_KEY=sk-ant...`).
+
+### Step 3: Start the Agent
+You can start the agent in two ways:
+
+#### A. Using Docker (Recommended)
+Ensure Docker Desktop (Mac/Win) or Docker Engine (Linux) is installed.
+Run:
 ```bash
-./backend/openclaw-engine/deploy-remote.sh
+docker compose up -d --build
 ```
+This starts the `ironclaw-remote` container, exposing port `18789`.
 
-Follow the prompts:
-- **Target Server IP:** The public IP of your server.
-- **SSH User:** Typically `root` or `ubuntu`.
-
-The script will configure your server and output the connection details.
-
-### 3. Connect via VPN
-Once installed, your server will join your Tailscale network.
-1. Install Tailscale on your **Desktop**.
-2. Go to **OpenClaw Desktop > Settings > Gateway**.
-3. Set **Gateway Mode** to **Remote Bridge**.
-4. Use the **Tailscale IP** of your server:
-   `ws://<tailscale-ip>:18789`
-   *(This is secure and encrypted over the VPN).*
-
----
-
-## 🐳 Option 2: Docker Manual Setup
-**Best for:** Quick tests, existing Docker environments, or if you don't want system-level changes.
-
-### 1. Transfer Files
-Copy `src-tauri/openclaw-engine` to your server:
+#### B. Native Rust (No Docker)
+If you don't want to use Docker, ensure you have Rust installed (`rustup`).
+From the root of the IronClaw source (`ironclaw/` directory):
 ```bash
-scp -r backend/openclaw-engine user@your-server-ip:~/openclaw-agent
+cargo run --release
 ```
-
-### 2. Start the Container
-On the server:
-```bash
-cd ~/openclaw-agent
-docker-compose up -d --build
-```
-*Note: This exposes port 18789 to the public internet unless you configure a firewall yourself.*
-
-### 3. Connect
-Go to **OpenClaw Desktop > Settings > Gateway** and connect to:
-`ws://<public-ip>:18789`
+The gateway will start on `0.0.0.0:18789` and print logs to your terminal.
 
 ---
 
-## 🔗 Connecting & Configuring (Both Methods)
+## 🔗 Connecting the Scrappy App to an Existing Agent
 
-Once your agent is running (via Ansible or Docker), connect your Desktop App to control it.
+Once your remote IronClaw agent is running (via Option 1 or Option 2), you connect your Scrappy Desktop App to control it.
 
-### 1. Remote Configuration
-Your Desktop App is the **Control Plane**.
-- **API Keys:** Go to **Settings > Secrets**. Toggling keys (OpenAI, Anthropic) sends them securely to the remote agent.
-- **Agent Settings:** Changing "System Prompt" or "Model" updates the remote agent's config.
+1. On your Scrappy Desktop App, go to **Settings > Gateway**.
+2. Click **Add New Agent Profile** and select **Connect Existing**.
+3. Fill in the connection details:
+   - **Gateway URL:** `http://<your-remote-machine-ip>:18789` 
+     *(e.g., `http://192.168.1.50:18789` or `http://my-vps.com:18789`)*
+   - **Auth Token:** The value you set for `GATEWAY_AUTH_TOKEN` in Step 2.
+4. Click **Test & Save**.
+5. Scrappy will verify the connection and switch to Remote Mode.
 
-### 2. Verification
-1. Open the Chat.
-2. Send a message: "Hello, what host are you running on?"
-3. The agent should reply with the hostname of your remote server (e.g., "I am running on 'linux-vps-01'").
+### VPN / Security Recommendation (Tailscale)
+Since the agent's port (`18789`) communicates over plain HTTP by default, **you should not expose it directly to the public internet** without a reverse proxy (like Nginx/Caddy with SSL).
+
+The easiest and most secure way to connect is using a mesh VPN like **Tailscale**:
+1. Install Tailscale on both your laptop (Scrappy UI) and your remote server (IronClaw Agent).
+2. Configure your server's firewall to block port 18789 on the public interface, but allow it on the `tailscale0` interface.
+3. In Scrappy "Connect Existing", use the server's **Tailscale IP**: `http://100.x.y.z:18789`
+
+This provides end-to-end encryption and zero public open ports.
 
 ---
 
-## ⚠️ Troubleshooting
+## 🔧 Post-Setup Configuration
 
-### 🔴 Connection Refused
-- **Ansible Users:** Ensure you are connected to **Tailscale**. Are you using the Tailscale IP (100.x.y.z)?
-- **Docker Users:** Did you open port 18789 in your cloud provider's firewall (AWS Security Group / DigitalOcean Firewall)?
+Your Scrappy Desktop App acts as the **Control Plane**. Even in remote mode, you can manage the agent from the UI:
 
-### 🔴 "Authentication Failed"
-- If you set a `OPENCLAW_GATEWAY_TOKEN` env var on the server, ensure it matches the **Gateway Token** in your Desktop Settings.
-- Ansible setup might generate a random token; check `/etc/openclaw/env` or the playbook logs.
-
-### 🔴 Updates
-- **Ansible:** Run the `deploy-remote.sh` script again to pull latest changes and restart services.
-- **Docker:** Copy new files and run `docker-compose up -d --build`.
+- **API Keys / Secrets:** Go to **Settings > Models & Secrets**. Toggling keys or entering new ones will securely push them to the remote agent over the encrypted HTTP proxy.
+- **Routines:** Creating or triggering routines in the UI will execute them on the remote server exactly as expected.
+- **File Access:** File paths shown in the UI will refer to the remote agent's filesystem (typically the Docker volume or `ironclaw` working directory).

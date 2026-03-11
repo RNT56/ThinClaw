@@ -1,6 +1,8 @@
+import { useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useChatLayout } from '../ChatProvider';
 import { OpenClawSidebar } from '../../openclaw/OpenClawSidebar';
+import type { OpenClawPage } from '../../openclaw/OpenClawSidebar';
 
 export function OpenClawSidebarSlice() {
     const {
@@ -13,6 +15,15 @@ export function OpenClawSidebarSlice() {
         activeOpenClawPage,
         setActiveOpenClawPage,
     } = useChatLayout();
+
+    // When navigating to the chat page, ensure a session is selected so the
+    // send button is never silently blocked by a null effectiveSessionKey.
+    const handleSelectPage = useCallback((page: OpenClawPage) => {
+        setActiveOpenClawPage(page);
+        if (page === 'chat' && !selectedOpenClawSession) {
+            setSelectedOpenClawSession('agent:main');
+        }
+    }, [setActiveOpenClawPage, selectedOpenClawSession, setSelectedOpenClawSession]);
 
     return (
         <motion.div
@@ -32,7 +43,7 @@ export function OpenClawSidebarSlice() {
                 gatewayRunning={openclawGatewayRunning}
                 onNavigateToSettings={(page) => setActiveTab(page)}
                 activePage={activeOpenClawPage}
-                onSelectPage={setActiveOpenClawPage}
+                onSelectPage={handleSelectPage}
             />
         </motion.div>
     );

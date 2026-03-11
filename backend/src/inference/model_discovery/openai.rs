@@ -27,6 +27,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
     }
 
     #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
     struct ModelData {
         id: String,
         #[serde(default)]
@@ -43,8 +44,10 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         .into_iter()
         .filter_map(|m| {
             let category = classify_model("openai", &m.id);
-            // Skip internal/system models
-            if m.owned_by == "system" || m.id.starts_with("ft:") || m.id.ends_with("-internal") {
+            // Skip fine-tuned and internal models only.
+            // NOTE: We no longer skip `owned_by == "system"` because OpenAI
+            // returns many production models (GPT-5.4, o3, etc.) with that owner.
+            if m.id.starts_with("ft:") || m.id.ends_with("-internal") {
                 return None;
             }
 
@@ -95,20 +98,14 @@ fn openai_model_limits(id: &str) -> (Option<u32>, Option<u32>) {
 }
 
 fn openai_supports_vision(id: &str) -> bool {
-    matches!(
-        id,
-        "gpt-4o"
-            | "gpt-4o-2024-11-20"
-            | "gpt-4o-2024-08-06"
-            | "gpt-4o-mini"
-            | "gpt-4o-mini-2024-07-18"
-            | "gpt-4-turbo"
-            | "gpt-4-turbo-2024-04-09"
-            | "o1"
-            | "o1-2024-12-17"
-            | "o3-mini"
-            | "o3-mini-2025-01-31"
-    )
+    // Most modern OpenAI chat models support vision
+    id.starts_with("gpt-5")
+        || id.starts_with("gpt-4o")
+        || id.starts_with("gpt-4.1")
+        || id.starts_with("gpt-4-turbo")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
 }
 
 fn openai_embedding_dims(id: &str) -> Option<u32> {

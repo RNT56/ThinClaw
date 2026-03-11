@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
-import { X, Globe, CheckCircle, Star, Save, Loader2, Server, Key, Cpu, ChevronDown, Shield } from 'lucide-react';
+import React, { useEffect, useState, useMemo } from 'react';
+import { X, Globe, CheckCircle, Star, Save, Loader2, Server, Key, Cpu, ChevronDown, Shield, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import * as openclaw from '../../lib/openclaw';
+import { useCloudModels } from '../../hooks/use-cloud-models';
 
 interface CloudBrainConfigModalProps {
     isOpen: boolean;
@@ -10,93 +11,19 @@ interface CloudBrainConfigModalProps {
     onUpdate: () => Promise<void>;
 }
 
-// Known models per provider — IDs must match config.rs catalog exactly
-const PROVIDER_MODELS: Record<string, { id: string; label: string; recommended?: boolean }[]> = {
+// Fallback models when discovery hasn't completed yet or fails
+const FALLBACK_MODELS: Record<string, { id: string; label: string; recommended?: boolean }[]> = {
     anthropic: [
         { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5', recommended: true },
-        { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-        { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
     ],
     openai: [
-        { id: 'gpt-5-nano', label: 'GPT-5 Nano', recommended: true },
-        { id: 'gpt-5-mini', label: 'GPT-5 Mini' },
-        { id: 'gpt-5.2', label: 'GPT-5.2' },
-        { id: 'gpt-5.2-pro', label: 'GPT-5.2 Pro' },
-        { id: 'o3', label: 'o3' },
-        { id: 'o4-mini', label: 'o4 Mini' },
+        { id: 'gpt-5-mini', label: 'GPT-5 Mini', recommended: true },
     ],
     gemini: [
-        { id: 'gemini-3.0-flash', label: 'Gemini 3.0 Flash', recommended: true },
-        { id: 'gemini-3-pro', label: 'Gemini 3 Pro' },
-        { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
-    ],
-    groq: [
-        { id: 'meta-llama/llama-4-maverick-17b-128-instruct', label: 'Llama 4 Maverick 17B', recommended: true },
-        { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B' },
-        { id: 'moonshotai/kimi-k2-instruct-0905', label: 'Kimi K2 Instruct' },
-        { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B' },
-        { id: 'groq/compound', label: 'Groq Compound' },
-    ],
-    openrouter: [
-        { id: 'z-ai/glm-4.7-flash', label: 'GLM 4.7 Flash' },
-        { id: 'z-ai/glm-5', label: 'GLM 5' },
-        { id: 'minimax/minimax-m2.5', label: 'MiniMax M2.5' },
-        { id: 'qwen/qwen3-max-thinking', label: 'Qwen3 Max Thinking' },
-        { id: 'qwen/qwen3-max', label: 'Qwen3 Max' },
-        { id: 'qwen/qwen3-coder-next', label: 'Qwen3 Coder Next' },
-        { id: 'anthropic/claude-opus-4.6', label: 'Claude Opus 4.6', recommended: true },
-        { id: 'moonshotai/kimi-k2.5', label: 'Kimi K2.5' },
-        { id: 'mistralai/mistral-large-2512', label: 'Mistral Large 2512' },
-        { id: 'deepseek/deepseek-v3.2-speciale', label: 'DeepSeek V3.2 Speciale' },
-        { id: 'x-ai/grok-4.1-fast', label: 'Grok 4.1 Fast' },
-        { id: 'perplexity/sonar-pro-search', label: 'Sonar Pro Search' },
-        { id: 'openai/gpt-5.2-codex', label: 'GPT-5.2 Codex' },
-        { id: 'openai/o3-deep-research', label: 'o3 Deep Research' },
-        { id: 'openai/o4-mini-deep-research', label: 'o4 Mini Deep Research' },
-        { id: 'meta-llama/llama-4-maverick', label: 'Llama 4 Maverick' },
-        { id: 'meta-llama/llama-4-scout', label: 'Llama 4 Scout' },
-    ],
-    // --- Additional implicit providers ---
-    xai: [
-        { id: 'grok-4.1', label: 'Grok 4.1', recommended: true },
-        { id: 'grok-4.1-fast', label: 'Grok 4.1 Fast' },
-        { id: 'grok-3-mini', label: 'Grok 3 Mini' },
-    ],
-    mistral: [
-        { id: 'mistral-large-latest', label: 'Mistral Large', recommended: true },
-        { id: 'codestral-latest', label: 'Codestral' },
-        { id: 'mistral-small-latest', label: 'Mistral Small' },
-    ],
-    together: [
-        { id: 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8', label: 'Llama 4 Maverick', recommended: true },
-        { id: 'Qwen/Qwen3-235B-A22B', label: 'Qwen3 235B' },
-        { id: 'deepseek-ai/DeepSeek-V3', label: 'DeepSeek V3' },
-    ],
-    'amazon-bedrock': [
-        { id: 'us.anthropic.claude-opus-4-6-v1:0', label: 'Claude Opus 4.6 (Bedrock)', recommended: true },
-        { id: 'us.anthropic.claude-sonnet-4-5-v1:0', label: 'Claude Sonnet 4.5 (Bedrock)' },
-        { id: 'amazon.nova-pro-v1:0', label: 'Amazon Nova Pro' },
-        { id: 'amazon.nova-lite-v1:0', label: 'Amazon Nova Lite' },
-    ],
-    venice: [
-        { id: 'llama-3.3-70b', label: 'Llama 3.3 70B', recommended: true },
-    ],
-    moonshot: [
-        { id: 'kimi-k2.5', label: 'Kimi K2.5', recommended: true },
-    ],
-    minimax: [
-        { id: 'minimax-m2.5', label: 'MiniMax M2.5', recommended: true },
-    ],
-    nvidia: [
-        { id: 'meta/llama-4-maverick-17b-128e-instruct', label: 'Llama 4 Maverick (NIM)', recommended: true },
-    ],
-    qianfan: [
-        { id: 'ernie-x1-turbo-32k', label: 'ERNIE X1 Turbo', recommended: true },
-    ],
-    xiaomi: [
-        { id: 'mimo-vl-7b', label: 'MiMo VL 7B', recommended: true },
+        { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', recommended: true },
     ],
 };
+
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
     anthropic: 'Anthropic',
@@ -131,6 +58,43 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
     const [expandedModelPicker, setExpandedModelPicker] = useState<string | null>(null);
 
     const hasInitialized = React.useRef(false);
+
+    // ── Dynamic model discovery (same system as chat browser) ──────────
+    const { models: discoveredModels, loading: discoveryLoading, refreshAll: refreshDiscovery } = useCloudModels();
+
+    // Build per-provider model lists from dynamically discovered models
+    // Only include chat-capable models; filter out image, audio, realtime, etc.
+    const providerModels = useMemo(() => {
+        const result: Record<string, { id: string; label: string; recommended?: boolean }[]> = {};
+
+        for (const model of discoveredModels) {
+            if (model.category !== 'chat') continue;
+            // Skip deprecated models
+            if (model.deprecated) continue;
+
+            if (!result[model.provider]) {
+                result[model.provider] = [];
+            }
+            result[model.provider].push({
+                id: model.id,
+                label: model.displayName,
+            });
+        }
+
+        // Sort each provider's models alphabetically by label
+        for (const provider of Object.keys(result)) {
+            result[provider].sort((a, b) => a.label.localeCompare(b.label));
+        }
+
+        // Fall back to FALLBACK_MODELS for providers that weren't discovered
+        for (const [provider, models] of Object.entries(FALLBACK_MODELS)) {
+            if (!result[provider] || result[provider].length === 0) {
+                result[provider] = models;
+            }
+        }
+
+        return result;
+    }, [discoveredModels]);
 
     useEffect(() => {
         if (isOpen && status && !hasInitialized.current) {
@@ -167,10 +131,10 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
             }
         } else {
             setEnabledProviders(prev => [...prev, provider]);
-            // Auto-enable the recommended model
-            const models = PROVIDER_MODELS[provider];
-            if (models) {
-                const rec = models.find(m => m.recommended);
+            // Auto-enable the first model (or recommended fallback)
+            const models = providerModels[provider];
+            if (models && models.length > 0) {
+                const rec = models.find((m: { id: string; label: string; recommended?: boolean }) => m.recommended);
                 setEnabledModels(prev => ({
                     ...prev,
                     [provider]: [rec?.id || models[0].id],
@@ -237,6 +201,15 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                 await openclaw.selectOpenClawModel(selectedModel || null);
             }
 
+            // Reload secrets to restart the engine with updated LLM_BACKEND env vars.
+            // Without this, the engine keeps using stale env vars from the previous
+            // start (e.g., LLM_BACKEND=ollama instead of the newly selected cloud provider).
+            try {
+                await openclaw.reloadSecrets();
+            } catch (e) {
+                console.warn("[CloudBrainConfig] Secrets reload skipped (engine may not be running):", e);
+            }
+
             toast.success("Cloud brain configuration saved");
             await onUpdate();
             onClose();
@@ -247,6 +220,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
             setIsSaving(false);
         }
     };
+
 
     if (!isOpen) return null;
 
@@ -272,10 +246,17 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                     {/* Safety Banner */}
                     <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-xs text-emerald-600 dark:text-emerald-400 flex items-start gap-2">
                         <Shield className="w-4 h-4 mt-0.5 shrink-0" />
-                        <div>
+                        <div className="flex-1">
                             <strong>Cost Safety:</strong> The agent can <strong>ONLY</strong> use models you explicitly enable below.
                             Disabled models are never sent to the engine, preventing unexpected API costs.
                         </div>
+                        <button
+                            onClick={() => refreshDiscovery()}
+                            className="p-1.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors shrink-0"
+                            title="Refresh available models from provider APIs"
+                        >
+                            <RefreshCw className={`w-3.5 h-3.5 ${discoveryLoading ? 'animate-spin' : ''}`} />
+                        </button>
                     </div>
 
                     {/* Provider Selection */}
@@ -288,7 +269,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                             {['anthropic', 'openai', 'openrouter', 'groq', 'gemini', 'xai', 'mistral', 'together', 'amazon-bedrock', 'venice', 'moonshot', 'minimax', 'nvidia', 'qianfan', 'xiaomi'].map(provider => {
                                 const isEnabled = enabledProviders.includes(provider);
                                 const providerEnabledModels = enabledModels[provider] || [];
-                                const providerAllModels = PROVIDER_MODELS[provider] || [];
+                                const providerAllModels = providerModels[provider] || [];
 
                                 return (
                                     <div key={provider}>

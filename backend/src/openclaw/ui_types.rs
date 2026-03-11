@@ -136,6 +136,55 @@ pub enum UiEvent {
         progress: Option<f32>, // 0.0–1.0
         result_preview: Option<String>,
     },
+
+    /// Mid-loop agent message — rendered as a persistent chat bubble.
+    ///
+    /// Emitted by the `emit_user_message` tool. The agent is still working
+    /// (the agentic loop continues), so the processing indicator should
+    /// stay active. These are NOT ephemeral status text.
+    AgentMessage {
+        session_key: String,
+        run_id: Option<String>,
+        message_id: String,
+        content: String,
+        message_type: String, // "progress" | "warning" | "question" | "interim_result"
+    },
+
+    /// Factory reset completed — frontend must clear all cached state
+    FactoryReset,
+
+    /// Routine lifecycle event — fired when a routine starts, completes, or fails.
+    /// The frontend Automations panel and Console can display these as live status.
+    RoutineLifecycle {
+        routine_name: String,
+        event: String, // "started" | "completed" | "failed"
+        run_id: Option<String>,
+        result_summary: Option<String>,
+    },
+
+    /// Real-time log entry push from the internal tracing subscriber.
+    /// Sent for every DEBUG+ event so the UI Logs tab updates live without polling.
+    LogEntry {
+        timestamp: String,
+        level: String, // "DEBUG" | "INFO" | "WARN" | "ERROR"
+        target: String,
+        message: String,
+    },
+
+    /// Bootstrap ritual completed — BOOTSTRAP.md was deleted by the agent.
+    /// Frontend should update bootstrapNeeded → false and hide the boot button.
+    BootstrapCompleted,
+
+    /// Agent created a file via write_file tool.
+    /// Frontend should show a clickable Finder-reveal link in the chat.
+    FileCreated {
+        /// Absolute path of the created file on disk.
+        path: String,
+        /// Relative path from workspace root (user-friendly display).
+        relative_path: String,
+        /// Size in bytes.
+        bytes: u64,
+    },
 }
 
 /// Session metadata for session list

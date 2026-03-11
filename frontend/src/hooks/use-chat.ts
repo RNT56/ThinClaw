@@ -18,6 +18,8 @@ export type ExtendedMessage = Message & {
     original_messages?: Message[] | null;
     isStreaming?: boolean;
     created_at?: number;
+    // Inference speed
+    tokensPerSec?: number;
 };
 
 export function useChat() {
@@ -61,7 +63,8 @@ export function useChat() {
                         web_search_results: activeJob.searchResults,
                         isStreaming: true,
                         // If it's a thinking model, we might want to expose that state too
-                        searchStatus: activeJob.searchStatus
+                        searchStatus: activeJob.searchStatus,
+                        tokensPerSec: activeJob.tokensPerSec,
                     };
                 }
             } else {

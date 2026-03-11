@@ -77,7 +77,7 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
         >
             <div className={cn(
                 "backdrop-blur-md rounded-xl border shadow-2xl overflow-hidden",
-                persistent ? "bg-black/40 border-white/5" : "bg-gradient-to-br from-black/80 to-zinc-900/80 border-white/10"
+                persistent ? "bg-black/40 border-white/5" : "bg-gradient-to-br from-black/80 to-zinc-900/80 border-border/40"
             )}>
                 {/* Header / Status Bar */}
                 <div
@@ -177,7 +177,7 @@ export function LiveAgentStatus({ run, persistent = false }: LiveAgentStatusProp
                                 {/* Tool Log */}
                                 <div className="space-y-2">
                                     {run.tools.map((tool, idx) => (
-                                        <div key={idx} className="group relative pl-4 border-l-2 border-white/10 hover:border-blue-500/50 transition-colors">
+                                        <div key={idx} className="group relative pl-4 border-l-2 border-border/40 hover:border-blue-500/50 transition-colors">
                                             <div className="flex items-center gap-2 mb-1">
                                                 <Terminal className="w-3 h-3 text-blue-400" />
                                                 <span className="text-[11px] font-bold text-blue-100 uppercase tracking-wider">{tool.tool}</span>
@@ -260,7 +260,7 @@ function ToolDetail({ tool, input, output }: { tool: string, input: any, output:
                     {tool === 'browser_click' && <span className="text-white/40">Click</span>}
                 </div>
                 {output?.screenshot && (
-                    <div className="relative group rounded-lg overflow-hidden border border-white/10 bg-black/40 aspect-video flex items-center justify-center">
+                    <div className="relative group rounded-lg overflow-hidden border border-border/40 bg-black/40 aspect-video flex items-center justify-center">
                         <img src={`data:image/png;base64,${output.screenshot}`} alt="Browser Screenshot" className="max-h-full object-contain" />
                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                             <MousePointer2 className="w-6 h-6 text-white animate-bounce" />
@@ -281,7 +281,7 @@ function ToolDetail({ tool, input, output }: { tool: string, input: any, output:
                         <ImageIcon className="w-3 h-3" />
                         <span>Canvas View</span>
                     </div>
-                    <div className="rounded-lg overflow-hidden border border-white/10 bg-black/40 p-2">
+                    <div className="rounded-lg overflow-hidden border border-border/40 bg-black/40 p-2">
                         <img src={`data:image/png;base64,${imageData}`} alt="Canvas Display" className="w-full h-auto rounded" />
                     </div>
                 </div>

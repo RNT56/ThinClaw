@@ -39,7 +39,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 describe('getOpenClawStatus()', () => {
     it('invokes the correct command', async () => {
-        const fakeStatus = { gateway_running: true, ws_connected: false, port: 18789 };
+        const fakeStatus = { engine_running: true, engine_connected: false, port: 18789 };
         mockInvoke.mockResolvedValueOnce(fakeStatus);
 
         const result = await getOpenClawStatus();

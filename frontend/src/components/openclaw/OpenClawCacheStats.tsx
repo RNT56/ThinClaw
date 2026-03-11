@@ -8,7 +8,7 @@ function StatCard({ icon: Icon, label, value, sub, color }: {
     icon: any; label: string; value: string; sub?: string; color: string;
 }) {
     return (
-        <div className="rounded-2xl border border-white/10 bg-card/30 backdrop-blur-md p-5">
+        <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-5">
             <div className="flex items-center gap-2 mb-3">
                 <Icon className={cn("w-4 h-4", color)} />
                 <span className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{label}</span>
@@ -63,7 +63,7 @@ export function OpenClawCacheStats() {
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                     <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
-                        <Database className="w-5 h-5 text-cyan-400" />
+                        <Database className="w-5 h-5 text-primary" />
                     </div>
                     <div>
                         <h1 className="text-xl font-bold">Response Cache</h1>
@@ -87,21 +87,21 @@ export function OpenClawCacheStats() {
                     label="Hits"
                     value={(stats?.hits ?? 0).toLocaleString()}
                     sub="Served from cache"
-                    color="text-emerald-400"
+                    color="text-primary"
                 />
                 <StatCard
                     icon={TrendingDown}
                     label="Misses"
                     value={(stats?.misses ?? 0).toLocaleString()}
                     sub="Required LLM call"
-                    color="text-amber-400"
+                    color="text-muted-foreground"
                 />
                 <StatCard
                     icon={Percent}
                     label="Hit Rate"
                     value={`${(hitRate * 100).toFixed(1)}%`}
                     sub={hitRate >= 0.7 ? 'Excellent' : hitRate >= 0.4 ? 'Good' : 'Low'}
-                    color={hitRate >= 0.7 ? 'text-emerald-400' : hitRate >= 0.4 ? 'text-amber-400' : 'text-red-400'}
+                    color={hitRate >= 0.7 ? 'text-primary' : hitRate >= 0.4 ? 'text-muted-foreground' : 'text-red-400'}
                 />
                 <StatCard
                     icon={HardDrive}
@@ -113,7 +113,7 @@ export function OpenClawCacheStats() {
             </div>
 
             {/* Hit rate visualisation */}
-            <div className="rounded-2xl border border-white/10 bg-card/30 backdrop-blur-md p-6">
+            <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-6">
                 <h3 className="text-sm font-bold text-muted-foreground mb-4">Cache Efficiency</h3>
                 <div className="h-6 bg-white/[0.03] rounded-full overflow-hidden border border-white/5 relative">
                     <motion.div

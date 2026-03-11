@@ -25,15 +25,15 @@ import { toast } from 'sonner';
 
 const KIND_STYLES: Record<string, { icon: React.ReactNode; label: string; color: string }> = {
     wasm_tool: { icon: <Puzzle className="w-4 h-4" />, label: 'WASM Tool', color: 'bg-blue-500/15 text-blue-400 border-blue-500/20' },
-    wasm_channel: { icon: <Globe className="w-4 h-4" />, label: 'WASM Channel', color: 'bg-purple-500/15 text-purple-400 border-purple-500/20' },
+    wasm_channel: { icon: <Globe className="w-4 h-4" />, label: 'WASM Channel', color: 'bg-purple-500/15 text-primary border-purple-500/20' },
     mcp_server: { icon: <Plug className="w-4 h-4" />, label: 'MCP Server', color: 'bg-green-500/15 text-green-400 border-green-500/20' },
 };
 
 const STATUS_STYLES: Record<string, { color: string; label: string; icon: React.ReactNode }> = {
     active: { color: 'text-green-400', label: 'Active', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
     configured: { color: 'text-blue-400', label: 'Configured', icon: <Wrench className="w-3.5 h-3.5" /> },
-    installed: { color: 'text-amber-400', label: 'Installed', icon: <Package className="w-3.5 h-3.5" /> },
-    pairing: { color: 'text-purple-400', label: 'Pairing', icon: <Plug className="w-3.5 h-3.5" /> },
+    installed: { color: 'text-muted-foreground', label: 'Installed', icon: <Package className="w-3.5 h-3.5" /> },
+    pairing: { color: 'text-primary', label: 'Pairing', icon: <Plug className="w-3.5 h-3.5" /> },
     failed: { color: 'text-red-400', label: 'Failed', icon: <XCircle className="w-3.5 h-3.5" /> },
 };
 
@@ -55,7 +55,7 @@ function ExtensionCard({
     const kindStyle = KIND_STYLES[ext.kind] || {
         icon: <Package className="w-4 h-4" />,
         label: ext.kind,
-        color: 'bg-white/5 text-muted-foreground border-white/10',
+        color: 'bg-white/5 text-muted-foreground border-border/40',
     };
     const statusStyle = ext.activation_status
         ? STATUS_STYLES[ext.activation_status] || STATUS_STYLES['installed']
@@ -89,7 +89,7 @@ function ExtensionCard({
                 ext.active
                     ? "bg-primary/[0.03] border-primary/20 shadow-sm shadow-primary/5"
                     : "bg-white/[0.02] border-white/5",
-                "hover:border-white/10"
+                "hover:border-border/40"
             )}
         >
             <div className="p-5 flex items-start gap-4">
@@ -98,7 +98,7 @@ function ExtensionCard({
                     "p-2.5 rounded-xl border transition-colors flex items-center justify-center",
                     ext.active
                         ? "bg-primary/10 border-primary/20 text-primary"
-                        : "bg-white/5 border-white/10 text-muted-foreground"
+                        : "bg-white/5 border-border/40 text-muted-foreground"
                 )}>
                     {kindStyle.icon}
                 </div>
@@ -123,11 +123,11 @@ function ExtensionCard({
                         {channelHealth && (
                             <span className={cn(
                                 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider border',
-                                channelHealth.state === 'Running' ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' :
-                                    channelHealth.state === 'Connecting' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' :
-                                        channelHealth.state === 'Degraded' ? 'text-orange-400 bg-orange-500/10 border-orange-500/20' :
+                                channelHealth.state === 'Running' ? 'text-primary bg-emerald-500/10 border-emerald-500/20' :
+                                    channelHealth.state === 'Connecting' ? 'text-muted-foreground bg-amber-500/10 border-amber-500/20' :
+                                        channelHealth.state === 'Degraded' ? 'text-muted-foreground bg-orange-500/10 border-orange-500/20' :
                                             channelHealth.state === 'Error' ? 'text-red-400 bg-red-500/10 border-red-500/20' :
-                                                'text-zinc-400 bg-zinc-500/10 border-zinc-500/20'
+                                                'text-muted-foreground bg-zinc-500/10 border-zinc-500/20'
                             )}>
                                 <span className={cn("w-1.5 h-1.5 rounded-full",
                                     channelHealth.state === 'Running' ? 'bg-emerald-500' :
@@ -218,7 +218,7 @@ function ExtensionCard({
                                     </div>
                                     <p className={cn(
                                         "text-sm font-medium",
-                                        ext.authenticated ? "text-green-400" : "text-amber-400"
+                                        ext.authenticated ? "text-green-400" : "text-muted-foreground"
                                     )}>
                                         {ext.authenticated ? 'Authenticated' : 'Not Authenticated'}
                                     </p>
@@ -230,7 +230,7 @@ function ExtensionCard({
                                     </div>
                                     <p className={cn(
                                         "text-sm font-medium",
-                                        ext.needs_setup ? "text-amber-400" : "text-green-400"
+                                        ext.needs_setup ? "text-muted-foreground" : "text-green-400"
                                     )}>
                                         {ext.needs_setup ? 'Needs Setup' : 'Ready'}
                                     </p>
@@ -425,7 +425,7 @@ export function OpenClawPlugins() {
                                 setIsLoading(true);
                                 fetchExtensions();
                             }}
-                            className="p-2.5 rounded-xl bg-card border border-white/10 hover:bg-white/5 transition-colors shadow-sm"
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
                         >
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                         </button>
@@ -464,7 +464,7 @@ export function OpenClawPlugins() {
                                 const style = KIND_STYLES[kind] || {
                                     icon: <Package className="w-3.5 h-3.5" />,
                                     label: kind,
-                                    color: 'bg-white/5 text-muted-foreground border-white/10',
+                                    color: 'bg-white/5 text-muted-foreground border-border/40',
                                 };
                                 return (
                                     <div
@@ -530,7 +530,7 @@ export function OpenClawPlugins() {
                                 </AnimatePresence>
                             ) : (
                                 <div className="py-20 flex flex-col items-center justify-center text-center space-y-4">
-                                    <div className="p-4 rounded-full bg-white/5 border border-white/10">
+                                    <div className="p-4 rounded-full bg-white/5 border border-border/40">
                                         <Package className="w-8 h-8 text-muted-foreground" />
                                     </div>
                                     <div>
@@ -547,7 +547,7 @@ export function OpenClawPlugins() {
                                 <motion.div
                                     initial={{ opacity: 0, y: -5 }}
                                     animate={{ opacity: 1, y: 0 }}
-                                    className="p-4 rounded-xl border border-white/10 bg-card/30 space-y-2"
+                                    className="p-4 rounded-xl border border-border/40 bg-card/30 space-y-2"
                                 >
                                     <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Manifest Validation</h4>
                                     {validationResult.errors.length > 0 && (
@@ -562,14 +562,14 @@ export function OpenClawPlugins() {
                                     {validationResult.warnings.length > 0 && (
                                         <div className="space-y-1">
                                             {validationResult.warnings.map((w, i) => (
-                                                <p key={i} className="text-xs text-amber-400 flex items-center gap-1.5">
+                                                <p key={i} className="text-xs text-muted-foreground flex items-center gap-1.5">
                                                     <AlertCircle className="w-3 h-3" /> {w}
                                                 </p>
                                             ))}
                                         </div>
                                     )}
                                     {validationResult.errors.length === 0 && validationResult.warnings.length === 0 && (
-                                        <p className="text-xs text-emerald-400 flex items-center gap-1.5">
+                                        <p className="text-xs text-primary flex items-center gap-1.5">
                                             <CheckCircle2 className="w-3 h-3" /> Manifest is valid — no issues found
                                         </p>
                                     )}
@@ -595,7 +595,7 @@ export function OpenClawPlugins() {
                                         onChange={(e) => setHubQuery(e.target.value)}
                                         onKeyDown={(e) => e.key === 'Enter' && handleSearchClawHub()}
                                         placeholder="Search ClawHub for plugins..."
-                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/10 text-sm outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-muted-foreground/50"
+                                        className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30 placeholder:text-muted-foreground/50"
                                     />
                                 </div>
                                 <button
@@ -619,7 +619,7 @@ export function OpenClawPlugins() {
                                             key={entry.id}
                                             initial={{ opacity: 0, y: 5 }}
                                             animate={{ opacity: 1, y: 0 }}
-                                            className="p-4 rounded-2xl border border-white/10 bg-card/30 flex items-start gap-4"
+                                            className="p-4 rounded-2xl border border-border/40 bg-card/30 flex items-start gap-4"
                                         >
                                             <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
                                                 <Puzzle className="w-5 h-5 text-primary" />
@@ -702,7 +702,7 @@ export function OpenClawPlugins() {
                                                             "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded",
                                                             event.event_type === 'error' ? 'bg-red-500/10 text-red-400' :
                                                                 event.event_type === 'removed' ? 'bg-red-500/10 text-red-300' :
-                                                                    event.event_type === 'activated' ? 'bg-emerald-500/10 text-emerald-400' :
+                                                                    event.event_type === 'activated' ? 'bg-emerald-500/10 text-primary' :
                                                                         'bg-blue-500/10 text-blue-400'
                                                         )}>
                                                             {event.event_type}

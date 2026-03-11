@@ -589,8 +589,8 @@ async agentChat(request: string) : Promise<Result<string, string>> {
  * Get OpenClaw status.
  * 
  * Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
- * Engine status fields (`gateway_running`, `ws_connected`) reflect IronClaw's
- * in-process state.
+ * Engine status fields (`engine_running`, `engine_connected`) reflect IronClaw's
+ * in-process state — both are `true` when the agent is initialized.
  */
 async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
     try {
@@ -826,7 +826,11 @@ async openclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Switch active gateway to a specific profile
+ * Switch the active agent to a different profile.
+ * 
+ * Stops the current connection (local engine or remote proxy),
+ * updates gateway settings from the selected profile, and
+ * restarts the connection with the new configuration.
  */
 async openclawSwitchToProfile(profileId: string) : Promise<Result<null, string>> {
     try {
@@ -837,7 +841,13 @@ async openclawSwitchToProfile(profileId: string) : Promise<Result<null, string>>
 }
 },
 /**
- * Test connection to a potential gateway
+ * Test connectivity to a remote IronClaw gateway.
+ * 
+ * Called by the frontend's "Test Connection" button in Gateway Settings.
+ * Returns Ok(true) if reachable and healthy, Err if not reachable.
+ * 
+ * This was previously a stub (command registered but returning error).
+ * Now fully implemented using RemoteGatewayProxy.
  */
 async openclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, string>> {
     try {
@@ -864,14 +874,19 @@ async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
 }
 },
 /**
- * Start the IronClaw engine.
+ * Start the IronClaw gateway.
  * 
- * Initializes the agent, starts background tasks, emits Connected event.
- * If already running, this is a no-op (returns Ok).
+ * Behavior depends on `identity.json:gateway_mode`:
+ * "local" (default):
+ * - Waits for local inference engine if configured
+ * - Starts the IronClaw in-process engine via IronClawState::start()
+ * "remote":
+ * - Reads remote_url + remote_token from config
+ * - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
+ * - No local engine is started
  * 
- * When local inference is selected and the engine isn't ready yet, this
- * command will poll the sidecar/engine status for up to 30 seconds before
- * proceeding — covering the common case where MLX is still booting.
+ * In both modes, the frontend receives the same events via `openclaw-event`
+ * and invokes the same Tauri commands — all routing is transparent.
  */
 async openclawStartGateway() : Promise<Result<null, string>> {
     try {
@@ -882,10 +897,10 @@ async openclawStartGateway() : Promise<Result<null, string>> {
 }
 },
 /**
- * Stop the IronClaw engine gracefully.
+ * Stop the IronClaw gateway.
  * 
- * Shuts down background tasks, channels, and emits Disconnected event.
- * If already stopped, this is a no-op (returns Ok).
+ * - Local mode: shuts down in-process engine gracefully.
+ * - Remote mode: closes the SSE subscription and clears the proxy.
  */
 async openclawStopGateway() : Promise<Result<null, string>> {
     try {
@@ -927,6 +942,9 @@ async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> 
 },
 /**
  * Get chat history for a session.
+ * 
+ * Routes to remote proxy when in remote mode, converting the gateway's
+ * message format to OpenClawHistoryResponse.
  */
 async openclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<OpenClawHistoryResponse, string>> {
     try {
@@ -963,6 +981,8 @@ async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
  * 
  * Returns immediately — the actual response streams back via `openclaw-event`
  * Tauri events (AssistantDelta, ToolUpdate, etc.).
+ * 
+ * Routes to RemoteGatewayProxy when in remote mode.
  */
 async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -998,6 +1018,8 @@ async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Resu
 },
 /**
  * Resolve a pending tool-execution approval (3-tier: Deny/AllowOnce/AllowSession).
+ * 
+ * In remote mode, sends the approval decision to the remote gateway.
  */
 async openclawResolveApproval(approvalId: string, approved: boolean, allowSession: boolean | null) : Promise<Result<OpenClawRpcResponse, string>> {
     try {
@@ -1008,7 +1030,7 @@ async openclawResolveApproval(approvalId: string, approved: boolean, allowSessio
 }
 },
 /**
- * Get gateway diagnostic info.
+ * Get engine diagnostic info.
  */
 async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
     try {
@@ -1019,7 +1041,11 @@ async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
 }
 },
 /**
- * Clear memory (deletes memory directory or identity files).
+ * Clear memory or identity files in IronClaw's workspace.
+ * 
+ * For "memory" and "identity" targets, this exclusively uses the
+ * DB-backed workspace API. For "all" (factory reset), it stops the
+ * engine and wipes the legacy state directories.
  */
 async openclawClearMemory(target: string) : Promise<Result<null, string>> {
     try {
@@ -1030,7 +1056,7 @@ async openclawClearMemory(target: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Get MEMORY.md content.
+ * Get MEMORY.md content from IronClaw's DB-backed workspace.
  */
 async openclawGetMemory() : Promise<Result<string, string>> {
     try {
@@ -1041,7 +1067,7 @@ async openclawGetMemory() : Promise<Result<string, string>> {
 }
 },
 /**
- * Get contents of a workspace file (e.g. SOUL.md).
+ * Get contents of a workspace file (e.g. SOUL.md) from IronClaw's DB.
  */
 async openclawGetFile(path: string) : Promise<Result<string, string>> {
     try {
@@ -1052,7 +1078,7 @@ async openclawGetFile(path: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Write content to a workspace file.
+ * Write content to a workspace file in IronClaw's DB.
  */
 async openclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
     try {
@@ -1063,7 +1089,23 @@ async openclawWriteFile(path: string, content: string) : Promise<Result<null, st
 }
 },
 /**
- * Save MEMORY.md content.
+ * Delete a workspace file from IronClaw's DB.
+ * 
+ * Protected files (core seeded workspace files) cannot be deleted.
+ * Users can only delete agent-created files like daily logs, context
+ * files, or project sub-files. If the path matches a directory prefix,
+ * all files under that prefix are deleted.
+ */
+async openclawDeleteFile(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_delete_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save MEMORY.md content to IronClaw's DB-backed workspace.
  */
 async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
     try {
@@ -1074,7 +1116,9 @@ async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * List all markdown files in the workspace.
+ * List all files in IronClaw's DB-backed workspace.
+ * 
+ * Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
  */
 async openclawListWorkspaceFiles() : Promise<Result<string[], string>> {
     try {
@@ -1103,6 +1147,46 @@ async openclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
 async openclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_history", { key, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Validates a cron expression and returns next fire times.
+ * This is a frontend-facing version of `ironclaw cron lint`.
+ */
+async openclawCronLint(expression: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_lint", { expression }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new scheduled routine dynamically.
+ * 
+ * Stores the routine in IronClaw's RoutineStore so it persists
+ * and is picked up by the RoutineEngine on its next tick.
+ */
+async openclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_create", { name, description, schedule, task }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists all registered channels from the live IronClaw agent.
+ * 
+ * Queries the agent's ChannelManager for actually registered channels
+ * instead of reading static config/env vars.
+ */
+async openclawChannelsList() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_channels_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1265,6 +1349,28 @@ async openclawToggleNodeHost(enabled: boolean) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Toggle local dev tools (shell, write_file, read_file, etc.) for OpenClaw
+ */
+async openclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_local_tools", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set workspace mode and optional root directory for the agent
+ */
+async openclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_workspace_mode", { mode, root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Toggle local inference (exposing local LLM) for OpenClaw
  */
 async openclawToggleLocalInference(enabled: boolean) : Promise<Result<null, string>> {
@@ -1302,6 +1408,78 @@ async openclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> 
 async openclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_set_dev_mode_wizard", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable or disable autonomous tool execution.
+ * 
+ * When `enabled = true` the agent runs tools without asking for user approval
+ * on each call (fully autonomous mode). When `false`, the user approves each
+ * tool call interactively (human-in-the-loop mode).
+ * 
+ * Persisted to identity.json and applied via env var for next engine start.
+ */
+async openclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_autonomy_mode", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get the current autonomy mode setting.
+ */
+async openclawGetAutonomyMode() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_autonomy_mode") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Mark the first-run identity bootstrap as completed.
+ */
+async openclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_bootstrap_completed", { completed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Check whether the bootstrap ritual needs to run.
+ * 
+ * Returns `true` if the agent has NOT completed the first-run identity ritual.
+ * Frontend uses this on startup to conditionally show the BootstrapModal.
+ * 
+ * Self-healing: if `identity.json` says bootstrap is still needed but
+ * `BOOTSTRAP.md` no longer exists in the workspace DB, the agent clearly
+ * completed the ritual already (the save just failed silently).  We
+ * auto-mark it done here so the button never shows the wrong label again.
+ */
+async openclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_check_bootstrap_needed") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-trigger the bootstrap ritual (Reinitiate Identity Ritual).
+ * 
+ * Resets bootstrap_completed to false so the BootstrapModal shows again
+ * on next startup. The agent will re-run its identity awakening.
+ */
+async openclawTriggerBootstrap() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_trigger_bootstrap") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1377,9 +1555,25 @@ async openclawSyncLocalLlm() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async openclawDeployRemote(ip: string, user: string) : Promise<Result<null, string>> {
+/**
+ * Deploy the IronClaw remote agent to a Linux server via SSH + Docker Compose.
+ * 
+ * Accepts the SSH host, user, and optional configuration for Tailscale VPN
+ * and systemd service. Emits live `deploy-log` events and a final
+ * `deploy-status` event with `"success"` | `"failed:<reason>"`.
+ * 
+ * Steps:
+ * 1. Find the `ironclaw/deploy/` directory (bundled or source)
+ * 2. SCP the deploy bundle to the target server
+ * 3. Run `setup.sh` on the server:
+ * - Always: Docker, UFW firewall, Fail2ban
+ * - Optional: Tailscale VPN (--tailscale <key>)
+ * - Optional: systemd service (--systemd)
+ * 4. Return the URL + generated token via `deploy-status`
+ */
+async openclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_deploy_remote", { ip, user }) };
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_deploy_remote", { ip, user, tailscaleKey, enableSystemd }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1403,6 +1597,9 @@ async openclawSpawnSession(agentId: string, task: string, parentSession: string 
 },
 /**
  * List all child sessions spawned by a parent session.
+ * 
+ * Falls back to scanning the live session list for child key patterns
+ * (`<parent>:task-<uuid>`) so the Fleet panel persists across restarts.
  */
 async openclawListChildSessions(parentSession: string) : Promise<Result<ChildSessionInfo[], string>> {
     try {
@@ -1458,11 +1655,536 @@ async openclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * List all active canvas panels.
+ */
+async openclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panels_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get a specific canvas panel's full data.
+ */
+async openclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panel_get", { panelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Dismiss (remove) a canvas panel.
+ */
+async openclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panel_dismiss", { panelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a routine by ID or name.
+ */
+async openclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_delete", { routineId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Toggle a routine enabled/disabled by ID or name.
+ */
+async openclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_toggle", { routineId, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Update the heartbeat interval at runtime.
+ * 
+ * 1. Updates the `__heartbeat__` DB routine's cron schedule → takes effect on next tick
+ * 2. Persists `interval_secs` to settings.toml → survives restarts
+ * 
+ * `interval_minutes` must be between 5 and 1440 (24 hours).
+ */
+async openclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_heartbeat_set_interval", { intervalMinutes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set thinking mode (native IronClaw ThinkingConfig).
+ * 
+ * This replaces the frontend localStorage hack that prepended
+ * "Think step by step" to messages. Now we set the env vars
+ * that IronClaw's ThinkingConfig reads natively.
+ */
+async openclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_thinking", { enabled, budgetTokens }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search workspace memory using IronClaw's hybrid BM25+vector search.
+ * 
+ * Falls back to simple text search across workspace files if the
+ * vector search API isn't available.
+ */
+async openclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_memory_search", { query, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Export a session's history in the requested format.
+ * 
+ * Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
+ * The `format` parameter is optional — `None` defaults to markdown
+ * for backward compatibility with existing frontend callers.
+ */
+async openclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_export_session", { sessionKey, format }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List all registered lifecycle hooks with their details.
+ */
+async openclawHooksList() : Promise<Result<HooksListResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Register hooks from a declarative JSON bundle (rules and/or outbound webhooks).
+ */
+async openclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegisterResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_register", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Unregister (remove) a hook by name.
+ */
+async openclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_unregister", { hookName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List all installed extensions/plugins.
+ */
+async openclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extensions_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Activate an extension by name.
+ */
+async openclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_activate", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove an extension by name.
+ */
+async openclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_remove", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_diagnostics") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawToolsList() : Promise<Result<ToolsListResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_tools_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get the set of globally disabled tools (deny-list stored in settings).
+ */
+async openclawToolPolicyGet() : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_tool_policy_get") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set (overwrite) the list of globally disabled tools.
+ */
+async openclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_tool_policy_set", { disabledTools }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawPairingList(channel: string) : Promise<Result<PairingListResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_pairing_list", { channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawPairingApprove(channel: string, code: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_pairing_approve", { channel, code }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_compact_session", { sessionKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get LLM cost summary.
+ * 
+ * Returns total spend, daily/monthly breakdowns, per-model costs,
+ * token totals, and alert status. The frontend picks what to display.
+ * 
+ * Also auto-persists entries to the IronClaw DB on each poll (cheap, ~10s interval).
+ */
+async openclawCostSummary() : Promise<Result<CostSummary, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_summary") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Export cost data as CSV.
+ */
+async openclawCostExportCsv() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_export_csv") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reset (clear) all cost tracking data.
+ * 
+ * Clears in-memory entries and persists the empty state to the IronClaw DB.
+ */
+async openclawCostReset() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_reset") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List channel statuses from the live IronClaw agent.
+ * 
+ * Queries the agent's ChannelManager for actually registered channels
+ * instead of reading static config/env vars.
+ */
+async openclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_channel_status_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set the default agent profile.
+ */
+async openclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_agents_set_default", { agentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search ClawHub plugin catalog (proxied through IronClaw).
+ */
+async openclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_clawhub_search", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Install a plugin from ClawHub.
+ */
+async openclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_clawhub_install", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List routine audit entries with optional outcome filter.
+ * 
+ * Replaces the empty `openclaw_cron_history` stub with actual data
+ * access from IronClaw's RoutineAuditLog.
+ */
+async openclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_audit_list", { routineKey, limit, outcome }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clear routine run history.
+ * 
+ * If `key` is provided, clears runs for that specific routine.
+ * If `key` is null, clears ALL routine runs.
+ */
+async openclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_clear_routine_runs", { key }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get response cache statistics.
+ */
+async openclawCacheStats() : Promise<Result<CacheStats, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_cache_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List plugin lifecycle events.
+ */
+async openclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_plugin_lifecycle_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Validate a plugin's manifest.
+ */
+async openclawManifestValidate(pluginId: string) : Promise<Result<ManifestValidationResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_manifest_validate", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get the current smart routing configuration.
+ */
+async openclawRoutingGet() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_get") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable or disable smart routing.
+ */
+async openclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_set", { smartRoutingEnabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List all routing rules along with the smart routing toggle state.
+ */
+async openclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save routing rules (full replace).
+ */
+async openclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_save", { rules }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Add a routing rule at a specific position (or at the end).
+ */
+async openclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Promise<Result<RoutingRule[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_add", { rule, position }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove a routing rule by index.
+ */
+async openclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_remove", { index }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reorder a routing rule (move from one position to another).
+ */
+async openclawRoutingRulesReorder(from: number, to: number) : Promise<Result<RoutingRule[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_reorder", { from, to }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get full routing policy status including latency data.
+ */
+async openclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start the Gmail OAuth PKCE flow via IronClaw.
+ * 
+ * This opens the user's browser for Google consent, waits for the
+ * callback, exchanges the auth code for tokens, and returns them.
+ * On success, the tokens are also stored in the Keychain.
+ */
+async openclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_gmail_oauth_start") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get Gmail channel configuration status.
+ */
+async openclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_gmail_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getPermissionStatus() : Promise<PermissionStatus> {
     return await TAURI_INVOKE("get_permission_status");
 },
-async requestPermission(permission: string) : Promise<void> {
-    await TAURI_INVOKE("request_permission", { permission });
+/**
+ * Request a specific OS permission and return the updated status.
+ * 
+ * Flow:
+ * 1. Call the native macOS API to trigger the permission dialog
+ * 2. If the permission was granted immediately, return the updated status
+ * 3. If not granted (dialog was dismissed or already shown once before),
+ * open System Settings to the relevant pane as a fallback
+ * 
+ * Returns the current PermissionStatus so the frontend can update the UI.
+ */
+async requestPermission(permission: string) : Promise<PermissionStatus> {
+    return await TAURI_INVOKE("request_permission", { permission });
+},
+/**
+ * Open System Settings to the relevant privacy pane for a permission.
+ * 
+ * Used when the user wants to revoke a previously granted permission
+ * (macOS doesn't support programmatic revocation).
+ */
+async openPermissionSettings(permission: string) : Promise<void> {
+    await TAURI_INVOKE("open_permission_settings", { permission });
 },
 async toggleSpotlight() : Promise<void> {
     await TAURI_INVOKE("toggle_spotlight");
@@ -1798,6 +2520,76 @@ async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Return the local filesystem workspace root path.
+ * 
+ * This is the directory where the agent writes local files (write_file, shell, etc.).
+ * Defaults to ~/Scrappy/ if not configured.
+ */
+async openclawGetWorkspacePath() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_workspace_path") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the local workspace directory in Finder (macOS) / Explorer (Windows).
+ * 
+ * Creates the directory if it doesn't exist yet. Returns the path that was opened.
+ */
+async openclawRevealWorkspace() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_reveal_workspace") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List all files in the agent's local `agent_workspace` directory.
+ * 
+ * Returns relative paths (from workspace root), file sizes, and modification
+ * timestamps so the frontend can build a proper file browser.
+ */
+async openclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_list_agent_workspace_files") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Write content to a file in the agent's local `agent_workspace` directory.
+ * 
+ * The `relative_path` is resolved against `WORKSPACE_ROOT`. Parent directories
+ * are created automatically. Path traversal (`..`) is rejected for safety.
+ * Returns the absolute path of the written file.
+ */
+async openclawWriteAgentWorkspaceFile(relativePath: string, content: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_write_agent_workspace_file", { relativePath, content }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reveal a specific file in Finder (macOS) / Explorer (Windows).
+ * 
+ * Uses `open -R <path>` on macOS to select the file in a Finder window,
+ * which is more user-friendly than just opening the parent folder.
+ */
+async openclawRevealFile(path: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_reveal_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1838,6 +2630,14 @@ modelId: string | null;
  * Whether the backend is currently available (has API key, server running, etc.).
  */
 available: boolean }
+/**
+ * Response cache statistics
+ */
+export type CacheStats = { hits: number; misses: number; evictions: number; size_bytes: number; hit_rate: number }
+/**
+ * Per-channel status entry with live state
+ */
+export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
 export type ChatPayload = { model: string; messages: Message[]; temperature: number; top_p: number; web_search_enabled?: boolean; auto_mode?: boolean; project_id: string | null; conversation_id: string | null }
 export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
 /**
@@ -1929,10 +2729,18 @@ metadata?: { [key in string]: string } }
  */
 export type CloudStatusResponse = { mode: string; provider_connected: boolean; provider_name: string | null; storage_used: number; storage_available: number | null; last_sync_at: number | null; has_recovery_key: boolean; migration_in_progress: boolean }
 /**
+ * Compaction result
+ */
+export type CompactSessionResponse = { tokens_before: number; tokens_after: number; turns_removed: number; summary: string | null }
+/**
  * Connection test result for the frontend.
  */
 export type ConnectionTestResult = { connected: boolean; provider_name: string; storage_used: number; storage_available: number | null; error: string | null }
 export type Conversation = { id: string; title: string; created_at: number; updated_at: number; project_id: string | null; sort_order: number }
+/**
+ * LLM cost tracker summary
+ */
+export type CostSummary = { total_cost_usd: number; total_input_tokens: number; total_output_tokens: number; total_requests: number; avg_cost_per_request: number; daily: { [key in string]: number }; monthly: { [key in string]: number }; by_model: { [key in string]: number }; by_agent: { [key in string]: number }; alert_threshold_usd: number; alert_triggered: boolean }
 export type CreateProjectRequest = { name: string; description: string | null }
 /**
  * Custom LLM config input
@@ -1940,6 +2748,14 @@ export type CreateProjectRequest = { name: string; description: string | null }
 export type CustomLlmConfigInput = { url: string | null; key: string | null; model: string | null; enabled: boolean }
 export type CustomPersona = { id: string; name: string; description: string; instructions: string }
 export type CustomSecret = { id: string; name: string; description: string | null; granted: boolean }
+/**
+ * A single diagnostic check result
+ */
+export type DiagnosticCheck = { name: string; status: string; detail: string }
+/**
+ * Full diagnostics response
+ */
+export type DiagnosticsResponse = { checks: DiagnosticCheck[]; passed: number; failed: number; skipped: number }
 /**
  * Aggregated discovery result for the frontend.
  */
@@ -2009,6 +2825,18 @@ message: string }
  * Result of starting an engine.
  */
 export type EngineStartResult = { port: number; token: string }
+/**
+ * Extension action response (install, activate, remove)
+ */
+export type ExtensionActionResponse = { ok: boolean; message: string | null }
+/**
+ * Extension (plugin) information for UI display
+ */
+export type ExtensionInfoItem = { name: string; kind: string; description: string | null; active: boolean; authenticated: boolean; tools: string[]; needs_setup: boolean; activation_status: string | null; activation_error: string | null }
+/**
+ * Extensions list response
+ */
+export type ExtensionsListResponse = { extensions: ExtensionInfoItem[]; total: number }
 export type FrontendMessage = { id: string; conversation_id: string; role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; web_search_results: WebSearchResult[] | null; created_at: number }
 export type GGUFMetadata = { architecture: string; context_length: number; embedding_length: number; block_count: number; head_count: number; head_count_kv: number; file_type: number; 
 /**
@@ -2024,6 +2852,14 @@ model_family: string | null }
  */
 export type GeneratedImage = { id: string; prompt: string; styleId: string | null; provider: string; aspectRatio: string; resolution: string | null; width: number | null; height: number | null; seed: number; filePath: string; thumbnailPath: string | null; createdAt: string; isFavorite: boolean; tags: string | null }
 /**
+ * Result from the Gmail OAuth PKCE flow.
+ */
+export type GmailOAuthResult = { success: boolean; access_token: string | null; refresh_token: string | null; expires_in: number | null; scope: string | null; error: string | null }
+/**
+ * Gmail channel configuration status.
+ */
+export type GmailStatusResponse = { enabled: boolean; configured: boolean; status: string; project_id: string; subscription_id: string; label_filters: string[]; allowed_senders: string[]; missing_fields: string[]; oauth_configured: boolean }
+/**
  * Information about a single file in an HF repo.
  */
 export type HfFileInfo = { filename: string; size: number; size_display: string; quant_type: string | null; is_mmproj: boolean }
@@ -2031,6 +2867,35 @@ export type HfFileInfo = { filename: string; size: number; size_display: string;
  * A model card returned from HF Hub search.
  */
 export type HfModelCard = { id: string; author: string; name: string; downloads: number; likes: number; tags: string[]; last_modified: string; gated: boolean }
+/**
+ * Hook information for UI display
+ */
+export type HookInfoItem = { name: string; hook_points: string[]; failure_mode: string; timeout_ms: number; priority: number }
+/**
+ * Input for registering a hook bundle (rules and/or outbound webhooks).
+ */
+export type HookRegisterInput = { 
+/**
+ * JSON string containing the hook bundle configuration.
+ * Can be a single rule object or a full bundle with `rules` and `outbound_webhooks`.
+ */
+bundle_json: string; 
+/**
+ * Optional human-readable source label (defaults to "ui").
+ */
+source: string | null }
+/**
+ * Response after registering hooks from a bundle.
+ */
+export type HookRegisterResponse = { ok: boolean; hooks_registered: number; webhooks_registered: number; errors: number; message: string | null }
+/**
+ * Response for unregistering a hook by name.
+ */
+export type HookUnregisterResponse = { ok: boolean; removed: boolean; message: string | null }
+/**
+ * Hooks list response
+ */
+export type HooksListResponse = { hooks: HookInfoItem[]; total: number }
 export type ImageGenParams = { prompt: string; model: string | null; vae: string | null; clip_l: string | null; clip_g: string | null; t5xxl: string | null; negative_prompt: string | null; width: number | null; height: number | null; steps: number | null; cfg_scale: number | null; seed: number; schedule: string | null; sampling_method: string | null }
 export type ImageResponse = { id: string; path: string }
 /**
@@ -2039,6 +2904,38 @@ export type ImageResponse = { id: string; path: string }
 export type ImagineParams = { prompt: string; provider: string; aspect_ratio: string; resolution: string | null; style_id: string | null; style_prompt: string | null; source_images: string[] | null; model: string | null; steps: number | null }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
 export type KnowledgeBit = { id: string; label: string; content: string; enabled: boolean }
+/**
+ * Per-provider latency data for routing UI.
+ */
+export type LatencyEntry = { provider: string; avg_latency_ms: number }
+/**
+ * Plugin lifecycle event
+ */
+export type LifecycleEventItem = { timestamp: string; plugin_id: string; event_type: string; details: string | null }
+/**
+ * Manifest validation response
+ */
+export type ManifestValidationResponse = { errors: string[]; warnings: string[] }
+/**
+ * Memory search response
+ */
+export type MemorySearchResponse = { results: MemorySearchResult[]; query: string; total: number }
+/**
+ * Memory search result item
+ */
+export type MemorySearchResult = { 
+/**
+ * File path within the workspace
+ */
+path: string; 
+/**
+ * Matched snippet/content
+ */
+snippet: string; 
+/**
+ * Relevance score (0.0 - 1.0)
+ */
+score: number }
 export type Message = { role: string; content: string; images: string[] | null; attached_docs: AttachedDoc[] | null; is_summary: boolean | null; original_messages: Message[] | null }
 /**
  * Which AI modality a backend serves.
@@ -2114,7 +3011,7 @@ code_verifier: string }
 /**
  * Diagnostic info
  */
-export type OpenClawDiagnostics = { timestamp: string; gateway_running: boolean; ws_connected: boolean; version: string; platform: string; port: number | null; state_dir: string | null; slack_enabled: boolean | null; telegram_enabled: boolean | null }
+export type OpenClawDiagnostics = { timestamp: string; engine_running: boolean; engine_connected: boolean; version: string; platform: string; port: number | null; state_dir: string | null; slack_enabled: boolean | null; telegram_enabled: boolean | null }
 /**
  * Chat history response
  */
@@ -2138,7 +3035,23 @@ export type OpenClawSessionsResponse = { sessions: OpenClawSession[] }
 /**
  * OpenClaw status response
  */
-export type OpenClawStatus = { gateway_running: boolean; ws_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean; custom_llm_url: string | null; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
+export type OpenClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean; 
+/**
+ * Whether the agent runs tools without individual approval prompts.
+ */
+auto_approve_tools: boolean; 
+/**
+ * Whether the first-run identity bootstrap ritual has been completed.
+ */
+bootstrap_completed: boolean; custom_llm_url: string | null; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
+/**
+ * A single paired device/user
+ */
+export type PairingItem = { channel: string; user_id: string; paired_at: string; status: string }
+/**
+ * Pairing list response
+ */
+export type PairingListResponse = { pairings: PairingItem[]; total: number }
 export type PermissionStatus = { accessibility: boolean; screen_recording: boolean }
 export type Project = { id: string; name: string; description: string | null; created_at: number; updated_at: number; sort_order: number }
 /**
@@ -2163,9 +3076,82 @@ fromCache: boolean;
 error: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
+ * Routine audit log entry
+ */
+export type RoutineAuditEntry = { routine_key: string; started_at: string; completed_at: string | null; outcome: string; duration_ms: number | null; error: string | null }
+/**
+ * A single LLM routing rule — matches requests based on criteria and
+ * routes to a specific model / provider.
+ */
+export type RoutingRule = { 
+/**
+ * Unique identifier (UUID)
+ */
+id: string; 
+/**
+ * Human-readable label, e.g. "Code tasks → GPT-4"
+ */
+label: string; 
+/**
+ * Match criterion kind: "keyword" | "context_length" | "provider" | "always"
+ */
+match_kind: string; 
+/**
+ * Match value — interpretation depends on `match_kind`:
+ * - keyword: comma-separated keywords (e.g. "code,debug,refactor")
+ * - context_length: threshold in tokens (e.g. "32000")
+ * - provider: provider name (e.g. "anthropic")
+ * - always: ignored
+ */
+match_value: string; 
+/**
+ * Target model identifier, e.g. "gpt-4o", "claude-sonnet-4-20250514"
+ */
+target_model: string; 
+/**
+ * Optional target provider override
+ */
+target_provider: string | null; 
+/**
+ * Priority — lower number = higher priority
+ */
+priority: number; 
+/**
+ * Whether this rule is currently active
+ */
+enabled: boolean }
+/**
+ * Human-readable routing rule summary from IronClaw's RoutingPolicy.
+ */
+export type RoutingRuleSummary = { index: number; kind: string; description: string; provider: string | null }
+/**
+ * Response for routing rules list
+ */
+export type RoutingRulesResponse = { rules: RoutingRule[]; smart_routing_enabled: boolean }
+/**
+ * Full routing policy status for the routing UI dashboard.
+ */
+export type RoutingStatusResponse = { enabled: boolean; default_provider: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
+/**
  * S3 provider configuration input from the frontend.
  */
 export type S3ConfigInput = { endpoint: string | null; bucket: string; region: string | null; access_key_id: string; secret_access_key: string; root: string | null }
+/**
+ * Session export response
+ */
+export type SessionExportResponse = { 
+/**
+ * Markdown-formatted transcript
+ */
+transcript: string; 
+/**
+ * Session key
+ */
+session_key: string; 
+/**
+ * Number of messages exported
+ */
+message_count: number }
 /**
  * SFTP provider configuration input from the frontend.
  */
@@ -2207,8 +3193,25 @@ export type TAURI_CHANNEL<TSend> = null
  * Telegram configuration input
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
+/**
+ * Thinking mode configuration
+ */
+export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
-export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; disabled_providers?: string[]; 
+/**
+ * Info about a registered tool
+ */
+export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string }
+/**
+ * Tool list response
+ */
+export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
+export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string; 
+/**
+ * Global keyboard shortcut for push-to-talk.
+ * Press to start recording, release to stop and transcribe.
+ */
+ptt_shortcut?: string; disabled_providers?: string[]; 
 /**
  * MCP server base URL (e.g. "https://api.scrappy.dev")
  * Falls back to SCRAPPY_MCP_URL env var if not set in config.

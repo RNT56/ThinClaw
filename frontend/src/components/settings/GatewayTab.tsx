@@ -53,7 +53,11 @@ interface StatusInfo {
     selectedCloudBrain: string | null;
     autoStartGateway: boolean;
     profiles: openclaw.AgentProfile[];
-    enabled_cloud_providers: string[]; // Added this field
+    enabled_cloud_providers: string[];
+    /** Agent runs tools without per-call approval prompts */
+    autoApproveTools: boolean;
+    /** First-run identity bootstrap has been completed */
+    bootstrapCompleted: boolean;
 }
 
 export function GatewayTab({ className }: GatewayTabProps) {
@@ -91,7 +95,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
         selectedCloudBrain: null,
         autoStartGateway: false,
         profiles: [],
-        enabled_cloud_providers: [] // Initialized
+        enabled_cloud_providers: [],
+        autoApproveTools: false,
+        bootstrapCompleted: false,
     });
 
     const [rawStatus, setRawStatus] = useState<openclaw.OpenClawStatus | null>(null);
@@ -155,7 +161,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 selectedCloudBrain: s.selected_cloud_brain,
                 autoStartGateway: s.auto_start_gateway || false,
                 profiles: s.profiles || [],
-                enabled_cloud_providers: s.enabled_cloud_providers || [] // Updated this field
+                enabled_cloud_providers: s.enabled_cloud_providers || [],
+                autoApproveTools: s.auto_approve_tools || false,
+                bootstrapCompleted: s.bootstrap_completed || false,
             });
             setRawStatus(s);
 
@@ -683,6 +691,83 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     </div>
                 </div>
 
+                {/* Autonomy Mode + Identity Ritual */}
+                <div className="p-8 rounded-3xl bg-card border border-border/50 shadow-xl space-y-6">
+                    <div className="flex items-center gap-3 border-b border-border/50 pb-4">
+                        <Zap className="w-6 h-6 text-violet-500" />
+                        <div>
+                            <h4 className="font-bold text-lg">Agency & Identity</h4>
+                            <p className="text-xs text-muted-foreground">Control how autonomously the agent acts, and manage its identity ritual.</p>
+                        </div>
+                    </div>
+
+                    {/* Autonomy toggle */}
+                    <div className="flex items-center justify-between py-2">
+                        <div className="flex flex-col gap-0.5">
+                            <span className="text-sm font-bold">Fully Autonomous Mode</span>
+                            <span className="text-xs text-muted-foreground">
+                                {status.autoApproveTools
+                                    ? 'Agent runs tools without per-call approval — maximum autonomy.'
+                                    : 'You approve each tool call before it runs — human-in-the-loop.'}
+                            </span>
+                        </div>
+                        <button
+                            onClick={async () => {
+                                const next = !status.autoApproveTools;
+                                try {
+                                    await openclaw.setAutonomyMode(next);
+                                    setStatus(s => ({ ...s, autoApproveTools: next }));
+                                    toast.success(next ? 'Autonomous mode enabled — restart gateway' : 'Human-in-the-loop mode enabled');
+                                } catch (e) { toast.error('Failed to update autonomy mode'); }
+                            }}
+                            className={cn(
+                                'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300',
+                                status.autoApproveTools ? 'bg-violet-600' : 'bg-muted'
+                            )}
+                        >
+                            <span className={cn(
+                                'inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300',
+                                status.autoApproveTools ? 'translate-x-5' : 'translate-x-0'
+                            )} />
+                        </button>
+                    </div>
+
+                    {status.autoApproveTools && (
+                        <div className="bg-violet-500/5 border border-violet-500/20 p-3 rounded-xl flex gap-3 text-xs text-violet-700 dark:text-violet-300">
+                            <Zap className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>The agent will use tools freely without asking for approval. Restart the gateway for this change to take effect.</span>
+                        </div>
+                    )}
+
+                    {/* Separator */}
+                    <div className="border-t border-border/50" />
+
+                    {/* Identity Ritual */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex flex-col gap-0.5">
+                            <span className="text-sm font-bold">Identity Ritual</span>
+                            <span className="text-xs text-muted-foreground">
+                                {status.bootstrapCompleted
+                                    ? 'Bootstrap complete. Re-initiate to restart the identity awakening dialogue.'
+                                    : 'First-run ritual pending. The agent will introduce itself on next chat.'}
+                            </span>
+                        </div>
+                        <button
+                            onClick={async () => {
+                                try {
+                                    await openclaw.triggerBootstrap();
+                                    setStatus(s => ({ ...s, bootstrapCompleted: false }));
+                                    toast.success('Identity ritual re-initiated — start a new chat!');
+                                } catch (e) { toast.error('Failed to trigger bootstrap'); }
+                            }}
+                            className="px-4 py-2 rounded-xl bg-violet-500/10 hover:bg-violet-500/20 border border-violet-500/20 text-violet-600 dark:text-violet-400 text-xs font-bold transition-all flex items-center gap-2"
+                        >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            {status.bootstrapCompleted ? 'Reinitiate' : 'Pending…'}
+                        </button>
+                    </div>
+                </div>
+
                 <div className="p-8 rounded-3xl bg-card border border-border/50 shadow-xl space-y-8">
                     <div className="flex items-center justify-between border-b border-border/50 pb-4">
                         <div className="flex items-center gap-3">
@@ -712,7 +797,11 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             { id: 'IDENTITY.md', label: 'Identity', icon: Shield },
                             { id: 'SOUL.md', label: 'Soul', icon: Zap },
                             { id: 'MEMORY.md', label: 'Chronicles', icon: RotateCcw, memory: true },
-                            { id: 'USER.md', label: 'Observer', icon: Monitor }
+                            { id: 'USER.md', label: 'Observer', icon: Monitor },
+                            { id: 'AGENTS.md', label: 'Agents', icon: Code },
+                            { id: 'TOOLS.md', label: 'Tools', icon: Settings },
+                            { id: 'BOOT.md', label: 'Boot Hook', icon: Play },
+                            { id: 'HEARTBEAT.md', label: 'Heartbeat', icon: RefreshCw },
                         ].map(file => (
                             <button
                                 key={file.id}

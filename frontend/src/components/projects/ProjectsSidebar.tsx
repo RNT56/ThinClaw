@@ -325,7 +325,7 @@ export function ProjectsSidebar({
                         <div
                             ref={projectsScrollRef}
                             className={cn(
-                                "flex-1 min-h-0 space-y-2 overflow-y-auto scrollbar-hide transition-all duration-300 pb-12",
+                                "flex-1 min-h-0 space-y-2 overflow-y-auto scrollbar-hide transition-all duration-300",
                                 sidebarOpen ? "px-1" : "px-0"
                             )}
                         >

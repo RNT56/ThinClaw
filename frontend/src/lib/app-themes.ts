@@ -18,6 +18,12 @@ export interface ThemeColors {
     border: string;
     input: string;
     ring: string;
+    // Theme-derived accent palette — 5 harmonious tones from the theme's hue family
+    'chart-1': string;
+    'chart-2': string;
+    'chart-3': string;
+    'chart-4': string;
+    'chart-5': string;
 }
 
 export interface AppTheme {
@@ -50,7 +56,13 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "240 5.9% 90%",
             input: "240 5.9% 90%",
-            ring: "240 5.9% 10%"
+            ring: "240 5.9% 10%",
+            // Zinc light: neutral accent palette
+            'chart-1': "240 10% 35%",
+            'chart-2': "240 8% 50%",
+            'chart-3': "200 15% 45%",
+            'chart-4': "260 12% 42%",
+            'chart-5': "220 10% 55%"
         },
         dark: {
             background: "240 10% 3.9%",
@@ -71,7 +83,13 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "240 3.7% 15.9%",
             input: "240 3.7% 15.9%",
-            ring: "240 4.9% 83.9%"
+            ring: "240 4.9% 83.9%",
+            // Zinc dark: neutral accent palette (lighter for dark bg)
+            'chart-1': "240 10% 70%",
+            'chart-2': "240 8% 60%",
+            'chart-3': "200 15% 65%",
+            'chart-4': "260 12% 62%",
+            'chart-5': "220 10% 55%"
         }
     },
     {
@@ -96,7 +114,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 100%",
             border: "226 30% 88%",
             input: "226 30% 88%",
-            ring: "226 70% 50%"
+            ring: "226 70% 50%",
+            'chart-1': "226 65% 45%",
+            'chart-2': "210 55% 50%",
+            'chart-3': "240 50% 48%",
+            'chart-4': "216 60% 42%",
+            'chart-5': "250 45% 52%"
         },
         dark: {
             background: "226 40% 4%",
@@ -117,7 +140,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "226 30% 18%",
             input: "226 30% 18%",
-            ring: "226 70% 60%"
+            ring: "226 70% 60%",
+            'chart-1': "226 65% 65%",
+            'chart-2': "210 55% 60%",
+            'chart-3': "240 50% 62%",
+            'chart-4': "216 60% 55%",
+            'chart-5': "250 45% 58%"
         }
     },
     {
@@ -142,7 +170,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 100%",
             border: "150 30% 88%",
             input: "150 30% 88%",
-            ring: "160 84% 39%"
+            ring: "160 84% 39%",
+            'chart-1': "160 70% 35%",
+            'chart-2': "145 60% 40%",
+            'chart-3': "175 55% 38%",
+            'chart-4': "155 65% 32%",
+            'chart-5': "140 50% 42%"
         },
         dark: {
             background: "160 40% 4%",
@@ -163,7 +196,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "160 30% 18%",
             input: "160 30% 18%",
-            ring: "160 84% 45%"
+            ring: "160 84% 45%",
+            'chart-1': "160 70% 55%",
+            'chart-2': "145 60% 50%",
+            'chart-3': "175 55% 52%",
+            'chart-4': "155 65% 48%",
+            'chart-5': "140 50% 55%"
         }
     },
     {
@@ -188,7 +226,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 100%",
             border: "340 30% 92%",
             input: "340 30% 92%",
-            ring: "330 81% 60%"
+            ring: "330 81% 60%",
+            'chart-1': "330 70% 55%",
+            'chart-2': "315 60% 50%",
+            'chart-3': "345 55% 52%",
+            'chart-4': "320 65% 45%",
+            'chart-5': "350 50% 55%"
         },
         dark: {
             background: "340 40% 4%",
@@ -209,7 +252,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "340 30% 18%",
             input: "340 30% 18%",
-            ring: "330 81% 65%"
+            ring: "330 81% 65%",
+            'chart-1': "330 70% 68%",
+            'chart-2': "315 60% 62%",
+            'chart-3': "345 55% 65%",
+            'chart-4': "320 65% 58%",
+            'chart-5': "350 50% 60%"
         }
     },
     {
@@ -234,7 +282,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 100%",
             border: "35 30% 92%",
             input: "35 30% 92%",
-            ring: "35 90% 50%"
+            ring: "35 90% 50%",
+            'chart-1': "35 80% 45%",
+            'chart-2': "25 70% 48%",
+            'chart-3': "45 65% 42%",
+            'chart-4': "20 75% 40%",
+            'chart-5': "50 60% 50%"
         },
         dark: {
             background: "35 40% 4%",
@@ -255,7 +308,12 @@ export const APP_THEMES: AppTheme[] = [
             'destructive-foreground': "0 0% 98%",
             border: "35 30% 18%",
             input: "35 30% 18%",
-            ring: "35 90% 60%"
+            ring: "35 90% 60%",
+            'chart-1': "35 80% 62%",
+            'chart-2': "25 70% 58%",
+            'chart-3': "45 65% 55%",
+            'chart-4': "20 75% 52%",
+            'chart-5': "50 60% 58%"
         }
     }
 ];

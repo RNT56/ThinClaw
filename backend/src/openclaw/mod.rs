@@ -15,6 +15,7 @@ pub mod ironclaw_bridge; // IronClaw lifecycle manager (IronClawState)
 pub mod ironclaw_channel; // impl Channel for TauriChannel
 pub mod ironclaw_secrets; // SecretsStore adapter (Keychain → IronClaw trait)
 pub mod ironclaw_types; // StatusUpdate → UiEvent conversion
+pub mod remote_proxy; // HTTP/SSE proxy client for remote IronClaw gateway
 pub mod sanitizer; // LLM token stripping
 pub mod tool_bridge; // ToolBridge trait + TauriToolBridge (3-tier approval)
 pub mod ui_types; // UiEvent enum + supporting types

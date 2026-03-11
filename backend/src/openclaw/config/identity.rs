@@ -202,6 +202,9 @@ impl OpenClawConfig {
                 secrets
             },
             node_host_enabled: identity.node_host_enabled,
+            allow_local_tools: identity.allow_local_tools,
+            workspace_mode: identity.workspace_mode,
+            workspace_root: identity.workspace_root,
             local_inference_enabled: identity.local_inference_enabled,
             expose_inference: identity.expose_inference,
             setup_completed: identity.setup_completed,
@@ -209,6 +212,8 @@ impl OpenClawConfig {
             selected_cloud_model: identity.selected_cloud_model,
             auto_start_gateway: identity.auto_start_gateway,
             dev_mode_wizard: identity.dev_mode_wizard,
+            auto_approve_tools: identity.auto_approve_tools,
+            bootstrap_completed: identity.bootstrap_completed,
             custom_llm_url: identity.custom_llm_url,
             custom_llm_key: keychain::get_key("custom_llm_key"),
             custom_llm_model: identity.custom_llm_model,
@@ -588,6 +593,22 @@ impl OpenClawConfig {
         self.save_identity()
     }
 
+    /// Set the autonomous tool approval mode.
+    ///
+    /// When `true`, the agent runs all tools without per-tool approval prompts.
+    /// This is the "fully autonomous" mode. When `false`, the user can approve
+    /// each tool call individually.
+    pub fn set_auto_approve_tools(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.auto_approve_tools = enabled;
+        self.save_identity()
+    }
+
+    /// Mark the first-run identity bootstrap ritual as completed.
+    pub fn set_bootstrap_completed(&mut self, completed: bool) -> std::io::Result<()> {
+        self.bootstrap_completed = completed;
+        self.save_identity()
+    }
+
     /// Persist non-sensitive settings to identity.json.
     /// API keys are NOT written here — they live only in the macOS Keychain.
     pub fn save_identity(&self) -> std::io::Result<()> {
@@ -623,6 +644,9 @@ impl OpenClawConfig {
             public_key: self.public_key.clone(),
             custom_secrets: self.custom_secrets.clone(),
             node_host_enabled: self.node_host_enabled,
+            allow_local_tools: self.allow_local_tools,
+            workspace_mode: self.workspace_mode.clone(),
+            workspace_root: self.workspace_root.clone(),
             local_inference_enabled: self.local_inference_enabled,
             expose_inference: self.expose_inference,
             setup_completed: self.setup_completed,
@@ -630,6 +654,8 @@ impl OpenClawConfig {
             selected_cloud_model: self.selected_cloud_model.clone(),
             auto_start_gateway: self.auto_start_gateway,
             dev_mode_wizard: self.dev_mode_wizard,
+            auto_approve_tools: self.auto_approve_tools,
+            bootstrap_completed: self.bootstrap_completed,
             xai_granted: self.xai_granted,
             venice_granted: self.venice_granted,
             together_granted: self.together_granted,

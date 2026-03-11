@@ -2,10 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Settings2, RefreshCw, Plus, Edit3, Check, X,
-    Search, Copy, Shield, Shrink, GitBranch, Loader2
+    Search, Copy, Shield, Shrink, GitBranch, Loader2,
+    Brain, User, Heart, BookOpen, ExternalLink
 } from 'lucide-react';
 import * as openclawApi from '../../lib/openclaw';
 import { toast } from 'sonner';
+import { useChatLayout } from '../chat/ChatProvider';
 
 interface SettingEntry {
     key: string;
@@ -16,6 +18,7 @@ interface SettingEntry {
 }
 
 export function OpenClawConfig() {
+    const { setActiveOpenClawPage } = useChatLayout();
     const [settings, setSettings] = useState<SettingEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
@@ -167,7 +170,7 @@ export function OpenClawConfig() {
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleExport}
-                            className="p-2 rounded-lg bg-white/5 border border-white/10 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
+                            className="p-2 rounded-lg bg-white/5 border border-border/40 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
                             title="Export to clipboard"
                         >
                             <Copy className="w-3.5 h-3.5" />
@@ -180,7 +183,7 @@ export function OpenClawConfig() {
                         </button>
                         <button
                             onClick={loadSettings}
-                            className="p-2 rounded-lg bg-white/5 border border-white/10 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
+                            className="p-2 rounded-lg bg-white/5 border border-border/40 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
                         >
                             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                         </button>
@@ -195,7 +198,7 @@ export function OpenClawConfig() {
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search settings..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
                     />
                 </div>
             </div>
@@ -215,14 +218,14 @@ export function OpenClawConfig() {
                                 value={newKey}
                                 onChange={e => setNewKey(e.target.value)}
                                 placeholder="Key name"
-                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
+                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
                             />
                             <textarea
                                 value={newValue}
                                 onChange={e => setNewValue(e.target.value)}
                                 placeholder="Value (JSON or string)"
                                 rows={2}
-                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50 font-mono resize-none"
+                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50 font-mono resize-none"
                             />
                             <div className="flex justify-end gap-2">
                                 <button onClick={() => setShowAddForm(false)} className="px-3 py-1 text-xs text-zinc-400 hover:text-white transition-colors">
@@ -236,6 +239,48 @@ export function OpenClawConfig() {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Agent Identity — Quick Access to workspace files */}
+            <div className="px-5 space-y-3 mb-3">
+                <div className="p-4 rounded-lg bg-gradient-to-br from-violet-500/5 to-indigo-500/5 border border-violet-500/15">
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                            <Brain className="w-3.5 h-3.5 text-violet-400" />
+                            <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Agent Identity</span>
+                        </div>
+                        <button
+                            onClick={() => setActiveOpenClawPage('brain')}
+                            className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300 transition-colors"
+                        >
+                            Open The Brain
+                            <ExternalLink className="w-3 h-3" />
+                        </button>
+                    </div>
+                    <p className="text-[10px] text-zinc-500 mb-3">
+                        These files define who the agent is. They're stored in IronClaw's database and auto-seeded on first run.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                        {[
+                            { file: 'SOUL.md', icon: Heart, label: 'Core Values', desc: 'Behavioral principles & boundaries', color: 'rose' },
+                            { file: 'IDENTITY.md', icon: User, label: 'Identity', desc: 'Name, personality, emoji', color: 'blue' },
+                            { file: 'USER.md', icon: User, label: 'User Context', desc: 'Your name, timezone, preferences', color: 'emerald' },
+                            { file: 'AGENTS.md', icon: BookOpen, label: 'Instructions', desc: 'Session startup routine', color: 'amber' },
+                        ].map(item => (
+                            <button
+                                key={item.file}
+                                onClick={() => setActiveOpenClawPage('brain')}
+                                className={`flex items-start gap-2.5 p-2.5 rounded-lg bg-black/20 border border-white/5 hover:border-${item.color}-500/30 hover:bg-${item.color}-500/5 transition-all text-left group`}
+                            >
+                                <item.icon className={`w-3.5 h-3.5 text-${item.color}-400 mt-0.5 shrink-0`} />
+                                <div className="min-w-0">
+                                    <div className="text-[11px] font-semibold text-zinc-200 group-hover:text-white">{item.label}</div>
+                                    <div className="text-[9px] text-zinc-500 truncate">{item.file} — {item.desc}</div>
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            </div>
 
             {/* Quick Config Sections */}
             <div className="px-5 space-y-3 mb-3">
@@ -254,14 +299,14 @@ export function OpenClawConfig() {
                             value={urlAllowlist}
                             onChange={e => { setUrlAllowlist(e.target.value); setUrlDirty(true); }}
                             placeholder="api.example.com, docs.example.com"
-                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveUrlAllowlist}
                             disabled={!urlDirty || urlSaving}
                             className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${urlDirty
-                                    ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
-                                    : 'bg-white/5 text-zinc-600 border border-white/5'
+                                ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
+                                : 'bg-white/5 text-zinc-600 border border-white/5'
                                 }`}
                         >
                             {urlSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -320,14 +365,14 @@ export function OpenClawConfig() {
                             value={fallbackModel}
                             onChange={e => { setFallbackModel(e.target.value); setFallbackDirty(true); }}
                             placeholder="e.g. gpt-4o, claude-3-haiku-20240307"
-                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-white/10 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveFallback}
                             disabled={!fallbackDirty || fallbackSaving}
                             className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${fallbackDirty
-                                    ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border border-blue-500/30'
-                                    : 'bg-white/5 text-zinc-600 border border-white/5'
+                                ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border border-blue-500/30'
+                                : 'bg-white/5 text-zinc-600 border border-white/5'
                                 }`}
                         >
                             {fallbackSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -355,7 +400,7 @@ export function OpenClawConfig() {
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: i * 0.03 }}
-                            className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] hover:border-white/10 transition-all group"
+                            className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] hover:border-border/40 transition-all group"
                         >
                             <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1 min-w-0">

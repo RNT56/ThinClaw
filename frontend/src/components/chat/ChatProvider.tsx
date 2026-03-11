@@ -360,7 +360,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         const checkStatus = async () => {
             try {
                 const status = await openclawApi.getOpenClawStatus();
-                setOpenClawGatewayRunning(status.gateway_running);
+                setOpenClawGatewayRunning(status.engine_running);
             } catch {
                 setOpenClawGatewayRunning(false);
             }

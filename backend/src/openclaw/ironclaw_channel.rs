@@ -176,8 +176,13 @@ impl Channel for TauriChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        // Extract session_key from the message's thread_id
-        let session_key = msg.thread_id.as_deref().unwrap_or("default");
+        // Session routing: prefer thread_id from message, fall back to most recent session
+        // (must match the same routing logic as send_status)
+        let session_key = if let Some(ref tid) = msg.thread_id {
+            tid.clone()
+        } else {
+            self.most_recent_session().await
+        };
 
         let run_id = msg
             .metadata
@@ -187,7 +192,7 @@ impl Channel for TauriChannel {
 
         // `respond` is called with the final assistant text
         let event = UiEvent::AssistantFinal {
-            session_key: session_key.to_string(),
+            session_key,
             run_id,
             message_id: msg.id.to_string(),
             text: strip_llm_tokens(&response.content),
@@ -230,9 +235,60 @@ impl Channel for TauriChannel {
         // Animate tray icon on activity events
         if matches!(
             &status,
-            StatusUpdate::Thinking(_) | StatusUpdate::ToolStarted { .. }
+            StatusUpdate::Thinking(_)
+                | StatusUpdate::ToolStarted { .. }
+                | StatusUpdate::AgentMessage { .. }
+                | StatusUpdate::SubagentSpawned { .. }
+                | StatusUpdate::SubagentProgress { .. }
         ) {
             self.set_tray_active();
+        }
+
+        // ── Register subagent lifecycle in the sub_agent_registry ────────
+        // This ensures automation subagents show up properly in the Presence
+        // "Sub-Agents" section and in listChildSessions() rather than as
+        // phantom top-level sessions.
+        match &status {
+            StatusUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
+            } => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as f64;
+                let child = super::commands::types::ChildSessionInfo {
+                    session_key: agent_id.clone(),
+                    task: format!("[{}] {}", name, task),
+                    status: "running".to_string(),
+                    spawned_at: now_ms,
+                    result_summary: None,
+                };
+                super::commands::rpc::sub_agent_registry::register(&resolved_session, child).await;
+            }
+            StatusUpdate::SubagentCompleted {
+                agent_id,
+                success,
+                response,
+                ..
+            } => {
+                let status_str = if *success { "completed" } else { "failed" };
+                let preview = if response.len() > 200 {
+                    Some(format!("{}…", &response[..200]))
+                } else if response.is_empty() {
+                    None
+                } else {
+                    Some(response.clone())
+                };
+                super::commands::rpc::sub_agent_registry::update_status(
+                    agent_id,
+                    status_str,
+                    preview.as_deref(),
+                )
+                .await;
+            }
+            _ => {}
         }
 
         if let Some(event) = status_to_ui_event(status, &resolved_session, run_id, message_id) {

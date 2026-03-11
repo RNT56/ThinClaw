@@ -14,6 +14,7 @@ lerna-debug.log*
 # Rust / Tauri
 backend/target/
 backend/scrappy-mcp-tools/target/
+ironclaw/target/
 backend/gen/
 backend/bin/
 backend/resources/chromium/

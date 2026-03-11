@@ -6,6 +6,8 @@ import { OpenClawView } from './views/OpenClawView';
 import { ImagineView } from './views/ImagineView';
 import { SettingsView } from './views/SettingsView';
 import { CanvasWindow } from '../openclaw/canvas/CanvasWindow';
+import { CanvasProviderWrapper } from '../openclaw/canvas/CanvasProvider';
+import { CanvasToolbar } from '../openclaw/canvas/CanvasToolbar';
 
 // ---------------------------------------------------------------------------
 // Shell — consumes ChatProvider context and wires up the root layout
@@ -59,20 +61,23 @@ function ChatLayoutShell() {
                 )}
             </div>
 
-            {/* Global floating canvas window */}
+            {/* Global floating canvas panels + toolbar */}
             <CanvasWindow />
+            <CanvasToolbar />
         </div>
     );
 }
 
 // ---------------------------------------------------------------------------
-// Public export — wraps shell in provider
+// Public export — wraps shell in providers
 // ---------------------------------------------------------------------------
 
 export function ChatLayout() {
     return (
         <ChatProvider>
-            <ChatLayoutShell />
+            <CanvasProviderWrapper>
+                <ChatLayoutShell />
+            </CanvasProviderWrapper>
         </ChatProvider>
     );
 }

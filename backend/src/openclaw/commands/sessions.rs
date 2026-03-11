@@ -20,6 +20,8 @@ use crate::openclaw::ironclaw_bridge::IronClawState;
 ///
 /// Returns immediately — the actual response streams back via `openclaw-event`
 /// Tauri events (AssistantDelta, ToolUpdate, etc.).
+///
+/// Routes to RemoteGatewayProxy when in remote mode.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_send_message(
@@ -28,13 +30,25 @@ pub async fn openclaw_send_message(
     text: String,
     deliver: bool,
 ) -> Result<OpenClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.send_message(&session_key, &text).await?;
+        return Ok(OpenClawRpcResponse {
+            ok: true,
+            message: Some("sent:remote".into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     // Set session context BEFORE sending so TauriChannel routes events correctly
     ironclaw.set_session_context(&session_key).await?;
 
     let agent = ironclaw.agent().await?;
-    let result = ironclaw::api::chat::send_message(agent, &session_key, &text, deliver)
-        .await
-        .map_err(|e| e.to_string())?;
+    let routine_engine = ironclaw.routine_engine().await;
+    let result =
+        ironclaw::api::chat::send_message_full(agent, &session_key, &text, deliver, routine_engine)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(OpenClawRpcResponse {
         ok: true,
@@ -50,6 +64,16 @@ pub async fn openclaw_abort_chat(
     session_key: String,
     _run_id: Option<String>,
 ) -> Result<OpenClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.abort_chat(&session_key).await?;
+        return Ok(OpenClawRpcResponse {
+            ok: true,
+            message: Some("Abort sent to remote agent".into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
     ironclaw::api::chat::abort(&agent, &session_key)
         .await
@@ -62,6 +86,8 @@ pub async fn openclaw_abort_chat(
 }
 
 /// Resolve a pending tool-execution approval (3-tier: Deny/AllowOnce/AllowSession).
+///
+/// In remote mode, sends the approval decision to the remote gateway.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_resolve_approval(
@@ -70,6 +96,18 @@ pub async fn openclaw_resolve_approval(
     approved: bool,
     allow_session: Option<bool>,
 ) -> Result<OpenClawRpcResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy
+            .resolve_approval(&approval_id, approved, allow_session.unwrap_or(false))
+            .await?;
+        return Ok(OpenClawRpcResponse {
+            ok: true,
+            message: Some(if approved { "Approved" } else { "Denied" }.into()),
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     use crate::openclaw::tool_bridge::ApprovalDecision;
 
     // Build the 3-tier decision from frontend params
@@ -121,6 +159,57 @@ pub async fn openclaw_resolve_approval(
 pub async fn openclaw_get_sessions(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<OpenClawSessionsResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let raw = proxy.get_sessions().await?;
+        // Remote gateway returns { threads: [...], assistant_thread: ... }
+        // We map it to OpenClawSessionsResponse
+        let mut session_list: Vec<OpenClawSession> = Vec::new();
+
+        if let Some(threads) = raw.get("threads").and_then(|v| v.as_array()) {
+            for t in threads {
+                session_list.push(OpenClawSession {
+                    session_key: t
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    title: t
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    updated_at_ms: t
+                        .get("updated_at")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_millis() as f64),
+                    source: t
+                        .get("thread_type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                });
+            }
+        }
+
+        // Ensure main session exists
+        if !session_list.iter().any(|s| s.session_key == "agent:main") {
+            session_list.insert(
+                0,
+                OpenClawSession {
+                    session_key: "agent:main".to_string(),
+                    title: Some("Remote Agent".to_string()),
+                    updated_at_ms: Some(chrono::Utc::now().timestamp_millis() as f64),
+                    source: Some("remote".to_string()),
+                },
+            );
+        }
+
+        return Ok(OpenClawSessionsResponse {
+            sessions: session_list,
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
     let thread_list = ironclaw::api::sessions::list_threads(
         agent.session_manager(),
@@ -215,6 +304,14 @@ pub async fn openclaw_delete_session(
         return Err("Cannot delete the core agent:main session.".to_string());
     }
 
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.delete_session(&session_key).await?;
+        info!("[ironclaw] Deleted remote session: {}", session_key);
+        return Ok(());
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     info!("[ironclaw] Deleting session: {}", session_key);
 
     // Abort any active run first (best-effort)
@@ -241,6 +338,14 @@ pub async fn openclaw_reset_session(
     ironclaw: State<'_, IronClawState>,
     session_key: String,
 ) -> Result<(), String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.reset_session(&session_key).await?;
+        info!("[ironclaw] Reset remote session: {}", session_key);
+        return Ok(());
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     info!("[ironclaw] Resetting session: {}", session_key);
 
     let agent = ironclaw.agent().await?;
@@ -258,6 +363,9 @@ pub async fn openclaw_reset_session(
 }
 
 /// Get chat history for a session.
+///
+/// Routes to remote proxy when in remote mode, converting the gateway's
+/// message format to OpenClawHistoryResponse.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_history(
@@ -266,6 +374,50 @@ pub async fn openclaw_get_history(
     limit: u32,
     _before: Option<String>,
 ) -> Result<OpenClawHistoryResponse, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let raw = proxy.get_history(&session_key, limit).await?;
+        // Remote gateway returns { messages: [{id, role, content, ts_ms, ...}] }
+        let messages: Vec<OpenClawMessage> = raw
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        let id = m.get("id")?.as_str()?.to_string();
+                        let role = m.get("role")?.as_str()?.to_string();
+                        let text = m
+                            .get("content")
+                            .or_else(|| m.get("text"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let ts_ms = m.get("ts_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let source = m
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        Some(OpenClawMessage {
+                            id,
+                            role,
+                            ts_ms,
+                            text,
+                            source,
+                            metadata: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let has_more = raw
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        return Ok(OpenClawHistoryResponse { messages, has_more });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
     let history = ironclaw::api::sessions::get_history(
         agent.session_manager(),
@@ -357,73 +509,45 @@ pub async fn openclaw_subscribe_session(
 // Batch 3: Memory / Workspace
 // ============================================================================
 
-/// Get MEMORY.md content.
+/// Get MEMORY.md content from IronClaw's DB-backed workspace.
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_get_memory(
-    ironclaw: State<'_, IronClawState>,
-    legacy: State<'_, OpenClawManager>,
-) -> Result<String, String> {
-    // Try IronClaw workspace API first
-    let agent = ironclaw.agent().await?;
-    if let Some(workspace) = agent.workspace() {
-        match ironclaw::api::memory::get_file(workspace, "MEMORY.md").await {
-            Ok(resp) => return Ok(resp.content),
-            Err(_) => return Ok("No memory file found.".to_string()),
-        }
+pub async fn openclaw_get_memory(ironclaw: State<'_, IronClawState>) -> Result<String, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.get_file("MEMORY.md").await;
     }
 
-    // Fallback: direct filesystem (legacy path)
-    let cfg_guard = legacy.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let memory_file = cfg.workspace_dir().join("MEMORY.md");
-    if memory_file.exists() {
-        std::fs::read_to_string(memory_file).map_err(|e| e.to_string())
-    } else {
-        Ok("No memory file found.".to_string())
+    let agent = ironclaw.agent().await?;
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+    match ironclaw::api::memory::get_file(workspace, "MEMORY.md").await {
+        Ok(resp) => Ok(resp.content),
+        Err(_) => Ok(String::new()),
     }
 }
 
-/// Save MEMORY.md content.
+/// Save MEMORY.md content to IronClaw's DB-backed workspace.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_save_memory(
     ironclaw: State<'_, IronClawState>,
-    legacy: State<'_, OpenClawManager>,
     content: String,
 ) -> Result<(), String> {
-    // Try IronClaw workspace API first
-    let agent = ironclaw.agent().await?;
-    if let Some(workspace) = agent.workspace() {
-        return ironclaw::api::memory::write_file(workspace, "MEMORY.md", &content)
-            .await
-            .map_err(|e| e.to_string());
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.write_file("MEMORY.md", &content).await;
     }
 
-    // Fallback: direct filesystem
-    let cfg_guard = legacy.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let path = cfg.workspace_dir().join("MEMORY.md");
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    tokio::fs::write(path, content)
+    let agent = ironclaw.agent().await?;
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+    ironclaw::api::memory::write_file(workspace, "MEMORY.md", &content)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// Get contents of a workspace file (e.g. SOUL.md).
+/// Get contents of a workspace file (e.g. SOUL.md) from IronClaw's DB.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_file(
     ironclaw: State<'_, IronClawState>,
-    legacy: State<'_, OpenClawManager>,
     path: String,
 ) -> Result<String, String> {
     // Sanitize
@@ -431,38 +555,23 @@ pub async fn openclaw_get_file(
         return Err("Invalid file path".to_string());
     }
 
-    // Try IronClaw workspace API
-    let agent = ironclaw.agent().await?;
-    if let Some(workspace) = agent.workspace() {
-        match ironclaw::api::memory::get_file(workspace, &path).await {
-            Ok(resp) => return Ok(resp.content),
-            Err(_) => return Ok(format!("File {} not found.", path)),
-        }
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.get_file(&path).await;
     }
 
-    // Fallback: direct filesystem
-    let cfg_guard = legacy.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let file_path = cfg.workspace_dir().join(&path);
-    if !file_path.starts_with(cfg.workspace_dir()) {
-        return Err("Path traversal detected".to_string());
-    }
-    if file_path.exists() {
-        std::fs::read_to_string(file_path).map_err(|e| e.to_string())
-    } else {
-        warn!("File not found at: {:?}", file_path);
-        Ok(format!("File {} not found.", path))
+    let agent = ironclaw.agent().await?;
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+    match ironclaw::api::memory::get_file(workspace, &path).await {
+        Ok(resp) => Ok(resp.content),
+        Err(_) => Ok(format!("File {} not found.", path)),
     }
 }
 
-/// Write content to a workspace file.
+/// Write content to a workspace file in IronClaw's DB.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_write_file(
     ironclaw: State<'_, IronClawState>,
-    legacy: State<'_, OpenClawManager>,
     path: String,
     content: String,
 ) -> Result<(), String> {
@@ -471,197 +580,330 @@ pub async fn openclaw_write_file(
         return Err("Invalid file path".to_string());
     }
 
-    // Try IronClaw workspace API
-    let agent = ironclaw.agent().await?;
-    if let Some(workspace) = agent.workspace() {
-        return ironclaw::api::memory::write_file(workspace, &path, &content)
-            .await
-            .map_err(|e| e.to_string());
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.write_file(&path, &content).await;
     }
 
-    // Fallback: direct filesystem
-    let cfg_guard = legacy.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let file_path = cfg.workspace_dir().join(&path);
-    if !file_path.starts_with(cfg.workspace_dir()) {
-        return Err("Path traversal detected".to_string());
-    }
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    info!("Writing file at: {:?}", file_path);
-    std::fs::write(file_path, content).map_err(|e| e.to_string())
+    let agent = ironclaw.agent().await?;
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+    ironclaw::api::memory::write_file(workspace, &path, &content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// List all markdown files in the workspace.
+/// Delete a workspace file from IronClaw's DB.
+///
+/// Protected files (core seeded workspace files) cannot be deleted.
+/// Users can only delete agent-created files like daily logs, context
+/// files, or project sub-files. If the path matches a directory prefix,
+/// all files under that prefix are deleted.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_delete_file(
+    ironclaw: State<'_, IronClawState>,
+    path: String,
+) -> Result<(), String> {
+    // Sanitize
+    if path.contains("..") || path.starts_with("/") || path.contains("\\") {
+        return Err("Invalid file path".to_string());
+    }
+
+    // Protect core seeded files from deletion
+    const PROTECTED_FILES: &[&str] = &[
+        "README.md",
+        "IDENTITY.md",
+        "SOUL.md",
+        "USER.md",
+        "AGENTS.md",
+        "MEMORY.md",
+        "HEARTBEAT.md",
+        "BOOT.md",
+        "TOOLS.md",
+    ];
+
+    if PROTECTED_FILES.contains(&path.as_str()) {
+        return Err(format!(
+            "{} is a core workspace file and cannot be deleted. You can clear its content instead.",
+            path
+        ));
+    }
+
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.delete_file(&path).await?;
+        tracing::info!("[ironclaw] Deleted remote workspace file: {}", path);
+        return Ok(());
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
+    let agent = ironclaw.agent().await?;
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+
+    // Try direct file deletion first
+    match ironclaw::api::memory::delete_file(workspace, &path).await {
+        Ok(()) => {
+            tracing::info!("[ironclaw] Deleted workspace file: {}", path);
+            return Ok(());
+        }
+        Err(_) => {
+            // File not found — try directory prefix deletion
+        }
+    }
+
+    // Treat as directory: find all files under this prefix and delete them
+    let prefix = if path.ends_with('/') {
+        path.clone()
+    } else {
+        format!("{}/", path)
+    };
+
+    let all_paths = workspace.list_all().await.map_err(|e| e.to_string())?;
+
+    let children: Vec<&String> = all_paths
+        .iter()
+        .filter(|p| p.starts_with(&prefix))
+        .collect();
+
+    if children.is_empty() {
+        return Err(format!("File or directory '{}' not found", path));
+    }
+
+    // Check none of the children are protected
+    for child_path in &children {
+        if PROTECTED_FILES.contains(&child_path.as_str()) {
+            return Err(format!(
+                "Cannot delete directory '{}' because it contains protected file '{}'",
+                path, child_path
+            ));
+        }
+    }
+
+    let count = children.len();
+    for child_path in children {
+        if let Err(e) = ironclaw::api::memory::delete_file(workspace, child_path).await {
+            tracing::warn!("[ironclaw] Failed to delete '{}': {}", child_path, e);
+        }
+    }
+
+    tracing::info!(
+        "[ironclaw] Deleted {} workspace files under directory: {}",
+        count,
+        path
+    );
+    Ok(())
+}
+
+/// List all files in IronClaw's DB-backed workspace.
+///
+/// Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_list_workspace_files(
     ironclaw: State<'_, IronClawState>,
-    legacy: State<'_, OpenClawManager>,
 ) -> Result<Vec<String>, String> {
-    // Try IronClaw workspace API
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.list_files().await;
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
-    if let Some(workspace) = agent.workspace() {
-        match ironclaw::api::memory::list_files(workspace, None).await {
-            Ok(resp) => return Ok(resp.entries.iter().map(|e| e.path.clone()).collect()),
-            Err(e) => {
-                warn!(
-                    "[ironclaw] list_files failed, falling back to filesystem: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    // Fallback: direct filesystem scan
-    let cfg_guard = legacy.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
-    let workspace = cfg.workspace_dir();
-
-    if !workspace.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut files = vec![];
-    if let Ok(entries) = std::fs::read_dir(&workspace) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension() {
-                    if ext == "md" {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            files.push(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let memory_dir = workspace.join("memory");
-    if memory_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&memory_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        files.push(format!("memory/{}", name));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(files)
+    let workspace = agent.workspace().ok_or("Workspace not available")?;
+    workspace.list_all().await.map_err(|e| e.to_string())
 }
 
-/// Clear memory (deletes memory directory or identity files).
+/// Clear memory or identity files in IronClaw's workspace.
+///
+/// For "memory" and "identity" targets, this exclusively uses the
+/// DB-backed workspace API. For "all" (factory reset), it stops the
+/// engine and wipes the legacy state directories.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_clear_memory(
+    app_handle: tauri::AppHandle,
     ironclaw: State<'_, IronClawState>,
     legacy: State<'_, OpenClawManager>,
     target: String,
 ) -> Result<(), String> {
-    // For "memory" and "identity", try IronClaw workspace API
-    let agent_opt = ironclaw.agent().await.ok();
-    if let Some(workspace) = agent_opt.as_ref().and_then(|a| a.workspace()) {
-        match target.as_str() {
-            "memory" => {
-                // Clear memory directory contents via workspace API
-                let _ = ironclaw::api::memory::write_file(workspace, "MEMORY.md", "").await;
-                info!("[ironclaw] Cleared MEMORY.md");
-                return Ok(());
-            }
-            "identity" => {
-                let _ = ironclaw::api::memory::write_file(workspace, "SOUL.md", "").await;
-                let _ = ironclaw::api::memory::write_file(workspace, "USER.md", "").await;
-                info!("[ironclaw] Cleared identity files");
-                return Ok(());
-            }
-            "all" => {
-                // Factory reset — fall through to legacy code which handles
-                // process cleanup, filesystem wipe, etc.
-            }
-            _ => return Err("Invalid target".to_string()),
-        }
-    }
-
-    // Legacy filesystem code for "all" (factory reset) and fallback
-    let cfg = if let Some(c) = legacy.get_config().await {
-        c
-    } else {
-        legacy.init_config().await?
-    };
-
-    let workspace_path = cfg.workspace_dir();
-
     match target.as_str() {
         "memory" => {
-            let memory_dir = workspace_path.join("memory");
-            if memory_dir.exists() {
-                std::fs::remove_dir_all(&memory_dir)
-                    .map_err(|e| format!("Failed to remove memory dir: {}", e))?;
-                std::fs::create_dir_all(&memory_dir)
-                    .map_err(|e| format!("Failed to recreate memory dir: {}", e))?;
+            // ── Remote mode ──────────────────────────────────────────
+            if let Some(proxy) = ironclaw.remote_proxy().await {
+                proxy.write_file("MEMORY.md", "").await?;
+                info!("[ironclaw] Cleared MEMORY.md on remote agent");
+                return Ok(());
             }
-            info!("[openclaw] Cleared memory directory");
+            // ── Local mode ───────────────────────────────────────────
+            let agent = ironclaw.agent().await?;
+            let workspace = agent.workspace().ok_or("Workspace not available")?;
+            let _ = ironclaw::api::memory::write_file(workspace, "MEMORY.md", "").await;
+            info!("[ironclaw] Cleared MEMORY.md via workspace API");
+            Ok(())
         }
         "identity" => {
-            let soul_file = workspace_path.join("SOUL.md");
-            let user_file = workspace_path.join("USER.md");
-            if soul_file.exists() {
-                std::fs::remove_file(soul_file)
-                    .map_err(|e| format!("Failed to delete SOUL.md: {}", e))?;
+            // ── Remote mode ──────────────────────────────────────────
+            if let Some(proxy) = ironclaw.remote_proxy().await {
+                let _ = proxy.write_file("SOUL.md", "").await;
+                let _ = proxy.write_file("USER.md", "").await;
+                let _ = proxy.write_file("IDENTITY.md", "").await;
+                info!("[ironclaw] Cleared identity files on remote agent");
+                return Ok(());
             }
-            if user_file.exists() {
-                std::fs::remove_file(user_file)
-                    .map_err(|e| format!("Failed to delete USER.md: {}", e))?;
-            }
-            info!("[openclaw] Cleared identity files");
+            // ── Local mode ───────────────────────────────────────────
+            let agent = ironclaw.agent().await?;
+            let workspace = agent.workspace().ok_or("Workspace not available")?;
+            let _ = ironclaw::api::memory::write_file(workspace, "SOUL.md", "").await;
+            let _ = ironclaw::api::memory::write_file(workspace, "USER.md", "").await;
+            let _ = ironclaw::api::memory::write_file(workspace, "IDENTITY.md", "").await;
+            info!("[ironclaw] Cleared identity files via workspace API");
+            Ok(())
         }
         "all" => {
-            // Shutdown IronClaw background tasks before wiping
+            // Factory reset — stop engine, then wipe ALL IronClaw state.
+            //
+            // IronClaw stores everything in a SQLite database (ironclaw.db):
+            // - All sessions and chat history
+            // - Workspace files (SOUL.md, MEMORY.md, USER.md, etc.)
+            // - Agent settings and config
+            // - Extension state
+            //
+            // We must delete this DB file to truly reset.
             ironclaw.stop().await;
 
-            // Wipe workspace
+            // ── 1. Delete IronClaw database (the real data store) ─────────
+            let ironclaw_db = ironclaw.state_dir().join("ironclaw.db");
+            if ironclaw_db.exists() {
+                if let Err(e) = std::fs::remove_file(&ironclaw_db) {
+                    error!("[openclaw] Failed to delete ironclaw.db: {}", e);
+                    return Err(format!("Failed to delete ironclaw.db: {}", e));
+                }
+                info!("[openclaw] Deleted ironclaw.db");
+            }
+
+            // Also remove WAL/SHM files (SQLite journal files)
+            let wal = ironclaw.state_dir().join("ironclaw.db-wal");
+            let shm = ironclaw.state_dir().join("ironclaw.db-shm");
+            let _ = std::fs::remove_file(&wal);
+            let _ = std::fs::remove_file(&shm);
+
+            // ── 2. Delete IronClaw config (ironclaw.toml) ────────────────
+            let ironclaw_toml = ironclaw.state_dir().join("ironclaw.toml");
+            if ironclaw_toml.exists() {
+                let _ = std::fs::remove_file(&ironclaw_toml);
+                info!("[openclaw] Deleted ironclaw.toml");
+            }
+
+            // ── 3. Legacy filesystem cleanup (backwards compat) ──────────
+            let mut cfg = if let Some(c) = legacy.get_config().await {
+                c
+            } else {
+                legacy.init_config().await?
+            };
+
+            let workspace_path = cfg.workspace_dir();
             if workspace_path.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&workspace_path) {
                     error!("[openclaw] Failed to wipe workspace: {}", e);
-                    return Err(format!("Failed to wipe workspace: {}", e));
+                    // Non-fatal — the DB was the important part
                 }
-                std::fs::create_dir_all(&workspace_path).map_err(|e| e.to_string())?;
-                info!("[openclaw] Wiped workspace directory: {:?}", workspace_path);
+                let _ = std::fs::create_dir_all(&workspace_path);
+                info!(
+                    "[openclaw] Wiped legacy workspace directory: {:?}",
+                    workspace_path
+                );
             }
 
-            // Clear sessions
             let sessions_dir = cfg.state_dir().join("agents").join("main").join("sessions");
             if sessions_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&sessions_dir) {
-                    error!("[openclaw] Failed to wipe sessions: {}", e);
-                    return Err(format!("Failed to wipe sessions: {}", e));
-                }
-                std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_dir_all(&sessions_dir);
+                let _ = std::fs::create_dir_all(&sessions_dir);
             }
 
-            // Clear logs
             let logs_dir = cfg.base_dir.join("logs");
             if logs_dir.exists() {
                 let _ = std::fs::remove_dir_all(&logs_dir);
                 let _ = std::fs::create_dir_all(&logs_dir);
             }
 
-            info!("[openclaw] Factory reset complete");
-        }
-        _ => return Err("Invalid target".to_string()),
-    }
+            // ── 4. Clean up agent workspace directories ──────────────────
+            // Delete the legacy auto-generated agent_workspace if it exists
+            let agent_workspace = cfg.base_dir.join("agent_workspace");
+            if agent_workspace.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&agent_workspace) {
+                    error!("[openclaw] Failed to wipe agent_workspace: {}", e);
+                } else {
+                    info!("[openclaw] Deleted agent_workspace directory");
+                }
+            }
 
-    Ok(())
+            // If a custom workspace_root was set in config, clean that too
+            if let Some(ref custom_root) = cfg.workspace_root {
+                let custom_path = std::path::Path::new(custom_root);
+                if custom_path.exists() && custom_path != agent_workspace {
+                    if let Err(e) = std::fs::remove_dir_all(custom_path) {
+                        error!(
+                            "[openclaw] Failed to wipe custom workspace root {:?}: {}",
+                            custom_root, e
+                        );
+                    } else {
+                        info!(
+                            "[openclaw] Deleted custom workspace root: {:?}",
+                            custom_root
+                        );
+                    }
+                }
+            }
+
+            // ── 4b. Wipe default ~/Scrappy/ workspace ────────────────────
+            // The engine resolves this at runtime in build_inner() but never
+            // persists it to cfg.workspace_root, so the block above misses it.
+            // On factory reset we must wipe it so agents start clean.
+            let default_scrappy = std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join("Scrappy"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("Scrappy"));
+            if default_scrappy.exists() && default_scrappy != agent_workspace {
+                if let Err(e) = std::fs::remove_dir_all(&default_scrappy) {
+                    tracing::warn!("[openclaw] Failed to wipe ~/Scrappy/: {}", e);
+                } else {
+                    let _ = std::fs::create_dir_all(&default_scrappy);
+                    info!("[openclaw] Wiped ~/Scrappy/ workspace directory");
+                }
+            }
+
+            // Reset workspace mode to sandboxed (NOT unrestricted) so that on next
+            // engine start, write_file is confined to agent_workspace and cannot
+            // accidentally write into the source tree (which would trigger the Tauri
+            // file watcher and cause a dev-mode crash/rebuild).
+            cfg.workspace_mode = "sandboxed".to_string();
+            cfg.workspace_root = None;
+
+            // ── Critical: reset bootstrap flag ───────────────────────────
+            // BOOTSTRAP.md is re-seeded on next engine start (it was in the DB
+            // that we just deleted). The frontend checks `bootstrap_completed`
+            // from identity.json to decide which wake-up message to send.
+            // Without this reset, the frontend sends SESSION_START instead of
+            // BOOTSTRAP, the agent ignores BOOTSTRAP.md, and starts with a
+            // generic greeting instead of the identity ritual.
+            if let Err(e) = cfg.set_bootstrap_completed(false) {
+                tracing::warn!("[openclaw] Failed to reset bootstrap_completed flag: {}", e);
+            }
+
+            let _ = cfg.save_identity();
+            *legacy.config.write().await = Some(cfg);
+
+            info!("[openclaw] Factory reset complete — all IronClaw data wiped");
+
+            // Notify frontend to clear all cached state (messages, runs, etc.)
+            use tauri::Emitter;
+            let _ = app_handle.emit(
+                "openclaw-event",
+                &crate::openclaw::ui_types::UiEvent::FactoryReset,
+            );
+
+            Ok(())
+        }
+        _ => Err("Invalid target".to_string()),
+    }
 }
 
 // ============================================================================
@@ -680,6 +922,27 @@ pub async fn openclaw_set_thinking(
     enabled: bool,
     budget_tokens: Option<u32>,
 ) -> Result<super::types::ThinkingConfig, String> {
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let _ = proxy
+            .set_setting("thinking_enabled", &serde_json::Value::Bool(enabled))
+            .await;
+        if let Some(budget) = budget_tokens {
+            let _ = proxy
+                .set_setting("thinking_budget_tokens", &serde_json::json!(budget))
+                .await;
+        }
+        info!(
+            "[ironclaw] Thinking mode (remote): enabled={}, budget={:?}",
+            enabled, budget_tokens
+        );
+        return Ok(super::types::ThinkingConfig {
+            enabled,
+            budget_tokens,
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     // Set environment variables that IronClaw reads for ThinkingConfig
     if enabled {
         std::env::set_var("AGENT_THINKING_ENABLED", "true");
@@ -739,6 +1002,41 @@ pub async fn openclaw_memory_search(
 ) -> Result<super::types::MemorySearchResponse, String> {
     let limit = limit.unwrap_or(20) as usize;
 
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let raw = proxy.search_memory(&query, limit as u32).await?;
+
+        // Parse the remote response into our local type
+        let results: Vec<super::types::MemorySearchResult> = raw
+            .get("results")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        Some(super::types::MemorySearchResult {
+                            path: item.get("path")?.as_str()?.to_string(),
+                            snippet: item
+                                .get("content")
+                                .or_else(|| item.get("snippet"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            score: item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let total = results.len() as u32;
+        return Ok(super::types::MemorySearchResponse {
+            results,
+            query,
+            total,
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     // Try IronClaw's memory search API
     let agent = ironclaw.agent().await.ok();
     if let Some(ref agent) = agent {
@@ -844,6 +1142,29 @@ pub async fn openclaw_export_session(
     format: Option<String>,
 ) -> Result<super::types::SessionExportResponse, String> {
     let fmt = format.as_deref().unwrap_or("md");
+
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let raw = proxy.export_session(&session_key, fmt).await?;
+
+        let transcript = raw
+            .get("transcript")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let message_count = raw
+            .get("message_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        return Ok(super::types::SessionExportResponse {
+            transcript,
+            session_key,
+            message_count,
+        });
+    }
+
+    // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
 
     // Fetch full history directly via IronClaw API

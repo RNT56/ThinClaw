@@ -24,8 +24,6 @@ import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
 
 // ── Channel icon mapping ────────────────────────────────────────
 const CHANNEL_ICONS: Record<string, any> = {
@@ -78,7 +76,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                 "rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm transition-all",
                 channel.enabled
                     ? "border-primary/20 shadow-primary/5"
-                    : "border-white/10"
+                    : "border-border/40"
             )}
         >
             <div className="p-6">
@@ -88,7 +86,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                             "p-2.5 rounded-xl border",
                             channel.enabled
                                 ? "bg-primary/10 border-primary/20"
-                                : "bg-white/5 border-white/10"
+                                : "bg-white/5 border-border/40"
                         )}>
                             <Icon className={cn("w-5 h-5", channel.enabled ? "text-primary" : "text-muted-foreground")} />
                         </div>
@@ -96,7 +94,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                             <h3 className="font-semibold">{channel.name}</h3>
                             <span className={cn(
                                 "text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
-                                channel.type === 'native' ? "bg-purple-500/10 text-purple-400" :
+                                channel.type === 'native' ? "bg-purple-500/10 text-primary" :
                                     channel.type === 'wasm' ? "bg-blue-500/10 text-blue-400" :
                                         "bg-green-500/10 text-green-400"
                             )}>
@@ -109,7 +107,7 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                             "px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border",
                             channel.enabled
                                 ? "text-green-500 bg-green-500/10 border-green-500/20"
-                                : "text-muted-foreground bg-white/5 border-white/10"
+                                : "text-muted-foreground bg-white/5 border-border/40"
                         )}>
                             {channel.enabled ? 'Active' : 'Inactive'}
                         </div>
@@ -121,8 +119,8 @@ function ChannelCard({ channel, onConfigureStream, hasStreamMode, expanded, onTo
                 {/* Stream mode badge */}
                 {hasStreamMode && channel.stream_mode && (
                     <div className="mt-3 flex items-center gap-2">
-                        <Podcast className="w-3.5 h-3.5 text-amber-400" />
-                        <span className="text-xs text-amber-400/80 font-medium">
+                        <Podcast className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground/80 font-medium">
                             Stream: {STREAM_MODE_LABELS[channel.stream_mode] || channel.stream_mode}
                         </span>
                     </div>
@@ -240,38 +238,40 @@ export function OpenClawChannels() {
         return () => { unlisten.then(fn => fn()); };
     }, [fetchChannels]);
 
-    // ── Gmail OAuth ──────────────────────────────────────────────────
+    // ── Gmail OAuth + Status ────────────────────────────────────────────
     const [gmailConnecting, setGmailConnecting] = useState(false);
     const [gmailConnected, setGmailConnected] = useState(false);
     const [gmailLabelFilter, setGmailLabelFilter] = useState('');
+    const [gmailStatus, setGmailStatus] = useState<openclaw.GmailStatusResponse | null>(null);
+
+    // Load real Gmail status on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                const status = await openclaw.getGmailStatus();
+                setGmailStatus(status);
+                setGmailConnected(status.oauth_configured);
+                if (status.label_filters.length > 0) {
+                    setGmailLabelFilter(status.label_filters.join(', '));
+                }
+            } catch {
+                // Gmail status not available — leave defaults
+            }
+        })();
+    }, []);
 
     const handleGmailConnect = async () => {
         setGmailConnecting(true);
         try {
-            const startResult = await invoke<{ auth_url: string; code_verifier: string }>(
-                'cloud_oauth_start', { provider: 'gmail' }
-            );
-            try {
-                await openUrl(startResult.auth_url);
-            } catch {
-                await navigator.clipboard.writeText(startResult.auth_url);
-                toast.info('Auth URL copied to clipboard. Please open it in your browser.');
-            }
-            const code = window.prompt('After authorizing Gmail in your browser, paste the authorization code here:');
-            if (!code?.trim()) {
-                toast.info('Gmail sign-in cancelled');
-                setGmailConnecting(false);
-                return;
-            }
-            const result = await invoke<{ connected: boolean; error?: string }>(
-                'cloud_oauth_complete', {
-                provider: 'gmail',
-                code: code.trim(),
-                codeVerifier: startResult.code_verifier,
-            }
-            );
-            if (result.connected) {
+            // Use IronClaw's PKCE flow — opens browser, binds callback, exchanges tokens automatically
+            const result = await openclaw.startGmailOAuth();
+            if (result.success) {
                 setGmailConnected(true);
+                // Refresh status after successful connection
+                try {
+                    const status = await openclaw.getGmailStatus();
+                    setGmailStatus(status);
+                } catch { /* ignore */ }
                 toast.success('Gmail connected successfully!');
             } else {
                 toast.error(result.error ?? 'Gmail connection failed');
@@ -326,7 +326,7 @@ export function OpenClawChannels() {
                 </div>
                 <button
                     onClick={() => { setIsLoading(true); fetchChannels(); }}
-                    className="p-2.5 rounded-lg bg-card border border-white/10 hover:bg-white/5 transition-colors"
+                    className="p-2.5 rounded-lg bg-card border border-border/40 hover:bg-white/5 transition-colors"
                 >
                     <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                 </button>
@@ -383,7 +383,7 @@ export function OpenClawChannels() {
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.9, opacity: 0 }}
-                            className="bg-card border border-white/10 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl shadow-black/50"
+                            className="bg-card border border-border/40 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl shadow-black/50"
                         >
                             <h2 className="text-2xl font-bold mb-2">Scan QR Code</h2>
                             <p className="text-sm text-muted-foreground mb-6">Open WhatsApp on your phone and scan this code to link your device.</p>
@@ -437,7 +437,7 @@ export function OpenClawChannels() {
                 <motion.div
                     initial={{ opacity: 0, y: 5 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="rounded-2xl border border-white/10 bg-card/30 backdrop-blur-md overflow-hidden"
+                    className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md overflow-hidden"
                 >
                     <div className="p-5">
                         <div className="flex items-start gap-4">
@@ -445,7 +445,7 @@ export function OpenClawChannels() {
                                 "p-3 rounded-xl border transition-colors",
                                 gmailConnected
                                     ? "bg-red-500/10 border-red-500/20 text-red-400"
-                                    : "bg-white/5 border-white/10 text-muted-foreground"
+                                    : "bg-white/5 border-border/40 text-muted-foreground"
                             )}>
                                 <Mail className="w-5 h-5" />
                             </div>
@@ -455,8 +455,8 @@ export function OpenClawChannels() {
                                     <span className={cn(
                                         "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
                                         gmailConnected
-                                            ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
-                                            : "text-zinc-400 bg-zinc-500/10 border-zinc-500/20"
+                                            ? "text-primary bg-emerald-500/10 border-emerald-500/20"
+                                            : "text-muted-foreground bg-zinc-500/10 border-zinc-500/20"
                                     )}>
                                         {gmailConnected ? (
                                             <><CheckCircle2 className="w-3 h-3" /> Connected</>
@@ -470,22 +470,47 @@ export function OpenClawChannels() {
                                 </p>
 
                                 {gmailConnected ? (
-                                    <div className="mt-3 space-y-2">
-                                        <div className="flex items-center gap-2">
+                                    <div className="mt-3 space-y-3">
+                                        {/* Status indicator */}
+                                        {gmailStatus && (
+                                            <div className="flex items-center gap-2">
+                                                <span className={cn(
+                                                    "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium",
+                                                    gmailStatus.status.startsWith('ready')
+                                                        ? "bg-emerald-500/10 text-primary"
+                                                        : "bg-amber-500/10 text-muted-foreground"
+                                                )}>
+                                                    {gmailStatus.status}
+                                                </span>
+                                            </div>
+                                        )}
+                                        {/* Allowed senders */}
+                                        {gmailStatus?.allowed_senders && gmailStatus.allowed_senders.length > 0 && (
+                                            <div>
+                                                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 mb-1">
+                                                    Allowed Senders
+                                                </p>
+                                                <p className="text-xs text-muted-foreground font-mono">
+                                                    {gmailStatus.allowed_senders.join(', ')}
+                                                </p>
+                                            </div>
+                                        )}
+                                        {/* Label filter */}
+                                        <div>
                                             <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
                                                 Label Filter
                                             </label>
+                                            <input
+                                                type="text"
+                                                value={gmailLabelFilter}
+                                                onChange={e => setGmailLabelFilter(e.target.value)}
+                                                placeholder="INBOX, Category:Primary"
+                                                className="mt-1 w-full h-8 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
+                                            />
+                                            <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+                                                Comma-separated Gmail labels to watch. Leave empty to watch INBOX.
+                                            </p>
                                         </div>
-                                        <input
-                                            type="text"
-                                            value={gmailLabelFilter}
-                                            onChange={e => setGmailLabelFilter(e.target.value)}
-                                            placeholder="INBOX, Category:Primary"
-                                            className="w-full h-8 rounded-lg border border-white/10 bg-white/[0.03] px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-none transition-all"
-                                        />
-                                        <p className="text-[10px] text-muted-foreground/50">
-                                            Comma-separated Gmail labels to watch. Leave empty to watch INBOX.
-                                        </p>
                                     </div>
                                 ) : (
                                     <button

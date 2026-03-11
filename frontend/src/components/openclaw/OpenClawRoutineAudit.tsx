@@ -2,16 +2,16 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
     RefreshCw, CheckCircle, XCircle, Clock,
-    FileText
+    FileText, Trash2
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
     const styles: Record<string, { icon: any; cls: string }> = {
-        success: { icon: CheckCircle, cls: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' },
+        success: { icon: CheckCircle, cls: 'text-primary bg-emerald-500/10 border-emerald-500/20' },
         failure: { icon: XCircle, cls: 'text-red-400 bg-red-500/10 border-red-500/20' },
-        timeout: { icon: Clock, cls: 'text-amber-400 bg-amber-500/10 border-amber-500/20' },
+        timeout: { icon: Clock, cls: 'text-muted-foreground bg-amber-500/10 border-amber-500/20' },
     };
     const s = styles[outcome] || styles.failure;
     const Icon = s.icon;
@@ -33,6 +33,7 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
     const [filter, setFilter] = useState<'all' | 'success' | 'failure'>('all');
     const [selectedKey, setSelectedKey] = useState(routineKey || '');
     const [cronJobs, setCronJobs] = useState<openclaw.CronJob[]>([]);
+    const [confirmClear, setConfirmClear] = useState(false);
 
     const fetchJobs = useCallback(async () => {
         try {
@@ -71,7 +72,7 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                     <div className="p-2.5 rounded-xl bg-orange-500/10 border border-orange-500/20">
-                        <FileText className="w-5 h-5 text-orange-400" />
+                        <FileText className="w-5 h-5 text-muted-foreground" />
                     </div>
                     <div>
                         <h1 className="text-xl font-bold">Routine Audit Log</h1>
@@ -80,12 +81,49 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
                         </p>
                     </div>
                 </div>
-                <button
-                    onClick={fetchAudit}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
-                >
-                    <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
-                </button>
+                <div className="flex items-center gap-2">
+                    {confirmClear ? (
+                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/20">
+                            <span className="text-[10px] text-red-400 font-medium">Clear {selectedKey ? 'this' : 'all'} history?</span>
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        await openclaw.clearRoutineRuns(selectedKey || undefined);
+                                        setEntries([]);
+                                        fetchAudit();
+                                    } catch (e) {
+                                        console.error('Failed to clear runs:', e);
+                                    }
+                                    setConfirmClear(false);
+                                }}
+                                className="px-2 py-0.5 rounded text-[10px] font-bold text-red-400 bg-red-500/20 hover:bg-red-500/30 transition-all"
+                            >
+                                Yes
+                            </button>
+                            <button
+                                onClick={() => setConfirmClear(false)}
+                                className="px-2 py-0.5 rounded text-[10px] font-bold text-muted-foreground hover:text-foreground transition-all"
+                            >
+                                No
+                            </button>
+                        </div>
+                    ) : (
+                        <button
+                            onClick={() => setConfirmClear(true)}
+                            disabled={entries.length === 0}
+                            className="p-2 rounded-lg text-muted-foreground hover:text-red-400 bg-white/[0.03] hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 transition-all disabled:opacity-30 disabled:pointer-events-none"
+                            title="Clear history"
+                        >
+                            <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                    )}
+                    <button
+                        onClick={fetchAudit}
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                    >
+                        <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
+                    </button>
+                </div>
             </div>
 
             {/* Controls */}
@@ -121,7 +159,7 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
             </div>
 
             {/* Table */}
-            <div className="rounded-2xl border border-white/10 bg-card/30 backdrop-blur-md overflow-hidden">
+            <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md overflow-hidden">
                 {isLoading ? (
                     <div className="flex items-center justify-center py-16">
                         <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />

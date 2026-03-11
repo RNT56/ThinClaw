@@ -21,12 +21,13 @@ const CHANNEL_ICONS: Record<string, any> = {
     whatsapp: Smartphone,
 };
 
-const STATE_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
-    Running: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', dot: 'bg-emerald-500' },
-    Connecting: { bg: 'bg-amber-500/10', text: 'text-amber-400', dot: 'bg-amber-500 animate-pulse' },
-    Degraded: { bg: 'bg-orange-500/10', text: 'text-orange-400', dot: 'bg-orange-500' },
-    Disconnected: { bg: 'bg-zinc-500/10', text: 'text-zinc-400', dot: 'bg-zinc-500' },
-    Error: { bg: 'bg-red-500/10', text: 'text-red-400', dot: 'bg-red-500' },
+// Semantic status colors — these are meaningful state indicators, not decorative
+const STATE_STYLES: Record<string, { bg: string; text: string; dot: string }> = {
+    Running: { bg: 'bg-green-500/10', text: 'text-green-500', dot: 'bg-green-500' },
+    Connecting: { bg: 'bg-amber-500/10', text: 'text-amber-500', dot: 'bg-amber-500 animate-pulse' },
+    Degraded: { bg: 'bg-amber-500/10', text: 'text-amber-500', dot: 'bg-amber-500' },
+    Disconnected: { bg: 'bg-muted', text: 'text-muted-foreground', dot: 'bg-muted-foreground/40' },
+    Error: { bg: 'bg-red-500/10', text: 'text-red-500', dot: 'bg-red-500' },
 };
 
 const STREAM_MODES = ['', 'full', 'typing_only', 'disabled'];
@@ -50,15 +51,15 @@ function ChannelStatusCard({
     onStreamChange: (id: string, mode: string) => void;
 }) {
     const Icon = CHANNEL_ICONS[entry.id] || Wifi;
-    const stateStyle = STATE_COLORS[entry.state] || STATE_COLORS.Disconnected;
+    const stateStyle = STATE_STYLES[entry.state] || STATE_STYLES.Disconnected;
     const hasStreamMode = ['discord', 'telegram', 'slack'].includes(entry.id);
 
     return (
         <motion.div
             layout
             className={cn(
-                "rounded-2xl border bg-card/30 backdrop-blur-md shadow-sm transition-all",
-                entry.enabled ? "border-primary/20 shadow-primary/5" : "border-white/10"
+                "rounded-2xl bg-card/30 backdrop-blur-md shadow-sm transition-all",
+                entry.enabled ? "shadow-primary/5" : ""
             )}
         >
             <div className="p-5">
@@ -66,26 +67,21 @@ function ChannelStatusCard({
                 <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-3">
                         <div className={cn(
-                            "p-2.5 rounded-xl border",
-                            entry.enabled ? "bg-primary/10 border-primary/20" : "bg-white/5 border-white/10"
+                            "p-2.5 rounded-xl",
+                            entry.enabled ? "bg-primary/10" : "bg-white/5"
                         )}>
                             <Icon className={cn("w-5 h-5", entry.enabled ? "text-primary" : "text-muted-foreground")} />
                         </div>
                         <div>
                             <h3 className="font-semibold">{entry.name}</h3>
-                            <span className={cn(
-                                "text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded",
-                                entry.type === 'native' ? "bg-purple-500/10 text-purple-400" :
-                                    entry.type === 'wasm' ? "bg-blue-500/10 text-blue-400" :
-                                        "bg-green-500/10 text-green-400"
-                            )}>
+                            <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/5 text-muted-foreground">
                                 {entry.type}
                             </span>
                         </div>
                     </div>
 
-                    {/* State badge */}
-                    <div className={cn("flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border", stateStyle.bg, stateStyle.text, "border-current/20")}>
+                    {/* State badge — semantic colors */}
+                    <div className={cn("flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider", stateStyle.bg, stateStyle.text)}>
                         <span className={cn("w-1.5 h-1.5 rounded-full", stateStyle.dot)} />
                         {entry.state}
                     </div>
@@ -93,15 +89,15 @@ function ChannelStatusCard({
 
                 {/* Metrics row */}
                 <div className="grid grid-cols-3 gap-3 mt-4">
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02] border border-white/5">
+                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
                         <p className="text-lg font-bold tabular-nums">{entry.messages_sent}</p>
                         <p className="text-[9px] text-muted-foreground uppercase tracking-widest">Sent</p>
                     </div>
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02] border border-white/5">
+                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
                         <p className="text-lg font-bold tabular-nums">{entry.messages_received}</p>
                         <p className="text-[9px] text-muted-foreground uppercase tracking-widest">Received</p>
                     </div>
-                    <div className="text-center p-2 rounded-lg bg-white/[0.02] border border-white/5">
+                    <div className="text-center p-2 rounded-lg bg-white/[0.02]">
                         <p className="text-lg font-bold tabular-nums">
                             {entry.uptime_secs != null ? formatUptime(entry.uptime_secs) : '—'}
                         </p>
@@ -109,19 +105,19 @@ function ChannelStatusCard({
                     </div>
                 </div>
 
-                {/* Error display */}
+                {/* Error display — semantic red only */}
                 {entry.last_error && (
-                    <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-red-500/5 border border-red-500/10">
-                        <AlertCircle className="w-3.5 h-3.5 text-red-400 mt-0.5 shrink-0" />
-                        <p className="text-xs text-red-300/80 leading-relaxed">{entry.last_error}</p>
+                    <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-red-500/5">
+                        <AlertCircle className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0" />
+                        <p className="text-xs text-red-500/80 leading-relaxed">{entry.last_error}</p>
                     </div>
                 )}
 
                 {/* Stream mode badge */}
                 {hasStreamMode && entry.stream_mode && (
                     <div className="mt-3 flex items-center gap-2">
-                        <Podcast className="w-3.5 h-3.5 text-amber-400" />
-                        <span className="text-xs text-amber-400/80 font-medium">
+                        <Podcast className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span className="text-xs text-muted-foreground/80 font-medium">
                             Stream: {STREAM_MODE_LABELS[entry.stream_mode] || entry.stream_mode}
                         </span>
                     </div>
@@ -131,7 +127,7 @@ function ChannelStatusCard({
                 {hasStreamMode && entry.enabled && (
                     <button
                         onClick={onToggle}
-                        className="mt-4 w-full py-2 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-white/5 transition-all flex items-center justify-center gap-1.5 border border-white/5"
+                        className="mt-4 w-full py-2 rounded-xl text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-white/5 transition-all flex items-center justify-center gap-1.5"
                     >
                         <Settings2 className="w-3.5 h-3.5" />
                         Stream Settings
@@ -149,7 +145,7 @@ function ChannelStatusCard({
                         exit={{ height: 0, opacity: 0 }}
                         className="overflow-hidden"
                     >
-                        <div className="px-5 pb-5 pt-2 border-t border-white/5 space-y-3">
+                        <div className="px-5 pb-5 pt-2 space-y-3">
                             <p className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Streaming Mode</p>
                             <div className="grid grid-cols-2 gap-2">
                                 {STREAM_MODES.map(mode => (
@@ -157,10 +153,10 @@ function ChannelStatusCard({
                                         key={mode}
                                         onClick={() => onStreamChange(entry.id, mode)}
                                         className={cn(
-                                            "px-3 py-2 rounded-lg text-xs font-medium transition-all border",
+                                            "px-3 py-2 rounded-lg text-xs font-medium transition-all",
                                             (entry.stream_mode || '') === mode
-                                                ? "bg-primary/15 text-primary border-primary/30"
-                                                : "bg-white/[0.03] text-muted-foreground hover:bg-white/5 border-white/5"
+                                                ? "bg-primary/15 text-primary"
+                                                : "bg-white/[0.03] text-muted-foreground hover:bg-white/5"
                                         )}
                                     >
                                         {STREAM_MODE_LABELS[mode]}
@@ -218,9 +214,8 @@ export function OpenClawChannelStatus() {
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 15000); // Poll every 15s
+        const interval = setInterval(fetchData, 15000);
 
-        // Also listen for real-time channel events
         const unlisten = listen('openclaw-event', (event: any) => {
             const payload = event.payload;
             if (payload.kind === 'ChannelStatus') {
@@ -272,19 +267,19 @@ export function OpenClawChannelStatus() {
 
     return (
         <motion.div
-            className="flex-1 overflow-y-auto p-8 space-y-6"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
+            className="flex-1 overflow-y-auto p-8 space-y-6 max-w-6xl mx-auto"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
         >
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                    <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
-                        <Zap className="w-5 h-5 text-indigo-400" />
+                    <div className="p-2.5 rounded-xl bg-primary/10">
+                        <Zap className="w-5 h-5 text-primary" />
                     </div>
                     <div>
-                        <h1 className="text-xl font-bold">Channel Status</h1>
-                        <p className="text-xs text-muted-foreground">
+                        <h1 className="text-2xl font-bold tracking-tight">Channel Status</h1>
+                        <p className="text-xs text-muted-foreground mt-0.5">
                             {activeCount}/{entries.length} channels active · {totalMsgs} total messages
                         </p>
                     </div>
@@ -292,19 +287,30 @@ export function OpenClawChannelStatus() {
                 <div className="flex items-center gap-2">
                     <button
                         onClick={() => setSortBy(s => s === 'name' ? 'state' : 'name')}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
                     >
                         <ArrowUpDown className="w-3.5 h-3.5" />
                         Sort: {sortBy === 'name' ? 'Name' : 'Status'}
                     </button>
                     <button
                         onClick={fetchData}
-                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 border border-white/5 transition-all"
+                        className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
                     >
                         <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
                     </button>
                 </div>
             </div>
+
+            {/* Empty state */}
+            {sorted.length === 0 && (
+                <div className="text-center py-16">
+                    <Radio className="w-8 h-8 text-muted-foreground/30 mx-auto mb-3" />
+                    <p className="text-sm text-muted-foreground">No channels configured.</p>
+                    <p className="text-xs text-muted-foreground/60 mt-1">
+                        Set up Slack, Telegram, or webhook channels in the Channels settings.
+                    </p>
+                </div>
+            )}
 
             {/* Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

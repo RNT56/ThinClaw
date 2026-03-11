@@ -92,8 +92,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 zstd = "0.13"
 
-# IronClaw agent engine (local path during development, desktop feature = libsql + html-to-markdown)
-ironclaw = { path = "../../ironclaw/ironclaw", features = ["desktop"] }
+# IronClaw agent engine (in-repo, desktop feature = libsql + html-to-markdown)
+ironclaw = { path = "../ironclaw", features = ["desktop"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]

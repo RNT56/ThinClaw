@@ -62,7 +62,7 @@ function SkillCard({ skill, onToggle }: { skill: openclaw.Skill, onToggle: (key:
             <div className="flex items-start justify-between mb-4">
                 <div className={cn(
                     "p-2.5 rounded-xl border transition-colors flex items-center justify-center text-xl",
-                    enabled ? "bg-primary/10 border-primary/20 text-primary" : "bg-white/5 border-white/10 text-muted-foreground"
+                    enabled ? "bg-primary/10 border-primary/20 text-primary" : "bg-white/5 border-border/40 text-muted-foreground"
                 )}>
                     {skill.emoji || (skill.source === 'openclaw-engine-bundled' ? <Package className="w-5 h-5" /> : <Github className="w-5 h-5" />)}
                 </div>
@@ -230,7 +230,7 @@ export function OpenClawSkills() {
                                 placeholder="Search skills..."
                                 value={search}
                                 onChange={(e) => setSearch(e.target.value)}
-                                className="pl-9 pr-4 py-2 rounded-xl bg-card border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm w-64 shadow-inner"
+                                className="pl-9 pr-4 py-2 rounded-xl bg-card border border-border/40 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm w-64 shadow-inner"
                             />
                         </div>
                         {gatewayMode === 'remote' ? (
@@ -245,7 +245,7 @@ export function OpenClawSkills() {
                                     "flex items-center gap-2 px-4 py-2 rounded-xl border transition-all text-sm font-bold shadow-sm",
                                     showMarketplace
                                         ? "bg-primary text-primary-foreground border-primary"
-                                        : "bg-card border-white/10 hover:bg-white/5"
+                                        : "bg-card border-border/40 hover:bg-white/5"
                                 )}
                             >
                                 <Plus className="w-4 h-4" />
@@ -261,7 +261,7 @@ export function OpenClawSkills() {
                                 setIsLoading(true);
                                 fetchData();
                             }}
-                            className="p-2.5 rounded-xl bg-card border border-white/10 hover:bg-white/5 transition-colors shadow-sm"
+                            className="p-2.5 rounded-xl bg-card border border-border/40 hover:bg-white/5 transition-colors shadow-sm"
                         >
                             <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
                         </button>
@@ -276,7 +276,7 @@ export function OpenClawSkills() {
                             exit={{ opacity: 0, height: 0 }}
                             className="overflow-hidden"
                         >
-                            <div className="p-6 rounded-2xl border bg-card border-white/10 space-y-4 shadow-2xl">
+                            <div className="p-6 rounded-2xl border bg-card border-border/40 space-y-4 shadow-2xl">
                                 <div className="flex items-center gap-3">
                                     <div className="p-2 bg-primary/10 rounded-lg">
                                         <Github className="w-5 h-5 text-primary" />
@@ -292,7 +292,7 @@ export function OpenClawSkills() {
                                         placeholder="https://github.com/openclaw/skills"
                                         value={repoUrl}
                                         onChange={(e) => setRepoUrl(e.target.value)}
-                                        className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm"
+                                        className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-border/40 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm"
                                     />
                                     <button
                                         onClick={handleInstallRepo}
@@ -345,7 +345,7 @@ export function OpenClawSkills() {
                         </div>
                     ) : (
                         <div className="py-20 flex flex-col items-center justify-center text-center space-y-4">
-                            <div className="p-4 rounded-full bg-white/5 border border-white/10">
+                            <div className="p-4 rounded-full bg-white/5 border border-border/40">
                                 <Package className="w-8 h-8 text-muted-foreground" />
                             </div>
                             <div>

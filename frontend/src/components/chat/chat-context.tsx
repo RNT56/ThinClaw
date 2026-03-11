@@ -17,6 +17,10 @@ interface ChatJob {
     replacedHistory?: Message[] | null;
     // Real DB ID of the saved assistant message, for in-place ID reconciliation
     savedMessageId?: string;
+    // Inference speed tracking
+    streamStartedAt?: number;  // Date.now() when first content token arrived
+    tokenCount?: number;       // Estimated token count (chars / 4)
+    tokensPerSec?: number;     // Live tokens/sec average
 }
 
 interface ChatContextType {
@@ -124,6 +128,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 let fullText = "";
                 let pendingUpdates: Partial<ChatJob> = {};
                 let rafHandle: number | null = null;
+                let streamStartedAt: number | null = null;
+                let totalCharsReceived = 0;
 
                 const flushUpdates = () => {
                     rafHandle = null;
@@ -167,11 +173,23 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                             rafHandle = null;
                         }
 
+                        // Compute final tok/s
+                        const estimatedTokens = Math.round(totalCharsReceived / 4);
+                        let finalTokPerSec: number | undefined;
+                        if (streamStartedAt && estimatedTokens > 0) {
+                            const elapsed = (Date.now() - streamStartedAt) / 1000;
+                            if (elapsed > 0.1) {
+                                finalTokPerSec = Math.round((estimatedTokens / elapsed) * 10) / 10;
+                            }
+                        }
+
                         // Flush final text immediately so nothing is lost
                         const finalUpdates: Partial<ChatJob> = {
                             ...pendingUpdates,
                             isStreaming: false,
                             fullMessage: fullText,
+                            tokenCount: estimatedTokens,
+                            tokensPerSec: finalTokPerSec,
                         };
 
                         // Finalize search status to 'done' if it's still in an active state
@@ -208,7 +226,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                     // Accumulate content into buffer — NOT calling setState here
                     if (chunk.content) {
                         fullText += chunk.content;
+                        totalCharsReceived += chunk.content.length;
                         pendingUpdates.fullMessage = fullText;
+
+                        // Start speed timer on first content token
+                        if (!streamStartedAt) {
+                            streamStartedAt = Date.now();
+                            pendingUpdates.streamStartedAt = streamStartedAt;
+                        }
+
+                        // Compute live tok/s (estimated: 1 token ≈ 4 chars)
+                        const elapsed = (Date.now() - streamStartedAt) / 1000;
+                        if (elapsed > 0.3) {
+                            const estimatedTokens = Math.round(totalCharsReceived / 4);
+                            pendingUpdates.tokenCount = estimatedTokens;
+                            pendingUpdates.tokensPerSec = Math.round((estimatedTokens / elapsed) * 10) / 10;
+                        }
                     }
                     if (chunk.usage) {
                         pendingUpdates.usage = chunk.usage;

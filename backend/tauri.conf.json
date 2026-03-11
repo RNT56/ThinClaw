@@ -71,7 +71,7 @@
       "bin/*.dylib",
       "bin/*.metal",
       "resources/chromium",
-      "openclaw-engine/**/*"
+      "../ironclaw/deploy/**/*"
     ],
     "macOS": {
       "entitlements": "Entitlements.plist"

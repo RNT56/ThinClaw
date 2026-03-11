@@ -37,22 +37,26 @@ pub fn status_to_ui_event(
             delta: strip_llm_tokens(&delta),
         }),
 
-        StatusUpdate::ToolStarted { name } => Some(UiEvent::ToolUpdate {
+        StatusUpdate::ToolStarted { name, parameters } => Some(UiEvent::ToolUpdate {
             session_key,
             run_id,
             tool_name: name,
             status: "started".into(),
-            input: Value::Null,
+            input: parameters.unwrap_or(Value::Null),
             output: Value::Null,
         }),
 
-        StatusUpdate::ToolCompleted { name, success } => Some(UiEvent::ToolUpdate {
+        StatusUpdate::ToolCompleted {
+            name,
+            success,
+            result_preview,
+        } => Some(UiEvent::ToolUpdate {
             session_key,
             run_id,
             tool_name: name,
             status: if success { "ok" } else { "error" }.into(),
             input: Value::Null,
-            output: Value::Null,
+            output: result_preview.map(Value::String).unwrap_or(Value::Null),
         }),
 
         StatusUpdate::ToolResult { name, preview } => Some(UiEvent::ToolUpdate {
@@ -129,5 +133,121 @@ pub fn status_to_ui_event(
             message,
             details: Value::Null,
         }),
+
+        StatusUpdate::CanvasAction(action) => Some(UiEvent::CanvasUpdate {
+            session_key,
+            run_id,
+            content: serde_json::to_string(&action).unwrap_or_default(),
+            content_type: "canvas_action".into(),
+            url: None,
+        }),
+
+        StatusUpdate::AgentMessage {
+            content,
+            message_type,
+        } => Some(UiEvent::AgentMessage {
+            session_key,
+            run_id,
+            message_id: message_id.to_string(),
+            content: strip_llm_tokens(&content),
+            message_type,
+        }),
+
+        // Lifecycle events — signal turn start/end to the frontend.
+        //
+        // LifecycleStart: emit AssistantInternal so the existing auto-activate path
+        //   (OpenClawChatView ~line 711) fires — it creates activeRun + sets isSending=true
+        //   from a single code path. Emitting RunStatus{status:"thinking"} here would
+        //   double-fire the active-run branch (status not in TERMINAL_STATUSES → else branch).
+        //
+        // LifecycleEnd: normalise phase → a status the frontend TERMINAL_STATUSES list knows.
+        //   ironclaw phase "response" → frontend "done"   (not in list otherwise)
+        //   "interrupted" and "error" pass through unchanged (already in the list).
+        StatusUpdate::LifecycleStart {
+            run_id: lifecycle_run_id,
+        } => Some(UiEvent::AssistantInternal {
+            session_key,
+            run_id: Some(lifecycle_run_id),
+            message_id: message_id.to_string(),
+            text: "Thinking...".into(),
+        }),
+
+        StatusUpdate::LifecycleEnd {
+            run_id: lifecycle_run_id,
+            phase,
+        } => {
+            // "response" is ironclaw's success phase name, but the frontend only
+            // clears isSending on: ok | error | aborted | done | interrupted | rejected.
+            let terminal_status = match phase.as_str() {
+                "response" => "done".to_string(),
+                other => other.to_string(),
+            };
+            Some(UiEvent::RunStatus {
+                session_key,
+                run_id: Some(lifecycle_run_id),
+                status: terminal_status,
+                error: None,
+            })
+        }
+
+        // ── Sub-agent lifecycle → SubAgentUpdate ─────────────────────────
+        StatusUpdate::SubagentSpawned {
+            agent_id,
+            name,
+            task,
+        } => Some(UiEvent::SubAgentUpdate {
+            parent_session: session_key,
+            child_session: agent_id,
+            task: format!("[{}] {}", name, task),
+            status: "running".into(),
+            progress: Some(0.0),
+            result_preview: None,
+        }),
+
+        StatusUpdate::SubagentProgress {
+            agent_id,
+            message,
+            category,
+        } => Some(UiEvent::SubAgentUpdate {
+            parent_session: session_key,
+            child_session: agent_id,
+            task: message,
+            status: format!("running:{}", category),
+            progress: None,
+            result_preview: None,
+        }),
+
+        StatusUpdate::SubagentCompleted {
+            agent_id,
+            name,
+            success,
+            response,
+            duration_ms,
+            iterations,
+        } => {
+            let preview = if response.len() > 200 {
+                format!("{}…", &response[..200])
+            } else {
+                response
+            };
+            Some(UiEvent::SubAgentUpdate {
+                parent_session: session_key,
+                child_session: agent_id,
+                task: format!(
+                    "[{}] {} ({} iters, {:.1}s)",
+                    name,
+                    if success { "completed" } else { "failed" },
+                    iterations,
+                    duration_ms as f64 / 1000.0
+                ),
+                status: if success {
+                    "completed".into()
+                } else {
+                    "failed".into()
+                },
+                progress: Some(1.0),
+                result_preview: Some(preview),
+            })
+        }
     }
 }

@@ -1,234 +1,462 @@
-import { useState, useEffect } from 'react';
+/**
+ * OpenClawPresence — Agent Runtime Inspector
+ *
+ * Displays live runtime metrics from the embedded IronClaw engine:
+ * sessions, sub-agents, tools, hooks, channels, uptime, and routine engine state.
+ * Polls every 5 seconds for live updates.
+ *
+ * Styling: Uses the app theme system (--primary, --muted-foreground, etc.)
+ * for all accent colors. Only semantic green/red for online/offline status.
+ */
+
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-    Users,
     Activity,
-    Globe,
-    RefreshCw,
+    Cpu,
     Clock,
-    Info,
-    Search,
-    Monitor,
+    Layers,
+    Wrench,
+    GitBranch,
+    Radio,
+    Zap,
+    RefreshCw,
     Circle,
     Terminal,
+    Users,
+    CheckCircle2,
+    XCircle,
+    Timer,
     ChevronRight,
-    User
+    BarChart3,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 
-interface PresenceItemProps {
-    type: 'instance' | 'node';
-    data: any;
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function formatUptime(secs: number | null): string {
+    if (secs === null) return '—';
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return `${h}h ${m}m`;
 }
 
-function PresenceItem({ type, data }: PresenceItemProps) {
-    const isInstance = type === 'instance';
+// ── Stat Card ────────────────────────────────────────────────────────
+
+interface StatCardProps {
+    icon: React.ElementType;
+    label: string;
+    value: string | number;
+    sub?: string;
+    /** Theme-derived chart color class, e.g. 'text-chart-1'. Falls back to 'text-foreground'. */
+    color?: string;
+    /** Only set for semantic status: 'success' or 'error'. Overrides color. */
+    status?: 'success' | 'error';
+    pulse?: boolean;
+}
+
+function StatCard({ icon: Icon, label, value, sub, color, status, pulse }: StatCardProps) {
+    // Semantic status overrides chart color
+    const valueColor = status === 'success' ? 'text-green-500' : status === 'error' ? 'text-red-500' : (color || 'text-foreground');
+    const iconColor = status === 'success' ? 'text-green-500' : status === 'error' ? 'text-red-500' : (color || 'text-primary');
 
     return (
-        <div className="p-4 rounded-xl bg-card border border-white/5 hover:bg-white/[0.04] transition-all group">
-            <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
-                    <div className={cn(
-                        "p-2 rounded-lg",
-                        isInstance ? "bg-primary/10 text-primary" : "bg-blue-500/10 text-blue-400"
-                    )}>
-                        {isInstance ? <Monitor className="w-4 h-4" /> : <Globe className="w-4 h-4" />}
-                    </div>
-                    <div>
-                        <h4 className="font-bold text-sm tracking-tight">{data.id || data.pubkey?.slice(0, 12)}</h4>
-                        <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-tighter">
-                            {isInstance ? 'Active Instance' : 'Remote Node'}
-                        </p>
-                    </div>
+        <motion.div
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="p-5 rounded-2xl bg-card/40 backdrop-blur-md border-none hover:bg-card/60 transition-all"
+        >
+            <div className="flex items-start justify-between mb-4">
+                <div className={cn('p-2.5 rounded-xl bg-primary/10', iconColor)}>
+                    <Icon className="w-5 h-5" />
                 </div>
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20">
-                    <Circle className="w-1.5 h-1.5 fill-green-500 text-green-500 animate-pulse" />
-                    <span className="text-[9px] font-bold text-green-500 uppercase tracking-widest">Live</span>
-                </div>
-            </div>
-
-            <div className="space-y-2">
-                {isInstance ? (
-                    <>
-                        <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground flex items-center gap-1.5 uppercase font-bold tracking-tighter">
-                                <Terminal className="w-3 h-3" /> Runtime
-                            </span>
-                            <span className="font-mono text-foreground/80">{data.runtime || 'Native'}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground flex items-center gap-1.5 uppercase font-bold tracking-tighter">
-                                <Activity className="w-3 h-3" /> Status
-                            </span>
-                            <span className="px-1.5 py-0.5 rounded bg-white/5 text-foreground/70 font-bold tracking-tighter">IDLE</span>
-                        </div>
-                    </>
-                ) : (
-                    <>
-                        <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground flex items-center gap-1.5 uppercase font-bold tracking-tighter">
-                                <ChevronRight className="w-3 h-3" /> Address
-                            </span>
-                            <span className="font-mono text-foreground/80">{data.addr || 'Unknown'}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground flex items-center gap-1.5 uppercase font-bold tracking-tighter">
-                                <Clock className="w-3 h-3" /> Connected
-                            </span>
-                            <span className="text-foreground/80 font-bold tracking-tighter">RECENT</span>
-                        </div>
-                    </>
+                {pulse && (
+                    <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                        <span className="text-[10px] font-bold text-green-500 uppercase tracking-widest">Live</span>
+                    </div>
                 )}
             </div>
-
-            <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
-                <div className="flex -space-x-1.5">
-                    {[1, 2].map(i => (
-                        <div key={i} className="w-5 h-5 rounded-full bg-muted border border-background flex items-center justify-center">
-                            <User className="w-2.5 h-2.5 text-muted-foreground" />
-                        </div>
-                    ))}
-                </div>
-                <button className="text-[9px] font-bold uppercase tracking-widest text-primary hover:underline">
-                    View Details
-                </button>
+            <div className="space-y-0.5">
+                <div className={cn('text-3xl font-bold tracking-tight', valueColor)}>{value}</div>
+                <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{label}</div>
+                {sub && <div className="text-[10px] text-muted-foreground/60 mt-1">{sub}</div>}
             </div>
+        </motion.div>
+    );
+}
+
+// ── Sub-agent row ────────────────────────────────────────────────────
+
+interface SubAgentRowProps {
+    info: openclaw.ChildSessionInfo;
+}
+
+function SubAgentRow({ info }: SubAgentRowProps) {
+    // Semantic status colors only
+    const statusColor =
+        info.status === 'completed'
+            ? 'text-green-500 bg-green-500/10'
+            : info.status === 'failed'
+                ? 'text-red-500 bg-red-500/10'
+                : 'text-muted-foreground bg-primary/5';
+
+    return (
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
+            <GitBranch className="w-3.5 h-3.5 text-muted-foreground/50 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-foreground/80 truncate">{info.task || info.session_key}</p>
+                <p className="text-[10px] font-mono text-muted-foreground/50 truncate">{info.session_key}</p>
+            </div>
+            <span className={cn('px-2 py-0.5 rounded-full text-[9px] font-bold uppercase', statusColor)}>
+                {info.status}
+            </span>
         </div>
     );
 }
 
-export function OpenClawPresence() {
-    const [presence, setPresence] = useState<any>(null);
-    const [filter, setFilter] = useState<'all' | 'instances' | 'nodes'>('all');
-    const [isLoading, setIsLoading] = useState(true);
-    const [search, setSearch] = useState('');
+// ── Main Component ────────────────────────────────────────────────────
 
-    const fetchData = async () => {
+export function OpenClawPresence() {
+    const [presence, setPresence] = useState<openclaw.AgentRuntimePresence | null>(null);
+    const [sessions, setSessions] = useState<openclaw.OpenClawSession[]>([]);
+    const [subAgents, setSubAgents] = useState<openclaw.ChildSessionInfo[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [lastFetched, setLastFetched] = useState<Date | null>(null);
+    const [expandedSection, setExpandedSection] = useState<string | null>('sessions');
+
+    const fetchAll = useCallback(async () => {
         try {
-            const data = await openclaw.getOpenClawSystemPresence();
-            setPresence(data);
+            const pres = await openclaw.getOpenClawSystemPresence();
+            setPresence(pres);
+
+            const sess = await openclaw.getOpenClawSessions();
+            // Filter out internal subagent sessions (they use ":task-" keyed sessions)
+            const allSessions = sess.sessions || [];
+            const userSessions = allSessions.filter((s: any) => !String(s.session_key || '').includes(':task-'));
+            setSessions(userSessions);
+
+            try {
+                const children = await openclaw.listChildSessions('agent:main');
+                setSubAgents(children || []);
+            } catch {
+                setSubAgents([]);
+            }
+
+            setLastFetched(new Date());
         } catch (e) {
-            console.error('Failed to fetch presence:', e);
+            console.error('[Presence] Failed to fetch:', e);
         } finally {
             setIsLoading(false);
         }
-    };
-
-    useEffect(() => {
-        fetchData();
-        const interval = setInterval(fetchData, 10000);
-        return () => clearInterval(interval);
     }, []);
 
-    const instances = presence?.instances || [];
-    const nodes = presence?.nodes || [];
+    useEffect(() => {
+        fetchAll();
+        const interval = setInterval(fetchAll, 5000);
+        return () => clearInterval(interval);
+    }, [fetchAll]);
 
-    const filteredItems = [
-        ...instances.map((i: any) => ({ ...i, p_type: 'instance' })),
-        ...nodes.map((n: any) => ({ ...n, p_type: 'node' }))
-    ].filter(item => {
-        const matchesFilter = filter === 'all' || (filter === 'instances' ? item.p_type === 'instance' : item.p_type === 'node');
-        const matchesSearch = !search || (item.id || item.pubkey || '').toLowerCase().includes(search.toLowerCase());
-        return matchesFilter && matchesSearch;
-    });
+    const isOnline = presence?.online ?? false;
 
     return (
         <motion.div
-            initial={{ opacity: 0, scale: 0.98 }}
-            animate={{ opacity: 1, scale: 1 }}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
             className="flex-1 p-8 space-y-8 max-w-6xl mx-auto"
         >
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            {/* Header */}
+            <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-3xl font-bold tracking-tight">Active Presence</h1>
-                    <p className="text-muted-foreground mt-1 text-sm">Real-time mesh network visibility and node discovery.</p>
-                </div>
-
-                <div className="flex items-center gap-3">
-                    <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                        <input
-                            type="text"
-                            placeholder="Filter by ID/Pubkey..."
-                            value={search}
-                            onChange={(e) => setSearch(e.target.value)}
-                            className="pl-9 pr-4 py-2 rounded-xl bg-card border border-white/10 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm w-64 shadow-inner px-2"
-                        />
-                    </div>
-                    <button
-                        onClick={() => {
-                            setIsLoading(true);
-                            fetchData();
-                        }}
-                        className="p-2.5 rounded-xl bg-card border border-white/10 hover:bg-white/5 transition-colors shadow-sm"
-                    >
-                        <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
-                    </button>
-                </div>
-            </div>
-
-            <div className="flex items-center gap-2 p-1 bg-white/5 border border-white/5 rounded-xl w-fit mb-4">
-                {(['all', 'instances', 'nodes'] as const).map((f) => (
-                    <button
-                        key={f}
-                        onClick={() => setFilter(f)}
-                        className={cn(
-                            "px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
-                            filter === f ? "bg-primary text-primary-foreground shadow-md" : "text-muted-foreground hover:text-foreground"
+                    <h1 className="text-3xl font-bold tracking-tight">Agent Runtime</h1>
+                    <p className="text-muted-foreground mt-1 text-sm">
+                        Live introspection of the embedded IronClaw engine.
+                        {lastFetched && (
+                            <span className="ml-2 text-muted-foreground/50 font-mono text-[10px]">
+                                Updated {lastFetched.toLocaleTimeString()}
+                            </span>
                         )}
+                    </p>
+                </div>
+                <div className="flex items-center gap-3">
+                    {/* Engine status pill — semantic color only */}
+                    <div className={cn(
+                        'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider',
+                        isOnline
+                            ? 'text-green-500 bg-green-500/10'
+                            : 'text-red-500 bg-red-500/10'
+                    )}>
+                        <Circle className={cn('w-2 h-2 fill-current', isOnline && 'animate-pulse')} />
+                        {isOnline ? 'Engine Online' : 'Engine Offline'}
+                    </div>
+                    <button
+                        onClick={() => { setIsLoading(true); fetchAll(); }}
+                        className="p-2.5 rounded-lg bg-card hover:bg-white/5 transition-colors"
                     >
-                        {f}
+                        <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin')} />
                     </button>
-                ))}
+                </div>
             </div>
 
-            {isLoading && !presence ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {[1, 2, 3].map(i => (
-                        <div key={i} className="h-44 rounded-2xl border border-white/5 bg-white/[0.02] animate-pulse" />
-                    ))}
-                </div>
-            ) : filteredItems.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    <AnimatePresence mode="popLayout">
-                        {filteredItems.map((item, idx) => (
-                            <motion.div
-                                key={item.id || item.pubkey || idx}
-                                layout
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, scale: 0.95 }}
-                            >
-                                <PresenceItem type={item.p_type as any} data={item} />
-                            </motion.div>
-                        ))}
-                    </AnimatePresence>
-                </div>
-            ) : (
-                <div className="py-20 flex flex-col items-center justify-center text-center space-y-4">
-                    <div className="p-4 rounded-full bg-white/5 border border-white/10">
-                        <Users className="w-8 h-8 text-muted-foreground" />
-                    </div>
-                    <div>
-                        <h3 className="text-lg font-semibold">No active presence found</h3>
-                        <p className="text-sm text-muted-foreground">The mesh network is currently silent or your filter is too strict.</p>
-                    </div>
+            {/* Engine info bar */}
+            {presence && (
+                <div className="flex items-center gap-4 px-5 py-3 rounded-xl bg-white/[0.02] text-xs font-mono text-muted-foreground/70">
+                    <span className="flex items-center gap-1.5">
+                        <Cpu className="w-3 h-3" />
+                        Engine: <span className="text-foreground/70">{presence.engine}</span>
+                    </span>
+                    <span className="w-px h-4 bg-muted-foreground/10" />
+                    <span className="flex items-center gap-1.5">
+                        <Terminal className="w-3 h-3" />
+                        Mode: <span className="text-foreground/70">{presence.mode}</span>
+                    </span>
+                    <span className="w-px h-4 bg-muted-foreground/10" />
+                    <span className="flex items-center gap-1.5">
+                        <Clock className="w-3 h-3" />
+                        Uptime: <span className="text-foreground/70">{formatUptime(presence.uptime_secs)}</span>
+                    </span>
+                    <span className="w-px h-4 bg-muted-foreground/10" />
+                    <span className="flex items-center gap-1.5">
+                        <Timer className="w-3 h-3" />
+                        Scheduler:{' '}
+                        <span className={presence.routine_engine_running ? 'text-green-500' : 'text-red-500'}>
+                            {presence.routine_engine_running ? 'Running' : 'Stopped'}
+                        </span>
+                    </span>
                 </div>
             )}
 
-            <div className="p-6 rounded-2xl border bg-blue-500/5 border-blue-500/10 flex gap-4">
-                <div className="p-2 bg-blue-500/10 rounded-xl h-fit">
-                    <Info className="w-5 h-5 text-blue-400" />
+            {/* Stats grid */}
+            {isLoading && !presence ? (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    {[...Array(6)].map((_, i) => (
+                        <div key={i} className="h-36 rounded-2xl bg-white/[0.02] animate-pulse" />
+                    ))}
                 </div>
-                <div className="space-y-1">
-                    <h4 className="text-xs font-bold text-blue-400 uppercase tracking-widest">Mesh Network Dynamics</h4>
-                    <p className="text-sm text-muted-foreground leading-relaxed">
-                        Instances are local execution environments running within the gateway process.
-                        Nodes represent external OpenClaw instances connected via the P2P mesh, allowing for task delegation and skill sharing.
-                    </p>
+            ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    <StatCard
+                        icon={Activity}
+                        label="Sessions"
+                        value={presence?.session_count ?? 0}
+                        sub="Active agent sessions"
+                        color="text-chart-1"
+                        pulse={isOnline}
+                    />
+                    <StatCard
+                        icon={GitBranch}
+                        label="Sub-Agents"
+                        value={presence?.sub_agent_count ?? 0}
+                        sub="Spawned child sessions"
+                        color="text-chart-2"
+                    />
+                    <StatCard
+                        icon={Wrench}
+                        label="Tools"
+                        value={presence?.tool_count ?? 0}
+                        sub="Registered tool definitions"
+                        color="text-chart-3"
+                    />
+                    <StatCard
+                        icon={Zap}
+                        label="Hooks"
+                        value={presence?.hook_count ?? 0}
+                        sub="Lifecycle hook handlers"
+                        color="text-chart-4"
+                    />
+                    <StatCard
+                        icon={Radio}
+                        label="Channels"
+                        value={presence?.channel_count ?? 0}
+                        sub="Active message channels"
+                        color="text-chart-5"
+                    />
+                    <StatCard
+                        icon={Timer}
+                        label="Scheduler"
+                        value={presence?.routine_engine_running ? 'Running' : 'Stopped'}
+                        sub="Background routine engine"
+                        status={presence?.routine_engine_running ? 'success' : 'error'}
+                    />
+                    <StatCard
+                        icon={Clock}
+                        label="Uptime"
+                        value={formatUptime(presence?.uptime_secs ?? null)}
+                        sub="Since engine start"
+                        color="text-chart-1"
+                    />
+                    <StatCard
+                        icon={BarChart3}
+                        label="Engine"
+                        value={isOnline ? 'Online' : 'Offline'}
+                        sub={presence?.mode ?? 'embedded'}
+                        status={isOnline ? 'success' : 'error'}
+                        pulse={isOnline}
+                    />
                 </div>
+            )}
+
+            {/* Live Sessions */}
+            <div className="rounded-2xl bg-card/20 overflow-hidden">
+                <button
+                    className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/[0.02] transition-colors"
+                    onClick={() => setExpandedSection(prev => prev === 'sessions' ? null : 'sessions')}
+                >
+                    <div className="flex items-center gap-3">
+                        <Users className="w-4 h-4 text-primary" />
+                        <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">
+                            Live Sessions
+                        </h2>
+                        <span className="text-[10px] text-muted-foreground/60 bg-white/5 px-1.5 py-0.5 rounded">
+                            {sessions.length}
+                        </span>
+                    </div>
+                    <ChevronRight className={cn('w-4 h-4 text-muted-foreground transition-transform',
+                        expandedSection === 'sessions' && 'rotate-90')} />
+                </button>
+
+                <AnimatePresence>
+                    {expandedSection === 'sessions' && (
+                        <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden"
+                        >
+                            <div className="px-6 pb-5 space-y-2">
+                                {sessions.length === 0 ? (
+                                    <div className="py-8 text-center text-muted-foreground text-sm">
+                                        No active sessions — start a chat to create one.
+                                    </div>
+                                ) : (
+                                    sessions.map(sess => (
+                                        <div
+                                            key={sess.session_key}
+                                            className="flex items-center gap-3 px-4 py-3 mt-3 rounded-xl bg-white/[0.02] hover:bg-white/[0.04] transition-colors"
+                                        >
+                                            <div className="flex items-center gap-2 flex-shrink-0">
+                                                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-xs font-medium text-foreground/80 truncate">
+                                                    {sess.title || sess.session_key}
+                                                </p>
+                                                <p className="text-[10px] font-mono text-muted-foreground/50">
+                                                    {sess.session_key}
+                                                    {sess.source && (
+                                                        <span className="ml-2 text-muted-foreground/40">via {sess.source}</span>
+                                                    )}
+                                                </p>
+                                            </div>
+                                            {sess.updated_at_ms && (
+                                                <span className="text-[10px] text-muted-foreground/50 font-mono flex-shrink-0">
+                                                    {new Date(sess.updated_at_ms).toLocaleTimeString()}
+                                                </span>
+                                            )}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
+
+            {/* Sub-agents */}
+            {subAgents.length > 0 && (
+                <div className="rounded-2xl bg-card/20 overflow-hidden">
+                    <button
+                        className="w-full flex items-center justify-between px-6 py-4 hover:bg-white/[0.02] transition-colors"
+                        onClick={() => setExpandedSection(prev => prev === 'subagents' ? null : 'subagents')}
+                    >
+                        <div className="flex items-center gap-3">
+                            <GitBranch className="w-4 h-4 text-primary" />
+                            <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">
+                                Sub-Agent Tasks
+                            </h2>
+                            <span className="text-[10px] text-muted-foreground/60 bg-white/5 px-1.5 py-0.5 rounded">
+                                {subAgents.length}
+                            </span>
+                        </div>
+                        <ChevronRight className={cn('w-4 h-4 text-muted-foreground transition-transform',
+                            expandedSection === 'subagents' && 'rotate-90')} />
+                    </button>
+
+                    <AnimatePresence>
+                        {expandedSection === 'subagents' && (
+                            <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="overflow-hidden"
+                            >
+                                <div className="px-6 pb-5 space-y-2 pt-3">
+                                    {subAgents.map(agent => (
+                                        <SubAgentRow key={agent.session_key} info={agent} />
+                                    ))}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
+            )}
+
+            {/* Capability summary */}
+            {presence && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="p-5 rounded-2xl bg-white/[0.02] space-y-3">
+                        <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                            <Layers className="w-3.5 h-3.5" />
+                            Capabilities
+                        </div>
+                        {[
+                            { label: 'Tools & Actions', ok: presence.tool_count > 0, detail: `${presence.tool_count} tools` },
+                            { label: 'Lifecycle Hooks', ok: presence.hook_count > 0, detail: `${presence.hook_count} hooks` },
+                            { label: 'Message Channels', ok: presence.channel_count > 0, detail: `${presence.channel_count} channels` },
+                            { label: 'Background Scheduler', ok: presence.routine_engine_running, detail: presence.routine_engine_running ? 'Active' : 'Not running' },
+                        ].map(({ label, ok, detail }) => (
+                            <div key={label} className="flex items-center justify-between py-1.5">
+                                <div className="flex items-center gap-2">
+                                    {ok
+                                        ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+                                        : <XCircle className="w-3.5 h-3.5 text-muted-foreground/30" />
+                                    }
+                                    <span className="text-xs text-muted-foreground">{label}</span>
+                                </div>
+                                <span className="text-[10px] font-mono text-muted-foreground/60">{detail}</span>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="p-5 rounded-2xl bg-white/[0.02] space-y-3 md:col-span-2">
+                        <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                            <Terminal className="w-3.5 h-3.5" />
+                            Runtime Details
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-8 gap-y-3 mt-2">
+                            {[
+                                { label: 'Engine', value: presence.engine },
+                                { label: 'Mode', value: presence.mode },
+                                { label: 'Status', value: presence.online ? 'Online' : 'Offline' },
+                                { label: 'Uptime', value: formatUptime(presence.uptime_secs) },
+                                { label: 'Sessions', value: String(presence.session_count) },
+                                { label: 'Sub-Agents', value: String(presence.sub_agent_count) },
+                            ].map(({ label, value }) => (
+                                <div key={label} className="flex items-baseline gap-2">
+                                    <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 shrink-0">
+                                        {label}
+                                    </span>
+                                    <span className="flex-1 border-b border-dotted border-muted-foreground/10" />
+                                    <span className="text-xs font-mono text-foreground/70">{value}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
         </motion.div>
     );
 }

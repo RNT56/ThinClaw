@@ -11,7 +11,9 @@ import {
     Zap,
     Filter,
     Sparkles,
-    FileText
+    FileText,
+    HardDrive,
+    Brain,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
@@ -30,10 +32,10 @@ export function OpenClawMemory() {
     const fetchLogs = async () => {
         try {
             const list = await openclaw.listWorkspaceFiles();
-            const memoryLogs = list.filter(f => f.startsWith('memory/')).sort().reverse();
-            setLogs(memoryLogs);
-            if (memoryLogs.length > 0 && !activeLog) {
-                handleSelectLog(memoryLogs[0]);
+            const dailyLogs = list.filter(f => f.startsWith('daily/')).sort().reverse();
+            setLogs(dailyLogs);
+            if (dailyLogs.length > 0 && !activeLog) {
+                handleSelectLog(dailyLogs[0]);
             }
         } catch (e) {
             console.error('Failed to fetch memory logs:', e);
@@ -109,7 +111,7 @@ export function OpenClawMemory() {
                     </div>
 
                     {/* Search Mode Toggle */}
-                    <div className="flex p-0.5 bg-white/5 rounded-lg border border-white/10">
+                    <div className="flex p-0.5 bg-white/5 rounded-lg border border-border/40">
                         <button
                             onClick={() => setSearchMode('files')}
                             className={cn(
@@ -127,7 +129,7 @@ export function OpenClawMemory() {
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                                 searchMode === 'semantic'
-                                    ? "bg-violet-500/15 text-violet-400 shadow-sm"
+                                    ? "bg-violet-500/15 text-primary shadow-sm"
                                     : "text-muted-foreground hover:text-foreground"
                             )}
                         >
@@ -148,11 +150,11 @@ export function OpenClawMemory() {
                                 "w-full pl-9 pr-3 py-2 bg-white/5 border rounded-xl text-xs focus:ring-1 outline-none transition-all",
                                 searchMode === 'semantic'
                                     ? "border-violet-500/20 focus:ring-violet-500/40"
-                                    : "border-white/10 focus:ring-primary/40"
+                                    : "border-border/40 focus:ring-primary/40"
                             )}
                         />
                         {isSearching && (
-                            <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-violet-400 animate-spin" />
+                            <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-primary animate-spin" />
                         )}
                     </div>
                 </div>
@@ -167,7 +169,7 @@ export function OpenClawMemory() {
                                 exit={{ opacity: 0 }}
                                 className="space-y-1.5"
                             >
-                                <div className="px-2 py-1.5 text-[10px] font-bold text-violet-400 uppercase tracking-widest">
+                                <div className="px-2 py-1.5 text-[10px] font-bold text-primary uppercase tracking-widest">
                                     {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
                                 </div>
                                 {searchResults.map((result, i) => (
@@ -178,12 +180,12 @@ export function OpenClawMemory() {
                                             "w-full flex flex-col gap-1.5 px-3 py-3 rounded-xl text-xs transition-all border",
                                             activeLog === result.path
                                                 ? "bg-violet-500/10 border-violet-500/30 shadow-sm"
-                                                : "border-transparent hover:bg-white/5 hover:border-white/10"
+                                                : "border-transparent hover:bg-white/5 hover:border-border/40"
                                         )}
                                     >
                                         <div className="flex items-center justify-between w-full">
-                                            <span className="font-mono text-[10px] text-violet-400 truncate flex-1">
-                                                {result.path.replace('memory/', '').replace('.md', '')}
+                                            <span className="font-mono text-[10px] text-primary truncate flex-1">
+                                                {result.path.replace('daily/', '').replace('.md', '')}
                                             </span>
                                             <span className="text-[9px] font-mono text-muted-foreground ml-2 shrink-0">
                                                 {(result.score * 100).toFixed(0)}%
@@ -203,7 +205,7 @@ export function OpenClawMemory() {
                                 exit={{ opacity: 0 }}
                             >
                                 {filteredLogs.map(log => {
-                                    const dateStr = log.replace('memory/', '').replace('.md', '');
+                                    const dateStr = log.replace('daily/', '').replace('.md', '');
                                     return (
                                         <button
                                             key={log}
@@ -253,7 +255,7 @@ export function OpenClawMemory() {
                                     <BookOpen className="w-5 h-5 text-primary" />
                                 </div>
                                 <div>
-                                    <h1 className="text-lg font-bold tracking-tight">{activeLog.replace('memory/', '')}</h1>
+                                    <h1 className="text-lg font-bold tracking-tight">{activeLog.replace('daily/', '')}</h1>
                                     <div className="flex items-center gap-3 mt-0.5">
                                         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground uppercase font-bold tracking-tighter">
                                             <Clock className="w-3 h-3" />
@@ -276,7 +278,7 @@ export function OpenClawMemory() {
                             ) : (
                                 <div className="max-w-4xl mx-auto p-12">
                                     <div className="prose prose-invert prose-zinc max-w-none">
-                                        <div className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300 selection:bg-primary/30">
+                                        <div className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-foreground/70 selection:bg-primary/30">
                                             {content || "This memory log is intentionally left blank."}
                                         </div>
                                     </div>
@@ -285,29 +287,49 @@ export function OpenClawMemory() {
                         </div>
                     </>
                 ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center p-12 text-center space-y-8">
+                    <div className="flex-1 flex flex-col items-center justify-center p-10 text-center space-y-6 max-w-xl mx-auto">
                         <div className="relative">
-                            <div className="absolute inset-0 animate-ping bg-primary/20 rounded-full blur-xl" />
-                            <div className="relative p-8 rounded-full bg-primary/5 border border-primary/10 shadow-2xl">
-                                <History className="w-16 h-16 text-primary/40" />
+                            <div className="absolute inset-0 animate-ping bg-primary/10 rounded-full blur-xl" />
+                            <div className="relative p-7 rounded-full bg-primary/5 border border-primary/10 shadow-2xl">
+                                <History className="w-14 h-14 text-primary/40" />
                             </div>
                         </div>
-                        <div className="space-y-3 max-w-md">
+                        <div className="space-y-2">
                             <h2 className="text-2xl font-bold tracking-tight">Temporal Reflective Ledger</h2>
                             <p className="text-muted-foreground text-sm leading-relaxed">
-                                Experience the agent's growth through daily append-only logs.
-                                These files capture every interaction, tool result, and long-term reflection.
+                                Daily memory logs will appear here as the agent accumulates experience over time.
                             </p>
                         </div>
-                        <div className="p-6 rounded-2xl border border-white/5 bg-white/[0.02] flex items-start gap-4 text-left max-w-lg">
-                            <div className="p-2 bg-blue-500/10 rounded-lg shrink-0">
-                                <Search className="w-5 h-5 text-blue-400" />
+                        {/* Explain the two storage systems */}
+                        <div className="grid gap-3 w-full text-left">
+                            <div className="p-4 rounded-xl border border-white/5 bg-white/[0.02] flex items-start gap-3">
+                                <div className="p-2 bg-primary/10 rounded-lg shrink-0"><Brain className="w-4 h-4 text-primary" /></div>
+                                <div>
+                                    <h4 className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">Temporal Memory (this panel)</h4>
+                                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                        Shows <code className="bg-white/10 px-1 rounded text-[10px]">daily/YYYY-MM-DD.md</code> daily session logs created automatically during conversations.
+                                        These are searchable by both text and semantic (vector) similarity.
+                                        They'll appear once the agent has had its first conversation.
+                                    </p>
+                                </div>
                             </div>
-                            <div>
-                                <h4 className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-1">Semantic Search Note</h4>
-                                <p className="text-xs text-muted-foreground leading-relaxed">
-                                    While you browse these as raw text, the agent uses vector embeddings to semantically search these files during chat turn reasoning.
-                                </p>
+                            <div className="p-4 rounded-xl border border-white/5 bg-white/[0.02] flex items-start gap-3">
+                                <div className="p-2 bg-emerald-500/10 rounded-lg shrink-0"><HardDrive className="w-4 h-4 text-primary" /></div>
+                                <div>
+                                    <h4 className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">File-Created Content → The Brain</h4>
+                                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                        When you ask the agent to <em>create a file</em>, it uses <code className="bg-white/10 px-1 rounded text-[10px]">write_file</code> and it lands in the <strong>Local Files</strong> tab inside The Brain. You can reveal these directly in Finder.
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="p-4 rounded-xl border border-white/5 bg-white/[0.02] flex items-start gap-3">
+                                <div className="p-2 bg-blue-500/10 rounded-lg shrink-0"><Search className="w-4 h-4 text-blue-400" /></div>
+                                <div>
+                                    <h4 className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Semantic Search</h4>
+                                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                        Once memory logs exist, the agent uses vector embeddings to retrieve the most relevant context from past sessions, enriching every conversation.
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>

@@ -474,7 +474,7 @@ function ServerSettings() {
             // Attempt dynamic config update for OpenClaw
             try {
                 const gatewayStatus = await commands.openclawGetStatus();
-                if (gatewayStatus.status === "ok" && gatewayStatus.data.gateway_running) {
+                if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
                     toast.loading("Syncing Agent Configuration...", { id: toastId });
 
                     // Fetch the actual running config of the chat server
@@ -516,8 +516,8 @@ function ServerSettings() {
                 // Fallback: Restart OpenClaw Gateway if running
                 try {
                     const gatewayStatus = await commands.openclawGetStatus();
-                    if (gatewayStatus.status === "ok" && gatewayStatus.data.gateway_running) {
-                        toast.loading("Restarting Agent Gateway...", { id: toastId });
+                    if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
+                        toast.loading("Restarting Agent Engine...", { id: toastId });
                         await commands.openclawStopGateway();
                         await new Promise(r => setTimeout(r, 1000));
                         await commands.openclawStartGateway();
