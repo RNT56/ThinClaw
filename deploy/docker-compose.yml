@@ -1,0 +1,77 @@
+version: '3.9'
+
+# IronClaw Remote Agent — Docker Compose deployment
+#
+# Quick start:
+#   cp .env.template .env
+#   # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
+#   docker compose up -d --build
+#
+# Scrappy connects via: http://<server-ip>:18789
+# Auth token: value of GATEWAY_AUTH_TOKEN in .env
+
+services:
+  ironclaw:
+    build:
+      context: ..  # ironclaw/ directory (one level up from deploy/)
+      dockerfile: Dockerfile
+    container_name: ironclaw-remote
+    restart: unless-stopped
+    ports:
+      - "18789:18789"   # Gateway HTTP API (Scrappy connects here)
+    env_file:
+      - .env
+    environment:
+      # Gateway — always bind to all interfaces inside container
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=18789
+      - CLI_ENABLED=false
+      - HEARTBEAT_ENABLED=true
+      - HEARTBEAT_NOTIFY_CHANNEL=gateway
+      # Database
+      - DATABASE_BACKEND=${DATABASE_BACKEND:-libsql}
+      - LIBSQL_PATH=/data/ironclaw.db
+    volumes:
+      - ironclaw-data:/data
+      - ironclaw-workspace:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - ironclaw-net
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: ironclaw-postgres
+    restart: unless-stopped
+    profiles:
+      - postgres   # Only started when: docker compose --profile postgres up
+    environment:
+      POSTGRES_DB: ironclaw
+      POSTGRES_USER: ${POSTGRES_USER:-ironclaw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ironclaw}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ironclaw}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ironclaw-net
+
+volumes:
+  ironclaw-data:
+  ironclaw-workspace:
+  pgdata:
+
+networks:
+  ironclaw-net:
+    driver: bridge
