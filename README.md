@@ -4,7 +4,7 @@
 
 # Scrappy: The Open-Source AI Command Center
 
-Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** Node.js engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
+Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** engine (powered by IronClaw, an in-process Rust library) for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
 
 ![Scrappy App Preview](assets/app-preview.png)
 
@@ -12,11 +12,11 @@ Scrappy is a professional, open-source AI cockpit designed for executive-level w
 
 ## Installation & Setup
 
-For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](setup.md)**.
+For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](documentation/setup.md)**.
 
 ### 1. Requirements
 - **macOS / Linux / Windows** (Tauri v2 compatible).
-- **Node.js 22.x+** and **npm**.
+- **Node.js 22.x+** and **npm** (for frontend tooling only).
 - **Rust (Stable)**.
 
 ### 2. Quick Start
@@ -24,7 +24,7 @@ For a deep dive into environment configuration, prerequisites, and production bu
 # 1. Install project dependencies
 npm install
 
-# 2. Automated sidecar initialization (Node, Chromium, AI binaries, OpenClaw)
+# 2. Automated sidecar initialization (Chromium, AI binaries)
 npm run setup:all
 
 # 3. Launch in Developer Mode (default engine: llama.cpp)
@@ -100,7 +100,7 @@ graph TD
     subgraph Sidecars [Sidecar Processes]
         EngineManager[/EngineManager\]
         Llama[llama.cpp / MLX / vLLM / Ollama]
-        OpenClaw[OpenClaw Node.js Agent]
+        OpenClaw[OpenClaw / IronClaw Agent \n In-Process Rust Library]
         Chromium[Chromium Web Scraper]
         Whisper[Whisper STT]
         TTS[Piper TTS]
@@ -123,11 +123,11 @@ graph TD
     McpSandbox -->|HTTP/JWT| MCP[(External MCP Server)]
 ```
 
-### 1. The OpenClaw Engine
-The heart of Scrappy's autonomous agency. Based on the **Pi agent runtime**, it executes an iterative **Think-Act-Observe** loop:
--   **Session Management**: Each conversation has a dedicated "lane" and JSONL transcript.
--   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools** via the Rhai script sandbox.
--   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking".
+### 1. The OpenClaw Engine (Powered by IronClaw)
+The heart of Scrappy's autonomous agency. Built on the **IronClaw** Rust agent runtime, running **in-process** as a library crate — no Node.js sidecar, no WebSocket bridge:
+-   **Session Management**: Each conversation has a dedicated thread with persistent history.
+-   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools**.
+-   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking" via `TauriChannel`.
 
 ### 2. The Native Rust Agent (`backend/src/rig_lib`)
 A specialized agent engine built using **Rig**. It focuses on performance and reliability for core features:
@@ -145,7 +145,6 @@ OpenClaw is highly configurable through a combination of system files and worksp
 These files handle the mechanical aspects of the agent:
 - **`identity.json`**: (`$APP_DATA/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
 - **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
-- **`auth-profiles.json`**: Filtered output containing only the API keys the user has explicitly **granted** to the agent. Written at engine startup from Keychain data; never edited directly.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
 The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
@@ -181,21 +180,28 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 ## Project Structure
 
 ### Backend (`backend/`)
--   `src/openclaw/`: OpenClaw gateway logic and session orchestration.
+-   `src/openclaw/`: OpenClaw / IronClaw integration layer.
     -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
-    -   `ipc.rs`: Core IPC event layer between Tauri and the OpenClaw WebSocket gateway.
+    -   `ironclaw_bridge.rs`: IronClaw agent lifecycle — init, config, Agent construction, shutdown.
+    -   `ironclaw_channel.rs`: `TauriChannel` bridging IronClaw events to Tauri `emit()`.
+    -   `ironclaw_secrets.rs`: Keychain ↔ IronClaw secrets adapter.
+    -   `tool_bridge.rs`: MCP tool bridge for IronClaw agent tool calls.
+    -   `sanitizer.rs`: LLM token stripping (ChatML, Llama, Jinja markers).
+    -   `ui_types.rs`: `UiEvent` enum — stable UI contract (16+ variants).
 -   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
-    -   `tools/`: `DDGSearchTool`, `ScrapePageTool`, `ImageGenTool`, `RagTool`.
+    -   `tools/`: `web_search.rs` (29KB), `calculator_tool.rs` (37KB), `scrape_page.rs`, `image_gen_tool.rs`, `rag_tool.rs`.
     -   `orchestrator.rs`: Multi-turn web search and synthesis pipeline.
     -   `unified_provider.rs`: Unified inference provider abstraction.
--   `src/engine/`: Multi-engine inference system (`InferenceEngine` trait, `EngineManager`, engine implementations for llama.cpp, MLX, vLLM, Ollama).
--   `src/sidecar.rs`: The manager for all background binaries (Node, Llama, Chromium, Whisper, TTS, SD).
+-   `src/engine/`: Multi-engine inference system (`InferenceEngine` trait, engine implementations for llama.cpp, MLX, vLLM, Ollama).
+-   `src/inference/`: InferenceRouter — 5-modality routing (Chat, Embedding, TTS, STT, Diffusion) with local and cloud backends.
+-   `src/cloud/`: Cloud storage system — 7 providers (S3, GDrive, iCloud, OneDrive, Dropbox, WebDAV, SFTP) + encryption + sync.
+-   `src/sidecar.rs`: The manager for all background binaries (Llama, Chromium, Whisper, TTS, SD).
 -   `src/hf_hub.rs`: HuggingFace Hub model discovery, file parsing, and download.
 -   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral, **Gemma**, **Qwen**) used for model formatting.
 -   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
 -   `scrappy-mcp-tools/`: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
--   `documentation/openclaw/`: Architectural deep-dives into the agent memory and tool systems.
+-   `documentation/openclaw/`: Historical architectural deep-dives (pre-IronClaw era).
 
 ### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
@@ -214,11 +220,11 @@ Templates are defined in `backend/src/templates.rs`. To add one:
 1.  Define a new `pub const` with your Jinja-like template (ChatML, Llama3, Mistral, Gemma, and Qwen formats already exist).
 2.  Add it to the renderer logic in the model manager (`src/model_manager.rs`).
 
-### Adding a New OpenClaw Tool
-Tools are implemented in the **OpenClaw** engine:
-1.  Create a tool definition with a JSON schema in the OpenClaw skill directory.
-2.  Implement the `execute` logic (Node.js).
-3.  The UI will automatically handle rendering based on the ACP metadata.
+### Adding a New OpenClaw Skill
+Skills extend the **OpenClaw** agent (powered by IronClaw):
+1.  Create a skill definition with a JSON schema in the OpenClaw skill directory.
+2.  Implement the `execute` logic.
+3.  The UI will automatically handle rendering based on the tool metadata.
 
 ### Adding a Native Rust Tool (Rig)
 1.  Implement the `Tool` trait in `backend/src/rig_lib/tools/`.
@@ -236,7 +242,7 @@ Tools are implemented in the **OpenClaw** engine:
 
 1.  **Strict Local-First**: Your data and AI transcripts stay on your machine.
 2.  **Keychain-Secured Secrets**: API keys are stored in the **macOS Keychain** (AES-256 encrypted at rest), never in plaintext config files. `identity.json` stores only non-sensitive metadata (grant flags, enabled providers).
-3.  **Explicit Grant Enforcement**: Saving an API key does **not** automatically expose it to the agent. You must toggle "Grant Access" per key in Settings › Secrets. Only granted keys are written to `auth-profiles.json` or injected as environment variables.
+3.  **Explicit Grant Enforcement**: Saving an API key does **not** automatically expose it to the agent. You must toggle "Grant Access" per key in Settings › Secrets. Only granted keys are injected into the IronClaw engine as environment variables.
 4.  **Environment Variable Gating**: Sensitive credentials (Custom LLM keys, AWS Bedrock) are only injected into the engine process when their corresponding feature is explicitly enabled.
 5.  **Human Governance**: Every dangerous command triggers a UI approval request (HITL).
 6.  **Sandbox Ready**: Tool execution can be configured to run in Docker containers.
