@@ -5,10 +5,10 @@ This document outlines the full specification and implementation strategy for in
 ## 1. Prerequisites & Installation
 
 ### Backend (Rust)
-Ensure the plugin is registered in `src-tauri/src/lib.rs`:
+Ensure the plugin is registered in `backend/src/lib.rs`:
 
 ```rust
-// src-tauri/src/lib.rs
+// backend/src/lib.rs
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init()) // Ensure this is present
@@ -18,7 +18,7 @@ pub fn run() {
 }
 ```
 
-Add the dependency to `src-tauri/Cargo.toml`:
+Add the dependency to `backend/Cargo.toml`:
 ```toml
 [dependencies]
 tauri-plugin-fs = "2"
@@ -34,7 +34,7 @@ npm install @tauri-apps/plugin-fs
 
 ## 2. Security & Capability Configuration
 
-Tauri v2 uses a strict **Access Control List (ACL)**. To allow writing to the Downloads folder, you must explicitly define the scopes in your capability files (e.g., `src-tauri/capabilities/default.json`).
+Tauri v2 uses a strict **Access Control List (ACL)**. To allow writing to the Downloads folder, you must explicitly define the scopes in your capability files (e.g., `backend/capabilities/default.json`).
 
 ### Recommended `default.json` Entry
 Tauri v2 requires command-level permissions AND path-level scopes. You can define scopes globally for all FS operations or per-command for tighter security.

@@ -3,7 +3,7 @@
 > Comprehensive reference of every way IronClaw can be deployed today,
 > what each path offers, and how it works under the hood.
 >
-> **Last updated:** 2026-03-10 (post remote-deploy implementation)
+> **Last updated:** See git log for latest revision date
 
 ---
 
@@ -301,22 +301,7 @@ AGENT_NAME=my-remote-agent
 
 ---
 
-## ~~Deployment Path 6: Ansible Automated Setup~~ (DEPRECATED)
 
-### Status: ❌ Deprecated & Removed
-
-The legacy `deploy-remote.sh` script (previously at `backend/openclaw-engine/deploy-remote.sh`) referenced an external `openclaw-ansible` playbook repository. This has been **deprecated and removed** because:
-
-1. The `openclaw-ansible` repo was never published/maintained.
-2. The script installed Ansible, Node.js, Tailscale, and other system-level dependencies that are no longer needed.
-3. The new Docker-based deployment (Path 2 / Path 4) is simpler, self-contained, and more portable.
-4. The Scrappy UI "Deploy New Agent" wizard provides the same one-click experience without requiring Ansible.
-
-**Migration:** If you were using the Ansible path, switch to:
-- **Deployment Path 2** (Scrappy UI deploy) for automated setup, or
-- **Deployment Path 4** (Manual Docker) for full control.
-
----
 
 ## Channels Available in Standalone Mode
 

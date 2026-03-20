@@ -2,7 +2,7 @@
 
 ## 1 Overview
 
-This specification describes how to integrate the **Brave Search API** into the AI‑Hub desktop application (built with **Tauri** on the backend and **React** on the frontend) and provides a detailed design for a reusable **Web Search tool** built around the API.  Brave Search exposes a number of endpoints for web, news, image and video search, suggestions, spell‑checking, summarization and AI‑grounded answers, all powered by Brave’s independent search index.  The Web Search tool described here will provide the core functionality for retrieving search results and, optionally, extra snippets, local results, rich results and summaries.
+This specification describes how to integrate the **Brave Search API** into the Scrappy desktop application (built with **Tauri** on the backend and **React** on the frontend) and provides a detailed design for a reusable **Web Search tool** built around the API.  Brave Search exposes a number of endpoints for web, news, image and video search, suggestions, spell‑checking, summarization and AI‑grounded answers, all powered by Brave’s independent search index.  The Web Search tool described here will provide the core functionality for retrieving search results and, optionally, extra snippets, local results, rich results and summaries.
 
 ### 1.1 Why Brave Search
 
@@ -147,7 +147,7 @@ Brave sets rate limits per subscription plan.  The `X‑Subscription‑Token` un
 
 ### 6.1 Purpose
 
-The Web Search tool wraps the Brave Search API to provide structured search results to the AI‑Hub.  It hides authentication details, handles pagination, and optionally triggers summarization or rich queries.  The tool returns a uniform JSON schema that can be consumed by other agents within AI‑Hub.
+The Web Search tool wraps the Brave Search API to provide structured search results to the Scrappy.  It hides authentication details, handles pagination, and optionally triggers summarization or rich queries.  The tool returns a uniform JSON schema that can be consumed by other agents within Scrappy.
 
 ### 6.2 Function Signatures
 
@@ -251,4 +251,4 @@ The Web Search tool can be extended to incorporate:
 
 ---
 
-By following this specification, developers can build a robust integration with the Brave Search API that powers intelligent search functionality within the AI‑Hub application.  The Web Search tool abstracts away authentication and parameter management, supports pagination and advanced features like summarization and rich results, and provides a clean interface for the React frontend.
+By following this specification, developers can build a robust integration with the Brave Search API that powers intelligent search functionality within the Scrappy application.  The Web Search tool abstracts away authentication and parameter management, supports pagination and advanced features like summarization and rich results, and provides a clean interface for the React frontend.
