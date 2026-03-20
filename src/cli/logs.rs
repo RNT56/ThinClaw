@@ -31,7 +31,7 @@ pub enum LogCommand {
         #[arg(short, long)]
         level: Option<String>,
 
-        /// Filter by component/target (e.g. "ironclaw::agent", "ironclaw::hooks")
+        /// Filter by component/target (e.g. "thinclaw::agent", "thinclaw::hooks")
         #[arg(short, long)]
         target: Option<String>,
 
@@ -104,7 +104,7 @@ pub struct LogEntry {
     pub timestamp: Option<DateTime<Utc>>,
     /// Log level (INFO, WARN, ERROR, etc.).
     pub level: String,
-    /// Component/target (e.g. "ironclaw::agent").
+    /// Component/target (e.g. "thinclaw::agent").
     pub target: String,
     /// The log message.
     pub message: String,
@@ -115,7 +115,7 @@ pub struct LogEntry {
 impl LogEntry {
     /// Parse a structured log line.
     ///
-    /// Expected format: `2026-03-03T12:00:00Z  INFO ironclaw::agent: message here`
+    /// Expected format: `2026-03-03T12:00:00Z  INFO thinclaw::agent: message here`
     pub fn parse(line: &str) -> Self {
         let parts: Vec<&str> = line.splitn(4, ' ').collect();
 
@@ -346,19 +346,19 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             println!("  ERROR — Error conditions");
             println!();
             println!("Known targets:");
-            println!("  ironclaw::agent      — Agent loop and dispatch");
-            println!("  ironclaw::channels   — Channel I/O");
-            println!("  ironclaw::hooks      — Hook execution");
-            println!("  ironclaw::llm        — LLM provider calls");
-            println!("  ironclaw::tools      — Tool execution");
-            println!("  ironclaw::workspace  — Workspace and indexing");
-            println!("  ironclaw::safety     — Safety layer");
-            println!("  ironclaw::config     — Configuration loading");
+            println!("  thinclaw::agent      — Agent loop and dispatch");
+            println!("  thinclaw::channels   — Channel I/O");
+            println!("  thinclaw::hooks      — Hook execution");
+            println!("  thinclaw::llm        — LLM provider calls");
+            println!("  thinclaw::tools      — Tool execution");
+            println!("  thinclaw::workspace  — Workspace and indexing");
+            println!("  thinclaw::safety     — Safety layer");
+            println!("  thinclaw::config     — Configuration loading");
             println!();
             println!("Usage:");
             println!("  ironclaw logs tail -l error");
             println!("  ironclaw logs search \"timeout\" --since 1h");
-            println!("  ironclaw logs show --since 30m -t ironclaw::llm");
+            println!("  ironclaw logs show --since 30m -t thinclaw::llm");
         }
     }
 
@@ -411,11 +411,11 @@ mod tests {
 
     #[test]
     fn test_parse_log_entry_structured() {
-        let line = "2026-03-03T12:00:00Z INFO ironclaw::agent: Processing message from user-1";
+        let line = "2026-03-03T12:00:00Z INFO thinclaw::agent: Processing message from user-1";
         let entry = LogEntry::parse(line);
         assert!(entry.timestamp.is_some());
         assert_eq!(entry.level, "INFO");
-        assert_eq!(entry.target, "ironclaw::agent");
+        assert_eq!(entry.target, "thinclaw::agent");
         assert!(entry.message.contains("Processing message"));
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let entry = LogEntry {
             timestamp: None,
             level: String::new(),
-            target: "ironclaw::agent::heartbeat".to_string(),
+            target: "thinclaw::agent::heartbeat".to_string(),
             message: String::new(),
             raw: String::new(),
         };

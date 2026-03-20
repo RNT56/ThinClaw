@@ -63,7 +63,7 @@
 //! # Example Usage
 //!
 //! ```ignore
-//! use ironclaw::channels::wasm::{WasmChannelLoader, WasmChannelRuntime};
+//! use thinclaw::channels::wasm::{WasmChannelLoader, WasmChannelRuntime};
 //!
 //! // Create runtime (can share engine with tool runtime)
 //! let runtime = WasmChannelRuntime::new(config)?;

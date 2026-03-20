@@ -383,7 +383,7 @@ impl TuiApp {
     async fn handle_submit(&mut self, text: &str) {
         // Slash commands
         if text.starts_with('/') {
-            self.handle_slash_command(text);
+            self.handle_slash_command(text).await;
             return;
         }
 
@@ -503,7 +503,7 @@ impl TuiApp {
         }
     }
 
-    fn handle_slash_command(&mut self, cmd: &str) {
+    async fn handle_slash_command(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
         let command = parts[0];
         let _arg = parts.get(1).copied().unwrap_or("");
@@ -536,6 +536,26 @@ impl TuiApp {
                         if self.show_thinking { "on" } else { "off" }
                     ),
                 });
+            }
+            "/status" => {
+                self.messages.push(ChatMessage::System {
+                    text: format!("Model: {} | Agent: {} | {}", self.model, self.agent_id, self.status_text),
+                });
+            }
+            "/interrupt" => {
+                let _ = self.outgoing_tx.send(TuiEvent::Abort).await;
+                self.active_stream = None;
+                self.status_text = "Interrupted".to_string();
+                self.messages.push(ChatMessage::System {
+                    text: "Operation interrupted.".to_string(),
+                });
+            }
+            // Commands forwarded to the agent loop (they need agent-side handling)
+            "/undo" | "/redo" | "/compact" | "/model" | "/models" | "/agent" | "/agents" => {
+                let _ = self
+                    .outgoing_tx
+                    .send(TuiEvent::UserMessage(cmd.to_string()))
+                    .await;
             }
             _ => {
                 self.messages.push(ChatMessage::System {
@@ -585,8 +605,9 @@ impl TuiApp {
 
     fn autocomplete_command(&mut self) {
         const COMMANDS: &[&str] = &[
-            "/help", "/clear", "/new", "/reset", "/exit", "/quit", "/think", "/status", "/model",
-            "/models", "/agent", "/agents",
+            "/help", "/clear", "/new", "/reset", "/exit", "/quit", "/think",
+            "/status", "/interrupt", "/undo", "/redo", "/compact",
+            "/model", "/models", "/agent", "/agents",
         ];
 
         let matches: Vec<&&str> = COMMANDS
@@ -647,7 +668,17 @@ const HELP_TEXT: &str = "\
   /clear         Clear chat history
   /new, /reset   Start a new session
   /think         Toggle thinking display
+  /status        Show current model and status
+  /interrupt     Abort current operation
   /exit, /quit   Exit the TUI
+
+  /undo          Undo the last turn
+  /redo          Redo an undone turn
+  /compact       Compact context window
+  /model <name>  Switch model
+  /models        List available models
+  /agent <name>  Switch agent
+  /agents        List available agents
 
   !<command>     Run a local shell command
 

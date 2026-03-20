@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use ironclaw::setup::SetupWizard;
+//! use thinclaw::setup::SetupWizard;
 //!
 //! let mut wizard = SetupWizard::new();
 //! wizard.run().await?;

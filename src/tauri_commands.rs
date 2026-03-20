@@ -7,7 +7,7 @@
 //! # Usage from Scrappy `rpc.rs`
 //!
 //! ```rust,ignore
-//! use ironclaw::tauri_commands;
+//! use thinclaw::tauri_commands;
 //!
 //! #[tauri::command]
 //! fn openclaw_cost_summary(state: State<IronClawState>) -> Result<CostSummary, String> {

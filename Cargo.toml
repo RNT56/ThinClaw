@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [package]
-name = "ironclaw"
+name = "thinclaw"
 version = "0.12.0"
 edition = "2024"
 rust-version = "1.92"
