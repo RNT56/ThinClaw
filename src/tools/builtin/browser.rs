@@ -70,9 +70,10 @@ fn is_url_allowed(raw_url: &str) -> Result<(), String> {
     }
 
     if let Some(port) = parsed.port()
-        && BLOCKED_PORTS.contains(&port) {
-            return Err(format!("Blocked port: {port}"));
-        }
+        && BLOCKED_PORTS.contains(&port)
+    {
+        return Err(format!("Blocked port: {port}"));
+    }
 
     Ok(())
 }
@@ -258,7 +259,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let mut guard = self.instance.write().await;
-        let instance = guard.as_mut().unwrap();
+        let instance = guard.as_mut().expect("browser instance ensured");
 
         let page = instance
             .browser
@@ -273,7 +274,10 @@ impl BrowserTool {
                 tracing::debug!("Navigation wait error (non-fatal): {e}");
             }
             Err(_) => {
-                tracing::debug!("Page load timed out after {:?}, proceeding anyway", PAGE_LOAD_TIMEOUT);
+                tracing::debug!(
+                    "Page load timed out after {:?}, proceeding anyway",
+                    PAGE_LOAD_TIMEOUT
+                );
             }
         }
 
@@ -339,7 +343,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let mut guard = self.instance.write().await;
-        let instance = guard.as_mut().unwrap();
+        let instance = guard.as_mut().expect("browser instance ensured");
         let state = Self::current_page_mut(instance)?;
 
         let page_url = state.page.url().await.ok().flatten().unwrap_or_default();
@@ -426,7 +430,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let mut guard = self.instance.write().await;
-        let instance = guard.as_mut().unwrap();
+        let instance = guard.as_mut().expect("browser instance ensured");
         let state = Self::current_page_mut(instance)?;
 
         let node_ref = state
@@ -492,7 +496,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let mut guard = self.instance.write().await;
-        let instance = guard.as_mut().unwrap();
+        let instance = guard.as_mut().expect("browser instance ensured");
         let state = Self::current_page_mut(instance)?;
 
         let node_ref = state
@@ -569,7 +573,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let guard = self.instance.read().await;
-        let instance = guard.as_ref().unwrap();
+        let instance = guard.as_ref().expect("browser instance ensured");
         let state = Self::current_page(instance)?;
 
         let screenshot_bytes = state
@@ -603,7 +607,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let guard = self.instance.read().await;
-        let instance = guard.as_ref().unwrap();
+        let instance = guard.as_ref().expect("browser instance ensured");
         let state = Self::current_page(instance)?;
 
         let eval_result = state
@@ -627,7 +631,7 @@ impl BrowserTool {
         self.ensure_browser().await?;
 
         let guard = self.instance.read().await;
-        let instance = guard.as_ref().unwrap();
+        let instance = guard.as_ref().expect("browser instance ensured");
         let state = Self::current_page(instance)?;
 
         let page_url = state.page.url().await.ok().flatten().unwrap_or_default();
@@ -664,7 +668,9 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             .page
             .evaluate_expression(extractor_js)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to extract page content: {e}")))?;
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to extract page content: {e}"))
+            })?;
 
         let text = eval_result.into_value::<String>().unwrap_or_default();
 
@@ -717,7 +723,7 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         self.ensure_browser().await?;
 
         let guard = self.instance.read().await;
-        let instance = guard.as_ref().unwrap();
+        let instance = guard.as_ref().expect("browser instance ensured");
 
         let mut tabs = Vec::new();
         for (i, state) in instance.pages.iter().enumerate() {
@@ -742,7 +748,7 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         self.ensure_browser().await?;
 
         let mut guard = self.instance.write().await;
-        let instance = guard.as_mut().unwrap();
+        let instance = guard.as_mut().expect("browser instance ensured");
 
         if tab_index >= instance.pages.len() {
             return Err(ToolError::InvalidParameters(format!(

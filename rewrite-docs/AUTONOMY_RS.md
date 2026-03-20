@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Autonomy vs. Security (The Orchestrator's Tools)
 
 A common concern when reading about "Least Privilege" and "Airgapped LLMs" is that it sounds like you are crippling the agent.

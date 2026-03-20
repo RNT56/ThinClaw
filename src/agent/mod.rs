@@ -8,6 +8,8 @@
 //! - Proactive heartbeat execution
 //! - Routine-based scheduled and reactive jobs
 //! - Turn-based session management with undo
+//!   (Note: undo is not available in remote-proxy mode where sessions
+//!    are forwarded to a remote IronClaw instance)
 //! - Context compaction for long conversations
 
 mod agent_loop;
@@ -18,6 +20,7 @@ pub mod context_monitor;
 pub mod cost_guard;
 pub mod cron_stagger;
 mod dispatcher;
+mod dispatcher_helpers;
 pub mod global_session;
 mod heartbeat;
 pub mod job_monitor;

@@ -89,9 +89,7 @@ pub fn describe_intent(tool_name: &str, args: &serde_json::Value) -> ToolIntent 
             let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("...");
             format!("Searching memory for '{}'", query)
         }
-        "memory_store" | "store_memory" => {
-            format!("Storing information in memory")
-        }
+        "memory_store" | "store_memory" => "Storing information in memory".to_string(),
         "calculator" | "calc" => {
             let expr = args
                 .get("expression")

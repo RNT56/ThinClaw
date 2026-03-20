@@ -100,64 +100,92 @@ pub async fn send_message_full(
 
     // Spawn the turn as a background task so we return immediately.
     tokio::spawn(async move {
-        match agent_ref.handle_message_external(&msg_clone).await {
-            Ok(Some(response)) if !response.is_empty() => {
-                // BeforeOutbound hook — allow hooks to modify or suppress outbound
-                let event = crate::hooks::HookEvent::Outbound {
-                    user_id: msg_clone.user_id.clone(),
-                    channel: msg_clone.channel.clone(),
-                    content: response.clone(),
-                    thread_id: msg_clone.thread_id.clone(),
-                };
-                match agent_ref.hooks().run(&event).await {
-                    Err(err) => {
-                        tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                        // Hook blocked the response — don't deliver
-                    }
-                    Ok(crate::hooks::HookOutcome::Continue {
-                        modified: Some(new_content),
-                    }) => {
-                        // Hook modified the response content
-                        if let Err(e) = agent_ref
-                            .channels()
-                            .respond(
-                                &msg_clone,
-                                crate::channels::OutgoingResponse::text(new_content),
-                            )
-                            .await
-                        {
-                            tracing::error!(error = %e, "Failed to deliver hook-modified response");
+        // Wrap in catch_unwind so panics don't silently kill the task (Bug 24).
+        let agent_ref_for_panic = Arc::clone(&agent_ref);
+        let result = std::panic::AssertUnwindSafe(async {
+            match agent_ref.handle_message_external(&msg_clone).await {
+                Ok(Some(response)) if !response.is_empty() => {
+                    // BeforeOutbound hook — allow hooks to modify or suppress outbound
+                    let event = crate::hooks::HookEvent::Outbound {
+                        user_id: msg_clone.user_id.clone(),
+                        channel: msg_clone.channel.clone(),
+                        content: response.clone(),
+                        thread_id: msg_clone.thread_id.clone(),
+                    };
+                    match agent_ref_for_panic.hooks().run(&event).await {
+                        Err(err) => {
+                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            // Hook blocked the response — don't deliver
                         }
-                    }
-                    _ => {
-                        // No modification — deliver original response
-                        if let Err(e) = agent_ref
-                            .channels()
-                            .respond(
-                                &msg_clone,
-                                crate::channels::OutgoingResponse::text(response),
-                            )
-                            .await
-                        {
-                            tracing::error!(error = %e, "Failed to deliver turn response to channel");
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => {
+                            // Hook modified the response content
+                            if let Err(e) = agent_ref_for_panic
+                                .channels()
+                                .respond(
+                                    &msg_clone,
+                                    crate::channels::OutgoingResponse::text(new_content),
+                                )
+                                .await
+                            {
+                                tracing::error!(error = %e, "Failed to deliver hook-modified response");
+                            }
+                        }
+                        _ => {
+                            // No modification — deliver original response
+                            if let Err(e) = agent_ref_for_panic
+                                .channels()
+                                .respond(
+                                    &msg_clone,
+                                    crate::channels::OutgoingResponse::text(response),
+                                )
+                                .await
+                            {
+                                tracing::error!(error = %e, "Failed to deliver turn response to channel");
+                            }
                         }
                     }
                 }
+                Ok(_) => {
+                    // Empty or None (shutdown) — nothing to send.
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Agent turn failed");
+                    // Surface the error through the channel's status mechanism so
+                    // the UI can display it.
+                    let _ = agent_ref_for_panic
+                        .channels()
+                        .send_status(
+                            "tauri",
+                            StatusUpdate::Error {
+                                message: e.to_string(),
+                                code: Some("turn_failed".into()),
+                            },
+                            &serde_json::Value::Null,
+                        )
+                        .await;
+                }
             }
-            Ok(_) => {
-                // Empty or None (shutdown) — nothing to send.
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Agent turn failed");
-                // Surface the error through the channel's status mechanism so
-                // the UI can display it.
-                let _ = agent_ref
+        });
+
+        // Execute and catch panics
+        match tokio::task::unconstrained(futures::FutureExt::catch_unwind(result)).await {
+            Ok(()) => {}
+            Err(panic_err) => {
+                let msg = panic_err
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_err.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                tracing::error!("Agent turn panicked: {}", msg);
+                let _ = agent_ref_for_panic
                     .channels()
                     .send_status(
                         "tauri",
                         StatusUpdate::Error {
-                            message: e.to_string(),
-                            code: Some("turn_failed".into()),
+                            message: format!("Agent turn panicked: {}", msg),
+                            code: Some("turn_panicked".into()),
                         },
                         &serde_json::Value::Null,
                     )

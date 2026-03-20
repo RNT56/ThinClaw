@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Building a Secure Knowledge Base (RAG) in ThinClaw
 
 In a local-first AI application like ThinClaw, the **Knowledge Base** (often called the Agent Memory or RAG - Retrieval-Augmented Generation system) must be highly secure, performant, and completely contained on the user's hard drive.

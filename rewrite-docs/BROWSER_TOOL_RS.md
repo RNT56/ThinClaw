@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Browser Automation Tool: Playwright/CDP → Rust
 
 The browser tool is one of OpenClaw's most complex subsystems (101 files). It provides the AI agent with full web browsing capabilities — navigating pages, filling forms, clicking elements, taking screenshots, and reading page content via accessibility tree snapshots.

@@ -46,10 +46,10 @@ impl BrowserArgsConfig {
         if let Ok(args) = std::env::var("BROWSER_EXTRA_ARGS") {
             config.extra_args = args.split_whitespace().map(|s| s.to_string()).collect();
         }
-        if let Ok(size) = std::env::var("BROWSER_WINDOW_SIZE") {
-            if let Some((w, h)) = parse_size(&size) {
-                config.window_size = Some((w, h));
-            }
+        if let Ok(size) = std::env::var("BROWSER_WINDOW_SIZE")
+            && let Some((w, h)) = parse_size(&size)
+        {
+            config.window_size = Some((w, h));
         }
         if let Ok(proxy) = std::env::var("BROWSER_PROXY") {
             config.proxy_server = Some(proxy);

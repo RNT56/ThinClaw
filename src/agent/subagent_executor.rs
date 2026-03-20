@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock, watch};
+use tokio::sync::{RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -219,9 +219,15 @@ impl SubagentExecutor {
         channel_name: &str,
         channel_metadata: &serde_json::Value,
     ) -> Result<SubagentResult, Error> {
-        // Check concurrency limit
+        let id = Uuid::new_v4();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        // Bidirectional: parent → sub-agent message channel
+        let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
+
+        // Check concurrency limit AND insert tracking entry under a single
+        // write lock to prevent TOCTOU races (Bug 37 fix).
         {
-            let active = self.active.read().await;
+            let mut active = self.active.write().await;
             let running = active
                 .values()
                 .filter(|h| h.status == SubagentStatus::Running)
@@ -235,12 +241,23 @@ impl SubagentExecutor {
                     ),
                 }));
             }
-        }
 
-        let id = Uuid::new_v4();
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        // Bidirectional: parent → sub-agent message channel
-        let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
+            // Insert tracking entry BEFORE spawning so fast-completing agents
+            // don't become zombies (Bug 38 fix). JoinHandle added after spawn.
+            active.insert(
+                id,
+                SubagentHandle {
+                    id,
+                    name: request.name.clone(),
+                    task: request.task.clone(),
+                    status: SubagentStatus::Running,
+                    spawned_at: chrono::Utc::now(),
+                    cancel_tx,
+                    join_handle: None, // filled in after tokio::spawn
+                    parent_to_sub_tx: parent_to_sub_tx.clone(),
+                },
+            );
+        }
 
         let timeout = Duration::from_secs(
             request
@@ -301,6 +318,7 @@ impl SubagentExecutor {
             )
             .await;
 
+        let active_ref = self.active.clone();
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
 
@@ -423,33 +441,43 @@ impl SubagentExecutor {
                 let summary = if subagent_result.success {
                     Some(subagent_result.response.clone())
                 } else {
-                    Some(subagent_result.error.clone().unwrap_or_else(|| "Unknown error".to_string()))
+                    Some(
+                        subagent_result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Unknown error".to_string()),
+                    )
                 };
 
-                if let Some(ref store) = store_for_task {
-                    if let Ok(run_id) = run_id_str.parse::<Uuid>() {
-                        if let Err(e) = store.complete_routine_run(
-                            run_id, run_status, summary.as_deref(), None,
-                        ).await {
-                            tracing::error!(
-                                routine = %routine_name,
-                                run_id = %run_id_str,
-                                "Failed to finalize routine run from subagent: {}", e
-                            );
-                        } else {
-                            tracing::info!(
-                                routine = %routine_name,
-                                run_id = %run_id_str,
-                                success = %subagent_result.success,
-                                "Finalized routine run from subagent"
-                            );
-                        }
+                if let Some(ref store) = store_for_task
+                    && let Ok(run_id) = run_id_str.parse::<Uuid>()
+                {
+                    if let Err(e) = store
+                        .complete_routine_run(run_id, run_status, summary.as_deref(), None)
+                        .await
+                    {
+                        tracing::error!(
+                            routine = %routine_name,
+                            run_id = %run_id_str,
+                            "Failed to finalize routine run from subagent: {}", e
+                        );
+                    } else {
+                        tracing::info!(
+                            routine = %routine_name,
+                            run_id = %run_id_str,
+                            success = %subagent_result.success,
+                            "Finalized routine run from subagent"
+                        );
                     }
                 }
 
                 // Emit SSE lifecycle event
                 if let Some(ref sse_tx) = sse_tx_for_task {
-                    let event_type = if subagent_result.success { "completed" } else { "failed" };
+                    let event_type = if subagent_result.success {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
                     let _ = sse_tx.send(SseEvent::RoutineLifecycle {
                         routine_name: routine_name.to_string(),
                         event: event_type.to_string(),
@@ -472,29 +500,22 @@ impl SubagentExecutor {
             subagent_result
         });
 
-        // Track the handle
+        // Store the JoinHandle now that we have it (Bug 38 — entry was pre-inserted above).
         {
-            let mut active = self.active.write().await;
-            active.insert(
-                id,
-                SubagentHandle {
-                    id,
-                    name: name.clone(),
-                    task: task.clone(),
-                    status: SubagentStatus::Running,
-                    spawned_at: chrono::Utc::now(),
-                    cancel_tx,
-                    join_handle: Some(join_handle),
-                    parent_to_sub_tx,
-                },
-            );
+            let mut active = active_ref.write().await;
+            if let Some(handle) = active.get_mut(&id) {
+                handle.join_handle = Some(join_handle);
+            }
         }
 
         // Always return immediately (fire-and-forget)
         Ok(SubagentResult {
             agent_id: id,
             name,
-            response: format!("Sub-agent spawned (id: {}). Results will arrive when complete.", id),
+            response: format!(
+                "Sub-agent spawned (id: {}). Results will arrive when complete.",
+                id
+            ),
             iterations: 0,
             duration_ms: 0,
             success: true,
@@ -505,10 +526,10 @@ impl SubagentExecutor {
     /// Send a message from the parent agent to a running sub-agent.
     pub async fn send_to_subagent(&self, agent_id: Uuid, message: String) -> bool {
         let active = self.active.read().await;
-        if let Some(handle) = active.get(&agent_id) {
-            if handle.status == SubagentStatus::Running {
-                return handle.parent_to_sub_tx.send(message).await.is_ok();
-            }
+        if let Some(handle) = active.get(&agent_id)
+            && handle.status == SubagentStatus::Running
+        {
+            return handle.parent_to_sub_tx.send(message).await.is_ok();
         }
         false
     }
@@ -516,17 +537,17 @@ impl SubagentExecutor {
     /// Cancel a running sub-agent.
     pub async fn cancel(&self, agent_id: Uuid) -> bool {
         let mut active = self.active.write().await;
-        if let Some(handle) = active.get_mut(&agent_id) {
-            if handle.status == SubagentStatus::Running {
-                let _ = handle.cancel_tx.send(true);
-                handle.status = SubagentStatus::Cancelled;
-                // Abort the task if we have a handle
-                if let Some(jh) = handle.join_handle.take() {
-                    jh.abort();
-                }
-                tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
-                return true;
+        if let Some(handle) = active.get_mut(&agent_id)
+            && handle.status == SubagentStatus::Running
+        {
+            let _ = handle.cancel_tx.send(true);
+            handle.status = SubagentStatus::Cancelled;
+            // Abort the task if we have a handle
+            if let Some(jh) = handle.join_handle.take() {
+                jh.abort();
             }
+            tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
+            return true;
         }
         false
     }
@@ -646,8 +667,11 @@ async fn run_subagent_loop(
             )));
         }
 
-        // Force text on last iteration
-        let force_text = iteration >= max_iterations.saturating_sub(1);
+        // Force text on last usable iteration so the model produces a text
+        // response before the fallback error at the end of the loop (Bug 39 fix).
+        // Use max_iterations - 2 because the loop is 0-indexed and the fallback
+        // fires AFTER the loop completes.
+        let force_text = iteration >= max_iterations.saturating_sub(2);
 
         let ctx = ReasoningContext {
             messages: context_messages.clone(),
@@ -764,15 +788,15 @@ async fn run_subagent_loop(
                     };
 
                     // Check tool is in allowed list
-                    if let Some(names) = allowed_tools {
-                        if !names.iter().any(|n| n == &tc.name) {
-                            context_messages.push(ChatMessage::tool_result(
-                                &tc.id,
-                                &tc.name,
-                                format!("Error: tool '{}' not allowed for this sub-agent", tc.name),
-                            ));
-                            continue;
-                        }
+                    if let Some(names) = allowed_tools
+                        && !names.iter().any(|n| n == &tc.name)
+                    {
+                        context_messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            format!("Error: tool '{}' not allowed for this sub-agent", tc.name),
+                        ));
+                        continue;
                     }
 
                     let tool_timeout = tool.execution_timeout();

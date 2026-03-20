@@ -396,7 +396,8 @@ impl ContainerRunner {
                     if stdout.len() + text.len() > half_max {
                         truncated = true;
                         let remaining = half_max.saturating_sub(stdout.len());
-                        stdout.push_str(&text[..remaining.min(text.len())]);
+                        let safe = crate::util::floor_char_boundary(&text, remaining.min(text.len()));
+                        stdout.push_str(&text[..safe]);
                     } else {
                         stdout.push_str(&text);
                     }
@@ -406,7 +407,8 @@ impl ContainerRunner {
                     if stderr.len() + text.len() > half_max {
                         truncated = true;
                         let remaining = half_max.saturating_sub(stderr.len());
-                        stderr.push_str(&text[..remaining.min(text.len())]);
+                        let safe = crate::util::floor_char_boundary(&text, remaining.min(text.len()));
+                        stderr.push_str(&text[..safe]);
                     } else {
                         stderr.push_str(&text);
                     }
@@ -441,7 +443,8 @@ impl ContainerRunner {
                         let text = String::from_utf8_lossy(&message);
                         if stdout.len() < half_max {
                             let remaining = half_max.saturating_sub(stdout.len());
-                            stdout.push_str(&text[..remaining.min(text.len())]);
+                            let safe = crate::util::floor_char_boundary(&text, remaining.min(text.len()));
+                            stdout.push_str(&text[..safe]);
                             if text.len() > remaining {
                                 truncated = true;
                             }
@@ -451,7 +454,8 @@ impl ContainerRunner {
                         let text = String::from_utf8_lossy(&message);
                         if stderr.len() < half_max {
                             let remaining = half_max.saturating_sub(stderr.len());
-                            stderr.push_str(&text[..remaining.min(text.len())]);
+                            let safe = crate::util::floor_char_boundary(&text, remaining.min(text.len()));
+                            stderr.push_str(&text[..safe]);
                             if text.len() > remaining {
                                 truncated = true;
                             }

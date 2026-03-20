@@ -1,6 +1,15 @@
 //! Message routing to appropriate handlers.
 //!
-//! The router handles explicit commands (starting with `/`).
+//! **Not to be confused with [`super::agent_router`]** (workspace-level routing).
+//!
+//! This module handles **message-level routing**: parsing explicit commands
+//! (starting with `/`) into structured `MessageIntent` variants that the
+//! agent loop can act on.
+//!
+//! In contrast, `agent_router.rs` handles **workspace-level routing**: deciding
+//! which *agent* should handle a message based on thread ownership, channel
+//! bindings, mentions, and keyword triggers.
+//!
 //! Natural language intent classification is handled by `IntentClassifier`
 //! which uses LLM + tools instead of brittle pattern matching.
 
@@ -79,7 +88,7 @@ impl Router {
         let parts: Vec<&str> = without_prefix.split_whitespace().collect();
 
         match parts.first().map(|s| s.to_lowercase()).as_deref() {
-            Some("job") | Some("create") => {
+            Some("job") | Some("create") if parts.len() > 1 => {
                 let rest = parts[1..].join(" ");
                 MessageIntent::CreateJob {
                     title: rest.clone(),
@@ -87,6 +96,7 @@ impl Router {
                     category: None,
                 }
             }
+            Some("job") | Some("create") => MessageIntent::Unknown,
             Some("status") => {
                 let job_id = parts.get(1).map(|s| s.to_string());
                 MessageIntent::CheckJobStatus { job_id }

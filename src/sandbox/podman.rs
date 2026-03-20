@@ -50,22 +50,17 @@ impl Default for PodmanLimits {
 }
 
 /// Podman network modes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum PodmanNetwork {
     /// No network access.
     None,
     /// Host network (not recommended).
     Host,
     /// Bridge (default isolated).
+    #[default]
     Bridge,
     /// Custom network name.
     Custom(String),
-}
-
-impl Default for PodmanNetwork {
-    fn default() -> Self {
-        Self::Bridge
-    }
 }
 
 impl Default for PodmanConfig {

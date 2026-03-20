@@ -757,7 +757,10 @@ impl Agent {
                     StatusUpdate::ToolCompleted {
                         name: pending.tool_name.clone(),
                         success: tool_result.is_ok(),
-                        result_preview: tool_result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
+                        result_preview: tool_result
+                            .as_ref()
+                            .ok()
+                            .map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
                     },
                     &message.metadata,
                 )
@@ -909,18 +912,20 @@ impl Agent {
                         .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                         .await;
 
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolCompleted {
-                                name: tc.name.clone(),
-                                success: result.is_ok(),
-                                result_preview: result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                    let _ =
+                        self.channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolCompleted {
+                                    name: tc.name.clone(),
+                                    success: result.is_ok(),
+                                    result_preview: result.as_ref().ok().map(|s| {
+                                        crate::agent::dispatcher::truncate_preview(s, 500)
+                                    }),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
 
                     results.push((tc.clone(), result));
                 }
@@ -966,7 +971,9 @@ impl Agent {
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
-                                    result_preview: result.as_ref().ok().map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
+                                    result_preview: result.as_ref().ok().map(|s| {
+                                        crate::agent::dispatcher::truncate_preview(s, 500)
+                                    }),
                                 },
                                 &metadata,
                             )

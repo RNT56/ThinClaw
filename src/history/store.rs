@@ -1239,9 +1239,7 @@ impl Store {
 
     pub async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError> {
         let conn = self.conn().await?;
-        let count = conn
-            .execute("DELETE FROM routine_runs", &[])
-            .await?;
+        let count = conn.execute("DELETE FROM routine_runs", &[]).await?;
         Ok(count)
     }
 }

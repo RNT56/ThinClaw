@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
 
-use super::INJECTED_VARS;
+use super::{BRIDGE_VARS, INJECTED_VARS};
 
 /// Crate-wide mutex for tests that mutate process environment variables.
 ///
@@ -12,15 +12,27 @@ use super::INJECTED_VARS;
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
-    // Check injected secrets overlay FIRST (keychain / secrets store).
+    // IC-007: Check bridge overlay FIRST (Tauri UI config — highest priority).
+    //
+    // This overlay is populated by `inject_bridge_vars()` from the Tauri bridge.
+    // It takes priority over everything else because it represents the user's
+    // current UI settings (LLM backend, workspace mode, etc.).
+    //
+    // Priority: BRIDGE_VARS (UI config) > INJECTED_VARS (keychain) > std::env::var > None
+    if let Ok(guard) = BRIDGE_VARS.read()
+        && let Some(val) = guard.get(key)
+        && !val.is_empty()
+    {
+        return Ok(Some(val.clone()));
+    }
+
+    // Check injected secrets overlay (keychain / secrets store).
     //
     // This overlay is populated by `inject_llm_keys_from_secrets()` from
-    // the encrypted secrets store (keychain). It must take priority over
+    // the encrypted secrets store (keychain). It takes priority over
     // `std::env::var()` because `.env` files loaded by dotenvy also set
     // real process env vars, and those can contain stale API keys that
     // should be superseded by the keychain-stored value.
-    //
-    // Priority: INJECTED_VARS (keychain) > std::env::var (.env + shell) > None
     if let Ok(guard) = INJECTED_VARS.read()
         && let Some(val) = guard.get(key)
         && !val.is_empty()

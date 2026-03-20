@@ -395,9 +395,15 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                         };
                         println!("    • {}{}", tool.name, approval);
                         if !tool.description.is_empty() {
-                            // Truncate long descriptions
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
+                            // Truncate long descriptions (char-safe)
+                            let desc = if tool.description.chars().count() > 60 {
+                                let byte_offset = tool
+                                    .description
+                                    .char_indices()
+                                    .nth(57)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(tool.description.len());
+                                format!("{}...", &tool.description[..byte_offset])
                             } else {
                                 tool.description.clone()
                             };

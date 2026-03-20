@@ -198,7 +198,13 @@ async fn show_agent(router: &AgentRouter, id: &str) {
             );
             if let Some(ref prompt) = a.system_prompt {
                 let preview = if prompt.len() > 120 {
-                    format!("{}...", &prompt[..120])
+                    let end = prompt
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i < 120)
+                        .last()
+                        .unwrap_or(0);
+                    format!("{}...", &prompt[..end])
                 } else {
                     prompt.clone()
                 };

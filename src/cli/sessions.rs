@@ -180,7 +180,7 @@ async fn export_session(
 /// Format session data as a markdown transcript.
 fn format_as_markdown(user_id: &str, channel: &str, info: &serde_json::Value) -> String {
     let mut md = String::new();
-    md.push_str(&format!("# Session Transcript\n\n"));
+    md.push_str("# Session Transcript\n\n");
     md.push_str(&format!("- **User:** {}\n", user_id));
     md.push_str(&format!("- **Channel:** {}\n", channel));
 

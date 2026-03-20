@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Cron & Scheduled Tasks: Proactive Agent Behaviors
 
 The cron system is what makes the agent **proactive** — it can run scheduled tasks, send daily briefings, check for emails, and wake itself up without user prompts. OpenClaw's cron system (71 files) is far more than a simple timer.

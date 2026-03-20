@@ -150,12 +150,9 @@ impl WasmChannelRuntime {
         // Disable debug info in production
         wasmtime_config.debug_info(false);
 
-        // Enable persistent compilation cache. Wasmtime serializes compiled native
-        // code to disk (~/.cache/wasmtime by default), so subsequent startups
-        // deserialize instead of recompiling — typically 10-50x faster.
-        if let Err(e) = wasmtime_config.cache_config_load_default() {
-            tracing::warn!("Failed to enable wasmtime compilation cache: {}", e);
-        }
+        // Note: Wasmtime compilation caching (via CacheConfig) can be enabled
+        // if the "cache" feature is added to the wasmtime dependency for faster
+        // subsequent startups. Skipped here to minimize feature surface.
 
         let engine = Engine::new(&wasmtime_config).map_err(|e| {
             WasmChannelError::Config(format!("Failed to create Wasmtime engine: {}", e))

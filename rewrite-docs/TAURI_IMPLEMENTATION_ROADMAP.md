@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # ThinClaw Tauri Integration — Implementation Roadmap
 
 > **Status:** ✅ **COMPLETE** — All phases finished 2026-02-28 (~1 day actual, vs 7-10 day estimate)

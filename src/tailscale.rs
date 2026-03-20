@@ -229,17 +229,17 @@ impl TailscaleDiscovery {
         let status = self.get_status().await?;
         let peers = status.peer.unwrap_or_default();
         for peer in peers.values() {
-            if let Some(ips) = &peer.tailscale_ips {
-                if ips.iter().any(|ip| ip == remote_ip) {
-                    return Ok(true);
-                }
+            if let Some(ips) = &peer.tailscale_ips
+                && ips.iter().any(|ip| ip == remote_ip)
+            {
+                return Ok(true);
             }
         }
         // Also check self IPs (local loopback over tailnet)
-        if let Some(self_ips) = status.tailscale_ips {
-            if self_ips.iter().any(|ip| ip == remote_ip) {
-                return Ok(true);
-            }
+        if let Some(self_ips) = status.tailscale_ips
+            && self_ips.iter().any(|ip| ip == remote_ip)
+        {
+            return Ok(true);
         }
         Ok(false)
     }

@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Sub-Agent Orchestration: Multi-Agent Spawning
 
 The sub-agent system allows the **main agent** to spawn child agents with different models, system prompts, or tool restrictions to handle subtasks. This is how OpenClaw supports complex workflows: the main agent delegates specialized work to purpose-built child agents.

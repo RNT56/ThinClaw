@@ -259,9 +259,10 @@ async fn record_audio(
         .await;
 
     if let Ok(output) = sox
-        && output.status.success() {
-            return Ok(());
-        }
+        && output.status.success()
+    {
+        return Ok(());
+    }
 
     // Fallback to ffmpeg
     let ffmpeg = Command::new("ffmpeg")
@@ -395,7 +396,7 @@ async fn transcribe_whisper_api(
     let part = reqwest::multipart::Part::bytes(file_bytes)
         .file_name(file_name)
         .mime_str("audio/wav")
-        .unwrap();
+        .expect("valid MIME type");
 
     let form = reqwest::multipart::Form::new()
         .part("file", part)
@@ -460,7 +461,7 @@ async fn transcribe_whisper_http(
     let part = reqwest::multipart::Part::bytes(file_bytes)
         .file_name(file_name)
         .mime_str("audio/wav")
-        .unwrap();
+        .expect("valid MIME type");
 
     let form = reqwest::multipart::Form::new()
         .part("file", part)
@@ -582,7 +583,12 @@ impl Tool for TalkModeTool {
         record_audio(&path, duration, 16000).await?;
 
         // Transcribe using the configured backend
-        let text = if let Ok(whisper_url) = std::env::var("WHISPER_HTTP_ENDPOINT") {
+        // IC-007: Use optional_env to see bridge-injected vars
+        let text = if let Some(whisper_url) =
+            crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+                .ok()
+                .flatten()
+        {
             // Desktop mode: use local whisper sidecar
             let token = std::env::var("WHISPER_HTTP_TOKEN").ok();
             transcribe_whisper_http(&path, &whisper_url, token.as_deref(), language).await?

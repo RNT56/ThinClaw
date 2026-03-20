@@ -86,7 +86,11 @@ impl Tool for SkillReadTool {
                 Err(ToolError::ExecutionFailed(format!(
                     "Skill '{}' not found. Available skills: {}",
                     name,
-                    if available.is_empty() { "none".to_string() } else { available.join(", ") }
+                    if available.is_empty() {
+                        "none".to_string()
+                    } else {
+                        available.join(", ")
+                    }
                 )))
             }
         }
@@ -139,9 +143,7 @@ impl Tool for SkillListTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let guard = self
-            .registry
-            .read().await;
+        let guard = self.registry.read().await;
 
         let skills: Vec<serde_json::Value> = guard
             .skills()
@@ -244,16 +246,39 @@ impl Tool for SkillSearchTool {
             .enrich_search_results(&mut catalog_entries, 5)
             .await;
 
-        // Search locally loaded skills
-        let installed_names: Vec<String> = {
-            let guard = self
-                .registry
-                .read().await;
-            guard
+        // IC-026: Single lock acquisition for both installed names and local search
+        let (installed_names, local_matches): (Vec<String>, Vec<serde_json::Value>) = {
+            let guard = self.registry.read().await;
+
+            let names = guard
                 .skills()
                 .iter()
                 .map(|s| s.manifest.name.clone())
-                .collect()
+                .collect();
+
+            let query_lower = query.to_lowercase();
+            let matches = guard
+                .skills()
+                .iter()
+                .filter(|s| {
+                    s.manifest.name.to_lowercase().contains(&query_lower)
+                        || s.manifest.description.to_lowercase().contains(&query_lower)
+                        || s.manifest
+                            .activation
+                            .keywords
+                            .iter()
+                            .any(|k| k.to_lowercase().contains(&query_lower))
+                })
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.manifest.name,
+                        "description": s.manifest.description,
+                        "trust": s.trust.to_string(),
+                    })
+                })
+                .collect();
+
+            (names, matches)
         };
 
         // Mark catalog entries that are already installed
@@ -277,34 +302,6 @@ impl Tool for SkillSearchTool {
                 })
             })
             .collect();
-
-        // Find matching local skills (simple substring match)
-        let query_lower = query.to_lowercase();
-        let local_matches: Vec<serde_json::Value> = {
-            let guard = self
-                .registry
-                .read().await;
-            guard
-                .skills()
-                .iter()
-                .filter(|s| {
-                    s.manifest.name.to_lowercase().contains(&query_lower)
-                        || s.manifest.description.to_lowercase().contains(&query_lower)
-                        || s.manifest
-                            .activation
-                            .keywords
-                            .iter()
-                            .any(|k| k.to_lowercase().contains(&query_lower))
-                })
-                .map(|s| {
-                    serde_json::json!({
-                        "name": s.manifest.name,
-                        "description": s.manifest.description,
-                        "trust": s.trust.to_string(),
-                    })
-                })
-                .collect()
-        };
 
         let mut output = serde_json::json!({
             "catalog": catalog_json,
@@ -353,15 +350,15 @@ impl Tool for SkillInstallTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Skill name or slug (from search results)"
+                    "description": "Skill name or slug (from search results). Used as the catalog lookup key if neither url nor content is provided."
                 },
                 "url": {
                     "type": "string",
-                    "description": "Direct URL to a SKILL.md file"
+                    "description": "Optional: direct URL to a SKILL.md file (skips catalog lookup)"
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install directly"
+                    "description": "Optional: raw SKILL.md content to install directly (skips fetch)"
                 }
             },
             "required": ["name"]
@@ -391,9 +388,7 @@ impl Tool for SkillInstallTool {
 
         // Check for duplicates and get install_dir under a brief read lock.
         let (user_dir, skill_name_from_parse) = {
-            let guard = self
-                .registry
-                .read().await;
+            let guard = self.registry.read().await;
 
             // Parse to extract the name (cheap, in-memory)
             let normalized = crate::skills::normalize_line_endings(&content);
@@ -423,9 +418,7 @@ impl Tool for SkillInstallTool {
 
         // Commit the in-memory addition under a brief write lock.
         let installed_name = {
-            let mut guard = self
-                .registry
-                .write().await;
+            let mut guard = self.registry.write().await;
             guard
                 .commit_install(&skill_name, loaded_skill)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -736,9 +729,7 @@ impl Tool for SkillRemoveTool {
 
         // Validate removal and get the filesystem path under a brief read lock.
         let skill_path = {
-            let guard = self
-                .registry
-                .read().await;
+            let guard = self.registry.read().await;
             guard
                 .validate_remove(name)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
@@ -751,9 +742,7 @@ impl Tool for SkillRemoveTool {
 
         // Remove from in-memory registry under a brief write lock.
         {
-            let mut guard = self
-                .registry
-                .write().await;
+            let mut guard = self.registry.write().await;
             guard
                 .commit_remove(name)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;

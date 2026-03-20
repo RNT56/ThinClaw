@@ -43,10 +43,10 @@ impl ClawHubConfig {
         if let Ok(key) = std::env::var("CLAWHUB_API_KEY") {
             config.api_key = Some(key);
         }
-        if let Ok(ttl) = std::env::var("CLAWHUB_CACHE_TTL") {
-            if let Ok(t) = ttl.parse() {
-                config.cache_ttl_secs = t;
-            }
+        if let Ok(ttl) = std::env::var("CLAWHUB_CACHE_TTL")
+            && let Ok(t) = ttl.parse()
+        {
+            config.cache_ttl_secs = t;
         }
         if std::env::var("CLAWHUB_DISABLED").is_ok() {
             config.enabled = false;

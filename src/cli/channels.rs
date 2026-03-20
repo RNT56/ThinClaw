@@ -204,7 +204,15 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                     if let Ok(url) = std::env::var("SIGNAL_HTTP_URL") {
                         // Redact URL for security.
                         let redacted = if url.len() > 20 {
-                            format!("{}...{}", &url[..15], &url[url.len() - 5..])
+                            // Safe char-boundary slicing to avoid UTF-8 panics
+                            let prefix_end = url
+                                .char_indices()
+                                .nth(15)
+                                .map(|(i, _)| i)
+                                .unwrap_or(url.len());
+                            let suffix_start =
+                                url.char_indices().rev().nth(4).map(|(i, _)| i).unwrap_or(0);
+                            format!("{}...{}", &url[..prefix_end], &url[suffix_start..])
                         } else {
                             url
                         };

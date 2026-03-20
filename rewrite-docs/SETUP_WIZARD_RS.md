@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Setup Wizard: First-Run Onboarding
 
 The setup wizard guides users through initial configuration on first launch. ThinClaw provides **two variants** of the same wizard: a **Tauri UI flow** (graphical, multi-step form) and a **terminal wizard** (for headless/SSH setups using `inquire` prompts). Both call the same underlying configuration functions.

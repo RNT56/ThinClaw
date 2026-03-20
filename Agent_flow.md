@@ -1,6 +1,6 @@
 # IronClaw Agent Flow
 
-> **Last updated:** 2026-03-06  
+> **Last updated:** 2026-03-13  
 > **Source of truth:** `src/main.rs`, `src/app.rs`, `src/bootstrap.rs`, `src/wizard/mod.rs`,  
 > `src/setup/wizard.rs`, `src/workspace/mod.rs`, `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs`
 
@@ -104,7 +104,7 @@ Settings are resolved in order (highest priority wins):
 When IronClaw starts, `check_onboard_needed()` runs two checks:
 
 ```rust
-// src/main.rs:1186-1206
+// src/main.rs:1233+
 fn check_onboard_needed() -> Option<&'static str> {
     let has_db = env::var("DATABASE_URL").is_ok()
         || env::var("LIBSQL_PATH").is_ok()
@@ -156,7 +156,7 @@ On first run, if legacy files exist they are automatically migrated:
 | `mcp-servers.json` | DB `mcp_servers` key | Stores raw JSON in DB settings, renames to `.migrated` |
 | `session.json` | DB `nearai.session_token` | Stores in DB settings, renames to `.migrated` |
 
-**Source:** `src/bootstrap.rs:184-301` — `migrate_disk_to_db()`
+**Source:** `src/bootstrap.rs:184+` — `migrate_disk_to_db()`
 
 ---
 
@@ -175,7 +175,7 @@ src/main.rs:258-265
 ### Phase 0: Early Bootstrap (before AppBuilder)
 
 ```rust
-// src/main.rs:211-265
+// src/main.rs (early bootstrap, before AppBuilder)
 let _ = dotenvy::dotenv();                              // Load ./.env
 ironclaw::bootstrap::load_ironclaw_env();               // Load ~/.ironclaw/.env
 let config = Config::from_env_with_toml(toml_path)?;    // Env + optional TOML
@@ -245,7 +245,7 @@ like heartbeat checks, routing decisions, and evaluation.
 After the 5 phases, `build_all()` performs:
 
 ```rust
-// src/app.rs:722-744
+// src/app.rs (post-build assembly)
 // 1. Seed workspace identity files
 workspace.seed_if_empty().await;    // Creates 7 core files if missing
 
@@ -253,7 +253,7 @@ workspace.seed_if_empty().await;    // Creates 7 core files if missing
 tokio::spawn(workspace.backfill_embeddings());  // Generates missing vectors
 ```
 
-**Source:** `src/app.rs:703-819`
+**Source:** `src/app.rs:847+` — `build_all()`
 
 ---
 
@@ -394,7 +394,7 @@ The heartbeat seed is **comment-only** by design — the heartbeat runner treats
 Files marked as **identity documents** get special handling:
 
 ```rust
-// src/workspace/document.rs:94-100
+// src/workspace/document.rs:101+
 pub fn is_identity_document(&self) -> bool {
     matches!(self.path.as_str(),
         paths::IDENTITY | paths::SOUL | paths::AGENTS | paths::USER
@@ -413,7 +413,7 @@ The user can edit workspace files through:
 - **CLI**: `ironclaw memory write SOUL.md "new content"`
 - **Scrappy UI**: Could expose a Settings → Personality editor calling `memory_read`/`memory_write`
 
-**Source:** `src/workspace/mod.rs:680-793`
+**Source:** `src/workspace/mod.rs:947+` — `seed_if_empty()`
 
 ---
 
@@ -423,7 +423,7 @@ When the agent processes a message, `system_prompt_for_context()` assembles the 
 prompt from workspace files:
 
 ```rust
-// src/workspace/mod.rs:546-594
+// src/workspace/mod.rs:621+
 pub async fn system_prompt_for_context(&self, is_group_chat: bool) -> Result<String> {
     let mut parts = Vec::new();
 
@@ -510,7 +510,7 @@ group conversations.
 After `build_all()` returns, `main.rs` wires up channels and builds the agent:
 
 ```rust
-// src/main.rs:362-854  (simplified)
+// src/main.rs (channel wiring, simplified)
 
 // 1. Create channel manager
 let channels = ChannelManager::new();
@@ -557,7 +557,7 @@ agent.run().await
 `Agent::run()` is the core event loop:
 
 ```rust
-// src/agent/agent_loop.rs:607-754  (simplified)
+// src/agent/agent_loop.rs:669+  (simplified)
 pub async fn run(self) -> Result<(), Error> {
     // 1. Start all channels (each returns a stream of IncomingMessage)
     let mut message_stream = self.channels.start_all().await?;
@@ -701,7 +701,7 @@ Build messages (system prompt + thread history + user input)
 | **Embedding backfill** | Once at startup | Generates embeddings for unembedded document chunks |
 | **Config watcher** | Filesystem events | Watches `config.toml` for changes, logs reload notification |
 
-**Source:** `src/agent/agent_loop.rs:300-606`
+**Source:** `src/agent/agent_loop.rs` (background task setup, before `run()`)
 
 ---
 

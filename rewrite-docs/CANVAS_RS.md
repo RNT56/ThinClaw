@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Canvas & a2UI: Agent-Generated Interactive UIs
 
 Canvas is OpenClaw's system for allowing the agent to create, serve, and interact with **live web UIs** inside the chat interface. The agent writes HTML/JS, the Orchestrator serves it via a local HTTP server, and the user sees a live interactive widget embedded in the conversation.

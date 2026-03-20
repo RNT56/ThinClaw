@@ -47,8 +47,9 @@ const MIN_KEYWORD_TAG_LENGTH: usize = 3;
 pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
 
 /// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
-static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
+static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").expect("constant regex")
+});
 
 /// Validate a skill name against the allowed pattern.
 pub fn validate_skill_name(name: &str) -> bool {
@@ -292,13 +293,13 @@ pub fn escape_skill_content(content: &str) -> String {
         // Match `<` followed by optional `/`, optional whitespace/control chars,
         // then `skill` (case-insensitive). Catches both opening and closing tags:
         // `<skill`, `</skill`, `< skill`, `</\0skill`, `<SKILL`, etc.
-        Regex::new(r"(?i)</?[\s\x00]*skill").unwrap()
+        Regex::new(r"(?i)</?[\s\x00]*skill").expect("constant regex")
     });
 
     SKILL_TAG_RE
         .replace_all(content, |caps: &regex::Captures| {
             // Replace leading `<` with `&lt;` to neutralize the tag
-            let matched = caps.get(0).unwrap().as_str();
+            let matched = caps.get(0).expect("full match always exists").as_str();
             format!("&lt;{}", &matched[1..])
         })
         .into_owned()
@@ -439,7 +440,7 @@ activation:
   patterns: ["(?i)\\b(write|draft)\\b.*\\b(email|letter)\\b"]
   max_context_tokens: 2000
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_yaml_ng::from_str(yaml).expect("parse failed");
         assert_eq!(manifest.name, "writing-assistant");
         assert_eq!(manifest.activation.keywords.len(), 3);
     }
@@ -455,7 +456,7 @@ metadata:
       env: ["VALE_CONFIG"]
       config: ["/etc/vale.ini"]
 "#;
-        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_yaml_ng::from_str(yaml).expect("parse failed");
         let meta = manifest.metadata.unwrap();
         let openclaw = meta.openclaw.unwrap();
         assert_eq!(openclaw.requires.bins, vec!["vale"]);

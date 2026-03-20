@@ -1,13 +1,20 @@
 //! Multi-agent routing with workspace isolation.
 //!
+//! **Not to be confused with [`super::router`]** (message intent classification).
+//!
+//! This module handles **workspace-level routing**: which *agent* should handle
+//! a message based on thread ownership, channel bindings, mentions, and keywords.
+//! Each agent operates in its own workspace with isolated sessions, system
+//! prompts, tools, and memory.
+//!
+//! In contrast, `router.rs` handles **message-level routing**: parsing explicit
+//! `/` commands into structured `MessageIntent` variants for the agent loop.
+//!
 //! Routes incoming messages to the correct agent based on:
 //! 1. Thread ownership (first-responder wins)
 //! 2. Channel binding (specific agents for specific channels)
 //! 3. Mention routing (@agent_name / agent keywords)
 //! 4. Default agent (fallback)
-//!
-//! Each agent operates in its own workspace with isolated sessions,
-//! system prompts, tools, and memory.
 
 use std::collections::HashMap;
 
@@ -206,8 +213,8 @@ impl AgentRouter {
     /// Returns `true` if transferred, `false` if thread was not owned.
     pub async fn transfer_thread(&self, thread_id: Uuid, new_owner: &str) -> bool {
         let mut ownership = self.thread_ownership.write().await;
-        if ownership.contains_key(&thread_id) {
-            ownership.insert(thread_id, new_owner.to_string());
+        if let std::collections::hash_map::Entry::Occupied(mut e) = ownership.entry(thread_id) {
+            e.insert(new_owner.to_string());
             tracing::info!(
                 thread = %thread_id,
                 new_owner = new_owner,

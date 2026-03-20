@@ -53,7 +53,7 @@ impl StickerFormat {
         }
 
         // WebM starts with EBML header
-        if data.len() >= 4 && &data[0..4] == &[0x1a, 0x45, 0xdf, 0xa3] {
+        if data.len() >= 4 && data[0..4] == [0x1a, 0x45, 0xdf, 0xa3] {
             return Self::WebM;
         }
 
@@ -111,15 +111,15 @@ impl StickerConfig {
         if let Ok(val) = std::env::var("STICKER_CONVERT_ENABLED") {
             config.enabled = val != "0" && !val.eq_ignore_ascii_case("false");
         }
-        if let Ok(max) = std::env::var("STICKER_MAX_SIZE_MB") {
-            if let Ok(m) = max.parse::<u64>() {
-                config.max_size = m * 1024 * 1024;
-            }
+        if let Ok(max) = std::env::var("STICKER_MAX_SIZE_MB")
+            && let Ok(m) = max.parse::<u64>()
+        {
+            config.max_size = m * 1024 * 1024;
         }
-        if let Ok(dim) = std::env::var("STICKER_MAX_DIMENSION") {
-            if let Ok(d) = dim.parse() {
-                config.max_dimension = d;
-            }
+        if let Ok(dim) = std::env::var("STICKER_MAX_DIMENSION")
+            && let Ok(d) = dim.parse()
+        {
+            config.max_dimension = d;
         }
         config
     }

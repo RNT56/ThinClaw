@@ -68,9 +68,11 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
         .await;
 
     if let Ok(output) = imagesnap
-        && output.status.success() && path.exists() {
-            return Ok("imagesnap".to_string());
-        }
+        && output.status.success()
+        && path.exists()
+    {
+        return Ok("imagesnap".to_string());
+    }
 
     // Fallback to ffmpeg
     let ffmpeg = Command::new("ffmpeg")
@@ -92,9 +94,11 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
         .await;
 
     if let Ok(output) = ffmpeg
-        && output.status.success() && path.exists() {
-            return Ok("ffmpeg".to_string());
-        }
+        && output.status.success()
+        && path.exists()
+    {
+        return Ok("ffmpeg".to_string());
+    }
 
     Err(ToolError::ExecutionFailed(
         "No camera tool found. Install imagesnap (brew install imagesnap) or ffmpeg.".to_string(),

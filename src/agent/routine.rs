@@ -542,8 +542,8 @@ pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineEr
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        content_hash, next_cron_fire, normalize_cron_expr, RoutineAction, RoutineGuardrails,
-        RunStatus, Trigger,
+        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
+        normalize_cron_expr,
     };
 
     #[test]

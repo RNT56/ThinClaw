@@ -98,30 +98,30 @@ impl LlamaConfig {
         if let Ok(path) = std::env::var("LLAMA_MODEL_PATH") {
             config.model_path = path;
         }
-        if let Ok(ctx) = std::env::var("LLAMA_CONTEXT_LENGTH") {
-            if let Ok(n) = ctx.parse() {
-                config.context_length = n;
-            }
+        if let Ok(ctx) = std::env::var("LLAMA_CONTEXT_LENGTH")
+            && let Ok(n) = ctx.parse()
+        {
+            config.context_length = n;
         }
-        if let Ok(gpu) = std::env::var("LLAMA_GPU_LAYERS") {
-            if let Ok(n) = gpu.parse() {
-                config.gpu_layers = n;
-            }
+        if let Ok(gpu) = std::env::var("LLAMA_GPU_LAYERS")
+            && let Ok(n) = gpu.parse()
+        {
+            config.gpu_layers = n;
         }
-        if let Ok(threads) = std::env::var("LLAMA_THREADS") {
-            if let Ok(n) = threads.parse() {
-                config.threads = Some(n);
-            }
+        if let Ok(threads) = std::env::var("LLAMA_THREADS")
+            && let Ok(n) = threads.parse()
+        {
+            config.threads = Some(n);
         }
-        if let Ok(temp) = std::env::var("LLAMA_TEMPERATURE") {
-            if let Ok(t) = temp.parse() {
-                config.temperature = t;
-            }
+        if let Ok(temp) = std::env::var("LLAMA_TEMPERATURE")
+            && let Ok(t) = temp.parse()
+        {
+            config.temperature = t;
         }
-        if let Ok(max) = std::env::var("LLAMA_MAX_TOKENS") {
-            if let Ok(n) = max.parse() {
-                config.max_tokens = n;
-            }
+        if let Ok(max) = std::env::var("LLAMA_MAX_TOKENS")
+            && let Ok(n) = max.parse()
+        {
+            config.max_tokens = n;
         }
 
         config

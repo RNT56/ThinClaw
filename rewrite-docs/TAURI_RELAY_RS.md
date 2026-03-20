@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Local Tauri App as a Headless Relay
 
 You are absolutely correct. One of the core design goals of ThinClaw is that the user can run the Tauri application on their MacBook, and it acts **simultaneously** as a rich desktop chat interface _and_ as the background engine powering their Discord bot or Telegram agent.

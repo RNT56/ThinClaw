@@ -1,7 +1,8 @@
 //! Orchestrator for managing sandboxed worker containers.
 //!
 //! The orchestrator runs in the main agent process and provides:
-//! - An internal HTTP API for worker communication (LLM proxy, status, secrets)
+//! - An internal **HTTP/JSON** API for worker communication (LLM proxy, status, secrets)
+//!   (powered by axum; **not** gRPC despite using port 50051)
 //! - Per-job bearer token authentication
 //! - Container lifecycle management (create, monitor, stop)
 //!
@@ -9,7 +10,7 @@
 //! ┌───────────────────────────────────────────────┐
 //! │              Orchestrator                       │
 //! │                                                 │
-//! │  Internal API (default :50051, configurable)    │
+//! │  Internal HTTP API (default :50051, configurable)│
 //! │    POST /worker/{id}/llm/complete               │
 //! │    POST /worker/{id}/llm/complete_with_tools    │
 //! │    GET  /worker/{id}/job                        │

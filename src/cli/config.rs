@@ -126,8 +126,27 @@ async fn list_settings(
             continue;
         }
 
-        let display_value = if value.len() > 60 {
-            format!("{}...", &value[..57])
+        // Mask sensitive values (tokens, secrets, passwords, API keys)
+        let is_sensitive = {
+            let k = key.to_lowercase();
+            (k.contains("token") || k.contains("secret") || k.contains("password") || k.contains("api_key"))
+                && !k.ends_with("_source") // e.g. secrets_master_key_source
+                && !k.ends_with("_name")   // e.g. api_key_name
+                && !k.contains("enabled")  // e.g. token_enabled
+        };
+
+        let display_value = if is_sensitive && !value.is_empty() && value != "null" {
+            // Show first 4 chars + masked remainder
+            let prefix: String = value.chars().take(4).collect();
+            format!("{}...[REDACTED]", prefix)
+        } else if value.len() > 60 {
+            let end = value
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i < 57)
+                .last()
+                .unwrap_or(0);
+            format!("{}...", &value[..end])
         } else {
             value
         };

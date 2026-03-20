@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # How the Orchestrator Queries the Database (Without an LLM)
 
 A very common question when learning about AI Agent architecture is: _"If the Generative LLM doesn't have access to the database, how does the Rust Orchestrator know what to search for?"_

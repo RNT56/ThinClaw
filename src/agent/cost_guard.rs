@@ -250,8 +250,9 @@ impl CostGuard {
 
 /// Convert a Decimal USD amount to whole cents (truncated).
 fn to_cents(usd: Decimal) -> u64 {
+    use std::convert::TryInto;
     let cents = (usd * dec!(100)).trunc();
-    cents.to_string().parse::<u64>().unwrap_or(0)
+    cents.try_into().unwrap_or(0u64)
 }
 
 #[cfg(test)]

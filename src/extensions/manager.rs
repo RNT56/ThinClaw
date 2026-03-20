@@ -202,7 +202,10 @@ impl ExtensionManager {
     }
 
     /// Fire a lifecycle event to the audit hook (if set).
-    async fn fire_lifecycle_event(&self, event: crate::extensions::lifecycle_hooks::LifecycleEvent) {
+    async fn fire_lifecycle_event(
+        &self,
+        event: crate::extensions::lifecycle_hooks::LifecycleEvent,
+    ) {
         if let Some(ref hook) = *self.lifecycle_audit_hook.read().await {
             use crate::extensions::lifecycle_hooks::LifecycleHook;
             hook.on_event(&event);
@@ -260,7 +263,9 @@ impl ExtensionManager {
         tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
-        let kind_label = kind_hint.map(|k| format!("{:?}", k)).unwrap_or_else(|| "unknown".into());
+        let kind_label = kind_hint
+            .map(|k| format!("{:?}", k))
+            .unwrap_or_else(|| "unknown".into());
         self.fire_lifecycle_event(
             crate::extensions::lifecycle_hooks::LifecycleEvent::Installing {
                 name: name.to_string(),
@@ -739,7 +744,10 @@ impl ExtensionManager {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
                 let primary_err = primary_result.unwrap_err();
-                let fallback = entry.fallback_source.as_ref().unwrap();
+                let fallback = entry
+                    .fallback_source
+                    .as_ref()
+                    .expect("TryFallback requires fallback_source");
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,

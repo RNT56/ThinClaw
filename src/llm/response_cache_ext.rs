@@ -87,16 +87,16 @@ impl CachedResponseStore {
     /// Store a response.
     pub fn set(&mut self, key: &str, response: String, model: &str) {
         // Evict if at capacity (LRU: remove least recently accessed)
-        if self.entries.len() >= self.config.max_size && !self.entries.contains_key(key) {
-            if let Some(lru_key) = self
+        if self.entries.len() >= self.config.max_size
+            && !self.entries.contains_key(key)
+            && let Some(lru_key) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, v)| v.last_accessed)
                 .map(|(k, _)| k.clone())
-            {
-                self.entries.remove(&lru_key);
-                self.evictions += 1;
-            }
+        {
+            self.entries.remove(&lru_key);
+            self.evictions += 1;
         }
 
         let now = Instant::now();
