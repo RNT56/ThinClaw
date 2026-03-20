@@ -14,7 +14,6 @@ import {
     startOpenClawGateway,
     stopOpenClawGateway,
     saveGatewaySettings,
-    toggleOpenClawNodeHost,
     toggleOpenClawLocalInference,
     addAgentProfile,
     removeAgentProfile,
@@ -45,7 +44,8 @@ describe('getOpenClawStatus()', () => {
         const result = await getOpenClawStatus();
 
         expect(mockInvoke).toHaveBeenCalledOnce();
-        expect(mockInvoke).toHaveBeenCalledWith('openclaw_get_status');
+        // safeInvoke forwards (cmd, args?) — args is undefined here
+        expect(mockInvoke).toHaveBeenCalledWith('openclaw_get_status', undefined);
         expect(result).toEqual(fakeStatus);
     });
 });
@@ -92,18 +92,6 @@ describe('saveGatewaySettings()', () => {
 // ---------------------------------------------------------------------------
 // Toggles
 // ---------------------------------------------------------------------------
-describe('toggleOpenClawNodeHost()', () => {
-    it('sends enabled=true', async () => {
-        await toggleOpenClawNodeHost(true);
-        expect(mockInvoke).toHaveBeenCalledWith('openclaw_toggle_node_host', { enabled: true });
-    });
-
-    it('sends enabled=false', async () => {
-        await toggleOpenClawNodeHost(false);
-        expect(mockInvoke).toHaveBeenCalledWith('openclaw_toggle_node_host', { enabled: false });
-    });
-});
-
 describe('toggleOpenClawLocalInference()', () => {
     it('sends enabled=true', async () => {
         await toggleOpenClawLocalInference(true);

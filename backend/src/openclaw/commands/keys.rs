@@ -729,55 +729,6 @@ pub async fn openclaw_toggle_custom_secret(
     Ok(())
 }
 
-/// Toggle node host (OS automation) for OpenClaw
-#[tauri::command]
-#[specta::specta]
-pub async fn openclaw_toggle_node_host(
-    state: State<'_, OpenClawManager>,
-    sidecar: State<'_, SidecarManager>,
-    enabled: bool,
-) -> Result<(), String> {
-    let mut cfg = if let Some(c) = state.get_config().await {
-        c
-    } else {
-        state.init_config().await?
-    };
-
-    info!("[openclaw] Toggling node host to: {}", enabled);
-    cfg.node_host_enabled = enabled;
-    cfg.save_identity().map_err(|e| {
-        let err = format!("Failed to save identity: {}", e);
-        error!("[openclaw] {}", err);
-        err
-    })?;
-
-    // Regenerate config to reflect policy change
-    // Preserve channel settings from existing openclaw_engine.json if it exists
-    let existing_openclaw_engine = cfg.load_config().ok();
-    let local_llm = sidecar.get_chat_config();
-    let openclaw_engine = cfg.generate_config(
-        existing_openclaw_engine
-            .as_ref()
-            .map(|m| m.channels.slack.clone()),
-        existing_openclaw_engine
-            .as_ref()
-            .map(|m| m.channels.telegram.clone()),
-        local_llm.clone(),
-    );
-
-    cfg.write_config(&openclaw_engine, local_llm).map_err(|e| {
-        let err = format!("Failed to write openclaw_engine config: {}", e);
-        error!("[openclaw] {}", err);
-        err
-    })?;
-
-    // IronClaw is in-process — no separate node host process to manage
-
-    *state.config.write().await = Some(cfg);
-
-    Ok(())
-}
-
 /// Toggle local dev tools (shell, write_file, read_file, etc.) for OpenClaw
 #[tauri::command]
 #[specta::specta]

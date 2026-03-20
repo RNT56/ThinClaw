@@ -37,12 +37,16 @@ impl RigManager {
         // Initialize custom provider
         let provider = UnifiedProvider::new(kind, &base_url, &api_key, &model_name, model_family);
 
+        // Bug 40 fix: Check IRONCLAW_AGENT_NAME first for config overlay consistency.
+        let agent_name = std::env::var("IRONCLAW_AGENT_NAME")
+            .or_else(|_| std::env::var("AGENT_NAME"))
+            .unwrap_or_else(|_| "OpenClaw".to_string());
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut base_preamble = format!(
-            "You are OpenClaw, a friendly AI assistant.
+            "You are {}, a friendly AI assistant.
 Current Date: {}
 ",
-            date
+            agent_name, date
         );
 
         if enable_web_search {
@@ -111,12 +115,15 @@ or
         // orchestrator always streams through `provider.stream_raw_completion()` on
         // our *own* `UnifiedProvider` (which uses `self.base_url`, not rig's URL)
         // and never calls `agent.prompt()` for the main chat path.
+        //
+        // Bug 41: Use a named constant to make intent clear.
+        const LOCAL_SENTINEL_MODEL: &str = "gpt-3.5-turbo"; // rig skips HF lookup for well-known names
         let agent_provider = if matches!(provider.kind, ProviderKind::Local) {
             UnifiedProvider::new(
                 ProviderKind::Local,
                 &provider.base_url,
                 &provider.api_key,
-                "gpt-3.5-turbo", // well-known name → rig skips HF lookup
+                LOCAL_SENTINEL_MODEL,
                 provider.model_family.clone(),
             )
         } else {
@@ -138,19 +145,20 @@ or
                 });
         }
 
-        let agent = builder
-            .tool(CalculatorTool)
-            .tool(RAGTool {
-                app: app_handle
-                    .clone()
-                    .expect("App handle required for RAG tool"),
-            })
-            .tool(ImageGenTool {
-                app: app_handle
-                    .clone()
-                    .expect("App handle required for Image tool"),
-            })
-            .build();
+        // IC-012: Conditional tool registration — don't panic if app_handle is None (CLI mode)
+        let mut builder = builder.tool(CalculatorTool);
+        if let Some(ref handle) = app_handle {
+            builder = builder
+                .tool(RAGTool {
+                    app: handle.clone(),
+                })
+                .tool(ImageGenTool {
+                    app: handle.clone(),
+                });
+        } else {
+            tracing::warn!("[RigManager] app_handle is None — RAGTool and ImageGenTool disabled");
+        }
+        let agent = builder.build();
 
         Self {
             agent: std::sync::Arc::new(agent),
@@ -195,99 +203,7 @@ or
         }
     }
 
-    pub async fn rag_chat(
-        &self,
-        query: &str,
-        chat_history: Vec<crate::chat::Message>,
-    ) -> Result<String, String> {
-        // ... (existing implementation details for non-streaming fallback if needed)
-        // For now, we are replacing the call site in chat.rs to use stream_rag_chat
-        // But we keep this for compatibility or simpler use cases.
-        // I will leave this as is.
-        // Re-implementing just to match "TargetContent" correctly or I can append.
-        // Actually, I'll allow the user to keep rag_chat for now.
-        // I will Add stream_rag_chat below it.
 
-        // Wait, replace_file_content replaces the block. I should just ADD stream_rag_chat.
-
-        // 1. Run Explicit Search
-        let search_results = self.explicit_search(query).await;
-
-        // 2. Construct RAG Prompt
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let context_prompt = format!(
-            "Current Date: {}\nUser Query: {}\n\nSearch Context:\n{}\n\nInstructions: Summarize the search results to answer the user query clearly and strictly.",
-            date, query, search_results
-        );
-
-        // 3. Convert history
-        let mut history = Vec::new();
-        for msg in chat_history {
-            history.push(rig::completion::Message {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-            });
-        }
-
-        self.agent
-            .chat(&context_prompt, history)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn stream_rag_chat(
-        &self,
-        query: &str,
-        chat_history: Vec<crate::chat::Message>,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, String>> + Send>>, String>
-    {
-        // 1. Run Explicit Search
-        let search_results = self.explicit_search(query).await;
-
-        // 2. Construct RAG Prompt
-        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let context_prompt = format!(
-            "Current Date: {}\nUser Query: {}\n\nSearch Context:\n{}\n\nInstructions: Summarize the search results to answer the user query clearly and strictly.",
-            date, query, search_results
-        );
-
-        // 3. Convert history
-        let mut history = Vec::new();
-        for msg in chat_history {
-            history.push(rig::completion::Message {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-            });
-        }
-
-        // 4. Call Streaming Provider directly
-        // We use the stored provider instance
-        self.provider
-            .stream_completion(context_prompt, history)
-            .await
-    }
-
-    pub async fn stream_chat(
-        &self,
-        prompt: &str,
-        chat_history: Vec<crate::chat::Message>,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<String, String>> + Send>>, String>
-    {
-        // Convert history to proper Rig Messages
-        let mut history = Vec::new();
-        for msg in chat_history {
-            history.push(rig::completion::Message {
-                role: msg.role.clone(),
-                content: msg.content.clone(),
-            });
-        }
-
-        // DIRECT STREAMING: Bypass the Rig Agent loop (and its tools).
-        // This ensures Manual Mode is purely conversational.
-        self.provider
-            .stream_completion(prompt.to_string(), history)
-            .await
-    }
 
     pub fn is_cancelled(&self) -> bool {
         if let Some(app) = &self.app_handle {

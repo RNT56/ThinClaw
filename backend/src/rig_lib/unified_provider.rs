@@ -273,20 +273,36 @@ impl UnifiedProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
         let mut contents: Vec<Value> = Vec::new();
+        let mut system_instruction = None;
 
         if let Some(p) = request.preamble {
-            contents.push(json!({ "role": "user", "parts": [{ "text": format!("System Instructions: {}\n\nUser Question: {}", p, request.prompt) }] }));
-        } else {
-            contents.push(json!({ "role": "user", "parts": [{ "text": request.prompt }] }));
+            system_instruction = Some(json!({ "parts": [{ "text": p }] }));
         }
+
+        // Include chat history
+        for msg in request.chat_history {
+            let gemini_role = if msg.role == "assistant" { "model" } else { "user" };
+            contents.push(json!({ "role": gemini_role, "parts": [{ "text": msg.content }] }));
+        }
+
+        contents.push(json!({ "role": "user", "parts": [{ "text": request.prompt }] }));
 
         let mut body = json!({
             "contents": contents,
             "generationConfig": {
-                "temperature": 0.7,
                 "maxOutputTokens": 4096,
             }
         });
+
+        if let Some(si) = system_instruction {
+            body.as_object_mut().unwrap().insert("system_instruction".into(), si);
+        }
+
+        if let Some(t) = request.temperature.and_then(|temp| self.sanitize_temperature(temp)) {
+            if let Some(obj) = body["generationConfig"].as_object_mut() {
+                obj.insert("temperature".into(), json!(t));
+            }
+        }
 
         if !request.tools.is_empty() {
             body.as_object_mut().unwrap().insert(
@@ -609,7 +625,7 @@ impl UnifiedProvider {
                 .insert("system_instruction".into(), si);
         }
 
-        if let Some(t) = self.sanitize_temperature(0.7) {
+        if let Some(t) = _temperature.and_then(|temp| self.sanitize_temperature(temp)).or_else(|| self.sanitize_temperature(0.7)) {
             if let Some(obj) = body["generationConfig"].as_object_mut() {
                 obj.insert("temperature".into(), json!(t));
             }
@@ -642,7 +658,7 @@ impl UnifiedProvider {
         }
 
         let stream = response.bytes_stream().eventsource();
-        let mut in_thought = false;
+        let in_thought = std::sync::Arc::new(std::sync::Mutex::new(false));
 
         let s = stream
             .map(move |event_res| {
@@ -672,15 +688,17 @@ impl UnifiedProvider {
                                                 }
 
                                                 let mut final_text = text.to_string();
+                                                let mut thought_guard = in_thought.lock().unwrap_or_else(|e| e.into_inner());
 
-                                                if is_thought && !in_thought {
+                                                if is_thought && !*thought_guard {
                                                     final_text = format!("<think>\n{}", final_text);
-                                                    in_thought = true;
-                                                } else if !is_thought && in_thought {
+                                                    *thought_guard = true;
+                                                } else if !is_thought && *thought_guard {
                                                     final_text =
                                                         format!("</think>\n\n{}", final_text);
-                                                    in_thought = false;
+                                                    *thought_guard = false;
                                                 }
+                                                drop(thought_guard);
 
                                                 events.push(Ok(ProviderEvent::Content(final_text)));
                                             }

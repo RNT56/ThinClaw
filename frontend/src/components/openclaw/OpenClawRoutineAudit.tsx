@@ -9,11 +9,17 @@ import * as openclaw from '../../lib/openclaw';
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
     const styles: Record<string, { icon: any; cls: string }> = {
-        success: { icon: CheckCircle, cls: 'text-primary bg-emerald-500/10 border-emerald-500/20' },
-        failure: { icon: XCircle, cls: 'text-red-400 bg-red-500/10 border-red-500/20' },
-        timeout: { icon: Clock, cls: 'text-muted-foreground bg-amber-500/10 border-amber-500/20' },
+        // Actual RunStatus values from the backend
+        ok:        { icon: CheckCircle, cls: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' },
+        running:   { icon: Clock,       cls: 'text-blue-400 bg-blue-500/10 border-blue-500/20' },
+        attention: { icon: XCircle,     cls: 'text-amber-400 bg-amber-500/10 border-amber-500/20' },
+        failed:    { icon: XCircle,     cls: 'text-red-400 bg-red-500/10 border-red-500/20' },
+        // Legacy / fallback aliases
+        success:   { icon: CheckCircle, cls: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' },
+        failure:   { icon: XCircle,     cls: 'text-red-400 bg-red-500/10 border-red-500/20' },
+        timeout:   { icon: Clock,       cls: 'text-amber-400 bg-amber-500/10 border-amber-500/20' },
     };
-    const s = styles[outcome] || styles.failure;
+    const s = styles[outcome] ?? styles.failed;
     const Icon = s.icon;
     return (
         <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border", s.cls)}>
@@ -180,17 +186,23 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
                                 <th className="text-left px-4 py-3 text-[10px] text-muted-foreground font-bold uppercase tracking-widest">Started</th>
                                 <th className="text-left px-4 py-3 text-[10px] text-muted-foreground font-bold uppercase tracking-widest">Duration</th>
                                 <th className="text-left px-4 py-3 text-[10px] text-muted-foreground font-bold uppercase tracking-widest">Outcome</th>
-                                <th className="text-left px-4 py-3 text-[10px] text-muted-foreground font-bold uppercase tracking-widest">Error</th>
+                                <th className="text-left px-4 py-3 text-[10px] text-muted-foreground font-bold uppercase tracking-widest">Summary</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {entries.map((entry, i) => (
+                            {entries.map((entry, i) => {
+                                const isFailed = entry.outcome === 'failed' || entry.outcome === 'attention'
+                                    || entry.outcome === 'failure' || entry.outcome === 'timeout'; // legacy aliases
+                                return (
                                 <motion.tr
                                     key={`${entry.routine_key}-${entry.started_at}-${i}`}
                                     initial={{ opacity: 0, x: -8 }}
                                     animate={{ opacity: 1, x: 0 }}
                                     transition={{ delay: i * 0.02 }}
-                                    className="border-b border-white/[0.03] hover:bg-white/[0.02]"
+                                    className={cn(
+                                        "border-b border-white/[0.03] hover:bg-white/[0.02]",
+                                        isFailed && "bg-red-500/[0.04]"
+                                    )}
                                 >
                                     <td className="px-4 py-3 font-mono text-muted-foreground">{entry.routine_key}</td>
                                     <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{formatTime(entry.started_at)}</td>
@@ -198,9 +210,15 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
                                         {entry.duration_ms != null ? `${entry.duration_ms}ms` : '—'}
                                     </td>
                                     <td className="px-4 py-3"><OutcomeBadge outcome={entry.outcome} /></td>
-                                    <td className="px-4 py-3 text-red-400/70 max-w-[200px] truncate">{entry.error || '—'}</td>
+                                    <td className={cn(
+                                        "px-4 py-3 max-w-[200px] truncate",
+                                        isFailed ? "text-red-400/70" : "text-muted-foreground/50"
+                                    )}>
+                                        {entry.error || '—'}
+                                    </td>
                                 </motion.tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}

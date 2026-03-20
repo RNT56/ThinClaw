@@ -233,8 +233,6 @@ pub async fn chat_stream(
         return Err("Last message must be from user".into());
     }
 
-    // (Optional) We could use this to check strict RAG mode or other logic
-    let _last_user_content = processing_messages[last_idx].content.clone();
 
     use tauri::Emitter;
 
@@ -325,15 +323,21 @@ pub async fn chat_stream(
         .last()
         .map(|m| m.content.to_lowercase())
         .unwrap_or_default();
+    let has_assistant_images = processing_messages
+        .iter()
+        .any(|m| m.role == "assistant" && m.images.as_ref().is_some_and(|i| !i.is_empty()));
     let is_referencing_image = last_prompt_lower.contains("image")
         || last_prompt_lower.contains("picture")
         || last_prompt_lower.contains("draw")
         || last_prompt_lower.contains("this one")
         || last_prompt_lower.contains("that one")
-        || last_prompt_lower.contains("it")
-            && processing_messages
-                .iter()
-                .any(|m| m.role == "assistant" && m.images.as_ref().is_some_and(|i| !i.is_empty()));
+        || (has_assistant_images
+            && (last_prompt_lower.contains("edit it")
+                || last_prompt_lower.contains("change it")
+                || last_prompt_lower.contains("modify it")
+                || last_prompt_lower.contains("redo it")
+                || last_prompt_lower.contains("make it")
+                || last_prompt_lower.contains("the same")));
 
     if !is_referencing_image {
         let mut filtered = Vec::new();
@@ -463,8 +467,8 @@ pub async fn chat_stream(
                 "web_search_status",
                 WebSearchStatus {
                     id: id.clone(),
-                    step: "searching".into(),
-                    message: "Web Search Active...".into(),
+                    step: "thinking".into(),
+                    message: "Preparing web search...".into(),
                 },
             );
         } else if has_context {
@@ -640,7 +644,7 @@ pub async fn chat_stream(
                         eprintln!("Error in stream: {}", e);
                         let _ = on_event.send(StreamChunk {
                             content: format!("\n[Error: {}]", e),
-                            done: false,
+                            done: true,
                             usage: None,
                             context_update: None,
                         });
@@ -686,14 +690,10 @@ pub async fn count_tokens(
     conversation_id: String,
 ) -> Result<TokenUsage, String> {
     use tauri::Manager;
-    // 1. Get Chat Config
-    let (port, token, _, model_family) =
-        state.get_chat_config().ok_or("Chat server not running")?;
 
-    // 2. Fetch Messages from DB Directly
+    // 1. Fetch Messages from DB
     let pool = app.state::<sqlx::SqlitePool>();
 
-    // Define minimal Message struct for query
     #[derive(sqlx::FromRow)]
     struct DbMessage {
         role: String,
@@ -708,31 +708,43 @@ pub async fn count_tokens(
     .await
     .map_err(|e| format!("DB Error: {}", e))?;
 
-    // 3. Convert to JSON for Rig
-    let mut check_history: Vec<serde_json::Value> = Vec::new();
-    for msg in messages {
-        check_history.push(serde_json::json!({ "role": msg.role, "content": msg.content }));
+    // 2. Try precise count via llamacpp sidecar if available
+    if let Some((port, token, _, model_family)) = state.get_chat_config() {
+        let mut check_history: Vec<serde_json::Value> = Vec::new();
+        for msg in &messages {
+            check_history
+                .push(serde_json::json!({ "role": msg.role, "content": msg.content }));
+        }
+
+        let base_url = format!("http://127.0.0.1:{}/v1", port);
+        let provider = crate::rig_lib::llama_provider::LlamaProvider::new(
+            &base_url,
+            &token,
+            "default",
+            &model_family,
+        );
+
+        if let Ok(count) = provider.count_tokens(check_history).await {
+            return Ok(TokenUsage {
+                prompt_tokens: count,
+                completion_tokens: 0,
+                total_tokens: count,
+            });
+        }
     }
 
-    // 4. Initialize ephemeral Rig/Provider to count
-    let base_url = format!("http://127.0.0.1:{}/v1", port);
-    // Token is already a String based on SidecarManager signature
-    let provider = crate::rig_lib::llama_provider::LlamaProvider::new(
-        &base_url,
-        &token,
-        "default",
-        &model_family,
+    // 3. Fallback: heuristic estimate (chars / 4) for MLX, Ollama, cloud
+    let total_chars: u32 = messages.iter().map(|m| m.content.len() as u32).sum();
+    let estimate = total_chars / 4;
+    tracing::debug!(
+        "[count_tokens] Using heuristic estimate (chars/4): {} chars → ~{} tokens",
+        total_chars,
+        estimate
     );
-
-    let count = provider
-        .count_tokens(check_history)
-        .await
-        .map_err(|e| e.to_string())?;
-
     Ok(TokenUsage {
-        prompt_tokens: count,
+        prompt_tokens: estimate,
         completion_tokens: 0,
-        total_tokens: count,
+        total_tokens: estimate,
     })
 }
 
@@ -763,6 +775,9 @@ pub async fn chat_completion(
     );
 
     // Construct the request
+    if payload.messages.is_empty() {
+        return Err("No messages provided".into());
+    }
     let mut history = Vec::new();
     let mut system_preamble = None;
 

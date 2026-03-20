@@ -17,8 +17,12 @@ pub async fn perform_web_search(query: &str) -> Result<(String, Vec<WebSearchRes
         .build()
         .map_err(|e| e.to_string())?;
 
-    let url = format!("https://duckduckgo.com/html/?q={}", query);
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let resp = client
+        .get("https://duckduckgo.com/html/")
+        .query(&[("q", query)])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let html = resp.text().await.map_err(|e| e.to_string())?;
 
     let document = Html::parse_document(&html);

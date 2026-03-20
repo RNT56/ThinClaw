@@ -300,7 +300,7 @@ export default function AutomationCard({
                         transition={{ duration: 0.25, ease: 'easeInOut' }}
                         className="overflow-hidden"
                     >
-                        <div className="px-4 py-3 border-t border-[var(--border-primary)]/50">
+                        <div className="px-4 py-3 border-t border-white/[0.06] dark:border-white/[0.06]">
                             {/* If there are structured findings, render as a list */}
                             {findings.length > 1 ? (
                                 <div className="space-y-1.5">
@@ -330,7 +330,7 @@ export default function AutomationCard({
                         </div>
 
                         {/* Footer: stats + action buttons */}
-                        <div className="px-4 py-2 border-t border-[var(--border-primary)]/30 flex items-center justify-between">
+                        <div className="px-4 py-2 border-t border-white/[0.06] dark:border-white/[0.06] flex items-center justify-between">
                             <div className="flex items-center gap-3">
                                 {toolCount && (
                                     <span className="inline-flex items-center gap-1 text-[10px] text-[var(--text-tertiary)]">

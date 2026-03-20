@@ -244,14 +244,10 @@ fn read_value_u32(file: &mut File, val_type: u32) -> Result<u32, String> {
 
 fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
     match val_type {
-        0..=7 | 11 => {
-            let sizes = [1, 1, 2, 2, 4, 4, 4, 1];
-            let size = if val_type < 8 {
-                sizes[val_type as usize]
-            } else {
-                1
-            };
-            file.seek(SeekFrom::Current(size))
+        0..=7 => {
+            // 0=UINT8(1) 1=INT8(1) 2=UINT16(2) 3=INT16(2) 4=UINT32(4) 5=INT32(4) 6=FLOAT32(4) 7=BOOL(1)
+            let sizes: [i64; 8] = [1, 1, 2, 2, 4, 4, 4, 1];
+            file.seek(SeekFrom::Current(sizes[val_type as usize]))
                 .map_err(|e| e.to_string())?;
         }
         8 => {
@@ -273,7 +269,8 @@ fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
                 skip_value(file, arr_type)?;
             }
         }
-        10 | 12 | 13 => {
+        // 10=UINT64 11=FLOAT64 12=INT64 13=INT64 — all 8 bytes
+        10 | 11 | 12 | 13 => {
             file.seek(SeekFrom::Current(8)).map_err(|e| e.to_string())?;
         }
         _ => return Err(format!("Unknown GGUF type: {}", val_type)),

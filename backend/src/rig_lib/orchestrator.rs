@@ -124,13 +124,6 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new(rig: Arc<RigManager>) -> Self {
-        Self {
-            rig,
-            mcp_config: McpOrchestratorConfig::default(),
-        }
-    }
-
     /// Construct with optional MCP sandbox configuration.
     pub fn new_with_mcp(rig: Arc<RigManager>, mcp_config: McpOrchestratorConfig) -> Self {
         Self { rig, mcp_config }
@@ -372,8 +365,8 @@ impl Orchestrator {
                         info!("[orchestrator] Summarization complete.");
                         // Create Summary Message
                         let summary_msg = Message {
-                            role: "system".into(),
-                            content: format!("Previous conversation summary: {}", summary_text),
+                            role: "assistant".into(),
+                            content: format!("[Summary of earlier conversation] {}", summary_text),
                             images: None,
                             attached_docs: None,
                             is_summary: Some(true),

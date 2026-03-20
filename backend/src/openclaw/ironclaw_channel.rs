@@ -95,7 +95,7 @@ impl TauriChannel {
     fn set_tray_active(&self) {
         if let Some(tray_state) = self
             .app_handle
-            .try_state::<std::sync::Arc<crate::TrayState>>()
+            .try_state::<std::sync::Arc<crate::setup::tray::TrayState>>()
         {
             let _ = tray_state
                 .tray
@@ -125,7 +125,7 @@ impl TauriChannel {
     fn set_tray_idle(&self) {
         if let Some(tray_state) = self
             .app_handle
-            .try_state::<std::sync::Arc<crate::TrayState>>()
+            .try_state::<std::sync::Arc<crate::setup::tray::TrayState>>()
         {
             // Cancel any pending reset timer
             let tray_arc = std::sync::Arc::clone(&tray_state);
@@ -265,7 +265,7 @@ impl Channel for TauriChannel {
                     spawned_at: now_ms,
                     result_summary: None,
                 };
-                super::commands::rpc::sub_agent_registry::register(&resolved_session, child).await;
+                super::commands::rpc_orchestration::sub_agent_registry::register(&resolved_session, child).await;
             }
             StatusUpdate::SubagentCompleted {
                 agent_id,
@@ -275,13 +275,15 @@ impl Channel for TauriChannel {
             } => {
                 let status_str = if *success { "completed" } else { "failed" };
                 let preview = if response.len() > 200 {
-                    Some(format!("{}…", &response[..200]))
+                    let mut end = 200;
+                    while !response.is_char_boundary(end) { end -= 1; }
+                    Some(format!("{}…", &response[..end]))
                 } else if response.is_empty() {
                     None
                 } else {
                     Some(response.clone())
                 };
-                super::commands::rpc::sub_agent_registry::update_status(
+                super::commands::rpc_orchestration::sub_agent_registry::update_status(
                     agent_id,
                     status_str,
                     preview.as_deref(),

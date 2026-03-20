@@ -29,11 +29,11 @@ interface LogLine {
 }
 
 const LEVEL_STYLES: Record<string, { badge: string; text: string; dot: string }> = {
-    TRACE: { badge: 'bg-gray-500/20 text-gray-400', text: 'text-gray-500', dot: 'bg-gray-500' },
-    DEBUG: { badge: 'bg-blue-500/20 text-blue-400', text: 'text-blue-300', dot: 'bg-blue-500' },
-    INFO: { badge: 'bg-emerald-500/20 text-primary', text: 'text-emerald-300', dot: 'bg-emerald-500' },
-    WARN: { badge: 'bg-amber-500/20 text-muted-foreground', text: 'text-amber-300', dot: 'bg-amber-500' },
-    ERROR: { badge: 'bg-red-500/20 text-red-400', text: 'text-red-300', dot: 'bg-red-500' },
+    TRACE: { badge: 'bg-gray-500/20 text-gray-400', text: 'text-gray-600 dark:text-gray-500', dot: 'bg-gray-500' },
+    DEBUG: { badge: 'bg-blue-500/20 text-blue-400', text: 'text-blue-600 dark:text-blue-300', dot: 'bg-blue-500' },
+    INFO: { badge: 'bg-emerald-500/20 text-primary', text: 'text-emerald-600 dark:text-emerald-300', dot: 'bg-emerald-500' },
+    WARN: { badge: 'bg-amber-500/20 text-muted-foreground', text: 'text-amber-600 dark:text-amber-300', dot: 'bg-amber-500' },
+    ERROR: { badge: 'bg-red-500/20 text-red-400', text: 'text-red-600 dark:text-red-300', dot: 'bg-red-500' },
 };
 
 function LogRow({ entry, idx }: { entry: LogLine; idx: number }) {
@@ -44,18 +44,18 @@ function LogRow({ entry, idx }: { entry: LogLine; idx: number }) {
     return (
         <div
             className={cn(
-                'flex items-start gap-2 px-3 py-1 text-xs font-mono group hover:bg-white/[0.02] rounded transition-colors select-text',
-                idx % 2 === 0 ? '' : 'bg-white/[0.01]'
+                'flex items-start gap-2 px-3 py-1 text-xs font-mono group hover:bg-muted/20 rounded transition-colors select-text',
+                idx % 2 === 0 ? '' : 'bg-muted/10'
             )}
         >
-            <span className="text-white/20 select-none w-[30px] text-right shrink-0 mt-[1px]">
+            <span className="text-muted-foreground/30 select-none w-[30px] text-right shrink-0 mt-[1px]">
                 {(idx + 1).toString().padStart(3, '0')}
             </span>
-            <span className="text-white/30 shrink-0 mt-[1px] tabular-nums">{timeStr}</span>
+            <span className="text-muted-foreground/50 shrink-0 mt-[1px] tabular-nums">{timeStr}</span>
             <span className={cn('shrink-0 px-1.5 py-0 rounded text-[9px] font-bold uppercase tracking-widest leading-5', s.badge)}>
                 {entry.level.slice(0, 4)}
             </span>
-            <span className="text-white/25 shrink-0 mt-[1px] max-w-[120px] truncate">{shortTarget}</span>
+            <span className="text-muted-foreground/40 shrink-0 mt-[1px] max-w-[120px] truncate">{shortTarget}</span>
             <span className={cn('flex-1 break-all whitespace-pre-wrap leading-relaxed', s.text)}>
                 {entry.message}
             </span>
@@ -244,14 +244,14 @@ export function OpenClawSystemControl() {
                     <h1 className="text-3xl font-bold tracking-tight">System Control</h1>
                     <p className="text-muted-foreground mt-1">Foundational node settings and diagnostic routines.</p>
                 </div>
-                <div className="bg-white/5 border border-border/40 rounded-xl p-1 flex items-center gap-1 shadow-inner">
+                <div className="bg-muted/30 border border-border/40 rounded-xl p-1 flex items-center gap-1 shadow-inner">
                     {(['config', 'logs', 'system'] as const).map((t) => (
                         <button
                             key={t}
                             onClick={() => setActiveTab(t)}
                             className={cn(
                                 "px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all",
-                                activeTab === t ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                                activeTab === t ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-muted/30"
                             )}
                         >
                             {t}
@@ -276,7 +276,7 @@ export function OpenClawSystemControl() {
                             <div className="flex-1 overflow-y-auto pr-4 space-y-6 scrollbar-thin">
                                 {config && Object.keys(config).length > 0 ? (
                                     Object.entries(config).map(([key, value]: [string, any]) => (
-                                        <div key={key} className="space-y-2 p-4 rounded-xl bg-white/[0.02] border border-white/5">
+                                        <div key={key} className="space-y-2 p-4 rounded-xl bg-muted/10 border border-border/30">
                                             <div className="flex items-center justify-between">
                                                 <label className="text-xs font-bold uppercase tracking-wider text-primary/80">{key}</label>
                                                 <span className="text-[10px] text-muted-foreground font-mono">{typeof value}</span>
@@ -290,7 +290,7 @@ export function OpenClawSystemControl() {
                                                             setConfig({ ...config, [key]: newVal });
                                                         } catch { }
                                                     }}
-                                                    className="w-full bg-black/40 border border-border/40 rounded-lg p-3 text-xs font-mono text-gray-300 min-h-[100px] focus:border-primary/50 outline-none transition-colors"
+                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg p-3 text-xs font-mono text-foreground min-h-[100px] focus:border-primary/50 outline-none transition-colors"
                                                 />
                                             ) : typeof value === 'boolean' ? (
                                                 <div className="flex items-center gap-2">
@@ -309,7 +309,7 @@ export function OpenClawSystemControl() {
                                                     type="text"
                                                     value={value}
                                                     onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
-                                                    className="w-full bg-black/40 border border-border/40 rounded-lg px-3 py-2 text-xs font-mono text-gray-300 focus:border-primary/50 outline-none transition-colors"
+                                                    className="w-full bg-muted/30 border border-border/40 rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:border-primary/50 outline-none transition-colors"
                                                 />
                                             )}
                                             {schema?.[key]?.description && (
@@ -351,10 +351,10 @@ export function OpenClawSystemControl() {
                             initial={{ opacity: 0, scale: 0.98 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.98 }}
-                            className="flex-1 bg-[#040404] rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
+                            className="flex-1 bg-zinc-950 dark:bg-[#040404] rounded-2xl border border-border/40 shadow-2xl flex flex-col overflow-hidden"
                         >
                             {/* Toolbar */}
-                            <div className="p-3 border-b border-white/5 bg-white/[0.02] flex items-center gap-3 flex-wrap">
+                            <div className="p-3 border-b border-border/30 bg-muted/10 flex items-center gap-3 flex-wrap">
                                 <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                                     <Terminal className="w-3.5 h-3.5" />
                                     Agent Internals
@@ -364,14 +364,14 @@ export function OpenClawSystemControl() {
                                 <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest">
                                     <span className={cn(
                                         "w-1.5 h-1.5 rounded-full",
-                                        isLive ? "bg-emerald-500 animate-pulse" : "bg-white/20"
+                                        isLive ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground/30"
                                     )} />
-                                    <span className={isLive ? "text-primary" : "text-white/30"}>
+                                    <span className={isLive ? "text-primary" : "text-muted-foreground/40"}>
                                         {isLive ? 'Live' : 'Idle'}
                                     </span>
                                 </div>
 
-                                <span className="text-white/20 text-[9px]">|</span>
+                                <span className="text-muted-foreground/30 text-[9px]">|</span>
 
                                 {/* Level filter */}
                                 <div className="flex items-center gap-1">
@@ -383,9 +383,9 @@ export function OpenClawSystemControl() {
                                                 "px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider transition-all",
                                                 levelFilter === lvl
                                                     ? lvl === 'ALL'
-                                                        ? 'bg-white/10 text-white'
-                                                        : (LEVEL_STYLES[lvl]?.badge ?? 'bg-white/10 text-white')
-                                                    : 'text-white/30 hover:text-white/60'
+                                                        ? 'bg-foreground/10 text-foreground'
+                                                        : (LEVEL_STYLES[lvl]?.badge ?? 'bg-foreground/10 text-foreground')
+                                                    : 'text-muted-foreground/40 hover:text-muted-foreground/70'
                                             )}
                                         >
                                             {lvl}
@@ -393,26 +393,26 @@ export function OpenClawSystemControl() {
                                     ))}
                                 </div>
 
-                                <span className="text-white/20 text-[9px]">|</span>
+                                <span className="text-muted-foreground/30 text-[9px]">|</span>
 
                                 {/* Search */}
                                 <div className="relative flex items-center flex-1 min-w-[120px] max-w-[220px]">
-                                    <Search className="absolute left-2 w-3 h-3 text-white/30" />
+                                    <Search className="absolute left-2 w-3 h-3 text-muted-foreground/40" />
                                     <input
                                         value={filter}
                                         onChange={e => setFilter(e.target.value)}
                                         placeholder="Filter logs…"
-                                        className="w-full bg-white/5 border border-border/40 rounded-lg pl-7 pr-7 py-1 text-[10px] font-mono text-gray-300 placeholder-white/20 focus:outline-none focus:border-primary/40"
+                                        className="w-full bg-muted/30 border border-border/40 rounded-lg pl-7 pr-7 py-1 text-[10px] font-mono text-foreground placeholder-muted-foreground/40 focus:outline-none focus:border-primary/40"
                                     />
                                     {filter && (
-                                        <button onClick={() => setFilter('')} className="absolute right-2 text-white/30 hover:text-white/60">
+                                        <button onClick={() => setFilter('')} className="absolute right-2 text-muted-foreground/40 hover:text-muted-foreground/70">
                                             <X className="w-3 h-3" />
                                         </button>
                                     )}
                                 </div>
 
                                 {/* Log count */}
-                                <span className="text-[9px] text-white/30 font-mono ml-auto">
+                                <span className="text-[9px] text-muted-foreground/40 font-mono ml-auto">
                                     {filteredLogs.length.toLocaleString()} / {logs.length.toLocaleString()} lines
                                 </span>
 
@@ -422,7 +422,7 @@ export function OpenClawSystemControl() {
                                     title={autoScroll ? 'Auto-scroll ON — click to disable' : 'Auto-scroll OFF — click to enable'}
                                     className={cn(
                                         "p-1.5 rounded-lg transition-all",
-                                        autoScroll ? "bg-primary/20 text-primary" : "text-white/30 hover:text-white/60"
+                                        autoScroll ? "bg-primary/20 text-primary" : "text-muted-foreground/40 hover:text-muted-foreground/70"
                                     )}
                                 >
                                     {autoScroll ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
@@ -430,21 +430,21 @@ export function OpenClawSystemControl() {
                                 <button
                                     onClick={handleCopyLogs}
                                     title="Copy all logs"
-                                    className="p-1.5 rounded-lg text-white/30 hover:text-white/60 transition-all"
+                                    className="p-1.5 rounded-lg text-muted-foreground/40 hover:text-muted-foreground/70 transition-all"
                                 >
                                     <Copy className="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                     onClick={fetchLogHistory}
                                     title="Reload history"
-                                    className="p-1.5 rounded-lg text-white/30 hover:text-white/60 transition-all"
+                                    className="p-1.5 rounded-lg text-muted-foreground/40 hover:text-muted-foreground/70 transition-all"
                                 >
                                     <RefreshCw className="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                     onClick={() => setLogs([])}
                                     title="Clear logs"
-                                    className="p-1.5 rounded-lg text-white/30 hover:text-red-400 transition-all"
+                                    className="p-1.5 rounded-lg text-muted-foreground/40 hover:text-red-400 transition-all"
                                 >
                                     <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -516,7 +516,7 @@ export function OpenClawSystemControl() {
                                     </p>
                                     <button
                                         onClick={handleUpdate}
-                                        className="w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest bg-white/5 border border-border/40 hover:bg-white/10 transition-all flex items-center justify-center gap-2"
+                                        className="w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest bg-muted/30 border border-border/40 hover:bg-muted/50 transition-all flex items-center justify-center gap-2"
                                     >
                                         <Binary className="w-4 h-4" />
                                         Run Update &amp; Rebuild

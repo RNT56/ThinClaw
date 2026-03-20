@@ -609,6 +609,77 @@ pub async fn download_hf_model_files(
     Ok(dest_dir.to_string_lossy().to_string())
 }
 
+/// Discover the embedding dimension of a HuggingFace model by fetching its
+/// `config.json` from the API and extracting `hidden_size`, `d_model`, or
+/// `embedding_dim`.
+///
+/// Returns `None` for GGUF single-file models or repos without a `config.json`.
+/// This is used by the onboarding wizard to pre-configure the vector store
+/// dimension *before* the embedding server starts, avoiding a wasteful
+/// create-then-destroy cycle on first boot.
+#[tauri::command]
+#[specta::specta]
+pub async fn discover_embedding_dimension(
+    app: AppHandle,
+    repo_id: String,
+) -> Result<Option<u32>, String> {
+    let client = build_hf_client(&app).await?;
+
+    // Fetch config.json from the HF Hub raw file API
+    let url = format!(
+        "https://huggingface.co/{}/raw/main/config.json",
+        repo_id
+    );
+
+    let response = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            println!("[hf_hub] discover_embedding_dimension: HTTP error for {}: {}", repo_id, e);
+            return Ok(None); // Not fatal — model may not have config.json
+        }
+    };
+
+    if !response.status().is_success() {
+        // 404 is expected for GGUF repos or repos without config.json
+        println!(
+            "[hf_hub] discover_embedding_dimension: {} → {} (no config.json)",
+            repo_id,
+            response.status()
+        );
+        return Ok(None);
+    }
+
+    let config: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse config.json for {}: {}", repo_id, e))?;
+
+    // Try the common keys in priority order:
+    //   hidden_size — most common (BERT, Nomic, BGE, GTE, etc.)
+    //   d_model     — used by some sentence-transformers
+    //   embedding_dim — occasionally used
+    let dim = config
+        .get("hidden_size")
+        .or_else(|| config.get("d_model"))
+        .or_else(|| config.get("embedding_dim"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    if let Some(d) = dim {
+        println!(
+            "[hf_hub] discover_embedding_dimension: {} → {} dims",
+            repo_id, d
+        );
+    } else {
+        println!(
+            "[hf_hub] discover_embedding_dimension: {} → no dimension found in config.json",
+            repo_id
+        );
+    }
+
+    Ok(dim)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

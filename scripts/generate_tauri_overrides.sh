@@ -29,8 +29,7 @@ case "$ENGINE" in
       "bin/whisper",
       "bin/whisper-server",
       "bin/sd",
-      "bin/tts",
-      "bin/node"
+      "bin/tts"
     ],
     "resources": [
       "bin/*.dylib",
@@ -43,7 +42,7 @@ EOF
     ;;
 
   mlx|vllm)
-    # Python-based engines — no llama-server needed, but bundle uv + node
+    # Python-based engines — no llama-server needed, but bundle uv
     cat > backend/tauri.override.json <<'EOF'
 {
   "bundle": {
@@ -51,8 +50,7 @@ EOF
       "bin/uv",
       "bin/whisper",
       "bin/whisper-server",
-      "bin/tts",
-      "bin/node"
+      "bin/tts"
     ],
     "resources": [
       "bin/libwhisper*.dylib",
@@ -71,8 +69,7 @@ EOF
     "externalBin": [
       "bin/whisper",
       "bin/whisper-server",
-      "bin/tts",
-      "bin/node"
+      "bin/tts"
     ],
     "resources": [
       "bin/libwhisper*.dylib",
@@ -88,9 +85,7 @@ EOF
     cat > backend/tauri.override.json <<'EOF'
 {
   "bundle": {
-    "externalBin": [
-      "bin/node"
-    ],
+    "externalBin": [],
     "resources": [
       "resources/chromium"
     ]

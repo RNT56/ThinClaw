@@ -119,6 +119,14 @@ async fn run_mflux_inference(
 
     // Detect model type from path for mflux CLI command selection
     let lower_model = model_path.to_lowercase();
+
+    // Detect Flux variant: "dev" uses a different model config than "schnell"
+    let flux_alias = if lower_model.contains("dev") {
+        "dev"
+    } else {
+        "schnell"
+    };
+
     let quantize_bits = if lower_model.contains("4bit") || lower_model.contains("q4") {
         4
     } else if lower_model.contains("8bit") || lower_model.contains("q8") {
@@ -129,19 +137,22 @@ async fn run_mflux_inference(
 
     // Create a temporary Python script to run mflux
     // This is more reliable than CLI because we can pass the model path directly
+    // NOTE: The prompt is passed via SCRAPPY_PROMPT env var to avoid injection issues
+    // with triple-quote strings in Python.
     let script_content = format!(
         r#"
-import sys
+import sys, os
 try:
     from mflux import Flux1
     model = Flux1(
-        model_config=Flux1.ModelConfig.from_alias("schnell"),
+        model_config=Flux1.ModelConfig.from_alias("{flux_alias}"),
         quantize={quantize},
         local_path="{model_path}" if "{model_path}" != "" else None,
     )
+    prompt_text = os.environ.get("SCRAPPY_PROMPT", "")
     image = model.generate_image(
         seed={seed},
-        prompt='''{prompt}''',
+        prompt=prompt_text,
         width={width},
         height={height},
         num_inference_steps={steps},
@@ -158,9 +169,9 @@ except Exception as e:
         } else {
             "None".to_string()
         },
+        flux_alias = flux_alias,
         model_path = model_path.replace('\\', "\\\\").replace('"', "\\\""),
         seed = seed,
-        prompt = params.prompt.replace('\'', "\\'").replace('\\', "\\\\"),
         width = width,
         height = height,
         steps = steps,
@@ -213,6 +224,7 @@ except Exception as e:
         .shell()
         .command(python_path.to_string_lossy().as_ref())
         .args([&script_path])
+        .env("SCRAPPY_PROMPT", &params.prompt)
         .spawn()
         .map_err(|e| format!("Failed to spawn mflux: {}", e))?;
 
@@ -511,7 +523,7 @@ async fn run_inference(
 
     let find_standard_fallback = |category: &str, keyword: &str| -> Option<String> {
         if let Ok(app_dir) = app.path().app_data_dir() {
-            let standard_dir = app_dir.join("models").join("standard").join(category);
+            let standard_dir = app_dir.join("models").join("Diffusion").join("standard").join(category);
             if let Ok(entries) = std::fs::read_dir(standard_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -677,9 +689,11 @@ async fn run_inference(
                 println!("[image_gen] {}", text);
 
                 // Detect progress bars: |====>   | 28/795
-                if let Some(caps) = regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)")
-                    .unwrap()
-                    .captures(&text)
+                static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                let re = PROGRESS_RE.get_or_init(|| {
+                    regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap()
+                });
+                if let Some(caps) = re.captures(&text)
                 {
                     let current = caps[2].parse::<f32>().unwrap_or(0.0);
                     let total = caps[3].parse::<f32>().unwrap_or(1.0);
@@ -777,7 +791,6 @@ async fn run_inference(
     )
     .ok();
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     Ok(ImageResponse {
         id,
@@ -826,17 +839,23 @@ pub async fn generate_image(
 
     // Stop chat server to free GPU memory for heavy Flux models
     // This prevents "CPU backend" fallback and "Black Screen" GPU crashes
-    println!("[image_gen] Stopping chat server to free VRAM...");
-    app.emit("image_gen_progress", serde_json::json!({"stage": "Memory Optimization", "progress": 0.01, "text": "Optimizing memory..."}).to_string()).ok();
+    let chat_was_running = state.get_chat_config().is_some();
+    if chat_was_running {
+        println!("[image_gen] Stopping chat server to free VRAM...");
+        app.emit("image_gen_progress", serde_json::json!({"stage": "Memory Optimization", "progress": 0.01, "text": "Optimizing memory..."}).to_string()).ok();
 
-    if let Err(e) = state.stop_chat_server() {
-        println!("[image_gen] Warning: Failed to stop chat server: {}", e);
+        if let Err(e) = state.stop_chat_server() {
+            println!("[image_gen] Warning: Failed to stop chat server: {}", e);
+        }
     }
 
     // Explicitly emit progress to UI to ensure it knows we are working
     app.emit("image_gen_progress", serde_json::json!({"stage": "Initializing", "progress": 0.03, "text": "Starting engine..."}).to_string()).ok();
 
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    // Only wait for GPU memory release if we actually stopped a chat server
+    if chat_was_running {
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    }
 
     // Route to the correct inference backend based on engine
     #[cfg(feature = "mlx")]

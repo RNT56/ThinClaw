@@ -37,6 +37,9 @@ static LLM_TOKEN_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ]
 });
 
+/// Collapse runs of 3+ newlines into 2 — compiled once, used on every call.
+static NEWLINE_COLLAPSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+
 /// Strip leaked LLM template tokens from text before it reaches the UI.
 ///
 /// Applied to all assistant text (deltas, snapshots, finals) before rendering.
@@ -47,8 +50,7 @@ pub fn strip_llm_tokens(text: &str) -> String {
         result = pattern.replace_all(&result, "").to_string();
     }
     // Collapse runs of 3+ newlines into 2
-    let collapse = Regex::new(r"\n{3,}").unwrap();
-    result = collapse.replace_all(&result, "\n\n").to_string();
+    result = NEWLINE_COLLAPSE.replace_all(&result, "\n\n").to_string();
     result.trim().to_string()
 }
 

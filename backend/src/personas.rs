@@ -30,6 +30,7 @@ pub fn get_persona_instructions(name: &str) -> &'static str {
     PERSONAS
         .iter()
         .find(|p| p.name == name)
+        .or_else(|| PERSONAS.first())
         .map(|p| p.instructions)
-        .unwrap_or(PERSONAS[0].instructions)
+        .unwrap_or("You are a helpful AI assistant.")
 }

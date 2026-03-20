@@ -28,12 +28,12 @@ function ScrapingStreamWindow({ progress }: { progress: ScrapingProgress | null 
             initial={{ opacity: 0, height: 0, marginTop: 0 }}
             animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
             exit={{ opacity: 0, height: 0, marginTop: 0 }}
-            className="w-full max-w-md overflow-hidden rounded-xl border border-primary/10 bg-black/40 backdrop-blur-sm"
+            className="w-full max-w-md overflow-hidden rounded-xl border border-border/30 bg-muted/30 backdrop-blur-sm"
         >
-            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-white/5">
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/20 bg-muted/20">
                 <div className="flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                    <span className="text-[10px] font-medium text-green-400/90 uppercase tracking-wider">
+                    <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                    <span className="text-[10px] font-medium text-primary/90 uppercase tracking-wider">
                         Live Read
                     </span>
                 </div>
@@ -43,7 +43,7 @@ function ScrapingStreamWindow({ progress }: { progress: ScrapingProgress | null 
             </div>
 
             <div className="relative h-24 overflow-hidden p-3 font-mono text-[10px] leading-relaxed text-muted-foreground/80">
-                <div className="absolute inset-0 bg-gradient-to-b from-black/10 via-transparent to-black/80 z-10 pointer-events-none" />
+                <div className="absolute inset-0 bg-gradient-to-b from-background/40 via-transparent to-background/90 z-10 pointer-events-none" />
 
                 <motion.div
                     key={progress.url}

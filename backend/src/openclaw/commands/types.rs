@@ -36,7 +36,6 @@ pub struct OpenClawStatus {
     pub has_groq_key: bool,
     pub groq_granted: bool,
     pub custom_secrets: Vec<CustomSecret>,
-    pub node_host_enabled: bool,
     pub allow_local_tools: bool,
     pub workspace_mode: String,
     pub workspace_root: Option<String>,

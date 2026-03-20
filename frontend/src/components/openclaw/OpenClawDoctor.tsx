@@ -11,7 +11,7 @@ const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle2; color: string; 
     pass: { icon: CheckCircle2, color: 'text-primary', bg: 'bg-emerald-500/10 border-emerald-500/30' },
     fail: { icon: XCircle, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/30' },
     warn: { icon: AlertTriangle, color: 'text-muted-foreground', bg: 'bg-amber-500/10 border-amber-500/30' },
-    skip: { icon: MinusCircle, color: 'text-muted-foreground/60', bg: 'bg-white/5 border-border/40' },
+    skip: { icon: MinusCircle, color: 'text-muted-foreground/60', bg: 'bg-muted/30 border-border/40' },
 };
 
 const CHECK_ICONS: Record<string, typeof Server> = {
@@ -57,7 +57,7 @@ export function OpenClawDoctor() {
                             <Stethoscope className="w-4.5 h-4.5 text-rose-400" />
                         </div>
                         <div>
-                            <h2 className="text-base font-semibold text-zinc-100">System Doctor</h2>
+                            <h2 className="text-base font-semibold text-foreground">System Doctor</h2>
                             <p className="text-xs text-muted-foreground/60">
                                 {lastRun ? `Last run: ${lastRun.toLocaleTimeString()}` : 'Not yet run'}
                             </p>
@@ -66,7 +66,7 @@ export function OpenClawDoctor() {
                     <button
                         onClick={runDiagnostics}
                         disabled={loading}
-                        className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-medium hover:bg-rose-500/20 disabled:opacity-50 transition-all flex items-center gap-1.5"
+                        className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs font-medium hover:bg-rose-500/20 disabled:opacity-50 transition-all flex items-center gap-1.5"
                     >
                         <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
                         {loading ? 'Running...' : 'Re-run'}
@@ -78,11 +78,11 @@ export function OpenClawDoctor() {
                     <motion.div
                         initial={{ opacity: 0, y: -10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] mb-2"
+                        className="p-3 rounded-xl bg-muted/10 border border-border/30 mb-2"
                     >
                         <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-4">
-                                <span className="text-2xl font-bold text-zinc-100">{healthPercent}%</span>
+                                <span className="text-2xl font-bold text-foreground">{healthPercent}%</span>
                                 <span className="text-xs text-muted-foreground/60 uppercase tracking-wider">System Health</span>
                             </div>
                             <div className="flex items-center gap-3 text-xs">
@@ -91,7 +91,7 @@ export function OpenClawDoctor() {
                                 <span className="text-muted-foreground/60">— {diagnostics.skipped}</span>
                             </div>
                         </div>
-                        <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                        <div className="h-2 bg-muted/30 rounded-full overflow-hidden">
                             <motion.div
                                 initial={{ width: 0 }}
                                 animate={{ width: `${healthPercent}%` }}
@@ -130,7 +130,7 @@ export function OpenClawDoctor() {
                                     <CheckIcon className={`w-4 h-4 ${cfg.color} flex-shrink-0`} />
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2">
-                                            <span className="text-sm font-medium text-zinc-200">{check.name}</span>
+                                            <span className="text-sm font-medium text-foreground">{check.name}</span>
                                             <StatusIcon className={`w-3.5 h-3.5 ${cfg.color}`} />
                                         </div>
                                         <p className="text-xs text-muted-foreground/60 mt-0.5">{check.detail}</p>

@@ -2,11 +2,13 @@ use crate::inference::stt::SttRequest;
 use crate::inference::AudioFormat;
 use crate::inference::InferenceRouter;
 use crate::sidecar::SidecarManager;
+#[cfg(not(feature = "mlx"))]
 use std::io::Write;
 use tauri::AppHandle;
 #[cfg(not(feature = "mlx"))]
 use tauri::Manager;
 use tauri::State;
+#[cfg(not(feature = "mlx"))]
 use tempfile::NamedTempFile;
 
 #[tauri::command]
@@ -53,13 +55,22 @@ pub async fn transcribe_audio(
     #[allow(unused_variables)]
     let model_path = state.get_stt_model().ok_or("STT Model not selected. Please select a Whisper model in Settings, or enable a cloud STT backend.")?;
 
-    // 2. Write audio to temp file (needed for CLI fallback)
-    let mut temp_file =
-        NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
-    temp_file
-        .write_all(&audio_bytes)
-        .map_err(|e| format!("Failed to write audio: {}", e))?;
-    let _temp_path = temp_file.path().to_string_lossy().to_string();
+    // 2. Write audio to temp file (only needed for CLI fallback — not available in MLX builds)
+    // IMPORTANT: Keep the NamedTempFile alive (_temp_file) so the file isn't
+    // deleted before whisper CLI reads it. The file is deleted on drop.
+    #[cfg(not(feature = "mlx"))]
+    let (_temp_file, _temp_path) = {
+        let mut temp_file =
+            NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
+        temp_file
+            .write_all(&audio_bytes)
+            .map_err(|e| format!("Failed to write audio: {}", e))?;
+        temp_file
+            .flush()
+            .map_err(|e| format!("Failed to flush audio temp file: {}", e))?;
+        let path = temp_file.path().to_string_lossy().to_string();
+        (temp_file, path)
+    };
 
     // CHECK FOR RUNNING SERVER FIRST
     let server_config = {

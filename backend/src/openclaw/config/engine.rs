@@ -315,30 +315,6 @@ impl OpenClawConfig {
              "model": agent_model,
         }));
 
-        // Security Policy (Spec Section 7)
-        let tools_policy = if self.node_host_enabled {
-            // Host Enabled: Allow UI/Automation
-            ToolsConfig {
-                allow: Some(vec![
-                    "group:ui".into(),
-                    "group:fs".into(),
-                    "group:runtime".into(),
-                    "group:messaging".into(),
-                ]),
-                deny: None,
-            }
-        } else {
-            // Host Disabled: Safe by default
-            ToolsConfig {
-                allow: Some(vec![
-                    "group:fs".into(),
-                    "group:runtime".into(),
-                    "group:messaging".into(),
-                ]),
-                // Explicitly deny UI and System automation if host is off
-                deny: Some(vec!["group:ui".into(), "group:system".into()]),
-            }
-        };
 
         OpenClawEngineConfig {
             gateway: GatewayConfig {
@@ -369,7 +345,6 @@ impl OpenClawConfig {
                 slack: slack.unwrap_or_default(),
                 telegram: telegram.unwrap_or_default(),
             },
-            tools: tools_policy,
             meta: MetaConfig {
                 last_touched_version: OPENCLAW_VERSION.into(),
                 last_touched_at: chrono::Utc::now().to_rfc3339(),
@@ -617,14 +592,6 @@ impl OpenClawConfig {
                 self.enabled_cloud_providers.join(","),
             ),
             ("MOLTBOT_GATEWAY_TOKEN".into(), self.auth_token.clone()),
-            (
-                "OPENCLAW_NODE_HOST_ENABLED".into(),
-                self.node_host_enabled.to_string(),
-            ),
-            (
-                "MOLTBOT_NODE_HOST_ENABLED".into(),
-                self.node_host_enabled.to_string(),
-            ),
             (
                 "OPENCLAW_LOCAL_INFERENCE_ENABLED".into(),
                 self.local_inference_enabled.to_string(),

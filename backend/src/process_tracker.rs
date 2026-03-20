@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChildProcess {
@@ -75,12 +75,12 @@ impl ProcessTracker {
     fn kill_processes(&self, procs: Vec<ChildProcess>) {
         // Create system object once
         let mut system = System::new_all();
-        system.refresh_processes();
+        system.refresh_processes(ProcessesToUpdate::All, true);
 
         for proc in procs {
             let sys_pid = Pid::from_u32(proc.pid);
             if let Some(process) = system.process(sys_pid) {
-                let proc_name = process.name();
+                let proc_name = process.name().to_string_lossy();
                 // Verify name
                 if proc_name.to_lowercase().contains(&proc.name.to_lowercase()) {
                     println!(

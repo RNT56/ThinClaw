@@ -170,12 +170,12 @@ function DbFilesTab() {
     return (
         <div className="flex-1 flex overflow-hidden">
             {/* Sidebar */}
-            <div className="w-64 border-r border-white/5 flex flex-col bg-black/10 shrink-0">
-                <div className="p-4 border-b border-white/5 space-y-3">
+            <div className="w-64 border-r border-border/30 flex flex-col bg-muted/10 shrink-0">
+                <div className="p-4 border-b border-border/30 space-y-3">
                     <div className="flex items-center gap-2">
                         <Database className="w-4 h-4 text-primary/70" />
                         <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">DB Workspace</span>
-                        <span className="ml-auto text-[10px] font-mono bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">{files.length}</span>
+                        <span className="ml-auto text-[10px] font-mono bg-muted/30 px-1.5 py-0.5 rounded text-muted-foreground">{files.length}</span>
                     </div>
                     <div className="relative">
                         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
@@ -184,7 +184,7 @@ function DbFilesTab() {
                             placeholder="Filter files..."
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-8 pr-3 py-1.5 bg-white/5 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-primary/40 outline-none"
+                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-primary/40 outline-none"
                         />
                     </div>
                 </div>
@@ -197,7 +197,7 @@ function DbFilesTab() {
                                 "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-medium transition-all group text-left",
                                 activeFile === file
                                     ? "bg-primary/10 text-primary border border-primary/20"
-                                    : "text-muted-foreground hover:bg-white/5 hover:text-foreground border border-transparent"
+                                    : "text-muted-foreground hover:bg-muted/30 hover:text-foreground border border-transparent"
                             )}>
                             <FileText className="w-3.5 h-3.5 shrink-0" />
                             <span className="truncate flex-1">{file}</span>
@@ -209,21 +209,21 @@ function DbFilesTab() {
                     {dailyFiles.length > 0 && (
                         <div className="mt-1.5">
                             <button onClick={() => setMemoriesExpanded(!memoriesExpanded)}
-                                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-bold text-muted-foreground hover:bg-white/5 hover:text-foreground transition-all text-left uppercase tracking-tighter">
+                                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-bold text-muted-foreground hover:bg-muted/30 hover:text-foreground transition-all text-left uppercase tracking-tighter">
                                 {memoriesExpanded ? <FolderOpen className="w-3.5 h-3.5 text-blue-400" /> : <Folder className="w-3.5 h-3.5 text-blue-400/60" />}
                                 <span className="flex-1">Daily Logs</span>
                                 <span className="text-[9px] font-mono bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded">{dailyFiles.length}</span>
                                 {memoriesExpanded ? <ChevronDown className="w-3 h-3 opacity-40" /> : <ChevronRight className="w-3 h-3 opacity-40" />}
                             </button>
                             {memoriesExpanded && (
-                                <div className="ml-2 pl-2 border-l border-white/5 space-y-0.5 mt-0.5">
+                                <div className="ml-2 pl-2 border-l border-border/30 space-y-0.5 mt-0.5">
                                     {dailyFiles.map(file => (
                                         <button key={file} onClick={() => handleSelectFile(file)}
                                             className={cn(
                                                 "w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-medium transition-all text-left",
                                                 activeFile === file
                                                     ? "bg-blue-500/10 text-blue-400 border border-blue-500/20"
-                                                    : "text-muted-foreground hover:bg-white/5 hover:text-foreground border border-transparent"
+                                                    : "text-muted-foreground hover:bg-muted/30 hover:text-foreground border border-transparent"
                                             )}>
                                             <div className="w-1 h-1 rounded-full bg-blue-500/40" />
                                             <span className="truncate flex-1">{file.replace('daily/', '')}</span>
@@ -241,7 +241,7 @@ function DbFilesTab() {
                                 "w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[11px] font-medium transition-all text-left",
                                 activeFile === file
                                     ? "bg-primary/10 text-primary border border-primary/20"
-                                    : "text-muted-foreground hover:bg-white/5 hover:text-foreground border border-transparent"
+                                    : "text-muted-foreground hover:bg-muted/30 hover:text-foreground border border-transparent"
                             )}>
                             <FileCode className="w-3.5 h-3.5 shrink-0" />
                             <span className="truncate flex-1">{file}</span>
@@ -253,9 +253,9 @@ function DbFilesTab() {
                     )}
                 </div>
 
-                <div className="p-3 border-t border-white/5">
+                <div className="p-3 border-t border-border/30">
                     <button onClick={() => fetchFiles()}
-                        className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] font-bold uppercase tracking-widest transition-all">
+                        className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg bg-muted/30 hover:bg-muted/50 text-[10px] font-bold uppercase tracking-widest transition-all">
                         <RefreshCw className={cn("w-3 h-3", isLoading && "animate-spin")} />
                         Sync DB
                     </button>
@@ -263,10 +263,10 @@ function DbFilesTab() {
             </div>
 
             {/* Editor */}
-            <div className="flex-1 flex flex-col bg-[#0D0D0E]">
+            <div className="flex-1 flex flex-col bg-card">
                 {activeFile ? (
                     <>
-                        <div className="p-4 flex items-center justify-between border-b border-white/5 bg-black/20">
+                        <div className="p-4 flex items-center justify-between border-b border-border/30 bg-muted/10">
                             <div className="flex items-center gap-3">
                                 <div className="p-1.5 bg-primary/10 rounded"><FileText className="w-4 h-4 text-primary" /></div>
                                 <div>
@@ -296,7 +296,7 @@ function DbFilesTab() {
                                 )}
                                 <button onClick={handleSave} disabled={!hasChanges || isSaving}
                                     className={cn("flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
-                                        hasChanges ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90" : "bg-white/5 text-muted-foreground cursor-not-allowed")}>
+                                        hasChanges ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90" : "bg-muted/30 text-muted-foreground cursor-not-allowed")}>
                                     {isSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                                     {isSaving ? 'Saving...' : 'Commit'}
                                 </button>
@@ -304,7 +304,7 @@ function DbFilesTab() {
                         </div>
                         <div className="flex-1 relative">
                             {isLoading ? (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-10">
+                                <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm z-10">
                                     <RefreshCw className="w-8 h-8 text-primary animate-spin" />
                                 </div>
                             ) : (
@@ -313,7 +313,7 @@ function DbFilesTab() {
                                     placeholder="# Start writing..." spellCheck={false} />
                             )}
                         </div>
-                        <div className="px-6 py-3 border-t border-white/5 flex items-center gap-3 bg-black/20">
+                        <div className="px-6 py-3 border-t border-border/30 flex items-center gap-3 bg-muted/10">
                             <Info className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                             <span className="text-[10px] text-muted-foreground">Changes will be live on next agent turn — no restart needed.</span>
                         </div>
@@ -334,7 +334,7 @@ function DbFilesTab() {
                                 { name: 'USER.md', desc: 'What the agent knows about you', color: 'text-primary' },
                                 { name: 'MEMORY.md', desc: 'Long-term episodic memory store', color: 'text-primary' },
                             ].map(f => (
-                                <div key={f.name} className="p-3 rounded-xl border border-white/5 bg-white/[0.02]">
+                                <div key={f.name} className="p-3 rounded-xl border border-border/30 bg-muted/10">
                                     <h3 className={cn("text-[10px] font-bold uppercase tracking-widest mb-1", f.color)}>{f.name}</h3>
                                     <p className="text-[10px] text-muted-foreground">{f.desc}</p>
                                 </div>
@@ -458,7 +458,7 @@ function FileTreeNode({
             <div>
                 <button
                     onClick={() => toggleExpand(node.fullPath)}
-                    className="w-full flex items-center gap-1.5 py-1.5 rounded-lg text-muted-foreground hover:bg-white/5 hover:text-foreground transition-all text-left group"
+                    className="w-full flex items-center gap-1.5 py-1.5 rounded-lg text-muted-foreground hover:bg-muted/30 hover:text-foreground transition-all text-left group"
                     style={{ paddingLeft, paddingRight: 8 }}
                 >
                     {isExpanded
@@ -496,7 +496,7 @@ function FileTreeNode({
     // File node
     return (
         <div
-            className="flex items-center gap-2 py-1.5 rounded-lg text-muted-foreground hover:bg-white/5 hover:text-foreground transition-all group cursor-default"
+            className="flex items-center gap-2 py-1.5 rounded-lg text-muted-foreground hover:bg-muted/30 hover:text-foreground transition-all group cursor-default"
             style={{ paddingLeft: paddingLeft + 16, paddingRight: 8 }}
         >
             {fileIcon(node.name)}
@@ -637,12 +637,12 @@ function LocalFilesTab() {
     return (
         <div className="flex-1 flex overflow-hidden">
             {/* Sidebar — Tree View */}
-            <div className="w-72 border-r border-white/5 flex flex-col bg-black/10 shrink-0">
-                <div className="p-4 border-b border-white/5 space-y-3">
+            <div className="w-72 border-r border-border/30 flex flex-col bg-muted/10 shrink-0">
+                <div className="p-4 border-b border-border/30 space-y-3">
                     <div className="flex items-center gap-2">
                         <HardDrive className="w-4 h-4 text-primary/70" />
                         <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Local Files</span>
-                        <span className="ml-auto text-[10px] font-mono bg-white/5 px-1.5 py-0.5 rounded text-muted-foreground">{files.length}</span>
+                        <span className="ml-auto text-[10px] font-mono bg-muted/30 px-1.5 py-0.5 rounded text-muted-foreground">{files.length}</span>
                     </div>
                     <div className="relative">
                         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
@@ -651,7 +651,7 @@ function LocalFilesTab() {
                             placeholder="Filter files..."
                             value={search}
                             onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-8 pr-3 py-1.5 bg-white/5 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-emerald-500/40 outline-none"
+                            className="w-full pl-8 pr-3 py-1.5 bg-muted/30 border border-border/40 rounded-lg text-xs focus:ring-1 focus:ring-emerald-500/40 outline-none"
                         />
                     </div>
                     {workspacePath && (
@@ -666,11 +666,11 @@ function LocalFilesTab() {
                             Finder
                         </button>
                         <button onClick={expandAll} title="Expand all"
-                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-foreground transition-all">
+                            className="p-1.5 rounded-lg bg-muted/30 hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-all">
                             <ChevronDown className="w-3 h-3" />
                         </button>
                         <button onClick={collapseAll} title="Collapse all"
-                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-foreground transition-all">
+                            className="p-1.5 rounded-lg bg-muted/30 hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-all">
                             <ChevronRight className="w-3 h-3" />
                         </button>
                     </div>
@@ -702,9 +702,9 @@ function LocalFilesTab() {
                     )}
                 </div>
 
-                <div className="p-3 border-t border-white/5">
+                <div className="p-3 border-t border-border/30">
                     <button onClick={fetchFiles}
-                        className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] font-bold uppercase tracking-widest transition-all">
+                        className="w-full flex items-center justify-center gap-2 py-1.5 rounded-lg bg-muted/30 hover:bg-muted/50 text-[10px] font-bold uppercase tracking-widest transition-all">
                         <RefreshCw className={cn("w-3 h-3", isLoading && "animate-spin")} />
                         Refresh
                     </button>
@@ -712,7 +712,7 @@ function LocalFilesTab() {
             </div>
 
             {/* File Detail / Summary */}
-            <div className="flex-1 flex flex-col items-center justify-center p-12 text-center bg-[#0D0D0E]">
+            <div className="flex-1 flex flex-col items-center justify-center p-12 text-center bg-card">
                 {files.length > 0 ? (
                     <div className="w-full max-w-2xl space-y-4">
                         <div className="flex items-center gap-3 mb-6">
@@ -737,7 +737,7 @@ function LocalFilesTab() {
                                         }
                                         setExpandedPaths(next);
                                     }}
-                                    className="p-3 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] hover:border-border/40 transition-all text-left group"
+                                    className="p-3 rounded-xl border border-border/30 bg-muted/10 hover:bg-muted/20 hover:border-border/50 transition-all text-left group"
                                 >
                                     <div className="flex items-center gap-2 mb-1.5">
                                         <Folder className="w-4 h-4 text-muted-foreground/60" />
@@ -757,7 +757,7 @@ function LocalFilesTab() {
                                 <p className="text-[10px] text-muted-foreground/50 font-bold uppercase tracking-widest px-1">Root files</p>
                                 {tree.children.filter(n => !n.isDirectory).map(f => (
                                     <div key={f.fullPath}
-                                        className="flex items-center gap-3 p-3 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] hover:border-border/40 transition-all group">
+                                        className="flex items-center gap-3 p-3 rounded-xl border border-border/30 bg-muted/10 hover:bg-muted/20 hover:border-border/50 transition-all group">
                                         {fileIcon(f.name)}
                                         <div className="flex-1 min-w-0">
                                             <p className="text-xs font-mono truncate text-foreground/80">{f.name}</p>
@@ -791,9 +791,9 @@ function LocalFilesTab() {
                         </div>
                         <div className="space-y-2">
                             <h2 className="text-xl font-bold">No local files yet</h2>
-                            <p className="text-muted-foreground text-sm">When the agent creates files using <code className="text-xs bg-white/10 px-1.5 py-0.5 rounded font-mono">write_file</code>, they'll appear here with a direct Finder link.</p>
+                            <p className="text-muted-foreground text-sm">When the agent creates files using <code className="text-xs bg-muted/30 px-1.5 py-0.5 rounded font-mono">write_file</code>, they'll appear here with a direct Finder link.</p>
                         </div>
-                        <div className="p-4 rounded-xl border border-white/5 bg-white/[0.02] text-left text-xs text-muted-foreground space-y-1">
+                        <div className="p-4 rounded-xl border border-border/30 bg-muted/10 text-left text-xs text-muted-foreground space-y-1">
                             <p className="font-bold text-foreground/60 uppercase tracking-widest text-[10px] mb-2">Try asking the agent:</p>
                             <p>"Create a weekly_report.md in my workspace"</p>
                             <p>"Save a CSV of today's tasks"</p>
@@ -827,7 +827,7 @@ export function OpenClawBrain() {
             className="flex-1 flex flex-col overflow-hidden h-[calc(100vh-100px)]"
         >
             {/* Tab bar */}
-            <div className="flex items-center border-b border-white/5 bg-black/20 px-4 gap-1 shrink-0">
+            <div className="flex items-center border-b border-border/30 bg-muted/10 px-4 gap-1 shrink-0">
                 {([
                     { id: 'db' as const, label: 'Agent Memory', icon: Database, hint: 'DB-backed workspace files (SOUL, MEMORY, etc.)' },
                     { id: 'local' as const, label: 'Local Files', icon: HardDrive, hint: 'Real files in agent_workspace directory' },
@@ -837,7 +837,7 @@ export function OpenClawBrain() {
                             "flex items-center gap-2 px-4 py-3 text-[11px] font-bold uppercase tracking-wider border-b-2 transition-all",
                             activeTab === tab.id
                                 ? "border-primary text-primary"
-                                : "border-transparent text-muted-foreground hover:text-foreground hover:border-white/20"
+                                : "border-transparent text-muted-foreground hover:text-foreground hover:border-border/40"
                         )}>
                         <tab.icon className="w-3.5 h-3.5" />
                         {tab.label}

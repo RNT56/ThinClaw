@@ -1,7 +1,7 @@
 use serde::Serialize;
 use specta::Type;
 use std::sync::{Mutex, OnceLock};
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tauri::command;
 
 static SYS: OnceLock<Mutex<System>> = OnceLock::new();
@@ -9,7 +9,7 @@ static SYS: OnceLock<Mutex<System>> = OnceLock::new();
 fn get_sys() -> &'static Mutex<System> {
     SYS.get_or_init(|| {
         let mut sys = System::new_with_specifics(
-            RefreshKind::new()
+            RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         );
@@ -36,19 +36,19 @@ pub fn get_system_specs() -> SystemSpecs {
     let mut sys = get_sys().lock().unwrap_or_else(|e| e.into_inner());
 
     // Refresh CPU usage
-    sys.refresh_cpu();
+    sys.refresh_cpu_all();
 
     let cpu = sys.cpus().first();
     let cpu_brand = cpu
         .map(|c| c.brand().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
-    let cpu_usage = sys.global_cpu_info().cpu_usage();
+    let cpu_usage = sys.global_cpu_usage();
 
     let platform = System::name().unwrap_or("Unknown".to_string());
 
     // Get cumulative memory of app + sidecars
     let my_pid = sysinfo::get_current_pid().unwrap();
-    sys.refresh_processes();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
 
     let mut total_app_memory = 0.0;
     if let Some(process) = sys.process(my_pid) {

@@ -64,7 +64,10 @@ impl<'a> ToolRouter<'a> {
                     })
                     .unwrap_or_default();
 
-                let script = format!("{}(\"{}\")", name, arg_value.replace("\"", "\\\""));
+                // Escape backslashes first, then double quotes, to prevent Rhai injection.
+                // Order matters: escaping " before \ would break on inputs like: hello\"world
+                let escaped = arg_value.replace('\\', "\\\\").replace('"', "\\\"");
+                let script = format!("{}(\"{}\")", name, escaped);
                 let res = sb
                     .execute(&script)
                     .map_err(|e| format!("Host tool execution failed: {:?}", e))?;
@@ -97,10 +100,12 @@ pub fn summarize_result(mut result: Value, max_chars: usize) -> Value {
         for item in content {
             if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()) {
                 if text.len() > max_chars {
+                    // Find a safe byte boundary to avoid panicking on multi-byte UTF-8
+                    let safe_end = safe_char_boundary(text, max_chars);
                     let truncated = format!(
                         "{}... [Truncated {} chars]",
-                        &text[0..max_chars],
-                        text.len() - max_chars
+                        &text[..safe_end],
+                        text.len() - safe_end
                     );
                     *item.get_mut("text").unwrap() = Value::String(truncated);
                 }
@@ -111,14 +116,29 @@ pub fn summarize_result(mut result: Value, max_chars: usize) -> Value {
 }
 
 /// Generic JSON summarizer for arbitrary structures
+/// Find the largest byte index <= `target` that falls on a UTF-8 char boundary.
+fn safe_char_boundary(s: &str, target: usize) -> usize {
+    if target >= s.len() {
+        return s.len();
+    }
+    // Walk backwards from target to find a valid char boundary
+    let mut idx = target;
+    while !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 pub fn summarize_arbitrary_json(val: Value, max_string_len: usize, max_array_len: usize) -> Value {
     match val {
         Value::String(s) => {
             if s.len() > max_string_len {
+                // Find a safe byte boundary to avoid panicking on multi-byte UTF-8
+                let safe_end = safe_char_boundary(&s, max_string_len);
                 let truncated = format!(
                     "{}... [Truncated {} chars]",
-                    &s[0..max_string_len],
-                    s.len() - max_string_len
+                    &s[..safe_end],
+                    s.len() - safe_end
                 );
                 Value::String(truncated)
             } else {

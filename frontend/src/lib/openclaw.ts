@@ -24,6 +24,13 @@ function safeInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 // Types (matching Rust types from commands.rs)
 // ============================================================================
 
+export interface CustomSecret {
+    id: string;
+    name: string;
+    description: string | null;
+    granted: boolean;
+}
+
 export interface OpenClawStatus {
     engine_running: boolean;
     engine_connected: boolean;
@@ -50,7 +57,7 @@ export interface OpenClawStatus {
     gemini_granted: boolean;
     has_groq_key: boolean;
     groq_granted: boolean;
-    node_host_enabled: boolean;
+    custom_secrets: CustomSecret[];
     allow_local_tools: boolean;
     workspace_mode: string;
     workspace_root: string | null;
@@ -71,6 +78,39 @@ export interface OpenClawStatus {
     custom_llm_enabled: boolean;
     enabled_cloud_providers: string[];
     enabled_cloud_models: Record<string, string[]>;
+    // --- Extended cloud provider status ---
+    has_xai_key: boolean;
+    xai_granted: boolean;
+    has_venice_key: boolean;
+    venice_granted: boolean;
+    has_together_key: boolean;
+    together_granted: boolean;
+    has_moonshot_key: boolean;
+    moonshot_granted: boolean;
+    has_minimax_key: boolean;
+    minimax_granted: boolean;
+    has_nvidia_key: boolean;
+    nvidia_granted: boolean;
+    has_qianfan_key: boolean;
+    qianfan_granted: boolean;
+    has_mistral_key: boolean;
+    mistral_granted: boolean;
+    has_xiaomi_key: boolean;
+    xiaomi_granted: boolean;
+    has_cohere_key: boolean;
+    cohere_granted: boolean;
+    has_voyage_key: boolean;
+    voyage_granted: boolean;
+    has_deepgram_key: boolean;
+    deepgram_granted: boolean;
+    has_elevenlabs_key: boolean;
+    elevenlabs_granted: boolean;
+    has_stability_key: boolean;
+    stability_granted: boolean;
+    has_fal_key: boolean;
+    fal_granted: boolean;
+    has_bedrock_key: boolean;
+    bedrock_granted: boolean;
 }
 
 export interface AgentProfile {
@@ -513,10 +553,6 @@ export async function getOpenClawSkillsStatus(): Promise<OpenClawSkillsStatus> {
 
 export async function toggleOpenClawSkill(key: string, enabled: boolean): Promise<OpenClawRpcResponse> {
     return invoke('openclaw_skills_toggle', { key, enabled });
-}
-
-export async function toggleOpenClawNodeHost(enabled: boolean): Promise<OpenClawRpcResponse> {
-    return invoke('openclaw_toggle_node_host', { enabled });
 }
 
 export async function toggleOpenClawLocalTools(enabled: boolean): Promise<OpenClawRpcResponse> {

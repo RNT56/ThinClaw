@@ -40,6 +40,10 @@ pub async fn openclaw_send_message(
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
+    // Wait for boot inject to complete before processing user messages
+    // to prevent racing with the boot inject task.
+    ironclaw.wait_for_boot_inject().await;
+
     // Set session context BEFORE sending so TauriChannel routes events correctly
     ironclaw.set_session_context(&session_key).await?;
 

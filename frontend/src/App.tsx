@@ -5,7 +5,7 @@ import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { SpotlightBar } from "./components/chat/SpotlightBar";
 import * as openclaw from "./lib/openclaw";
 import { UpdateChecker } from "./components/UpdateChecker";
-import { VoiceWakeOverlay } from "./components/voice/VoiceWakeOverlay";
+
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { ThemeProvider } from "./components/theme-provider";
@@ -111,7 +111,7 @@ function App() {
             )}
             <Toaster closeButton position="top-right" richColors expand={true} />
             <UpdateChecker />
-            <VoiceWakeOverlay />
+
           </ChatProvider>
         </ModelProvider>
       </ConfigProvider>

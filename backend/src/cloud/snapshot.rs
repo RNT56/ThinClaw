@@ -58,7 +58,10 @@ pub async fn create_snapshot(pool: &SqlitePool, output_path: &Path) -> Result<u6
         .map_err(|e| SnapshotError::CheckpointFailed(e.to_string()))?;
 
     // 2. VACUUM INTO — atomic consistent copy
-    let vacuum_sql = format!("VACUUM INTO '{}'", output_path.display());
+    // SQLite doesn't support bound parameters for VACUUM INTO, so we escape
+    // single quotes in the path to prevent accidental SQL injection.
+    let safe_path = output_path.display().to_string().replace('\'', "''");
+    let vacuum_sql = format!("VACUUM INTO '{}'", safe_path);
     sqlx::query(&vacuum_sql)
         .execute(pool)
         .await

@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Wrench, CheckCircle2, AlertTriangle, Zap } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { toast } from "sonner";
-import { useEngineSetup } from "../../hooks/useEngineSetup";
+import { useEngineSetup } from "../../hooks/use-engine-setup";
 
 interface EngineInfo {
     id: string;

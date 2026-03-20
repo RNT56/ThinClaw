@@ -124,6 +124,9 @@ pub async fn extract_document_content(
         .await
         .map_err(|e| e.to_string())?;
 
+        // Ensure browser is closed on all paths (including errors)
+        // by using a scope guard pattern.
+        let browser_close_result: Result<(), String> = async {
         let _handle = tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
         let page = browser
@@ -134,9 +137,37 @@ pub async fn extract_document_content(
         // Small wait for initial render
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-        if let Some((port, token, _, _)) = sidecar.get_chat_config() {
+        // Resolve the vision-capable chat endpoint.
+        // Priority: 1) resolve_provider (works for any active backend — cloud, MLX, Ollama, llamacpp)
+        //           2) direct sidecar get_chat_config() as legacy fallback
+        let ocr_endpoint: Option<(String, String, String)> = {
+            use tauri::Manager;
+            let config_mgr = app.state::<crate::config::ConfigManager>();
+            let secret_store = app.state::<crate::secret_store::SecretStore>();
+            let engine_manager = app.state::<crate::engine::EngineManager>();
+            let sidecar_state = app.state::<SidecarManager>();
+            let user_config = config_mgr.get_config();
+
+            if let Ok(provider_cfg) = crate::chat::resolve_provider(
+                &user_config,
+                &secret_store,
+                &sidecar_state,
+                &engine_manager,
+            )
+            .await
+            {
+                let url = format!("{}/chat/completions", provider_cfg.base_url);
+                Some((url, provider_cfg.token, provider_cfg.model_name))
+            } else if let Some((port, token, _, _)) = sidecar.get_chat_config() {
+                let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+                Some((url, token, "default".to_string()))
+            } else {
+                None
+            }
+        };
+
+        if let Some((url, token, model_name)) = ocr_endpoint {
             let client = reqwest::Client::new();
-            let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 
             // Extract up to 15 pages via Vision-OCR, with a 2-minute overall timeout
             // to prevent a slow/stuck LLM from blocking the ingestion pipeline.
@@ -171,7 +202,7 @@ pub async fn extract_document_content(
                         let b64 = base64::engine::general_purpose::STANDARD.encode(screenshot);
 
                         let body = serde_json::json!({
-                            "model": "default",
+                            "model": model_name,
                             "messages": [
                                 {
                                     "role": "user",
@@ -219,8 +250,17 @@ pub async fn extract_document_content(
                     );
                 }
             }
+        } else {
+            println!("[rag] WARNING: No vision-capable chat backend available for OCR. PDF will be ingested with text-only extraction. Configure a chat provider in Settings to enable Vision-OCR.");
         }
+        Ok(())
+        }.await;
+
+        // Always close browser, even if OCR errored
         let _ = browser.close().await;
+
+        // Propagate any error from the OCR block
+        browser_close_result?;
     }
 
     // Always generate preview for PDFs (even if not using OCR) if not already existing
@@ -451,6 +491,11 @@ pub async fn ingest_document(
 
         for res in &results {
             if let Err(e) = res {
+                // Roll back both chunks and document to prevent orphans
+                let _ = sqlx::query("DELETE FROM chunks WHERE document_id = ?")
+                    .bind(&doc_id)
+                    .execute(pool.inner())
+                    .await;
                 let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
                     .bind(&doc_id)
                     .execute(pool.inner())
@@ -582,6 +627,11 @@ pub async fn ingest_document(
 
         for res in &results {
             if let Err(e) = res {
+                // Roll back both chunks and document to prevent orphans
+                let _ = sqlx::query("DELETE FROM chunks WHERE document_id = ?")
+                    .bind(&doc_id)
+                    .execute(pool.inner())
+                    .await;
                 let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
                     .bind(&doc_id)
                     .execute(pool.inner())
@@ -694,7 +744,7 @@ pub async fn retrieve_context_internal(
 
     if let Some(pid) = &project_id {
         if is_overview {
-            let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM documents WHERE (project_id = ? OR project_id IS NULL) ORDER BY path ASC")
+            let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM documents WHERE project_id = ? ORDER BY path ASC")
                 .bind(pid)
                 .fetch_all(&pool)
                 .await
@@ -709,7 +759,7 @@ pub async fn retrieve_context_internal(
 
     if let Some(pid) = &project_id {
         let docs: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, path FROM documents WHERE (project_id = ? OR project_id IS NULL)",
+            "SELECT id, path FROM documents WHERE project_id = ?",
         )
         .bind(pid)
         .fetch_all(&pool)
@@ -744,7 +794,9 @@ pub async fn retrieve_context_internal(
 
             let full_text = chunks.join("");
             let safe_text = if full_text.len() > 15000 {
-                format!("{}... (truncated)", &full_text[..15000])
+                let mut end = 15000;
+                while !full_text.is_char_boundary(end) { end -= 1; }
+                format!("{}... (truncated)", &full_text[..end])
             } else {
                 full_text
             };
@@ -859,7 +911,7 @@ pub async fn retrieve_context_internal(
         }
     }
 
-    let fts_query = format!("\"{}\"", query.replace("\"", " "));
+    let fts_query = format!("\"{}\"", query.replace("\"", ""));
     let fts_results: Vec<i64> = {
         // Scope-filter FTS results to match the vector search scopes:
         // project documents + global, or chat documents + global.
@@ -1059,13 +1111,25 @@ pub async fn retrieve_context_internal(
 
     if is_vague && !global_chunks.is_empty() {
         for g_chunk in global_chunks.into_iter().rev().take(3) {
-            if !top_results.iter().any(|r| r.contains(&g_chunk[..50])) {
+            let prefix_end = g_chunk
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i < 50)
+                .last()
+                .unwrap_or(0);
+            if prefix_end == 0 || !top_results.iter().any(|r| r.contains(&g_chunk[..prefix_end])) {
                 top_results.insert(0, g_chunk);
             }
         }
     } else if !global_chunks.is_empty() {
         let first_intro = &global_chunks[0];
-        if !top_results.iter().any(|r| r.contains(&first_intro[..50])) {
+        let prefix_end = first_intro
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i < 50)
+            .last()
+            .unwrap_or(0);
+        if prefix_end == 0 || !top_results.iter().any(|r| r.contains(&first_intro[..prefix_end])) {
             top_results.insert(0, first_intro.clone());
         }
     }

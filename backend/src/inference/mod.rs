@@ -255,6 +255,7 @@ pub async fn get_inference_backends(
 #[tauri::command]
 #[specta::specta]
 pub async fn update_inference_backend(
+    app: tauri::AppHandle,
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
     modality: Modality,
@@ -302,6 +303,16 @@ pub async fn update_inference_backend(
             result.old_embedding_dims,
             result.new_embedding_dims
         );
+        // Notify frontend so the user can re-ingest documents
+        use tauri::Emitter;
+        let _ = app.emit("embedding_dims_changed", serde_json::json!({
+            "old_dims": result.old_embedding_dims,
+            "new_dims": result.new_embedding_dims,
+            "message": format!(
+                "Embedding dimensions changed from {} to {}. Previously ingested documents should be re-imported for best results.",
+                result.old_embedding_dims, result.new_embedding_dims
+            ),
+        }));
     }
 
     Ok(())

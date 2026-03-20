@@ -89,8 +89,7 @@ export function useChat() {
     const isStreaming = activeJob?.isStreaming || false;
     const isThinking = activeJob?.isThinking || false;
 
-    // Track pending optimistic messages (Legacy Ref for compatibility if needed, but currently unused logic removed)
-    const pendingOptimisticMessages = useRef<ExtendedMessage[]>([]);
+
 
     // Refs for stable callbacks
     const messagesRef = useRef(messages);
@@ -293,10 +292,10 @@ export function useChat() {
 
                         // 3. Last Assistant Message Match:
                         // If this is one of the last few messages from DB, and matches role
-                        // increased time buffer to 5 minutes to account for long generations
+                        // IC-011: Tightened from 5 minutes to 30 seconds to prevent false matches
                         if (curr.role === m.role && m.role === 'assistant') {
                             const timeDiff = Math.abs((curr.created_at || 0) - (m.created_at || 0));
-                            return timeDiff < 300000;
+                            return timeDiff < 30000;
                         }
                         return false;
                     });
@@ -432,7 +431,7 @@ export function useChat() {
         };
 
         // Add to pending queue so we can map IDs later
-        pendingOptimisticMessages.current.push(tempUserMsg, tempAssistantMsg);
+        // IC-024: pendingOptimisticMessages ref removed — was populated but never consumed
 
         setDbMessages(prev => [...prev, tempUserMsg, tempAssistantMsg]);
 

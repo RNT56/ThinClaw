@@ -44,15 +44,6 @@ pub enum ChangeType {
     Deleted,
 }
 
-/// Result of a sync cycle.
-#[derive(Debug, Clone, Default)]
-pub struct SyncResult {
-    pub files_uploaded: u32,
-    pub files_deleted: u32,
-    pub bytes_transferred: u64,
-    pub duration_ms: u64,
-    pub errors: Vec<String>,
-}
 
 /// Status of the sync engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +73,10 @@ impl FileTracker {
     }
 
     /// Load known hashes from a previous state (e.g., from manifest).
-    pub fn load_from_hashes(hashes: HashMap<String, String>) -> Self {
+    pub fn load_from_hashes(hashes: HashMap<String, String>, last_sync: Option<DateTime<Utc>>) -> Self {
         Self {
             known_hashes: hashes,
-            last_sync: Some(Utc::now()),
+            last_sync,
         }
     }
 
@@ -202,11 +193,21 @@ impl FileTracker {
 
                 seen.insert(rel_path.clone());
 
-                // Compute SHA-256
-                let data = tokio::fs::read(&path).await.map_err(|e| {
-                    CloudError::Provider(format!("read '{}': {}", path.display(), e))
+                // Skip very large files (likely model files — too costly to hash/sync)
+                const MAX_SYNC_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+                if meta.len() > MAX_SYNC_FILE_SIZE {
+                    debug!(
+                        "[cloud/sync] Skipping large file ({} MB): {}",
+                        meta.len() / (1024 * 1024),
+                        rel_path
+                    );
+                    continue;
+                }
+
+                // Compute SHA-256 using streaming reader (constant memory)
+                let hash = compute_sha256_streaming(&path).await.map_err(|e| {
+                    CloudError::Provider(format!("hash '{}': {}", path.display(), e))
                 })?;
-                let hash = compute_sha256(&data);
 
                 match known.get(&rel_path) {
                     None => {
@@ -240,10 +241,25 @@ impl FileTracker {
     }
 }
 
-fn compute_sha256(data: &[u8]) -> String {
+
+
+/// Streaming SHA-256: reads file in 64 KB chunks to avoid loading large files into RAM.
+async fn compute_sha256_streaming(path: &Path) -> Result<String, std::io::Error> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    let mut buf = vec![0u8; 64 * 1024]; // 64 KB chunks
+
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 // ── SyncEngine ───────────────────────────────────────────────────────────
@@ -297,6 +313,8 @@ impl SyncEngine {
         >,
     ) {
         let mut cancel = self.cancel_rx.clone();
+        let mut consecutive_failures: u32 = 0;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
         info!(
             "[cloud/sync] Starting sync loop (interval: {:?})",
@@ -304,9 +322,19 @@ impl SyncEngine {
         );
 
         loop {
+            // Calculate backoff: on failures, wait longer (double each time, capped at 1 hour)
+            let wait_duration = if consecutive_failures > 0 {
+                let backoff_secs = self.interval.as_secs() * 2u64.pow(consecutive_failures.min(6));
+                let capped = backoff_secs.min(3600); // Max 1 hour
+                warn!("[cloud/sync] Backoff: waiting {}s after {} consecutive failures", capped, consecutive_failures);
+                Duration::from_secs(capped)
+            } else {
+                self.interval
+            };
+
             // Wait for interval or cancellation
             tokio::select! {
-                _ = tokio::time::sleep(self.interval) => {},
+                _ = tokio::time::sleep(wait_duration) => {},
                 _ = cancel.changed() => {
                     if *cancel.borrow() {
                         info!("[cloud/sync] Cancelled");
@@ -325,6 +353,7 @@ impl SyncEngine {
             match tracker.detect_changes(app_data_dir, scan_dirs).await {
                 Ok(changes) if changes.is_empty() => {
                     debug!("[cloud/sync] No changes detected");
+                    consecutive_failures = 0; // Reset on successful detection
                 }
                 Ok(changes) => {
                     let count = changes.len();
@@ -334,14 +363,20 @@ impl SyncEngine {
                         Ok(()) => {
                             tracker.mark_synced(&changes);
                             info!("[cloud/sync] Sync complete ({} files)", count);
+                            consecutive_failures = 0;
                         }
                         Err(e) => {
-                            warn!("[cloud/sync] Sync failed: {}", e);
+                            consecutive_failures += 1;
+                            warn!("[cloud/sync] Sync failed ({}/{}): {}", consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
+                            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                                warn!("[cloud/sync] {} consecutive failures reached, continuing with backoff", MAX_CONSECUTIVE_FAILURES);
+                            }
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("[cloud/sync] Change detection failed: {}", e);
+                    consecutive_failures += 1;
+                    warn!("[cloud/sync] Change detection failed ({}/{}): {}", consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
                 }
             }
         }
@@ -488,13 +523,5 @@ mod tests {
         )
         .await
         .expect("sync loop should have stopped");
-    }
-
-    #[test]
-    fn test_sync_result_default() {
-        let result = SyncResult::default();
-        assert_eq!(result.files_uploaded, 0);
-        assert_eq!(result.files_deleted, 0);
-        assert_eq!(result.bytes_transferred, 0);
     }
 }

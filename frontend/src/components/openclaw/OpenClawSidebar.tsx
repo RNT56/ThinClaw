@@ -213,7 +213,7 @@ export function OpenClawSidebar({
                     onClick={() => sidebarOpen && setIsAgentListOpen(!isAgentListOpen)}
                     className={cn(
                         "w-full flex items-center gap-3 p-2 rounded-xl transition-all border",
-                        isAgentListOpen ? "bg-accent border-primary/20" : "bg-card/50 border-white/5 hover:bg-accent/50",
+                        isAgentListOpen ? "bg-accent border-primary/20" : "bg-card/50 border-border/50 hover:bg-accent/50",
                         !sidebarOpen && "justify-center px-0 border-none bg-transparent"
                     )}
                 >
@@ -240,13 +240,13 @@ export function OpenClawSidebar({
 
                 {/* Dropdown Menu */}
                 {isAgentListOpen && sidebarOpen && (
-                    <div className="absolute top-full left-3 right-3 mt-2 p-1.5 bg-zinc-900 border border-border rounded-xl shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-200">
+                    <div className="absolute top-full left-3 right-3 mt-2 p-1.5 bg-popover border border-border rounded-xl shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-200">
                         <div className="space-y-0.5">
                             <button
                                 onClick={() => handleSwitchAgent('local')}
                                 className={cn(
                                     "w-full flex items-center gap-3 p-2 rounded-lg text-left transition-colors",
-                                    status?.gateway_mode === 'local' ? "bg-primary/10 text-primary" : "hover:bg-white/5 text-muted-foreground hover:text-foreground"
+                                    status?.gateway_mode === 'local' ? "bg-primary/10 text-primary" : "hover:bg-accent text-muted-foreground hover:text-foreground"
                                 )}
                             >
                                 <Laptop className="w-4 h-4" />
@@ -265,7 +265,7 @@ export function OpenClawSidebar({
                                         "w-full flex items-center gap-3 p-2 rounded-lg text-left transition-colors",
                                         status?.gateway_mode === 'remote' && status.remote_url === profile.url
                                             ? "bg-primary/10 text-primary"
-                                            : "hover:bg-white/5 text-muted-foreground hover:text-foreground"
+                                            : "hover:bg-accent text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     <Server className="w-4 h-4" />
@@ -290,7 +290,7 @@ export function OpenClawSidebar({
                                         {!profile.is_default && (
                                             <button
                                                 onClick={(e) => handleSetDefault(e, profile.id)}
-                                                className="p-1 rounded hover:bg-white/10 transition-colors"
+                                                className="p-1 rounded hover:bg-accent transition-colors"
                                                 title="Set as default"
                                             >
                                                 <Star className="w-3 h-3 text-muted-foreground/40 hover:text-amber-400" />
@@ -302,13 +302,13 @@ export function OpenClawSidebar({
                             ))}
                         </div>
 
-                        <div className="mt-2 pt-2 border-t border-white/5">
+                        <div className="mt-2 pt-2 border-t border-border">
                             <button
                                 onClick={() => {
                                     setIsAgentListOpen(false);
                                     onNavigateToSettings('openclaw-gateway');
                                 }}
-                                className="w-full flex items-center gap-2 p-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
+                                className="w-full flex items-center gap-2 p-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
                             >
                                 <Settings className="w-3 h-3" />
                                 Manage Agents

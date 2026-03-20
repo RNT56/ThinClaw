@@ -598,7 +598,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                 <div className="flex justify-end gap-2 mt-2">
                                     <button
                                         onClick={() => { setIsEditing(false); setEditContent(message.content); }}
-                                        className="p-1 px-3 rounded bg-black/20 hover:bg-black/30 text-xs text-white/80 transition-colors"
+                                        className="p-1 px-3 rounded bg-black/20 hover:bg-black/30 text-xs text-primary-foreground/90 transition-colors"
                                     >
                                         Cancel
                                     </button>
@@ -752,8 +752,8 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                 <div className={cn(
                     "flex items-center gap-1 mt-1.5 text-[10px] font-mono transition-all duration-300",
                     message.isStreaming
-                        ? "text-emerald-400/80"
-                        : "text-zinc-500/60"
+                        ? "text-emerald-500/80"
+                        : "text-muted-foreground/60"
                 )}>
                     <Zap className="w-2.5 h-2.5" />
                     <span>{message.tokensPerSec} tok/s</span>

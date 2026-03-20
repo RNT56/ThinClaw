@@ -42,7 +42,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 rand = "0.8"
 futures = "0.3.31"
 tauri-specta = { version = "^2.0.0-rc", features = ["derive", "typescript"] }
@@ -56,7 +56,7 @@ ndarray = "0.16.1"
 image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
 base64 = "0.22.1"
 uuid = { version = "1.19.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
-sysinfo = "0.30"
+sysinfo = "0.38"
 tempfile = "3.24.0"
 scraper = "0.25.0"
 chrono = "0.4.43"
@@ -65,7 +65,7 @@ rig-core = "0.7.0"
 html2text = "0.13.5"
 urlencoding = "2"
 eventsource-stream = "0.2.3"
-chromiumoxide = { version = "0.8.0", features = ["tokio-runtime"] }
+chromiumoxide = { version = "0.9.1" }
 zip = "0.6"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
@@ -73,8 +73,8 @@ tauri-plugin-process = "2"
 
 tokio-stream = "0.1.18"
 sha2 = "0.10"
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tungstenite = "0.26"
 futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
 pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
@@ -97,7 +97,7 @@ ironclaw = { path = "../ironclaw", features = ["desktop"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "2"
+security-framework = "3"
 
 # ---------------------------------------------------------------------------
 # Build Profiles — keep target/ size under control

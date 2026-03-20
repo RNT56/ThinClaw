@@ -77,8 +77,6 @@ pub struct OpenClawIdentity {
     // remote_token → Keychain
     #[serde(default)]
     pub custom_secrets: Vec<CustomSecret>,
-    #[serde(default)]
-    pub node_host_enabled: bool,
     #[serde(default = "default_true")]
     pub allow_local_tools: bool,
     #[serde(default = "default_workspace_mode")]
@@ -159,6 +157,36 @@ pub struct OpenClawIdentity {
     pub bedrock_granted: bool,
 }
 
+// IC-021: Zeroize key material to prevent leaking sensitive data.
+// NOTE: Using an explicit method instead of Drop because OpenClawIdentity
+// is moved/destructured in many places, which is incompatible with Drop.
+impl OpenClawIdentity {
+    /// Zeroize private and public key material in place.
+    ///
+    /// Call this before discarding an identity that held real key data.
+    pub fn zeroize_keys(&mut self) {
+        if let Some(ref mut key) = self.private_key {
+            // SAFETY: we own the String and are about to drop it
+            unsafe {
+                let bytes = key.as_bytes_mut();
+                for b in bytes.iter_mut() {
+                    std::ptr::write_volatile(b, 0);
+                }
+            }
+        }
+        if let Some(ref mut key) = self.public_key {
+            unsafe {
+                let bytes = key.as_bytes_mut();
+                for b in bytes.iter_mut() {
+                    std::ptr::write_volatile(b, 0);
+                }
+            }
+        }
+        self.private_key = None;
+        self.public_key = None;
+    }
+}
+
 /// OpenClaw configuration manager
 #[derive(Clone)]
 pub struct OpenClawConfig {
@@ -199,8 +227,6 @@ pub struct OpenClawConfig {
     pub public_key: Option<String>,
     /// Custom user-added secrets
     pub custom_secrets: Vec<CustomSecret>,
-    /// Node host (OS automation) enabled
-    pub node_host_enabled: bool,
     /// Allow local dev tools (shell, write_file, read_file, etc.)
     pub allow_local_tools: bool,
     /// Workspace mode: "unrestricted", "sandboxed", or "project"
@@ -337,7 +363,8 @@ pub struct SlackConfig {
     pub channels: serde_json::Value,
 }
 
-pub(crate) fn default_dm_policy() -> String {
+// IC-032: Private — only used as serde default, no external callers
+fn default_dm_policy() -> String {
     "pairing".into()
 }
 
@@ -396,13 +423,6 @@ impl Default for TelegramGroupConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ToolsConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deny: Option<Vec<String>>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawEngineConfig {
@@ -412,8 +432,6 @@ pub struct OpenClawEngineConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<ModelsConfig>,
     pub channels: ChannelsConfig,
-    #[serde(default)]
-    pub tools: ToolsConfig,
     #[serde(default)]
     pub meta: MetaConfig,
 }
@@ -437,8 +455,17 @@ impl OpenClawEngineConfig {
         let models_list = local.get("models")?.as_array()?;
         let context_size = models_list.get(0)?.get("contextWindow")?.as_u64()? as u32;
 
-        // Model family is not stored in config JSON, default to chatml
-        Some((port, api_key, context_size, "chatml".into()))
+        // IC-016: Infer model family from config instead of hardcoding
+        let family = if let Some(models_arr) = local.get("models").and_then(|v| v.as_array()) {
+            models_arr.get(0)
+                .and_then(|m| m.get("family"))
+                .and_then(|f| f.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| "chatml".into())
+        } else {
+            "chatml".into()
+        };
+        Some((port, api_key, context_size, family))
     }
 }
 

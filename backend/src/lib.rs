@@ -68,6 +68,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 }
 
 pub mod chat;
+pub mod setup;
 pub mod cloud;
 pub mod config;
 pub mod engine;
@@ -101,20 +102,8 @@ pub mod web_search;
 use sidecar::SidecarManager;
 use std::str::FromStr;
 use std::sync::Arc;
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
-};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-
-/// Managed state for tray icon animation.
-struct TrayState {
-    tray: tauri::tray::TrayIcon,
-    idle_icon: tauri::image::Image<'static>,
-    active_icon: tauri::image::Image<'static>,
-    reset_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
+use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -153,265 +142,7 @@ pub fn run() {
         ironclaw::channels::web::log_layer::init_tracing(broadcaster);
     });
 
-    let specta_builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
-        greet,
-        chat::chat_stream,
-        chat::chat_completion,
-        chat::count_tokens,
-        sidecar::start_chat_server,
-        sidecar::stop_chat_server,
-        sidecar::start_embedding_server,
-        sidecar::start_summarizer_server,
-        sidecar::get_sidecar_status,
-        sidecar::get_chat_server_config,
-        sidecar::start_stt_server,
-        sidecar::start_image_server,
-        sidecar::start_tts_server,
-        sidecar::cancel_generation,
-        tts::tts_synthesize,
-        tts::tts_list_voices,
-        web_search::check_web_search,
-        image_gen::generate_image,
-        stt::transcribe_audio,
-        rag::ingest_document,
-        rag::upload_document,
-        rag::retrieve_context,
-        rag::check_vector_index_integrity,
-        model_manager::list_models,
-        model_manager::download_model,
-        model_manager::cancel_download,
-        model_manager::check_model_path,
-        model_manager::open_models_folder,
-        model_manager::delete_local_model,
-        model_manager::open_url,
-        model_manager::check_missing_standard_assets,
-        model_manager::download_standard_asset,
-        model_manager::open_standard_models_folder,
-        model_manager::get_model_metadata,
-        model_manager::update_remote_model_catalog,
-        model_manager::get_remote_model_catalog,
-        history::get_conversations,
-        config::open_config_file,
-        config::get_user_config,
-        config::update_user_config,
-        config::get_hf_token,
-        history::create_conversation,
-        history::delete_conversation,
-        history::get_messages,
-        history::save_message,
-        history::edit_message,
-        history::update_conversation_title,
-        history::update_conversation_project,
-        history::update_conversations_order,
-        history::delete_all_history,
-        images::upload_image,
-        images::load_image,
-        images::get_image_path,
-        images::open_images_folder,
-        imagine::imagine_generate,
-        imagine::imagine_list_images,
-        imagine::imagine_search_images,
-        imagine::imagine_toggle_favorite,
-        imagine::imagine_delete_image,
-        imagine::imagine_get_stats,
-        system::get_system_specs,
-        projects::create_project,
-        projects::list_projects,
-        projects::delete_project,
-        projects::update_project,
-        projects::update_projects_order,
-        projects::get_project_documents,
-        projects::delete_document,
-        rig_lib::rig_check_web_search,
-        rig_lib::agent_chat,
-        // OpenClaw commands
-        openclaw::commands::openclaw_get_status,
-        openclaw::commands::openclaw_save_anthropic_key,
-        openclaw::commands::openclaw_get_anthropic_key,
-        openclaw::commands::openclaw_save_brave_key,
-        openclaw::commands::openclaw_get_brave_key,
-        openclaw::commands::openclaw_save_openai_key,
-        openclaw::commands::openclaw_get_openai_key,
-        openclaw::commands::openclaw_save_openrouter_key,
-        openclaw::commands::openclaw_get_openrouter_key,
-        openclaw::commands::openclaw_save_gemini_key,
-        openclaw::commands::openclaw_get_gemini_key,
-        openclaw::commands::openclaw_save_groq_key,
-        openclaw::commands::openclaw_get_groq_key,
-        openclaw::commands::openclaw_save_selected_cloud_model,
-        openclaw::commands::select_openclaw_brain,
-        openclaw::commands::openclaw_save_cloud_config,
-        openclaw::commands::openclaw_toggle_secret_access,
-        openclaw::commands::openclaw_save_slack_config,
-        openclaw::commands::openclaw_save_telegram_config,
-        openclaw::commands::openclaw_save_gateway_settings,
-        openclaw::commands::openclaw_add_agent_profile,
-        openclaw::commands::openclaw_remove_agent_profile,
-        openclaw::commands::openclaw_switch_to_profile,
-        openclaw::commands::openclaw_test_connection,
-        openclaw::fleet::openclaw_get_fleet_status,
-        openclaw::fleet::openclaw_broadcast_command,
-        openclaw::commands::openclaw_start_gateway,
-        openclaw::commands::openclaw_stop_gateway,
-        openclaw::commands::openclaw_reload_secrets,
-        openclaw::commands::openclaw_get_sessions,
-        openclaw::commands::openclaw_get_history,
-        openclaw::commands::openclaw_delete_session,
-        openclaw::commands::openclaw_reset_session,
-        openclaw::commands::openclaw_send_message,
-        openclaw::commands::openclaw_subscribe_session,
-        openclaw::commands::openclaw_abort_chat,
-        openclaw::commands::openclaw_resolve_approval,
-        openclaw::commands::openclaw_get_diagnostics,
-        openclaw::commands::openclaw_clear_memory,
-        openclaw::commands::openclaw_get_memory,
-        openclaw::commands::openclaw_get_file,
-        openclaw::commands::openclaw_write_file,
-        openclaw::commands::openclaw_delete_file,
-        openclaw::commands::openclaw_save_memory,
-        openclaw::commands::openclaw_list_workspace_files,
-        openclaw::commands::openclaw_cron_list,
-        openclaw::commands::openclaw_cron_run,
-        openclaw::commands::openclaw_cron_history,
-        openclaw::commands::openclaw_cron_lint,
-        openclaw::commands::openclaw_routine_create,
-        openclaw::commands::openclaw_channels_list,
-        openclaw::commands::openclaw_skills_list,
-        openclaw::commands::openclaw_skills_status,
-        openclaw::commands::openclaw_skills_toggle,
-        openclaw::commands::openclaw_install_skill_repo,
-        openclaw::commands::openclaw_install_skill_deps,
-        openclaw::commands::openclaw_config_schema,
-        openclaw::commands::openclaw_config_get,
-        openclaw::commands::openclaw_config_set,
-        openclaw::commands::openclaw_config_patch,
-        openclaw::commands::openclaw_system_presence,
-        openclaw::commands::openclaw_logs_tail,
-        openclaw::commands::openclaw_update_run,
-        openclaw::commands::openclaw_web_login_whatsapp,
-        openclaw::commands::openclaw_web_login_telegram,
-        openclaw::commands::openclaw_add_custom_secret,
-        openclaw::commands::openclaw_remove_custom_secret,
-        openclaw::commands::openclaw_toggle_custom_secret,
-        openclaw::commands::openclaw_toggle_node_host,
-        openclaw::commands::openclaw_toggle_local_tools,
-        openclaw::commands::openclaw_set_workspace_mode,
-        openclaw::commands::openclaw_toggle_local_inference,
-        openclaw::commands::openclaw_toggle_expose_inference,
-        openclaw::commands::openclaw_set_setup_completed,
-        openclaw::commands::openclaw_toggle_auto_start,
-        openclaw::commands::openclaw_set_dev_mode_wizard,
-        // Autonomy & bootstrap
-        openclaw::commands::openclaw_set_autonomy_mode,
-        openclaw::commands::openclaw_get_autonomy_mode,
-        openclaw::commands::openclaw_set_bootstrap_completed,
-        openclaw::commands::openclaw_check_bootstrap_needed,
-        openclaw::commands::openclaw_trigger_bootstrap,
-        openclaw::commands::openclaw_set_hf_token,
-        openclaw::commands::openclaw_save_implicit_provider_key,
-        openclaw::commands::openclaw_get_implicit_provider_key,
-        openclaw::commands::openclaw_save_bedrock_credentials,
-        openclaw::commands::openclaw_get_bedrock_credentials,
-        openclaw::commands::openclaw_sync_local_llm,
-        openclaw::deploy::openclaw_deploy_remote,
-        // Orchestration & Canvas
-        openclaw::commands::openclaw_spawn_session,
-        openclaw::commands::openclaw_list_child_sessions,
-        openclaw::commands::openclaw_update_sub_agent_status,
-        openclaw::commands::openclaw_agents_list,
-        openclaw::commands::openclaw_canvas_push,
-        openclaw::commands::openclaw_canvas_navigate,
-        openclaw::commands::openclaw_canvas_panels_list,
-        openclaw::commands::openclaw_canvas_panel_get,
-        openclaw::commands::openclaw_canvas_panel_dismiss,
-        openclaw::commands::openclaw_routine_delete,
-        openclaw::commands::openclaw_routine_toggle,
-        openclaw::commands::openclaw_heartbeat_set_interval,
-        // New feature commands
-        openclaw::commands::openclaw_set_thinking,
-        openclaw::commands::openclaw_memory_search,
-        openclaw::commands::openclaw_export_session,
-        // Hooks & extensions management
-        openclaw::commands::openclaw_hooks_list,
-        openclaw::commands::openclaw_hooks_register,
-        openclaw::commands::openclaw_hooks_unregister,
-        openclaw::commands::openclaw_extensions_list,
-        openclaw::commands::openclaw_extension_activate,
-        openclaw::commands::openclaw_extension_remove,
-        // Diagnostics & tools
-        openclaw::commands::openclaw_diagnostics,
-        openclaw::commands::openclaw_tools_list,
-        openclaw::commands::openclaw_tool_policy_get,
-        openclaw::commands::openclaw_tool_policy_set,
-        // Pairing & compaction
-        openclaw::commands::openclaw_pairing_list,
-        openclaw::commands::openclaw_pairing_approve,
-        openclaw::commands::openclaw_compact_session,
-        // Sprint 13 — New backend APIs
-        openclaw::commands::openclaw_cost_summary,
-        openclaw::commands::openclaw_cost_export_csv,
-        openclaw::commands::openclaw_cost_reset,
-        openclaw::commands::openclaw_channel_status_list,
-        openclaw::commands::openclaw_agents_set_default,
-        openclaw::commands::openclaw_clawhub_search,
-        openclaw::commands::openclaw_clawhub_install,
-        openclaw::commands::openclaw_routine_audit_list,
-        openclaw::commands::openclaw_clear_routine_runs,
-        openclaw::commands::openclaw_cache_stats,
-        openclaw::commands::openclaw_plugin_lifecycle_list,
-        openclaw::commands::openclaw_manifest_validate,
-        openclaw::commands::openclaw_routing_get,
-        openclaw::commands::openclaw_routing_set,
-        openclaw::commands::openclaw_routing_rules_list,
-        openclaw::commands::openclaw_routing_rules_save,
-        openclaw::commands::openclaw_routing_rules_add,
-        openclaw::commands::openclaw_routing_rules_remove,
-        openclaw::commands::openclaw_routing_rules_reorder,
-        openclaw::commands::openclaw_routing_status,
-        openclaw::commands::openclaw_gmail_oauth_start,
-        openclaw::commands::openclaw_gmail_status,
-        permissions::get_permission_status,
-        permissions::request_permission,
-        permissions::open_permission_settings,
-        toggle_spotlight,
-        hide_spotlight,
-        // Engine & HF Hub
-        engine::get_active_engine_info,
-        engine::get_engine_setup_status,
-        engine::setup_engine,
-        engine::start_engine,
-        engine::stop_engine,
-        engine::is_engine_ready,
-        hf_hub::discover_hf_models,
-        hf_hub::get_model_files,
-        hf_hub::download_hf_model_files,
-        // Inference Router
-        inference::get_inference_backends,
-        inference::update_inference_backend,
-        // Cloud Model Discovery
-        inference::discover_cloud_models,
-        inference::refresh_cloud_models,
-        // Cloud Storage
-        cloud::commands::cloud_get_status,
-        cloud::commands::cloud_test_connection,
-        cloud::commands::cloud_test_icloud,
-        cloud::commands::cloud_test_webdav,
-        cloud::commands::cloud_test_sftp,
-        cloud::commands::cloud_oauth_start,
-        cloud::commands::cloud_oauth_complete,
-        cloud::commands::cloud_migrate_to_cloud,
-        cloud::commands::cloud_migrate_to_local,
-        cloud::commands::cloud_cancel_migration,
-        cloud::commands::cloud_get_recovery_key,
-        cloud::commands::cloud_import_recovery_key,
-        cloud::commands::cloud_get_storage_breakdown,
-        // Workspace path & Finder reveal
-        openclaw::commands::openclaw_get_workspace_path,
-        openclaw::commands::openclaw_reveal_workspace,
-        openclaw::commands::openclaw_list_agent_workspace_files,
-        openclaw::commands::openclaw_write_agent_workspace_file,
-        openclaw::commands::openclaw_reveal_file,
-    ]);
+    let specta_builder = setup::commands::specta_builder();
 
     #[cfg(debug_assertions)]
     specta_builder
@@ -533,7 +264,6 @@ pub fn run() {
 
             // Reranker Init (Downloads if needed)
             // Using RerankerWrapper to gracefully handle initialization failures.
-            // This prevents crashes when RAG commands demand State<RerankerWrapper>.
             // This prevents crashes when RAG commands demand State<RerankerWrapper>.
             let reranker_wrapper = reranker::RerankerWrapper::new(app_data_dir.clone()).await;
             handle.manage(reranker_wrapper);
@@ -718,88 +448,10 @@ pub fn run() {
         });
 
         // 2. Tray Icon
-        let quit_i = MenuItem::with_id(&app, "quit", "Quit", true, None::<&str>);
-        let show_i = MenuItem::with_id(&app, "show", "Show OpenClaw", true, None::<&str>);
-
-        if let (Ok(quit_i), Ok(show_i)) = (quit_i, show_i) {
-            let menu = Menu::with_items(&app, &[&show_i, &quit_i]);
-            if let Ok(menu) = menu {
-                let tray_icon = tauri::image::Image::from_bytes(include_bytes!(
-                    "../icons/tray-iconTemplate.png"
-                ))
-                .expect("failed to load tray icon");
-
-                let tray_result = TrayIconBuilder::new()
-                    .icon(tray_icon)
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "quit" => app.exit(0),
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        if let TrayIconEvent::Click {
-                            button: tauri::tray::MouseButton::Left,
-                            ..
-                        } = event
-                        {
-                            let app = tray.app_handle();
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                    })
-                    .build(&app);
-
-                // Store tray handle for animated icon switching
-                if let Ok(tray) = &tray_result {
-                    let active_icon = tauri::image::Image::from_bytes(include_bytes!(
-                        "../icons/tray-icon-activeTemplate.png"
-                    ))
-                    .expect("failed to load active tray icon");
-
-                    let idle_icon_copy = tauri::image::Image::from_bytes(include_bytes!(
-                        "../icons/tray-iconTemplate.png"
-                    ))
-                    .expect("failed to load idle tray icon");
-
-                    let tray_state = TrayState {
-                        tray: tray.clone(),
-                        idle_icon: idle_icon_copy,
-                        active_icon,
-                        reset_handle: tokio::sync::Mutex::new(None),
-                    };
-                    app.manage(Arc::new(tray_state));
-                }
-            }
-        }
+        setup::tray::setup_tray(&app);
 
         // 3. Global Shortcuts
-        let config_manager = app.state::<config::ConfigManager>();
-        let config = config_manager.get_config();
-
-        // Register spotlight shortcut
-        if let Ok(shortcut) = Shortcut::from_str(&config.spotlight_shortcut) {
-            let _ = app.global_shortcut().register(shortcut);
-        } else {
-            let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
-            let _ = app.global_shortcut().register(shortcut);
-        }
-
-        // Register PTT shortcut
-        if let Ok(shortcut) = Shortcut::from_str(&config.ptt_shortcut) {
-            let _ = app.global_shortcut().register(shortcut);
-        } else {
-            let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV);
-            let _ = app.global_shortcut().register(shortcut);
-        }
+        setup::shortcuts::register_shortcuts(&app);
     }
 
     app.run(|_app_handle, _event| {

@@ -149,9 +149,6 @@ async fn check_agent(profile: crate::openclaw::config::AgentProfile) -> AgentSta
 fn get_capabilities(cfg: &crate::openclaw::config::OpenClawConfig) -> Vec<String> {
     let mut caps = vec!["inference".to_string(), "chat".to_string()];
 
-    if cfg.node_host_enabled {
-        caps.push("ui_automation".to_string());
-    }
     if cfg.brave_granted {
         caps.push("web_search".to_string());
     }

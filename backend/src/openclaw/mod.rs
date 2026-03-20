@@ -9,9 +9,9 @@
 pub mod commands;
 pub mod config;
 pub mod deploy;
-pub mod extra_commands;
 pub mod fleet;
 pub mod ironclaw_bridge; // IronClaw lifecycle manager (IronClawState)
+mod ironclaw_builder; // Engine construction logic (extracted from ironclaw_bridge)
 pub mod ironclaw_channel; // impl Channel for TauriChannel
 pub mod ironclaw_secrets; // SecretsStore adapter (Keychain → IronClaw trait)
 pub mod ironclaw_types; // StatusUpdate → UiEvent conversion

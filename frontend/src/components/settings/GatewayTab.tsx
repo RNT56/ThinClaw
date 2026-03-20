@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, MousePointerClick, Globe, Cpu, Settings, FolderOpen } from 'lucide-react';
+import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, Globe, Cpu, Settings, FolderOpen } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as openclaw from '../../lib/openclaw';
+import { type CustomSecret } from '../../lib/bindings';
 import { useModelContext } from '../model-context';
 import { RemoteDeployWizard } from '../openclaw/RemoteDeployWizard';
 import CloudBrainConfigModal from '../openclaw/CloudBrainConfigModal';
@@ -31,12 +32,10 @@ interface StatusInfo {
     deviceId: string;
     authToken: string;
     stateDir: string;
-    nodeHostEnabled: boolean;
     allowLocalTools: boolean;
     workspaceMode: string;
     workspaceRoot: string | null;
     localInferenceEnabled: boolean;
-    exposeInference: boolean;
     hasHuggingfaceToken: boolean;
     huggingfaceGranted: boolean;
     hasAnthropicKey: boolean;
@@ -47,7 +46,7 @@ interface StatusInfo {
     openaiGranted: boolean;
     hasOpenrouterKey: boolean;
     openrouterGranted: boolean;
-    customSecrets: any[];
+    customSecrets: CustomSecret[];
     geminiGranted: boolean;
     groqGranted: boolean;
     selectedCloudBrain: string | null;
@@ -73,12 +72,10 @@ export function GatewayTab({ className }: GatewayTabProps) {
         deviceId: '',
         authToken: '',
         stateDir: '',
-        nodeHostEnabled: false,
         allowLocalTools: true,
         workspaceMode: 'sandboxed',
         workspaceRoot: null,
         localInferenceEnabled: false,
-        exposeInference: false,
         hasHuggingfaceToken: false,
         huggingfaceGranted: false,
         hasAnthropicKey: false,
@@ -102,7 +99,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const [rawStatus, setRawStatus] = useState<openclaw.OpenClawStatus | null>(null);
 
-    const [showBrainSelector, setShowBrainSelector] = useState(false);
     const [isCloudConfigOpen, setIsCloudConfigOpen] = useState(false); // Added this state
     const [showDeployWizard, setShowDeployWizard] = useState(false);
 
@@ -139,12 +135,10 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 deviceId: s.device_id,
                 authToken: s.auth_token,
                 stateDir: s.state_dir,
-                nodeHostEnabled: s.node_host_enabled,
                 allowLocalTools: s.allow_local_tools ?? true,
-                workspaceMode: (s as any).workspace_mode || 'unrestricted',
-                workspaceRoot: (s as any).workspace_root || null,
+                workspaceMode: s.workspace_mode || 'unrestricted',
+                workspaceRoot: s.workspace_root || null,
                 localInferenceEnabled: s.local_inference_enabled,
-                exposeInference: (s as any).expose_inference || false,
                 hasHuggingfaceToken: s.has_huggingface_token,
                 huggingfaceGranted: s.huggingface_granted,
                 hasAnthropicKey: s.has_anthropic_key,
@@ -155,7 +149,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 openaiGranted: s.openai_granted,
                 hasOpenrouterKey: s.has_openrouter_key,
                 openrouterGranted: s.openrouter_granted,
-                customSecrets: (s as any).custom_secrets || [],
+                customSecrets: s.custom_secrets || [],
                 geminiGranted: s.gemini_granted,
                 groqGranted: s.groq_granted,
                 selectedCloudBrain: s.selected_cloud_brain,
@@ -334,7 +328,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     className={cn(
                         "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
                         status.gatewayMode === 'local'
-                            ? "bg-primary/5 border-primary shadow-sm ring-1 ring-primary/20"
+                            ? "bg-primary/5 border-primary/40 shadow-sm"
                             : "bg-card border-border/50 hover:bg-muted/50 hover:border-primary/30"
                     )}
                 >
@@ -371,7 +365,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         className={cn(
                             "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
                             status.gatewayMode === 'remote' && status.remoteUrl === profile.url
-                                ? "bg-indigo-500/5 border-indigo-500 shadow-sm ring-1 ring-indigo-500/20"
+                                ? "bg-indigo-500/5 border-indigo-500/40 shadow-sm"
                                 : "bg-card border-border/50 hover:bg-muted/50 hover:border-indigo-500/30"
                         )}
                     >
@@ -614,7 +608,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 </div>
                                 <h3 className="text-lg font-bold mb-1">Local Core</h3>
                                 <p className="text-xs text-muted-foreground mb-4">
-                                    Privacy-first inference running directly on this device. Zero data egress.
+                                    Privacy-first inference on this device. Zero data egress. Also powers connected remote agents.
                                 </p>
                                 <div className="flex items-center gap-2 text-[10px] font-medium text-emerald-600/80">
                                     <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -838,40 +832,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                     }
                 </div >
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* OS Automation Card */}
-                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="p-2 bg-indigo-500/10 rounded-xl group-hover:bg-indigo-500/20 transition-colors">
-                                    <Monitor className="w-5 h-5 text-indigo-500" />
-                                </div>
-                                <h4 className="font-bold text-base">OS Synthesis</h4>
-                            </div>
-                            <button
-                                onClick={async () => {
-                                    try {
-                                        await openclaw.toggleOpenClawNodeHost(!status.nodeHostEnabled);
-                                        await fetchStatus();
-                                        toast.success('automation state toggled');
-                                    } catch (e) { toast.error('toggle failed'); }
-                                }}
-                                className={cn(
-                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
-                                    status.nodeHostEnabled ? "bg-indigo-600" : "bg-muted"
-                                )}
-                            >
-                                <span className={cn(
-                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
-                                    status.nodeHostEnabled ? "translate-x-5" : "translate-x-0"
-                                )} />
-                            </button>
-                        </div>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                            Deep OS hooks: terminal bridging, filesystem manipulation, and browser puppet control.
-                        </p>
-                    </div>
 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Local Dev Tools Card */}
                     <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
                         <div className="flex items-center justify-between">
@@ -902,6 +864,39 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </div>
                         <p className="text-xs text-muted-foreground leading-relaxed">
                             Allow the agent to read/write files, run shell commands, and execute code. Requires engine restart.
+                        </p>
+                    </div>
+
+                    {/* Persistent Engine Card */}
+                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-blue-500/10 rounded-xl group-hover:bg-blue-500/20 transition-colors">
+                                    <RotateCcw className="w-5 h-5 text-blue-500" />
+                                </div>
+                                <h4 className="font-bold text-base">Persistent Engine</h4>
+                            </div>
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        await openclaw.toggleOpenClawAutoStart(!status.autoStartGateway);
+                                        await fetchStatus();
+                                        toast.success(`Auto-start ${!status.autoStartGateway ? 'enabled' : 'disabled'}`);
+                                    } catch (e) { toast.error('Toggle failed'); }
+                                }}
+                                className={cn(
+                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
+                                    status.autoStartGateway ? "bg-blue-600" : "bg-muted"
+                                )}
+                            >
+                                <span className={cn(
+                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
+                                    status.autoStartGateway ? "translate-x-5" : "translate-x-0"
+                                )} />
+                            </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                            Automatically engage the gateway on application launch for immediate agent availability.
                         </p>
                     </div>
 
@@ -959,7 +954,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                 workspaceRoot: resolvedPath === 'none' ? null : resolvedPath,
                                             }));
                                             toast.success(`Workspace mode: ${label}`);
-                                        } catch (e: any) {
+                                        } catch (e) {
                                             toast.error(e?.toString() || 'Failed to set workspace mode');
                                         }
                                     }}
@@ -1022,7 +1017,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                     workspaceRoot: resolvedPath === 'none' ? null : resolvedPath,
                                                 }));
                                                 toast.success('Workspace directory updated');
-                                            } catch (e: any) {
+                                            } catch (e) {
                                                 toast.error(e?.toString() || 'Failed to set workspace root');
                                             }
                                         }}
@@ -1037,72 +1032,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             </div>
                         )}
                     </div>
-
-                    {/* Local Inference Card */}
-                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="p-2 bg-emerald-500/10 rounded-xl group-hover:bg-emerald-500/20 transition-colors">
-                                    <Zap className="w-5 h-5 text-emerald-500" />
-                                </div>
-                                <h4 className="font-bold text-base">Local Neural Link</h4>
-                            </div>
-                            <button
-                                onClick={async () => {
-                                    try {
-                                        await openclaw.toggleOpenClawLocalInference(!status.localInferenceEnabled);
-                                        await fetchStatus();
-                                        toast.success('Inference link state toggled');
-                                    } catch (e) { toast.error('Link toggle failed'); }
-                                }}
-                                className={cn(
-                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
-                                    status.localInferenceEnabled ? "bg-emerald-600" : "bg-muted"
-                                )}
-                            >
-                                <span className={cn(
-                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
-                                    status.localInferenceEnabled ? "translate-x-5" : "translate-x-0"
-                                )} />
-                            </button>
-                        </div>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                            Expose your high-performance local LLMs to the gateway for zero-latency agentic thought.
-                        </p>
-                    </div>
-
-                    {/* Auto-Start Gateway Card */}
-                    <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-xl space-y-4 group">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="p-2 bg-blue-500/10 rounded-xl group-hover:bg-blue-500/20 transition-colors">
-                                    <RotateCcw className="w-5 h-5 text-blue-500" />
-                                </div>
-                                <h4 className="font-bold text-base">Persistent Engine</h4>
-                            </div>
-                            <button
-                                onClick={async () => {
-                                    try {
-                                        await openclaw.toggleOpenClawAutoStart(!status.autoStartGateway);
-                                        await fetchStatus();
-                                        toast.success(`Auto-start ${!status.autoStartGateway ? 'enabled' : 'disabled'}`);
-                                    } catch (e) { toast.error('Toggle failed'); }
-                                }}
-                                className={cn(
-                                    "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300",
-                                    status.autoStartGateway ? "bg-blue-600" : "bg-muted"
-                                )}
-                            >
-                                <span className={cn(
-                                    "inline-block h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-300",
-                                    status.autoStartGateway ? "translate-x-5" : "translate-x-0"
-                                )} />
-                            </button>
-                        </div>
-                        <p className="text-xs text-muted-foreground leading-relaxed">
-                            Automatically engage the gateway on application launch for immediate agent availability.
-                        </p>
-                    </div>
                 </div>
 
                 {/* Extended Setup & Safety */}
@@ -1113,23 +1042,9 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <Shield className="w-6 h-6 text-emerald-600 dark:text-emerald-400" />
                             <h4 className="font-bold text-lg text-emerald-700 dark:text-emerald-300">Security Vault</h4>
                         </div>
-                        <div className="space-y-4">
-                            <div className="flex flex-col gap-1.5">
-                                <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/60">Desktop Handshake Token</span>
-                                <div className="flex items-center justify-between bg-black/5 dark:bg-black/20 p-3 rounded-xl border border-border/50">
-                                    <span className="text-[11px] font-mono truncate max-w-[180px]">••••••••••••••••••••••••••••••••</span>
-                                    <button
-                                        onClick={() => copyToClipboard(status.authToken, 'Access Token')}
-                                        className="p-1.5 hover:bg-emerald-600/10 rounded-lg transition-colors"
-                                    >
-                                        <Copy className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                                    </button>
-                                </div>
-                            </div>
-                            <p className="text-[11px] text-emerald-600/70 leading-relaxed font-medium">
-                                Pure loopback binding (127.0.0.1) enforced. Token authentication required for all IPC/WS requests. Discovery disabled.
-                            </p>
-                        </div>
+                        <p className="text-[11px] text-emerald-600/70 leading-relaxed font-medium">
+                            Pure loopback binding (127.0.0.1) enforced. Token authentication required for all IPC/WS requests. Discovery disabled.
+                        </p>
                     </div>
 
                     {/* Critical Factory Reset */}
@@ -1195,8 +1110,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 </div>
                                 <div className="space-y-3">
                                     {[
-                                        { id: 'accessibility', label: 'Accessibility', desc: 'UI automation & input control', icon: MousePointerClick, granted: permissions.accessibility },
-                                        { id: 'screen_recording', label: 'Vision Stream', desc: 'Screen capture for context', icon: Monitor, granted: permissions.screen_recording }
+                                        { id: 'screen_recording', label: 'Vision Stream', desc: 'Allows the agent to capture screenshots for visual context. Requires Dev Tools to be enabled.', icon: Monitor, granted: permissions.screen_recording }
                                     ].map(perm => (
                                         <div key={perm.id} className="flex items-center justify-between p-3.5 rounded-2xl bg-muted/20 border border-border/50 transition-all duration-300">
                                             <div className="flex items-center gap-3">
@@ -1223,7 +1137,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                             toast.info(`Revoke ${perm.label} in System Settings`, {
                                                                 description: "Toggle the switch off, then restart Scrappy for changes to take effect."
                                                             });
-                                                            // Auto-poll to detect revocation
                                                             let checks = 0;
                                                             const poller = setInterval(async () => {
                                                                 checks++;
@@ -1254,7 +1167,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                                 toast.info(`Grant ${perm.label} in System Settings, then return here`, {
                                                                     description: "System Settings should have opened. After granting access, the status updates automatically."
                                                                 });
-                                                                // Auto-poll for permission changes for 30s after request
                                                                 let checks = 0;
                                                                 const poller = setInterval(async () => {
                                                                     checks++;
@@ -1267,7 +1179,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                                     }
                                                                 }, 2000);
                                                             }
-                                                        } catch (e: any) {
+                                                        } catch (e) {
                                                             toast.error(`Failed to request ${perm.label}`, { description: String(e) });
                                                         }
                                                     }}
@@ -1280,7 +1192,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     ))}
                                 </div>
                                 <p className="text-[10px] text-muted-foreground/40 leading-relaxed">
-                                    macOS manages these permissions at the system level. After revoking, restart Scrappy for the change to take effect.
+                                    macOS manages this permission at the system level. Restart Scrappy after changing for it to take effect.
                                 </p>
                             </div>
                         )}
@@ -1389,74 +1301,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 )
             }
 
-            {/* Brain Selector Modal */}
-            {
-                showBrainSelector && (
-                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-md p-6 animate-in fade-in duration-300">
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                            className="bg-card border border-border/50 p-8 rounded-3xl shadow-2xl max-w-md w-full space-y-6"
-                        >
-                            <div className="space-y-2 text-center">
-                                <div className="mx-auto p-4 bg-primary/10 rounded-full w-fit">
-                                    <Zap className="w-8 h-8 text-primary" />
-                                </div>
-                                <h3 className="text-xl font-bold tracking-tight">Select Cloud Brain</h3>
-                                <p className="text-sm text-muted-foreground leading-relaxed">
-                                    Local inference is disabled. Choose which cloud provider to use for the agent's logic.
-                                </p>
-                            </div>
 
-                            <div className="space-y-3">
-                                {[
-                                    { id: 'anthropic', label: 'Anthropic Claude', granted: status.anthropicGranted, color: 'indigo' },
-                                    { id: 'openai', label: 'OpenAI GPT-4o', granted: status.openaiGranted, color: 'blue' },
-                                    { id: 'openrouter', label: 'OpenRouter', granted: status.openrouterGranted, color: 'purple' }
-                                ].map(brain => (
-                                    <button
-                                        key={brain.id}
-                                        disabled={!brain.granted}
-                                        onClick={async () => {
-                                            try {
-                                                await openclaw.selectOpenClawBrain(brain.id);
-                                                await fetchStatus();
-                                                setShowBrainSelector(false);
-                                                toast.success(`${brain.label} selected as primary brain`);
-                                            } catch (e) { toast.error('Selection failed'); }
-                                        }}
-                                        className={cn(
-                                            "w-full p-4 rounded-2xl border transition-all flex items-center justify-between group",
-                                            brain.granted
-                                                ? `hover:bg-${brain.color}-500/5 hover:border-${brain.color}-500/30`
-                                                : "opacity-40 cursor-not-allowed",
-                                            status.selectedCloudBrain === brain.id ? `bg-${brain.color}-500/10 border-${brain.color}-500/40` : "bg-muted/10 border-transparent"
-                                        )}
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <div className={cn("p-2 rounded-xl bg-card", brain.granted && `text-${brain.color}-500`)}>
-                                                <Shield className="w-4 h-4" />
-                                            </div>
-                                            <span className="text-sm font-bold">{brain.label}</span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            {!brain.granted && <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest">NOT GRANTED</span>}
-                                            {status.selectedCloudBrain === brain.id && <CheckCircle className="w-4 h-4 text-emerald-500" />}
-                                        </div>
-                                    </button>
-                                ))}
-                            </div>
-
-                            <button
-                                onClick={() => setShowBrainSelector(false)}
-                                className="w-full py-3 text-xs font-bold text-muted-foreground hover:text-foreground transition-all"
-                            >
-                                Cancel
-                            </button>
-                        </motion.div>
-                    </div>
-                )
-            }
             {/* Modals */}
             <CloudBrainConfigModal
                 isOpen={isCloudConfigOpen}

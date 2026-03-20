@@ -137,6 +137,14 @@ async ttsListVoices() : Promise<Result<VoiceInfo[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async transcribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("transcribe_audio", { audioBytes }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkWebSearch(query: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_web_search", { query }) };
@@ -148,14 +156,6 @@ async checkWebSearch(query: string) : Promise<Result<string, string>> {
 async generateImage(params: ImageGenParams) : Promise<Result<ImageResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_image", { params }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async transcribeAudio(audioBytes: number[]) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("transcribe_audio", { audioBytes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -300,33 +300,6 @@ async getConversations() : Promise<Result<Conversation[], string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async openConfigFile() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_config_file") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getUserConfig() : Promise<UserConfig> {
-    return await TAURI_INVOKE("get_user_config");
-},
-async updateUserConfig(config: UserConfig) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getHfToken() : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async createConversation(title: string, projectId: string | null) : Promise<Result<Conversation, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_conversation", { title, projectId }) };
@@ -394,6 +367,33 @@ async updateConversationsOrder(orders: ([string, number])[]) : Promise<Result<nu
 async deleteAllHistory() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_all_history") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openConfigFile() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_config_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getUserConfig() : Promise<UserConfig> {
+    return await TAURI_INVOKE("get_user_config");
+},
+async updateUserConfig(config: UserConfig) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_user_config", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getHfToken() : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1332,17 +1332,6 @@ async openclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
 async openclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_custom_secret", { id, granted }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Toggle node host (OS automation) for OpenClaw
- */
-async openclawToggleNodeHost(enabled: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_node_host", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2318,6 +2307,24 @@ async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir
 }
 },
 /**
+ * Discover the embedding dimension of a HuggingFace model by fetching its
+ * `config.json` from the API and extracting `hidden_size`, `d_model`, or
+ * `embedding_dim`.
+ * 
+ * Returns `None` for GGUF single-file models or repos without a `config.json`.
+ * This is used by the onboarding wizard to pre-configure the vector store
+ * dimension *before* the embedding server starts, avoiding a wasteful
+ * create-then-destroy cycle on first boot.
+ */
+async discoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discover_embedding_dimension", { repoId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Returns the active and available backends for all 5 modalities.
  */
 async getInferenceBackends() : Promise<Result<ModalityBackends[], string>> {
@@ -3035,7 +3042,7 @@ export type OpenClawSessionsResponse = { sessions: OpenClawSession[] }
 /**
  * OpenClaw status response
  */
-export type OpenClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; node_host_enabled: boolean; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean; 
+export type OpenClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean; 
 /**
  * Whether the agent runs tools without individual approval prompts.
  */

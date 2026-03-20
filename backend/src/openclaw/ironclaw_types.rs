@@ -226,7 +226,9 @@ pub fn status_to_ui_event(
             iterations,
         } => {
             let preview = if response.len() > 200 {
-                format!("{}…", &response[..200])
+                let mut end = 200;
+                while !response.is_char_boundary(end) { end -= 1; }
+                format!("{}…", &response[..end])
             } else {
                 response
             };

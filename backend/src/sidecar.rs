@@ -156,11 +156,12 @@ impl SidecarManager {
         if let Some(proc) = process_guard.take() {
             // Signal that this stop is intentional (restart)
             *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            let old_port = proc.port;
             let _ = proc.kill();
             
-            // Wait for port to clear (max 2s)
+            // Wait for the old port to clear (max 2s)
             for _ in 0..20 {
-               if std::net::TcpListener::bind("127.0.0.1:53755").is_ok() {
+               if std::net::TcpListener::bind(format!("127.0.0.1:{}", old_port)).is_ok() {
                    break;
                }
                std::thread::sleep(std::time::Duration::from_millis(100));
@@ -272,7 +273,7 @@ impl SidecarManager {
                 println!("[sidecar] Found mmproj: {}", mmproj_path);
                 args.push("--mmproj".to_string());
                 args.push(mmproj_path);
-                // found_mmproj = true; // Optimization: variable not used after this block
+                found_mmproj = true;
             } else {
                 // Fallback: Smart Discovery if in a subfolder
                 // If the model is in "models/UseSpecificFolder/", we scan that folder for any "mmproj"
@@ -299,6 +300,7 @@ impl SidecarManager {
                                         );
                                         args.push("--mmproj".to_string());
                                         args.push(p.to_string_lossy().to_string());
+                                        found_mmproj = true;
                                         break; // Use the first one found
                                     }
                                 }

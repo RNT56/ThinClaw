@@ -22,7 +22,7 @@ async-trait = "0.1"
 tracing = "0.1"
 
 # Error handling
-thiserror = "1"
+thiserror = "2"
 
 # Time
 chrono = "0.4"

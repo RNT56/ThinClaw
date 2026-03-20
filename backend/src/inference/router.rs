@@ -305,7 +305,8 @@ impl InferenceRouter {
                 }
             }
         } else {
-            // Local — will be set lazily when sidecar is started
+            // Local — clear any stale cloud backend and defer to sidecar
+            *self.chat.write().await = None;
             tracing::info!("[inference_router] Chat = local (deferred until sidecar starts)");
         }
 
@@ -359,6 +360,9 @@ impl InferenceRouter {
                     *self.embedding.write().await = Some(backend);
                 }
             }
+        } else {
+            // Local — clear any stale cloud embedding backend
+            *self.embedding.write().await = None;
         }
 
         // ── TTS backend ─────────────────────────────────────────────────
@@ -386,6 +390,9 @@ impl InferenceRouter {
                     *self.tts.write().await = Some(b);
                 }
             }
+        } else {
+            // Local — clear any stale cloud TTS backend
+            *self.tts.write().await = None;
         }
 
         // ── STT backend ─────────────────────────────────────────────────
@@ -413,6 +420,9 @@ impl InferenceRouter {
                     *self.stt.write().await = Some(b);
                 }
             }
+        } else {
+            // Local — clear any stale cloud STT backend
+            *self.stt.write().await = None;
         }
 
         // ── Diffusion backend ───────────────────────────────────────────

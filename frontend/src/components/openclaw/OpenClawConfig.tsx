@@ -163,14 +163,14 @@ export function OpenClawConfig() {
                             <Settings2 className="w-4.5 h-4.5 text-amber-400" />
                         </div>
                         <div>
-                            <h2 className="text-base font-semibold text-zinc-100">Config Editor</h2>
-                            <p className="text-xs text-zinc-500">{settings.length} settings</p>
+                            <h2 className="text-base font-semibold text-foreground">Config Editor</h2>
+                            <p className="text-xs text-muted-foreground">{settings.length} settings</p>
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleExport}
-                            className="p-2 rounded-lg bg-white/5 border border-border/40 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
+                            className="p-2 rounded-lg bg-muted/30 border border-border/40 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
                             title="Export to clipboard"
                         >
                             <Copy className="w-3.5 h-3.5" />
@@ -183,7 +183,7 @@ export function OpenClawConfig() {
                         </button>
                         <button
                             onClick={loadSettings}
-                            className="p-2 rounded-lg bg-white/5 border border-border/40 text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
+                            className="p-2 rounded-lg bg-muted/30 border border-border/40 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
                         >
                             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
                         </button>
@@ -192,13 +192,13 @@ export function OpenClawConfig() {
 
                 {/* Search */}
                 <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                     <input
                         type="text"
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                         placeholder="Search settings..."
-                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
+                        className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50"
                     />
                 </div>
             </div>
@@ -218,20 +218,20 @@ export function OpenClawConfig() {
                                 value={newKey}
                                 onChange={e => setNewKey(e.target.value)}
                                 placeholder="Key name"
-                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50"
+                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50"
                             />
                             <textarea
                                 value={newValue}
                                 onChange={e => setNewValue(e.target.value)}
                                 placeholder="Value (JSON or string)"
                                 rows={2}
-                                className="w-full px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/50 font-mono resize-none"
+                                className="w-full px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-500/50 font-mono resize-none"
                             />
                             <div className="flex justify-end gap-2">
-                                <button onClick={() => setShowAddForm(false)} className="px-3 py-1 text-xs text-zinc-400 hover:text-white transition-colors">
+                                <button onClick={() => setShowAddForm(false)} className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
                                     Cancel
                                 </button>
-                                <button onClick={handleAdd} className="px-3 py-1 rounded bg-amber-500/20 text-amber-300 text-xs hover:bg-amber-500/30 transition-colors">
+                                <button onClick={handleAdd} className="px-3 py-1 rounded bg-amber-500/20 text-amber-600 dark:text-amber-300 text-xs hover:bg-amber-500/30 transition-colors">
                                     <Plus className="w-3 h-3 inline mr-1" />Add
                                 </button>
                             </div>
@@ -246,7 +246,7 @@ export function OpenClawConfig() {
                     <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                             <Brain className="w-3.5 h-3.5 text-violet-400" />
-                            <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Agent Identity</span>
+                            <span className="text-xs font-semibold text-violet-600 dark:text-violet-300 uppercase tracking-wider">Agent Identity</span>
                         </div>
                         <button
                             onClick={() => setActiveOpenClawPage('brain')}
@@ -256,7 +256,7 @@ export function OpenClawConfig() {
                             <ExternalLink className="w-3 h-3" />
                         </button>
                     </div>
-                    <p className="text-[10px] text-zinc-500 mb-3">
+                    <p className="text-[10px] text-muted-foreground mb-3">
                         These files define who the agent is. They're stored in IronClaw's database and auto-seeded on first run.
                     </p>
                     <div className="grid grid-cols-2 gap-2">
@@ -269,12 +269,12 @@ export function OpenClawConfig() {
                             <button
                                 key={item.file}
                                 onClick={() => setActiveOpenClawPage('brain')}
-                                className={`flex items-start gap-2.5 p-2.5 rounded-lg bg-black/20 border border-white/5 hover:border-${item.color}-500/30 hover:bg-${item.color}-500/5 transition-all text-left group`}
+                                className={`flex items-start gap-2.5 p-2.5 rounded-lg bg-muted/20 border border-border/30 hover:border-${item.color}-500/30 hover:bg-${item.color}-500/5 transition-all text-left group`}
                             >
                                 <item.icon className={`w-3.5 h-3.5 text-${item.color}-400 mt-0.5 shrink-0`} />
                                 <div className="min-w-0">
-                                    <div className="text-[11px] font-semibold text-zinc-200 group-hover:text-white">{item.label}</div>
-                                    <div className="text-[9px] text-zinc-500 truncate">{item.file} — {item.desc}</div>
+                                    <div className="text-[11px] font-semibold text-foreground group-hover:text-foreground">{item.label}</div>
+                                    <div className="text-[9px] text-muted-foreground truncate">{item.file} — {item.desc}</div>
                                 </div>
                             </button>
                         ))}
@@ -285,12 +285,12 @@ export function OpenClawConfig() {
             {/* Quick Config Sections */}
             <div className="px-5 space-y-3 mb-3">
                 {/* URL Allowlist */}
-                <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+                <div className="p-3 rounded-lg bg-muted/10 border border-border/30">
                     <div className="flex items-center gap-2 mb-2">
                         <Shield className="w-3.5 h-3.5 text-emerald-400" />
-                        <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">HTTP URL Allowlist</span>
+                        <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-300 uppercase tracking-wider">HTTP URL Allowlist</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 mb-2">
+                    <p className="text-[10px] text-muted-foreground mb-2">
                         Comma-separated domains the HTTP tool is allowed to access. Leave empty for no restrictions.
                     </p>
                     <div className="flex gap-2">
@@ -299,14 +299,14 @@ export function OpenClawConfig() {
                             value={urlAllowlist}
                             onChange={e => { setUrlAllowlist(e.target.value); setUrlDirty(true); }}
                             placeholder="api.example.com, docs.example.com"
-                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveUrlAllowlist}
                             disabled={!urlDirty || urlSaving}
                             className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${urlDirty
-                                ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
-                                : 'bg-white/5 text-zinc-600 border border-white/5'
+                                ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
+                                : 'bg-muted/30 text-muted-foreground border border-border/30'
                                 }`}
                         >
                             {urlSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -315,33 +315,33 @@ export function OpenClawConfig() {
                 </div>
 
                 {/* Context Compaction */}
-                <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+                <div className="p-3 rounded-lg bg-muted/10 border border-border/30">
                     <div className="flex items-center gap-2 mb-2">
                         <Shrink className="w-3.5 h-3.5 text-violet-400" />
-                        <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">Context Compaction</span>
+                        <span className="text-xs font-semibold text-violet-600 dark:text-violet-300 uppercase tracking-wider">Context Compaction</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 mb-2">
+                    <p className="text-[10px] text-muted-foreground mb-2">
                         Analyze context window usage and estimate compaction savings.
                     </p>
                     <div className="flex items-center gap-3">
                         <button
                             onClick={handleCompact}
                             disabled={compacting}
-                            className="px-4 py-1.5 rounded text-xs font-medium bg-violet-500/15 text-violet-300 border border-violet-500/25 hover:bg-violet-500/25 transition-all flex items-center gap-2"
+                            className="px-4 py-1.5 rounded text-xs font-medium bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-500/25 hover:bg-violet-500/25 transition-all flex items-center gap-2"
                         >
                             {compacting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shrink className="w-3 h-3" />}
                             Analyze Session
                         </button>
                         {compactionResult && (
                             <div className="flex items-center gap-4 text-[10px] font-mono">
-                                <span className="text-zinc-400">
+                                <span className="text-muted-foreground">
                                     {compactionResult.tokens_before.toLocaleString()} → {compactionResult.tokens_after.toLocaleString()} tokens
                                 </span>
                                 <span className="text-violet-400">
                                     {compactionResult.turns_removed} turns removable
                                 </span>
                                 {compactionResult.summary && (
-                                    <span className="text-zinc-500 truncate max-w-[200px]" title={compactionResult.summary}>
+                                    <span className="text-muted-foreground/70 truncate max-w-[200px]" title={compactionResult.summary}>
                                         {compactionResult.summary}
                                     </span>
                                 )}
@@ -351,12 +351,12 @@ export function OpenClawConfig() {
                 </div>
 
                 {/* Multi-Provider Failover */}
-                <div className="p-3 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+                <div className="p-3 rounded-lg bg-muted/10 border border-border/30">
                     <div className="flex items-center gap-2 mb-2">
                         <GitBranch className="w-3.5 h-3.5 text-blue-400" />
-                        <span className="text-xs font-semibold text-blue-300 uppercase tracking-wider">Failover Model</span>
+                        <span className="text-xs font-semibold text-blue-600 dark:text-blue-300 uppercase tracking-wider">Failover Model</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 mb-2">
+                    <p className="text-[10px] text-muted-foreground mb-2">
                         Fallback model/provider used when the primary LLM fails. Leave empty for default behavior.
                     </p>
                     <div className="flex gap-2">
@@ -365,14 +365,14 @@ export function OpenClawConfig() {
                             value={fallbackModel}
                             onChange={e => { setFallbackModel(e.target.value); setFallbackDirty(true); }}
                             placeholder="e.g. gpt-4o, claude-3-haiku-20240307"
-                            className="flex-1 px-3 py-1.5 rounded bg-black/30 border border-border/40 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 font-mono"
+                            className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-blue-500/50 font-mono"
                         />
                         <button
                             onClick={handleSaveFallback}
                             disabled={!fallbackDirty || fallbackSaving}
                             className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${fallbackDirty
-                                ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 border border-blue-500/30'
-                                : 'bg-white/5 text-zinc-600 border border-white/5'
+                                ? 'bg-blue-500/20 text-blue-600 dark:text-blue-300 hover:bg-blue-500/30 border border-blue-500/30'
+                                : 'bg-muted/30 text-muted-foreground border border-border/30'
                                 }`}
                         >
                             {fallbackSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
@@ -384,12 +384,12 @@ export function OpenClawConfig() {
             {/* Settings List */}
             <div className="flex-1 overflow-y-auto px-5 pb-5 space-y-2 mt-2">
                 {loading ? (
-                    <div className="flex items-center justify-center py-16 text-zinc-500">
+                    <div className="flex items-center justify-center py-16 text-muted-foreground">
                         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
                         Loading...
                     </div>
                 ) : filtered.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-zinc-500">
+                    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                         <Settings2 className="w-8 h-8 mb-3 opacity-30" />
                         <p className="text-sm">{search ? 'No matching settings' : 'No settings stored'}</p>
                     </div>
@@ -400,13 +400,13 @@ export function OpenClawConfig() {
                             initial={{ opacity: 0, y: 10 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ delay: i * 0.03 }}
-                            className="p-3 rounded-lg bg-white/[0.03] border border-white/[0.06] hover:border-border/40 transition-all group"
+                            className="p-3 rounded-lg bg-muted/10 border border-border/30 hover:border-border/50 transition-all group"
                         >
                             <div className="flex items-start justify-between gap-3">
                                 <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-sm font-mono font-medium text-amber-300/90">{setting.key}</span>
-                                        <span className="text-[10px] text-zinc-600">{new Date(setting.updated_at).toLocaleString()}</span>
+                                        <span className="text-sm font-mono font-medium text-amber-600 dark:text-amber-300/90">{setting.key}</span>
+                                        <span className="text-[10px] text-muted-foreground/60">{new Date(setting.updated_at).toLocaleString()}</span>
                                     </div>
                                     {setting.editing ? (
                                         <div className="flex items-end gap-2 mt-2">
@@ -416,7 +416,7 @@ export function OpenClawConfig() {
                                                     s.key === setting.key ? { ...s, editValue: e.target.value } : s
                                                 ))}
                                                 rows={3}
-                                                className="flex-1 px-3 py-1.5 rounded bg-black/40 border border-amber-500/30 text-sm text-zinc-200 font-mono resize-none focus:outline-none focus:border-amber-500/50"
+                                                className="flex-1 px-3 py-1.5 rounded bg-muted/30 border border-amber-500/30 text-sm text-foreground font-mono resize-none focus:outline-none focus:border-amber-500/50"
                                                 autoFocus
                                             />
                                             <div className="flex flex-col gap-1">
@@ -430,14 +430,14 @@ export function OpenClawConfig() {
                                                     onClick={() => setSettings(prev => prev.map(s =>
                                                         s.key === setting.key ? { ...s, editing: false } : s
                                                     ))}
-                                                    className="p-1.5 rounded bg-white/5 text-zinc-400 hover:bg-white/10 transition-colors"
+                                                    className="p-1.5 rounded bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
                                                 >
                                                     <X className="w-3 h-3" />
                                                 </button>
                                             </div>
                                         </div>
                                     ) : (
-                                        <pre className="text-xs text-zinc-400 font-mono overflow-x-auto max-h-24 overflow-y-auto whitespace-pre-wrap break-all">
+                                        <pre className="text-xs text-muted-foreground font-mono overflow-x-auto max-h-24 overflow-y-auto whitespace-pre-wrap break-all">
                                             {typeof setting.value === 'string' ? setting.value : JSON.stringify(setting.value, null, 2)}
                                         </pre>
                                     )}
@@ -447,7 +447,7 @@ export function OpenClawConfig() {
                                         onClick={() => setSettings(prev => prev.map(s =>
                                             s.key === setting.key ? { ...s, editing: true } : s
                                         ))}
-                                        className="p-1.5 rounded bg-white/5 text-zinc-500 hover:text-white hover:bg-white/10 transition-all opacity-0 group-hover:opacity-100"
+                                        className="p-1.5 rounded bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all opacity-0 group-hover:opacity-100"
                                     >
                                         <Edit3 className="w-3 h-3" />
                                     </button>

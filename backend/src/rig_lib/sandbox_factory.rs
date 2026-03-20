@@ -120,7 +120,11 @@ where
             eprintln!(
                 "[DEBUG web_search] Returning {} chars to Rhai. First 200: {:?}",
                 result.len(),
-                &result[..std::cmp::min(200, result.len())]
+                {
+                    let mut end = std::cmp::min(200, result.len());
+                    while end > 0 && !result.is_char_boundary(end) { end -= 1; }
+                    &result[..end]
+                }
             );
             rhai::Dynamic::from(result)
         });
@@ -176,7 +180,9 @@ where
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         if content.len() > 20000 {
-                            rhai::Dynamic::from(format!("{}... (truncated)", &content[..20000]))
+                            let mut end = 20000;
+                            while !content.is_char_boundary(end) { end -= 1; }
+                            rhai::Dynamic::from(format!("{}... (truncated)", &content[..end]))
                         } else {
                             rhai::Dynamic::from(content)
                         }

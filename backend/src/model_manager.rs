@@ -273,6 +273,11 @@ pub async fn download_model(
         fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
     }
 
+    // Check for directory traversal attempts in the filename
+    if filename.contains("..") {
+        return Err("Invalid filename: traversal detected".to_string());
+    }
+
     let dest_path = models_dir.join(&filename);
 
     // Ensure parent directory exists (for nested categories like LLM/ModelName/)
@@ -759,7 +764,21 @@ pub async fn download_standard_asset(
         .map_err(|e| e.to_string())?;
 
     println!("[download_standard] Sending request to {}", url);
-    let res = match client.get(&url).send().await {
+
+    // HF Token Injection — same as download_model()
+    let mut request_builder = client.get(&url);
+    if url.contains("huggingface.co") {
+        if let Some(store) = app.try_state::<crate::secret_store::SecretStore>() {
+            if let Some(token) = store.huggingface_token() {
+                if !token.trim().is_empty() {
+                    println!("[download_standard] Using HF Token for authentication");
+                    request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+                }
+            }
+        }
+    }
+
+    let res = match request_builder.send().await {
         Ok(r) => r.error_for_status().map_err(|e| e.to_string())?,
         Err(e) => {
              let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());

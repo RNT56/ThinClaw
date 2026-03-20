@@ -314,10 +314,12 @@ pub async fn edit_message(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 3. Delete subsequent messages
-    sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND created_at > ?")
+    // 3. Delete subsequent messages (use >= to catch millisecond collisions,
+    //    but exclude the edited message itself by ID)
+    sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND created_at >= ? AND id != ?")
         .bind(&msg.conversation_id)
         .bind(msg.created_at)
+        .bind(&message_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;

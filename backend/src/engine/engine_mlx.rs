@@ -756,7 +756,11 @@ impl InferenceEngine for MlxEngine {
                         String::from("(no stderr output)")
                     } else {
                         let trimmed = if buf.len() > 500 {
-                            format!("...{}", &buf[buf.len() - 500..])
+                            let mut start = buf.len() - 500;
+                            while !buf.is_char_boundary(start) && start < buf.len() {
+                                start += 1;
+                            }
+                            format!("...{}", &buf[start..])
                         } else {
                             buf
                         };

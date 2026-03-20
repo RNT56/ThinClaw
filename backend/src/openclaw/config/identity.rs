@@ -201,7 +201,6 @@ impl OpenClawConfig {
                 }
                 secrets
             },
-            node_host_enabled: identity.node_host_enabled,
             allow_local_tools: identity.allow_local_tools,
             workspace_mode: identity.workspace_mode,
             workspace_root: identity.workspace_root,
@@ -643,7 +642,6 @@ impl OpenClawConfig {
             private_key: self.private_key.clone(),
             public_key: self.public_key.clone(),
             custom_secrets: self.custom_secrets.clone(),
-            node_host_enabled: self.node_host_enabled,
             allow_local_tools: self.allow_local_tools,
             workspace_mode: self.workspace_mode.clone(),
             workspace_root: self.workspace_root.clone(),

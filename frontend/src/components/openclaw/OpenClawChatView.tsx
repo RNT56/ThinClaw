@@ -2,16 +2,17 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronRight, ChevronDown, Brain, Terminal, Loader2, CheckCircle2, XCircle, Layers, Zap, ExternalLink, Trash2, Download, Sliders, FileDown, PanelRight, Copy, Check } from 'lucide-react';
+import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as openclaw from '../../lib/openclaw';
 import { OpenClawMessage } from '../../lib/openclaw';
 import { listen } from '@tauri-apps/api/event';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 
+
+
+import { AssistantMessageContent, ToolHistoryGroup, CopyMessageButton, SystemMessageContent } from './ChatSubComponents';
 import { StreamRun } from '../../hooks/use-openclaw-stream';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { MemoryEditor } from './MemoryEditor';
@@ -30,518 +31,6 @@ interface OpenClawChatViewProps {
     onFactoryReset?: () => void;
     onNavigateToSettings?: (page: 'openclaw-gateway') => void;
     onViewSession?: (sessionKey: string) => void;
-}
-
-interface RichToolCardProps {
-    name: string;
-    status: 'started' | 'completed' | 'failed' | 'in_flight';
-    input?: any;
-    output?: any;
-    isSubAgent?: boolean;
-    variant?: 'live' | 'history';
-    onViewSession?: (sessionKey: string) => void;
-}
-
-function RichToolCard({ name, status, input: rawInput, output: rawOutput, isSubAgent, variant = 'live', onViewSession }: RichToolCardProps) {
-    const [isExpanded, setIsExpanded] = useState(false);
-
-    // Filter out null/undefined/"null"/"Null" to prevent showing empty data
-    const input = (rawInput === null || rawInput === undefined || rawInput === 'null' || rawInput === 'Null') ? undefined : rawInput;
-    const output = (rawOutput === null || rawOutput === undefined || rawOutput === 'null' || rawOutput === 'Null') ? undefined : rawOutput;
-
-    // Extract spawned session key from sub-agent output
-    const spawnedSessionKey = isSubAgent ? extractSessionKey(output) : null;
-
-    // Minimal History Mode
-    if (variant === 'history') {
-        return (
-            <div className="w-full">
-                <button
-                    onClick={() => setIsExpanded(!isExpanded)}
-                    className="flex items-center gap-2 w-full text-left py-1 hover:bg-white/5 transition-colors rounded group pl-2 border-l border-white/5"
-                >
-                    <div className="w-4 h-4 rounded flex items-center justify-center bg-gray-800/50 group-hover:bg-gray-800 transition-colors">
-                        {isSubAgent ? <RefreshCw className="w-2.5 h-2.5 text-purple-400" /> : <Terminal className="w-2.5 h-2.5 text-gray-500" />}
-                    </div>
-                    <div className="flex-1 flex items-center gap-2">
-                        <span className="text-[10px] font-medium text-muted-foreground group-hover:text-gray-300 transition-colors font-mono">
-                            {isSubAgent ? 'Sub-Agent Spawn' : name}
-                        </span>
-                        {status === 'failed' && <span className="text-[9px] text-red-500 font-bold uppercase">Failed</span>}
-                        {isSubAgent && status === 'started' && <span className="text-[9px] text-purple-400 font-bold uppercase animate-pulse">Running</span>}
-                    </div>
-                    {isExpanded ? <ChevronDown className="w-3 h-3 text-muted-foreground" /> : <ChevronRight className="w-3 h-3 text-muted-foreground" />}
-                </button>
-                <AnimatePresence>
-                    {isExpanded && (
-                        <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: "auto", opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            className="overflow-hidden ml-7 space-y-2 mt-1 mb-2 border-l-2 border-white/5 pl-3"
-                        >
-                            {input && (
-                                <div>
-                                    <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-0.5">Input</div>
-                                    <pre className="text-[10px] font-mono text-gray-400 overflow-x-auto whitespace-pre-wrap bg-black/20 p-2 rounded">
-                                        {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
-                                    </pre>
-                                </div>
-                            )}
-                            {output && (
-                                <div>
-                                    <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-0.5">Output</div>
-                                    <pre className="text-[10px] font-mono text-gray-500 overflow-x-auto whitespace-pre-wrap bg-black/20 p-2 rounded">
-                                        {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
-                                    </pre>
-                                </div>
-                            )}
-                            {/* Sub-Agent Navigation Button */}
-                            {spawnedSessionKey && onViewSession && (
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); onViewSession(spawnedSessionKey); }}
-                                    className="flex items-center gap-1.5 mt-1 px-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 text-[10px] font-bold border border-purple-500/20 rounded transition-all group/nav"
-                                >
-                                    <ExternalLink className="w-3 h-3 group-hover/nav:translate-x-0.5 transition-transform" />
-                                    View Sub-Agent
-                                </button>
-                            )}
-                        </motion.div>
-                    )}
-                </AnimatePresence>
-            </div>
-        );
-    }
-
-    // Default Rich/Live Mode
-    let StatusIcon = Terminal;
-    let iconColor = "text-amber-500";
-    let animate = false;
-
-    if (isSubAgent) {
-        StatusIcon = RefreshCw;
-        iconColor = "text-purple-400";
-    }
-
-    if (status === 'started' || status === 'in_flight') {
-        StatusIcon = Loader2;
-        iconColor = "text-blue-400";
-        animate = true;
-    } else if (status === 'completed') {
-        StatusIcon = CheckCircle2;
-        iconColor = "text-green-400";
-    } else if (status === 'failed') {
-        StatusIcon = XCircle;
-        iconColor = "text-red-400";
-    }
-
-    let label = isSubAgent ? "Sub-Agent Task" : `Action: ${name} `;
-    if (status === 'started') label += " (Running...)";
-    if (status === 'completed') label += " (Done)";
-    if (status === 'failed') label += " (Failed)";
-
-    return (
-        <div className="w-full">
-            <button
-                onClick={() => setIsExpanded(!isExpanded)}
-                className={cn(
-                    "flex items-center gap-2 w-full text-left py-1 mb-1 transition-colors rounded hover:bg-white/5",
-                    iconColor
-                )}
-            >
-                <StatusIcon className={cn("w-3.5 h-3.5", animate && "animate-spin")} />
-                <span className="text-[10px] font-bold uppercase tracking-wider flex-1">
-                    {label}
-                </span>
-                {isExpanded ? <ChevronDown className="w-3 h-3 opacity-50" /> : <ChevronRight className="w-3 h-3 opacity-50" />}
-            </button>
-            <AnimatePresence>
-                {isExpanded && (
-                    <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: "auto", opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="overflow-hidden ml-6 space-y-2"
-                    >
-                        {input && (
-                            <div className="bg-black/30 rounded p-2 border border-border/40">
-                                <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-1">Input</div>
-                                <pre className="text-[10px] font-mono text-gray-300 overflow-x-auto whitespace-pre-wrap">
-                                    {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
-                                </pre>
-                            </div>
-                        )}
-                        {output && (
-                            <div className="bg-black/30 rounded p-2 border border-border/40">
-                                <div className="text-[9px] uppercase text-muted-foreground font-semibold mb-1">Output</div>
-                                {(() => {
-                                    // Parse if string
-                                    let content = output;
-                                    if (typeof output === 'string' && output.trim().startsWith('{')) {
-                                        try { content = JSON.parse(output); } catch { }
-                                    }
-
-                                    // Display error prominently
-                                    if (content?.error || (content?.status === 'error' && content?.error)) {
-                                        return (
-                                            <div className="bg-red-500/10 border border-red-500/20 rounded p-2 text-red-400 text-xs font-mono whitespace-pre-wrap">
-                                                {content.error}
-                                            </div>
-                                        );
-                                    }
-
-                                    return (
-                                        <pre className="text-[10px] font-mono text-green-300/80 overflow-x-auto whitespace-pre-wrap">
-                                            {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
-                                        </pre>
-                                    );
-                                })()}
-                            </div>
-                        )}
-                        {/* Sub-Agent Navigation Button (Live Mode) */}
-                        {spawnedSessionKey && onViewSession && (
-                            <button
-                                onClick={(e) => { e.stopPropagation(); onViewSession(spawnedSessionKey); }}
-                                className="flex items-center gap-2 mt-2 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 text-xs font-bold border border-purple-500/20 rounded-lg transition-all group/nav w-full justify-center"
-                            >
-                                <ExternalLink className="w-3.5 h-3.5 group-hover/nav:translate-x-0.5 transition-transform" />
-                                View Sub-Agent Session
-                            </button>
-                        )}
-                    </motion.div>
-                )}
-            </AnimatePresence>
-        </div>
-    );
-}
-
-// Helper: extract session key from sub-agent spawn output
-function extractSessionKey(output: any): string | null {
-    if (!output) return null;
-    let data = output;
-    if (typeof output === 'string') {
-        try { data = JSON.parse(output); } catch { return null; }
-    }
-    // Common patterns from sessions_spawn output
-    return data?.sessionKey || data?.session_key || data?.sessionId || data?.session_id || null;
-}
-
-// Shared markdown components for OpenClaw chat — handles link clicks
-// by opening URLs in the system browser (Safari/Chrome) instead of
-// navigating the Tauri webview.
-const markdownComponents = {
-    a: ({ node, href, children, ...props }: any) => {
-        const isExternalUrl = href && (href.startsWith('http://') || href.startsWith('https://'));
-        return (
-            <a
-                {...props}
-                href={href}
-                className="text-primary hover:underline cursor-pointer"
-                onClick={(e: React.MouseEvent) => {
-                    if (isExternalUrl && href) {
-                        e.preventDefault();
-                        import('@tauri-apps/plugin-opener').then(({ openUrl }) => {
-                            openUrl(href);
-                        }).catch(() => {
-                            window.open(href, '_blank', 'noopener,noreferrer');
-                        });
-                    }
-                }}
-            >
-                {children}
-            </a>
-        );
-    },
-};
-
-// Parse [TOOL_CALLS] in assistant messages and render nicely
-function AssistantMessageContent({ text }: { text: string }) {
-    // Match patterns like: [TOOL_CALLS]tool_name[ARGS]{"key": "value"}
-    // Use greedy match to end-of-line for the JSON args (handles nested objects)
-    const toolCallRegex = /\[TOOL_CALLS\](\w+)\[ARGS\](\{.*?\})(?:\s|$)/gm;
-    const hasToolCalls = toolCallRegex.test(text);
-
-    if (!hasToolCalls) {
-        return <div className="prose prose-invert prose-sm"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{text}</ReactMarkdown></div>;
-    }
-
-    // Reset regex after test
-    toolCallRegex.lastIndex = 0;
-
-    // Split into text parts and tool call parts
-    const parts: { type: 'text' | 'tool'; content?: string; toolName?: string; toolInput?: any }[] = [];
-    let lastIndex = 0;
-    let match;
-
-    while ((match = toolCallRegex.exec(text)) !== null) {
-        // Add preceding text if any
-        if (match.index > lastIndex) {
-            const preceding = text.slice(lastIndex, match.index).trim();
-            if (preceding) {
-                parts.push({ type: 'text', content: preceding });
-            }
-        }
-
-        // Parse tool call
-        let parsedInput: any = undefined;
-        try {
-            parsedInput = JSON.parse(match[2]);
-        } catch {
-            parsedInput = match[2];
-        }
-
-        parts.push({
-            type: 'tool',
-            toolName: match[1],
-            toolInput: parsedInput,
-        });
-
-        lastIndex = match.index + match[0].length;
-    }
-
-    // Add trailing text if any
-    if (lastIndex < text.length) {
-        const trailing = text.slice(lastIndex).trim();
-        if (trailing) {
-            parts.push({ type: 'text', content: trailing });
-        }
-    }
-
-    return (
-        <div className="space-y-2">
-            {parts.map((part, i) => {
-                if (part.type === 'text' && part.content) {
-                    return <div key={i} className="prose prose-invert prose-sm"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{part.content}</ReactMarkdown></div>;
-                }
-                if (part.type === 'tool' && part.toolName) {
-                    return (
-                        <RichToolCard
-                            key={i}
-                            name={part.toolName}
-                            status="completed"
-                            input={part.toolInput}
-                            variant="history"
-                        />
-                    );
-                }
-                return null;
-            })}
-        </div>
-    );
-}
-
-// Collapsed Group for History
-function ToolHistoryGroup({ messages, onViewSession }: { messages: OpenClawMessage[]; onViewSession?: (sessionKey: string) => void }) {
-    const [expanded, setExpanded] = useState(false);
-    const count = messages.length;
-    const hasFailures = messages.some(m => {
-        // basic heuristic for failure
-        return m.metadata?.status === 'failed' || m.text.includes('FAIL') || m.text.includes('error');
-    });
-
-    return (
-        <div className="w-full my-2">
-            <button
-                onClick={() => setExpanded(!expanded)}
-                className={cn(
-                    "flex items-center gap-3 w-full text-left px-3 py-2 rounded-lg transition-all border",
-                    expanded ? "bg-white/5 border-border/40" : "bg-transparent border-transparent hover:bg-white/5",
-                    "group"
-                )}
-            >
-                <div className={cn(
-                    "w-6 h-6 rounded-md flex items-center justify-center transition-colors",
-                    hasFailures ? "bg-red-500/10 text-red-400" : "bg-blue-500/10 text-blue-400"
-                )}>
-                    {hasFailures ? <AlertTriangle className="w-3.5 h-3.5" /> : <Layers className="w-3.5 h-3.5" />}
-                </div>
-                <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                        <span className="text-xs font-medium text-gray-300">
-                            Executed {count} tool{count > 1 ? 's' : ''}
-                        </span>
-                        {hasFailures && <span className="text-[9px] uppercase font-bold text-red-500 bg-red-500/10 px-1.5 rounded">Issues Found</span>}
-                    </div>
-                </div>
-                {expanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
-            </button>
-            <AnimatePresence>
-                {expanded && (
-                    <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: "auto", opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="overflow-hidden pl-4 pr-1 py-2 space-y-1"
-                    >
-                        {messages.map((msg) => (
-                            <SystemMessageContent key={msg.id} text={msg.text} metadata={msg.metadata} onViewSession={onViewSession} />
-                        ))}
-                    </motion.div>
-                )}
-            </AnimatePresence>
-        </div>
-    );
-}
-
-// ── Copy-to-clipboard for chat messages ─────────────────────────────────
-
-function CopyMessageButton({ text }: { text: string }) {
-    const [copied, setCopied] = useState(false);
-    return (
-        <button
-            onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                    await navigator.clipboard.writeText(text);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 2000);
-                } catch { /* noop */ }
-            }}
-            title="Copy message"
-            className={cn(
-                'inline-flex items-center gap-0.5 transition-all duration-200',
-                copied
-                    ? 'text-emerald-400 scale-110'
-                    : 'hover:text-foreground/70 hover:scale-105'
-            )}
-        >
-            {copied
-                ? <><Check className="w-3 h-3" /> <span className="normal-case">copied</span></>
-                : <Copy className="w-3 h-3" />
-            }
-        </button>
-    );
-}
-
-function SystemMessageContent({ text, metadata, onViewSession }: { text: string; metadata?: any; onViewSession?: (sessionKey: string) => void }) {
-    // 1. File Created Card
-    if (metadata?.type === 'file_created') {
-        const kb = metadata.bytes < 1024
-            ? `${metadata.bytes} B`
-            : `${(metadata.bytes / 1024).toFixed(1)} KB`;
-        return (
-            <div className="flex items-start gap-3 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 w-full max-w-md">
-                <div className="p-2 bg-emerald-500/10 rounded-lg shrink-0">
-                    <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                </div>
-                <div className="flex-1 min-w-0">
-                    <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-0.5">File Created</p>
-                    <p className="text-xs font-mono text-foreground/80 truncate">{metadata.relative_path || metadata.absolute_path?.split('/').pop()}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">{kb}</p>
-                </div>
-                <button
-                    onClick={() => {
-                        (window as any).__tauri__?.invoke('openclaw_reveal_file', { path: metadata.absolute_path }).catch(() => { });
-                    }}
-                    title="Reveal in Finder"
-                    className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 transition-all border border-emerald-500/20 shrink-0"
-                >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                </button>
-            </div>
-        );
-    }
-
-    // 2. Rich Tool Card Support (Backend Metadata)
-    if (metadata?.type === 'tool' || metadata?.type === 'tool_result') {
-        const isSubAgent = metadata.name === 'sessions_spawn' || metadata.name?.includes('subagent');
-        return (
-            <RichToolCard
-                name={metadata.name || 'Unknown Tool'}
-                status={metadata.status || 'completed'}
-                input={metadata.input}
-                output={metadata.output}
-                isSubAgent={isSubAgent}
-                variant="history"
-                onViewSession={onViewSession}
-            />
-        );
-    }
-
-    // 2. Parse "ACTION: TOOL_NAME (STATUS)"
-    const trimmedText = text.trim();
-    const actionMatch = trimmedText.match(/^ACTION:\s*(\w+)\s*\((\w+)\)/i);
-    if (actionMatch) {
-        const toolName = actionMatch[1].toUpperCase();
-        const statusRaw = actionMatch[2].toLowerCase();
-        const status = statusRaw === 'done' ? 'completed' :
-            statusRaw === 'error' ? 'failed' :
-                statusRaw === 'started' ? 'started' :
-                    statusRaw === 'in_flight' ? 'in_flight' : 'completed';
-
-        const contentAfterAction = trimmedText.replace(/^ACTION:\s*\w+\s*\(\w+\)\s*/i, '').trim();
-        let output: any = null;
-        let hasError = false;
-        try {
-            output = JSON.parse(contentAfterAction);
-            if (output?.error || output?.status === 'error') hasError = true;
-        } catch { output = contentAfterAction || null; }
-
-        return <RichToolCard name={toolName} status={hasError ? 'failed' : status} output={output} variant="history" />;
-    }
-
-    // 3. Fallback for standalone JSON
-    if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
-        try {
-            const parsed = JSON.parse(text);
-            if (parsed.tool || parsed.results || parsed.status) {
-                const hasError = parsed.error !== undefined || parsed.status === 'error';
-                const toolName = parsed.tool || 'TOOL';
-                return <RichToolCard name={toolName.toUpperCase()} status={hasError ? 'failed' : 'completed'} output={parsed} variant="history" />;
-            }
-        } catch { }
-    }
-
-    // 4. Thinking / Reasoning
-    const isThinking = text.includes('🧠');
-    if (isThinking) {
-        const content = text.replace(/^🧠/, '').trim();
-        return (
-            <div className="w-full">
-                <div className="flex items-center gap-2 mb-1.5 px-1 py-0.5 rounded bg-blue-500/5 w-fit border border-blue-500/10">
-                    <Brain className="w-3 h-3 text-blue-400" />
-                    <span className="text-[9px] font-bold text-blue-400 uppercase tracking-widest">Internal Reasoning</span>
-                </div>
-                <p className="whitespace-pre-wrap leading-relaxed text-[11px] font-mono text-blue-200/60 pl-4 border-l-2 border-blue-500/20 py-1 transition-colors hover:text-blue-200/80">
-                    {content}
-                </p>
-            </div>
-        );
-    }
-
-    // 5. General System Message
-    if (!text.includes('[Tool')) {
-        const content = text.replace(/^🛠️/, '').trim();
-        return (
-            <p className="whitespace-pre-wrap leading-relaxed opacity-90 text-[11px] font-mono text-gray-400 pl-6 border-l border-blue-500/20 py-1">
-                {content}
-            </p>
-        );
-    }
-
-    // Legacy Tool format fallback
-    let toolName = "System Action";
-    let toolInput = null;
-    let toolOutput = null;
-
-    const callMatch = text.match(/\[Tool\s+Call:\s+([^\]]+)\]/);
-    if (callMatch) toolName = callMatch[1];
-
-    try {
-        const inputMatch = text.match(/Input:\s+((?:(?!Output:).)+)/s);
-        if (inputMatch) toolInput = JSON.parse(inputMatch[1].trim());
-    } catch (e) { }
-
-    try {
-        const outputMatch = text.match(/Output:\s+(.+)/s);
-        if (outputMatch) toolOutput = JSON.parse(outputMatch[1]);
-    } catch (e) { }
-
-    return <RichToolCard name={toolName} status="completed" input={toolInput} output={toolOutput} variant="history" />;
 }
 
 export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded = false, onBootstrapComplete = () => { }, onFactoryReset, onNavigateToSettings, onViewSession }: OpenClawChatViewProps) {
@@ -567,7 +56,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
-    const isUserScrolling = useRef(false);
+    // IC-028: Renamed from isUserScrolling (inverted logic) to isAutoScrollPinned
+    const isAutoScrollPinned = useRef(true);
 
     // Inference speed tracking for OpenClaw
     const ocStreamStartRef = useRef<number | null>(null);
@@ -577,7 +67,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     const isCoreView = sessionKey === 'agent:main';
     // Use a valid session key for the engine if in Core View
     const effectiveSessionKey = isCoreView ? 'agent:main' : sessionKey;
-    const [coreTab, setCoreTab] = useState<'chat' | 'console' | 'memory'>(isCoreView ? 'chat' : 'console');
+    // IC-014: Always initialize to 'chat' regardless of view type
+    const [coreTab, setCoreTab] = useState<'chat' | 'console' | 'memory'>('chat');
 
 
 
@@ -590,12 +81,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
         const distFromBottom = scrollHeight - scrollTop - clientHeight;
 
-        // If user scrolls up by more than 15px, break the auto-scroll pin
-        if (distFromBottom < 15) {
-            isUserScrolling.current = false;
-        } else {
-            isUserScrolling.current = true;
-        }
+        // IC-028: Simplified — pinned when near bottom, unpinned when user scrolls up
+        isAutoScrollPinned.current = distFromBottom < 15;
     };
 
     const fetchHistory = useCallback(async () => {
@@ -686,7 +173,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     }, [effectiveSessionKey, gatewayRunning]);
 
     useEffect(() => {
-        isUserScrolling.current = false;
+        isAutoScrollPinned.current = true;
         fetchHistory();
 
         // The backend boot inject fires ~1.5s after engine start.
@@ -713,9 +200,12 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
     useEffect(() => {
         if (!effectiveSessionKey) return;
+        // IC-020: Guard against events firing after unmount
+        let isMounted = true;
         // Listen for ALL openclaw events — don't gate on gatewayRunning
         // so we never miss events during the polling interval gap.
         const unlistenPromise = listen<any>('openclaw-event', (event) => {
+            if (!isMounted) return;
             const uiEvent = event.payload;
 
             // ── Skip events owned by other panels ────────────────────────
@@ -760,7 +250,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                     action: {
                         label: 'Reveal',
                         onClick: () => {
-                            (window as any).__tauri__?.invoke('openclaw_reveal_file', { path }).catch(() => { });
+                            // IC-009: Use typed Specta binding
+                            commands.openclawRevealFile(path).catch(() => { });
                         },
                     },
                 });
@@ -824,7 +315,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                             metadata: { type: 'routine_message', routine_name },
                         }]);
                     }
-                    if (!isUserScrolling.current) scrollToBottom();
+                    if (isAutoScrollPinned.current) scrollToBottom();
                     return;
                 }
 
@@ -850,7 +341,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         }];
                     });
                     toast('🔔 Heartbeat: items need attention', { duration: 6000, icon: '💓' });
-                    if (!isUserScrolling.current) scrollToBottom();
+                    if (isAutoScrollPinned.current) scrollToBottom();
                     return;
                 }
 
@@ -884,7 +375,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         }];
                     });
                     toast.success(`✅ Automation "${routine_name}" completed`, { duration: 6000 });
-                    if (!isUserScrolling.current) scrollToBottom();
+                    if (isAutoScrollPinned.current) scrollToBottom();
                     return;
                 }
 
@@ -910,7 +401,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                     });
                     const summarySnippet = result_summary ? ` — ${String(result_summary).slice(0, 120)}` : '';
                     toast.error(`❌ Automation "${routine_name}" failed${summarySnippet}`, { duration: 8000 });
-                    if (!isUserScrolling.current) scrollToBottom();
+                    if (isAutoScrollPinned.current) scrollToBottom();
                     return;
                 }
 
@@ -956,7 +447,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             // Handle message events
             if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus'].includes(uiEvent.kind)) {
                 updateMessagesFromEvent(uiEvent);
-                if (!isUserScrolling.current) {
+                if (isAutoScrollPinned.current) {
                     scrollToBottom();
                 }
             }
@@ -1117,12 +608,15 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 });
             }
         });
-        return () => { unlistenPromise.then(fn => fn()); };
+        return () => {
+            isMounted = false;
+            unlistenPromise.then(fn => fn());
+        };
     }, [effectiveSessionKey, scrollToBottom]);
 
     // Pin scroll on NEW messages
     useEffect(() => {
-        isUserScrolling.current = false;
+        isAutoScrollPinned.current = true;
         scrollToBottom();
     }, [messages.length, scrollToBottom]);
 
@@ -1226,7 +720,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         // Optimistic update
         const optimisticMsg: OpenClawMessage = { id: `temp-${Date.now()}`, role: 'user', ts_ms: Date.now(), text: msg, source: 'openclaw' };
         setMessages(prev => [...prev, optimisticMsg]);
-        isUserScrolling.current = false;
+        isAutoScrollPinned.current = true;
         scrollToBottom();
         try { await openclaw.sendOpenClawMessage(effectiveSessionKey, msg, true); }
         catch (e) { toast.error('Failed to send message'); setMessages(prev => prev.filter(m => m.id !== optimisticMsg.id)); }
@@ -1342,21 +836,21 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     </button>
                                     <button
                                         onClick={() => setShowExportMenu(!showExportMenu)}
-                                        className="p-2 rounded-r-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors border-l border-white/5"
+                                        className="p-2 rounded-r-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors border-l border-border/30"
                                         title="Choose format"
                                     >
                                         <ChevronDown className="w-3 h-3" />
                                     </button>
                                 </div>
                                 {showExportMenu && (
-                                    <div className="absolute top-full right-0 mt-1 p-1 bg-zinc-900 border border-border rounded-xl shadow-2xl z-50 min-w-[140px] animate-in fade-in zoom-in-95 duration-150">
+                                    <div className="absolute top-full right-0 mt-1 p-1 bg-popover border border-border rounded-xl shadow-2xl z-50 min-w-[140px] animate-in fade-in zoom-in-95 duration-150">
                                         {EXPORT_FORMATS.map(f => (
                                             <button
                                                 key={f.id}
                                                 onClick={() => { setExportFormat(f.id); handleExportSession(f.id); }}
                                                 className={cn(
                                                     "w-full text-left px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-2",
-                                                    exportFormat === f.id ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                                                    exportFormat === f.id ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                                                 )}
                                             >
                                                 <FileDown className="w-3 h-3" />
@@ -1389,7 +883,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     "flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold border rounded-lg transition-all group",
                                     isSending
                                         ? "bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/20"
-                                        : "bg-zinc-500/5 text-zinc-600 border-zinc-500/10 cursor-not-allowed opacity-50"
+                                        : "bg-muted/30 text-muted-foreground border-border/30 cursor-not-allowed opacity-50"
                                 )}
                                 title={isSending ? "Stop the current agent run" : "No active run"}
                             >
@@ -1417,7 +911,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('chat')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'chat' ? "bg-blue-500/20 text-blue-400 shadow-sm" : "text-gray-500 hover:text-gray-300"
+                                        coreTab === 'chat' ? "bg-blue-500/20 text-blue-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Chat
@@ -1426,7 +920,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('console')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'console' ? "bg-amber-500/20 text-amber-400 shadow-sm" : "text-gray-500 hover:text-gray-300"
+                                        coreTab === 'console' ? "bg-amber-500/20 text-amber-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Logs
@@ -1435,7 +929,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     onClick={() => setCoreTab('memory')}
                                     className={cn(
                                         "px-4 py-1.5 rounded-md text-xs font-medium transition-all",
-                                        coreTab === 'memory' ? "bg-purple-500/20 text-purple-400 shadow-sm" : "text-gray-500 hover:text-gray-300"
+                                        coreTab === 'memory' ? "bg-purple-500/20 text-purple-400 shadow-sm" : "text-muted-foreground hover:text-foreground"
                                     )}
                                 >
                                     Memory
@@ -1544,15 +1038,15 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                                                 )}
                                                                 <div className={cn(
                                                                     "max-w-[85%] rounded-2xl px-5 py-3 shadow-md relative group",
-                                                                    msg.role === 'user' ? "bg-blue-600 text-white rounded-tr-none"
-                                                                        : msg.role === 'assistant' ? "bg-card/80 backdrop-blur-md border border-border/50 rounded-tl-none"
-                                                                            : "bg-[#0d1117] border border-gray-800 text-gray-300 font-mono text-xs rounded-lg py-2 px-3 shadow-inner"
+                                                                    msg.role === 'user' ? "bg-primary text-primary-foreground rounded-tr-none"
+                                                                        : msg.role === 'assistant' ? "bg-card/80 backdrop-blur-md border border-border/50 rounded-tl-none text-card-foreground"
+                                                                            : "bg-muted/50 border border-border/50 text-foreground/80 font-mono text-xs rounded-lg py-2 px-3 shadow-inner"
                                                                 )}>
                                                                     {msg.role === 'system'
                                                                         ? <SystemMessageContent text={msg.text} metadata={msg.metadata} onViewSession={onViewSession} />
                                                                         : <AssistantMessageContent text={msg.text} />
                                                                     }
-                                                                    <div className={cn("flex items-center gap-3 mt-2 text-[10px] opacity-0 group-hover:opacity-100 uppercase transition-opacity duration-200", msg.role === 'user' ? "text-primary-foreground/60" : "text-muted-foreground/60")}>
+                                                                    <div className={cn("flex items-center gap-3 mt-2 text-[10px] opacity-0 group-hover:opacity-100 uppercase transition-opacity duration-200", msg.role === 'user' ? "text-primary-foreground/50" : "text-muted-foreground/60")}>
                                                                         <span><Clock className="w-3 h-3 inline mr-1" /> {formatTime(msg.ts_ms)}</span>
                                                                         {msg.role === 'assistant' && msg.tokensPerSec != null && msg.tokensPerSec > 0 && (
                                                                             <span className="flex items-center gap-1 text-emerald-400/70">
@@ -1577,15 +1071,15 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                     {/* CHAT TAB: Empty state — agent is booting */}
                                     {isCoreView && coreTab === 'chat' && messages.length === 0 && !isLoading && gatewayRunning && (
                                         <div className="flex flex-col items-center justify-center py-20 gap-5">
-                                            <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center relative">
+                                            <div className="w-16 h-16 rounded-full bg-muted/30 flex items-center justify-center relative">
                                                 <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
                                                 <Bot className="w-8 h-8 text-emerald-500" />
                                             </div>
                                             <div className="text-center">
-                                                <h3 className="text-lg font-medium text-white">
+                                                <h3 className="text-lg font-medium text-foreground">
                                                     {bootstrapNeeded ? 'Awakening…' : 'Coming online…'}
                                                 </h3>
-                                                <p className="text-sm text-gray-500 mt-1">
+                                                <p className="text-sm text-muted-foreground mt-1">
                                                     {bootstrapNeeded
                                                         ? 'Your agent is waking up for the first time.'
                                                         : 'Your agent is preparing to greet you.'}
@@ -1596,24 +1090,24 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
 
                                     {/* CORE VIEW: Console tab controls */}
                                     {isCoreView && coreTab === 'console' && (
-                                        <div className="space-y-4 pt-4 border-t border-white/5 mt-4">
+                                        <div className="space-y-4 pt-4 border-t border-border/30 mt-4">
                                             {/* Empty State / Refresh Button */}
-                                            <div className="text-center space-y-4 pt-10 border-t border-white/5">
+                                            <div className="text-center space-y-4 pt-10 border-t border-border/30">
                                                 {messages.length === 0 ? (
                                                     <>
-                                                        <div className="w-16 h-16 rounded-full bg-white/5 mx-auto flex items-center justify-center relative">
+                                                        <div className="w-16 h-16 rounded-full bg-muted/30 mx-auto flex items-center justify-center relative">
                                                             <div className="absolute inset-0 rounded-full border border-emerald-500/20 animate-ping" />
                                                             <Radio className="w-8 h-8 text-emerald-500" />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-lg font-medium text-white">System Consoles Online</h3>
-                                                            <p className="text-sm text-gray-500">Waiting for system events...</p>
+                                                            <h3 className="text-lg font-medium text-foreground">System Consoles Online</h3>
+                                                            <p className="text-sm text-muted-foreground">Waiting for system events...</p>
                                                         </div>
                                                     </>
                                                 ) : (
-                                                    <div className="flex items-center gap-2 justify-center py-4 border-b border-white/5 mb-4">
+                                                    <div className="flex items-center gap-2 justify-center py-4 border-b border-border/30 mb-4">
                                                         <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                                                        <span className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">Context Active</span>
+                                                        <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Context Active</span>
                                                     </div>
                                                 )}
                                                 <button
@@ -1738,7 +1232,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         animate={{ width: 340, opacity: 1 }}
                         exit={{ width: 0, opacity: 0 }}
                         transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
-                        className="h-full border-l border-zinc-700/40 overflow-hidden shrink-0"
+                        className="h-full border-l border-border/40 overflow-hidden shrink-0"
                     >
                         <SubAgentPanel
                             sessionKey={sessionKey}

@@ -119,10 +119,6 @@ pub async fn openclaw_get_status(
             .as_ref()
             .map(|cfg| cfg.custom_secrets.clone())
             .unwrap_or_default(),
-        node_host_enabled: config
-            .as_ref()
-            .map(|c| c.node_host_enabled)
-            .unwrap_or(false),
         allow_local_tools: config.as_ref().map(|c| c.allow_local_tools).unwrap_or(true),
         workspace_mode: config
             .as_ref()
