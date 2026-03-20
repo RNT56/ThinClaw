@@ -7,7 +7,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use ironclaw::{
+use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
@@ -29,12 +29,12 @@ use ironclaw::{
     pairing::PairingStore,
 };
 
-use ironclaw::channels::GmailChannel;
+use thinclaw::channels::GmailChannel;
 #[cfg(target_os = "macos")]
-use ironclaw::channels::IMessageChannel;
+use thinclaw::channels::IMessageChannel;
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use ironclaw::setup::{SetupConfig, SetupWizard};
+use thinclaw::setup::{SetupConfig, SetupWizard};
 
 use main_helpers::*;
 
@@ -59,11 +59,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Config(config_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_config_command(config_cmd.clone()).await;
+            return thinclaw::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Registry(registry_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
+            return thinclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
@@ -84,44 +84,44 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Doctor) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_doctor_command().await;
+            thinclaw::bootstrap::load_ironclaw_env();
+            return thinclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_cron_command(cron_cmd.clone()).await;
+            thinclaw::bootstrap::load_ironclaw_env();
+            return thinclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
             return run_gateway_command(gw_cmd.clone()).await;
         }
         Some(Command::Channels(ch_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
             return run_channels_command(ch_cmd.clone()).await;
         }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_message_command(msg_cmd.clone()).await;
+            thinclaw::bootstrap::load_ironclaw_env();
+            return thinclaw::cli::run_message_command(msg_cmd.clone()).await;
         }
         Some(Command::Models(model_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_model_command(model_cmd.clone()).await;
+            thinclaw::bootstrap::load_ironclaw_env();
+            return thinclaw::cli::run_model_command(model_cmd.clone()).await;
         }
         Some(Command::Completion(completion)) => {
             init_cli_tracing();
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
             channels_only,
         }) => {
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -170,36 +170,36 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
             // In standalone CLI mode, create a fresh router.
             // Runtime agent routing state is in-memory only.
-            let router = ironclaw::agent::AgentRouter::new();
-            ironclaw::cli::run_agents_command(agent_cmd.clone(), &router).await;
+            let router = thinclaw::agent::AgentRouter::new();
+            thinclaw::cli::run_agents_command(agent_cmd.clone(), &router).await;
             return Ok(());
         }
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_ironclaw_env();
             // In standalone CLI mode, create a fresh session manager.
             // Runtime session state is in-memory only.
-            let mgr = std::sync::Arc::new(ironclaw::agent::SessionManager::new());
-            ironclaw::cli::run_sessions_command(session_cmd.clone(), &mgr).await;
+            let mgr = std::sync::Arc::new(thinclaw::agent::SessionManager::new());
+            thinclaw::cli::run_sessions_command(session_cmd.clone(), &mgr).await;
             return Ok(());
         }
         Some(Command::Logs(log_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_log_command(log_cmd.clone()).await;
+            thinclaw::bootstrap::load_ironclaw_env();
+            return thinclaw::cli::run_log_command(log_cmd.clone()).await;
         }
         Some(Command::Browser(browser_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_browser_command(browser_cmd.clone()).await;
+            return thinclaw::cli::run_browser_command(browser_cmd.clone()).await;
         }
         Some(Command::Update(update_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_update_command(update_cmd.clone()).await;
+            return thinclaw::cli::run_update_command(update_cmd.clone()).await;
         }
         None | Some(Command::Run) => {
             // Continue to run agent
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     // Load .env files early so DATABASE_URL (and any other vars) are
     // available to all subsequent env-based config resolution.
     let _ = dotenvy::dotenv();
-    ironclaw::bootstrap::load_ironclaw_env();
+    thinclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -228,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
     let toml_path = cli.config.as_deref();
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
-        Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
+        Err(thinclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
             eprintln!("  {}", hint);
             eprintln!();
@@ -246,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
     let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+        thinclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
     tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
@@ -274,32 +274,32 @@ async fn main() -> anyhow::Result<()> {
 
     // Proactive Docker detection
     let docker_status = if config.sandbox.enabled {
-        let detection = ironclaw::sandbox::check_docker().await;
+        let detection = thinclaw::sandbox::check_docker().await;
         match detection.status {
-            ironclaw::sandbox::DockerStatus::Available => {
+            thinclaw::sandbox::DockerStatus::Available => {
                 tracing::info!("Docker is available");
             }
-            ironclaw::sandbox::DockerStatus::NotInstalled => {
+            thinclaw::sandbox::DockerStatus::NotInstalled => {
                 tracing::warn!(
                     "Docker is not installed -- sandbox disabled for this session. {}",
                     detection.platform.install_hint()
                 );
             }
-            ironclaw::sandbox::DockerStatus::NotRunning => {
+            thinclaw::sandbox::DockerStatus::NotRunning => {
                 tracing::warn!(
                     "Docker is installed but not running -- sandbox disabled for this session. {}",
                     detection.platform.start_hint()
                 );
             }
-            ironclaw::sandbox::DockerStatus::Disabled => {}
+            thinclaw::sandbox::DockerStatus::Disabled => {}
         }
         detection.status
     } else {
-        ironclaw::sandbox::DockerStatus::Disabled
+        thinclaw::sandbox::DockerStatus::Disabled
     };
 
     let job_event_tx: Option<
-        tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
+        tokio::sync::broadcast::Sender<(uuid::Uuid, thinclaw::channels::web::types::SseEvent)>,
     > = if config.sandbox.enabled && docker_status.is_ok() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
@@ -308,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let prompt_queue = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
         uuid::Uuid,
-        std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
+        std::collections::VecDeque<thinclaw::orchestrator::api::PendingPrompt>,
     >::new()));
 
     let container_job_manager: Option<Arc<ContainerJobManager>> =
@@ -320,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
                 cpu_shares: config.sandbox.cpu_shares,
                 orchestrator_port: 50051,
                 claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
                 claude_code_model: config.claude_code.model.clone(),
                 claude_code_max_turns: config.claude_code.max_turns,
                 claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
@@ -489,7 +489,7 @@ async fn main() -> anyhow::Result<()> {
     if !cli.cli_only
         && let Some(ref imessage_config) = config.channels.imessage
     {
-        use ironclaw::channels::IMessageConfig;
+        use thinclaw::channels::IMessageConfig;
 
         let channel_config = IMessageConfig {
             allow_from: imessage_config.allow_from.clone(),
@@ -517,7 +517,7 @@ async fn main() -> anyhow::Result<()> {
     if !cli.cli_only
         && let Some(ref gmail_config) = config.channels.gmail
     {
-        use ironclaw::channels::gmail_wiring::GmailConfig;
+        use thinclaw::channels::gmail_wiring::GmailConfig;
 
         let gmail_wiring_config = GmailConfig {
             enabled: true,
@@ -580,8 +580,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create the shared canvas store and mount HTTP routes.
-    let canvas_store = ironclaw::channels::canvas_gateway::CanvasStore::default();
-    webhook_routes.push(ironclaw::channels::canvas_gateway::canvas_routes(
+    let canvas_store = thinclaw::channels::canvas_gateway::CanvasStore::default();
+    webhook_routes.push(thinclaw::channels::canvas_gateway::canvas_routes(
         canvas_store.clone(),
     ));
 
@@ -630,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create session manager (shared between agent and web gateway)
     let session_manager =
-        Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
+        Arc::new(thinclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     components.tools.register_job_tools(
@@ -651,9 +651,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut gateway_url: Option<String> = None;
     let mut sse_sender: Option<
-        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
+        tokio::sync::broadcast::Sender<thinclaw::channels::web::types::SseEvent>,
     > = None;
-    let mut gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
+    let mut gateway_state: Option<std::sync::Arc<thinclaw::channels::web::server::GatewayState>> =
         None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
@@ -727,7 +727,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|c| c.model_name().to_string());
 
     if config.channels.cli.enabled && cli.message.is_none() {
-        let boot_info = ironclaw::boot_screen::BootInfo {
+        let boot_info = thinclaw::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             agent_name: config.agent.name.clone(),
             llm_backend: config.llm.backend.to_string(),
@@ -761,7 +761,7 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| config.tunnel.public_url.clone()),
             tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
         };
-        ironclaw::boot_screen::print_boot_screen(&boot_info);
+        thinclaw::boot_screen::print_boot_screen(&boot_info);
     }
 
     // ── Run the agent ──────────────────────────────────────────────────
@@ -801,12 +801,12 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sub-agent system ────────────────────────────────────────────────
     let subagent_executor = {
-        let (executor, _result_rx) = ironclaw::agent::SubagentExecutor::new(
+        let (executor, _result_rx) = thinclaw::agent::SubagentExecutor::new(
             components.llm.clone(),
             components.safety.clone(),
             components.tools.clone(),
             channels.clone(),
-            ironclaw::agent::SubagentConfig::default(),
+            thinclaw::agent::SubagentConfig::default(),
         );
 
         // Wire store + SSE for routine run finalization by subagents
@@ -822,13 +822,13 @@ async fn main() -> anyhow::Result<()> {
 
         // Register sub-agent tools with the executor
         components.tools.register_sync(std::sync::Arc::new(
-            ironclaw::tools::builtin::SpawnSubagentTool::new(executor.clone()),
+            thinclaw::tools::builtin::SpawnSubagentTool::new(executor.clone()),
         ));
         components.tools.register_sync(std::sync::Arc::new(
-            ironclaw::tools::builtin::ListSubagentsTool::new(executor.clone()),
+            thinclaw::tools::builtin::ListSubagentsTool::new(executor.clone()),
         ));
         components.tools.register_sync(std::sync::Arc::new(
-            ironclaw::tools::builtin::CancelSubagentTool::new(executor.clone()),
+            thinclaw::tools::builtin::CancelSubagentTool::new(executor.clone()),
         ));
 
         tracing::info!("Sub-agent system initialized (with routine finalization support)");

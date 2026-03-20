@@ -9,11 +9,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use ironclaw::channels::web::server::{GatewayState, start_server};
-use ironclaw::channels::web::sse::SseManager;
-use ironclaw::channels::web::ws::WsConnectionTracker;
-use ironclaw::error::LlmError;
-use ironclaw::llm::{
+use thinclaw::channels::web::server::{GatewayState, start_server};
+use thinclaw::channels::web::sse::SseManager;
+use thinclaw::channels::web::ws::WsConnectionTracker;
+use thinclaw::error::LlmError;
+use thinclaw::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
@@ -62,7 +62,7 @@ impl LlmProvider for MockLlmProvider {
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == ironclaw::llm::Role::User)
+            .find(|m| m.role == thinclaw::llm::Role::User)
             .map(|m| m.content.clone())
             .unwrap_or_else(|| "no user message".to_string());
 
@@ -89,7 +89,7 @@ impl LlmProvider for MockLlmProvider {
         if let Some(tool) = req.tools.first() {
             Ok(ToolCompletionResponse {
                 content: None,
-                tool_calls: vec![ironclaw::llm::ToolCall {
+                tool_calls: vec![thinclaw::llm::ToolCall {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
@@ -202,7 +202,7 @@ async fn start_test_server_with_provider(
         llm_provider: Some(llm_provider),
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        chat_rate_limiter: thinclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
@@ -692,7 +692,7 @@ async fn test_no_llm_provider_returns_503() {
         llm_provider: None, // No LLM!
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        chat_rate_limiter: thinclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),

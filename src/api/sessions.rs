@@ -1,6 +1,6 @@
 //! Session/thread API — framework-agnostic session management functions.
 //!
-//! Extracts business logic from `channels/web/handlers/chat.rs`
+//! Extracts business logic from `channels/web/server.rs`
 //! (`chat_threads_handler`, `chat_history_handler`, `chat_new_thread_handler`).
 
 use std::sync::Arc;
@@ -154,7 +154,7 @@ pub async fn get_history(
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-        let turns = crate::channels::web::handlers::chat::build_turns_from_db_messages(&messages);
+        let turns = crate::channels::web::server::build_turns_from_db_messages(&messages);
         return Ok(HistoryResponse {
             thread_id: tid,
             turns,
@@ -207,7 +207,7 @@ pub async fn get_history(
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
             let turns =
-                crate::channels::web::handlers::chat::build_turns_from_db_messages(&messages);
+                crate::channels::web::server::build_turns_from_db_messages(&messages);
             return Ok(HistoryResponse {
                 thread_id: tid,
                 turns,
