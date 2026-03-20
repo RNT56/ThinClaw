@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
 
-use ironclaw::channels::wasm::{
+use thinclaw::channels::wasm::{
     RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
     WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
 };
-use ironclaw::config::Config;
-use ironclaw::pairing::PairingStore;
-use ironclaw::secrets::SecretsStore;
+use thinclaw::config::Config;
+use thinclaw::pairing::PairingStore;
+use thinclaw::secrets::SecretsStore;
 
 /// Initialize tracing for worker/bridge processes (info level).
 pub(crate) fn init_worker_tracing() {
@@ -26,7 +26,7 @@ pub(crate) fn init_worker_tracing() {
 
 /// Run the Memory CLI subcommand.
 pub(crate) async fn run_memory_command(
-    mem_cmd: &ironclaw::cli::MemoryCommand,
+    mem_cmd: &thinclaw::cli::MemoryCommand,
 ) -> anyhow::Result<()> {
     let config = Config::from_env()
         .await
@@ -35,7 +35,7 @@ pub(crate) async fn run_memory_command(
     let embeddings = config.embeddings.create_provider();
 
     // Warn if libSQL backend is used with non-1536 embedding dimension.
-    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+    if config.database.backend == thinclaw::config::DatabaseBackend::LibSql
         && config.embeddings.enabled
         && config.embeddings.dimension != 1536
     {
@@ -49,11 +49,11 @@ pub(crate) async fn run_memory_command(
         );
     }
 
-    let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
+    let db: Arc<dyn thinclaw::db::Database> = thinclaw::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    ironclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    thinclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
 }
 
 /// Run the Worker subcommand (inside Docker containers).
@@ -68,14 +68,14 @@ pub(crate) async fn run_worker(
         orchestrator_url
     );
 
-    let config = ironclaw::worker::runtime::WorkerConfig {
+    let config = thinclaw::worker::runtime::WorkerConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_iterations,
         timeout: std::time::Duration::from_secs(600),
     };
 
-    let runtime = ironclaw::worker::WorkerRuntime::new(config)
+    let runtime = thinclaw::worker::WorkerRuntime::new(config)
         .map_err(|e| anyhow::anyhow!("Worker init failed: {}", e))?;
 
     runtime
@@ -98,16 +98,16 @@ pub(crate) async fn run_claude_bridge(
         model
     );
 
-    let config = ironclaw::worker::claude_bridge::ClaudeBridgeConfig {
+    let config = thinclaw::worker::claude_bridge::ClaudeBridgeConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_turns,
         model: model.to_string(),
         timeout: std::time::Duration::from_secs(1800),
-        allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
+        allowed_tools: thinclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
     };
 
-    let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
+    let runtime = thinclaw::worker::ClaudeBridgeRuntime::new(config)
         .map_err(|e| anyhow::anyhow!("Claude bridge init failed: {}", e))?;
 
     runtime
@@ -118,10 +118,10 @@ pub(crate) async fn run_claude_bridge(
 
 /// Start managed tunnel if configured and no static URL is already set.
 pub(crate) async fn start_tunnel(
-    mut config: ironclaw::config::Config,
+    mut config: thinclaw::config::Config,
 ) -> (
-    ironclaw::config::Config,
-    Option<Box<dyn ironclaw::tunnel::Tunnel>>,
+    thinclaw::config::Config,
+    Option<Box<dyn thinclaw::tunnel::Tunnel>>,
 ) {
     if config.tunnel.public_url.is_some() {
         tracing::info!(
@@ -148,7 +148,7 @@ pub(crate) async fn start_tunnel(
         .map(|g| g.host.as_str())
         .unwrap_or("127.0.0.1");
 
-    match ironclaw::tunnel::create_tunnel(provider_config) {
+    match thinclaw::tunnel::create_tunnel(provider_config) {
         Ok(Some(tunnel)) => {
             tracing::info!(
                 "Starting {} tunnel on {}:{}...",
@@ -178,7 +178,7 @@ pub(crate) async fn start_tunnel(
 
 /// Result of WASM channel setup.
 pub(crate) struct WasmChannelSetup {
-    pub(crate) channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)>,
+    pub(crate) channels: Vec<(String, Box<dyn thinclaw::channels::Channel>)>,
     pub(crate) channel_names: Vec<String>,
     pub(crate) webhook_routes: Option<axum::Router>,
     /// Runtime objects needed for hot-activation via ExtensionManager.
@@ -189,9 +189,9 @@ pub(crate) struct WasmChannelSetup {
 
 /// Load WASM channels and register their webhook routes.
 pub(crate) async fn setup_wasm_channels(
-    config: &ironclaw::config::Config,
+    config: &thinclaw::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    extension_manager: Option<&Arc<thinclaw::extensions::ExtensionManager>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -216,7 +216,7 @@ pub(crate) async fn setup_wasm_channels(
     };
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let mut channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)> = Vec::new();
+    let mut channels: Vec<(String, Box<dyn thinclaw::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
     for loaded in results.loaded {
@@ -350,7 +350,7 @@ pub(crate) async fn setup_wasm_channels(
 pub(crate) fn check_onboard_needed() -> Option<&'static str> {
     let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
-        || ironclaw::config::default_libsql_path().exists();
+        || thinclaw::config::default_libsql_path().exists();
 
     if !has_db {
         return Some("Database not configured");
@@ -372,7 +372,7 @@ pub(crate) fn check_onboard_needed() -> Option<&'static str> {
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
 pub(crate) async fn inject_channel_credentials(
-    channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
+    channel: &Arc<thinclaw::channels::wasm::WasmChannel>,
     secrets: &dyn SecretsStore,
     channel_name: &str,
 ) -> anyhow::Result<usize> {

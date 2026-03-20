@@ -1,4 +1,4 @@
-//! API error type shared across all `ironclaw::api` sub-modules.
+//! API error type shared across all `thinclaw::api` sub-modules.
 //!
 //! Provides a framework-agnostic error enum that Tauri (or any other host)
 //! can convert into its own error representation.

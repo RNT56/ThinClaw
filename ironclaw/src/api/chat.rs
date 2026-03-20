@@ -8,7 +8,7 @@
 //! ## Usage from Tauri
 //!
 //! ```rust,ignore
-//! let result = ironclaw::api::chat::send_message(
+//! let result = thinclaw::api::chat::send_message(
 //!     &agent, &channels, "session-key-123", "Hello!", true,
 //! ).await?;
 //! ```

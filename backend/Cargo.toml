@@ -93,7 +93,7 @@ hkdf = "0.12"
 zstd = "0.13"
 
 # IronClaw agent engine (in-repo, desktop feature = libsql + html-to-markdown)
-ironclaw = { path = "../ironclaw", features = ["desktop"] }
+ironclaw = { path = "../ironclaw", package = "thinclaw", features = ["desktop"] }
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]
