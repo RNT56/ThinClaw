@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Secrets & API Key Management (Node.js vs. Rust)
 
 One of the most important aspects of an AI agent is handling the highly sensitive API keys (OpenAI, Anthropic, etc.) without leaking them or storing them insecurely.

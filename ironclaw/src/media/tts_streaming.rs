@@ -140,13 +140,13 @@ impl SentenceChunker {
         self.buffer.push_str(text);
 
         // Check if we've hit a sentence boundary with sufficient text
-        if self.buffer.len() >= self.config.min_chunk_chars {
-            if let Some(pos) = self.find_sentence_boundary() {
-                let chunk = self.buffer[..pos].to_string();
-                self.buffer = self.buffer[pos..].trim_start().to_string();
-                self.chunk_index += 1;
-                return Some(chunk);
-            }
+        if self.buffer.len() >= self.config.min_chunk_chars
+            && let Some(pos) = self.find_sentence_boundary()
+        {
+            let chunk = self.buffer[..pos].to_string();
+            self.buffer = self.buffer[pos..].trim_start().to_string();
+            self.chunk_index += 1;
+            return Some(chunk);
         }
 
         // Force-emit if we've exceeded max chunk size

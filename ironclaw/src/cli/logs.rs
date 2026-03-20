@@ -179,15 +179,15 @@ impl LogEntry {
     ) -> bool {
         match self.timestamp {
             Some(ts) => {
-                if let Some(s) = since {
-                    if ts < s {
-                        return false;
-                    }
+                if let Some(s) = since
+                    && ts < s
+                {
+                    return false;
                 }
-                if let Some(u) = until {
-                    if ts > u {
-                        return false;
-                    }
+                if let Some(u) = until
+                    && ts > u
+                {
+                    return false;
                 }
                 true
             }
@@ -240,8 +240,8 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
 
             let filtered: Vec<&LogEntry> = entries
                 .iter()
-                .filter(|e| level.as_ref().map_or(true, |l| e.matches_level(l)))
-                .filter(|e| target.as_ref().map_or(true, |t| e.matches_target(t)))
+                .filter(|e| level.as_ref().is_none_or(|l| e.matches_level(l)))
+                .filter(|e| target.as_ref().is_none_or(|t| e.matches_target(t)))
                 .collect();
 
             let start = filtered.len().saturating_sub(lines);
@@ -279,10 +279,10 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
                 if !entry.contains_pattern(&pattern) {
                     continue;
                 }
-                if let Some(ref l) = level {
-                    if !entry.matches_level(l) {
-                        continue;
-                    }
+                if let Some(ref l) = level
+                    && !entry.matches_level(l)
+                {
+                    continue;
                 }
                 if !entry.in_time_range(since_dt, until_dt) {
                     continue;
@@ -311,8 +311,8 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             let filtered: Vec<&LogEntry> = entries
                 .iter()
                 .filter(|e| e.in_time_range(since_dt, until_dt))
-                .filter(|e| level.as_ref().map_or(true, |l| e.matches_level(l)))
-                .filter(|e| target.as_ref().map_or(true, |t| e.matches_target(t)))
+                .filter(|e| level.as_ref().is_none_or(|l| e.matches_level(l)))
+                .filter(|e| target.as_ref().is_none_or(|t| e.matches_target(t)))
                 .collect();
 
             if format == "json" {
@@ -378,7 +378,7 @@ fn read_log_entries(dir: &std::path::Path, max: usize) -> anyhow::Result<Vec<Log
         .map(|e| e.path())
         .filter(|p| {
             p.extension()
-                .map_or(false, |ext| ext == "log" || ext == "txt" || ext == "jsonl")
+                .is_some_and(|ext| ext == "log" || ext == "txt" || ext == "jsonl")
         })
         .collect();
     log_files.sort();

@@ -265,14 +265,27 @@ impl FailoverProvider {
                         );
                     }
 
+                    // Bug 6 fix: add jitter before trying the next provider so
+                    // concurrent callers don't all hammer the next provider at the
+                    // exact same millisecond (thundering-herd on recovery).
+                    // Jitter = 0–20% of 100ms per attempt, derived from index + pos
+                    // as a cheap pseudo-random without importing the rand crate.
+                    let jitter_ms = {
+                        let seed = (i as u64).wrapping_mul(2654435761)
+                            ^ (pos as u64).wrapping_mul(2246822519)
+                            ^ self.now_nanos();
+                        (seed >> 50) % 20 // 0..20 ms
+                    };
                     if pos + 1 < available.len() {
                         let next_i = available[pos + 1];
                         tracing::warn!(
                             provider = %provider.model_name(),
                             error = %err,
                             next_provider = %self.providers[next_i].model_name(),
+                            jitter_ms = jitter_ms,
                             "Provider failed with retryable error, trying next provider"
                         );
+                        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
                     }
                     last_error = Some(err);
                 }

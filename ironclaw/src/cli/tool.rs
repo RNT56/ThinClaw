@@ -1039,12 +1039,11 @@ fn read_hidden_input() -> anyhow::Result<String> {
                 KeyCode::Enter => {
                     break;
                 }
-                KeyCode::Backspace
-                    if !input.is_empty() => {
-                        input.pop();
-                        print!("\x08 \x08");
-                        std::io::stdout().flush()?;
-                    }
+                KeyCode::Backspace if !input.is_empty() => {
+                    input.pop();
+                    print!("\x08 \x08");
+                    std::io::stdout().flush()?;
+                }
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
                     return Err(anyhow::anyhow!("Interrupted"));
@@ -1098,7 +1097,13 @@ async fn validate_token(
             status,
             validation.success_status,
             if body.len() > 100 {
-                format!("{}...", &body[..100])
+                let end = body
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i < 100)
+                    .last()
+                    .unwrap_or(0);
+                format!("{}...", &body[..end])
             } else {
                 body
             }

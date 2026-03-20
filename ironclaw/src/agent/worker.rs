@@ -64,7 +64,11 @@ struct ToolExecResult {
 impl Worker {
     /// Create a new worker for a specific job.
     pub fn new(job_id: Uuid, deps: WorkerDeps) -> Self {
-        Self { job_id, deps, last_output: StdMutex::new(None) }
+        Self {
+            job_id,
+            deps,
+            last_output: StdMutex::new(None),
+        }
     }
 
     /// Store the last meaningful output for finalization.
@@ -209,12 +213,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .get_context(self.job_id)
                     .await
                     .ok()
-                    .map(|c| matches!(c.state, JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled))
+                    .map(|c| {
+                        matches!(
+                            c.state,
+                            JobState::Completed
+                                | JobState::Failed
+                                | JobState::Stuck
+                                | JobState::Cancelled
+                        )
+                    })
                     .unwrap_or(false);
-                if !already_terminal {
-                    if let Err(e) = self.mark_completed().await {
-                        tracing::warn!("Failed to mark job {} completed: {}", self.job_id, e);
-                    }
+                if !already_terminal && let Err(e) = self.mark_completed().await {
+                    tracing::warn!("Failed to mark job {} completed: {}", self.job_id, e);
                 }
             }
             Ok(Err(e)) => {
@@ -251,6 +261,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()))
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
+
+        // Heartbeat jobs set { "heartbeat": true } in metadata. When the LLM
+        // produces a text response (HEARTBEAT_OK or findings), the job is done
+        // — don't loop looking for a generic completion phrase.
+        let is_heartbeat = self
+            .context_manager()
+            .get_context(self.job_id)
+            .await
+            .ok()
+            .and_then(|ctx| ctx.metadata.get("heartbeat").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
         let mut iteration = 0;
 
         // Initial tool definitions for planning (will be refreshed in loop).
@@ -311,14 +333,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             self.execute_plan(rx, reasoning, reason_ctx, plan).await?;
 
             // Check whether the job reached a terminal state.
-            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await {
-                if matches!(
+            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
+                && matches!(
                     ctx.state,
                     JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled
-                ) {
-                    return Ok(());
-                }
+                )
+            {
+                return Ok(());
             }
+
+            // Heartbeat jobs: if the plan already called emit_user_message,
+            // the findings have been delivered — skip the expensive fallback
+            // to direct tool selection.
+            if is_heartbeat && self.last_output.lock().ok().is_some_and(|g| g.is_some()) {
+                self.mark_completed().await?;
+                return Ok(());
+            }
+
             tracing::info!(
                 "Job {} falling back to direct tool selection after plan",
                 self.job_id
@@ -386,6 +417,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             return Ok(());
                         }
 
+                        // Heartbeat jobs: any text response (HEARTBEAT_OK or findings)
+                        // means the heartbeat is done. The LLM either found nothing
+                        // (HEARTBEAT_OK already caught above) or reported its findings.
+                        // Don't loop — the report IS the deliverable.
+                        if is_heartbeat {
+                            self.set_last_output(&response);
+                            self.mark_completed().await?;
+                            return Ok(());
+                        }
+
                         // Add assistant response to context
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
@@ -397,8 +438,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             }),
                         );
 
-                        // Give it one more chance to select a tool
-                        if iteration > 3 && iteration % 5 == 0 {
+                        // Give it one more chance to select a tool.
+                        // Only nudge occasionally to avoid polluting context (Bug 26).
+                        if iteration > 8 && iteration % 10 == 0 {
                             reason_ctx.messages.push(ChatMessage::user(
                                 "Are you stuck? Do you need help completing this job?",
                             ));
@@ -485,6 +527,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
             }
 
+            // Heartbeat jobs: once emit_user_message has delivered findings,
+            // the job is done. The LLM often stays in tool-call mode (never
+            // producing a bare Text response), so we catch completion here
+            // after each tool execution round.
+            if is_heartbeat && self.last_output.lock().ok().is_some_and(|g| g.is_some()) {
+                self.mark_completed().await?;
+                return Ok(());
+            }
+
             // Small delay between iterations
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -528,30 +579,48 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Collect and reorder by original index
         let mut results: Vec<Option<ToolExecResult>> = (0..count).map(|_| None).collect();
+        let mut panicked_reasons: Vec<Option<String>> = (0..count).map(|_| None).collect();
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok((idx, exec_result)) => results[idx] = Some(exec_result),
                 Err(e) => {
-                    if e.is_panic() {
-                        tracing::error!("Tool execution task panicked: {}", e);
+                    let reason = if e.is_panic() {
+                        let panic_info = e.into_panic();
+                        let msg = panic_info
+                            .downcast_ref::<String>()
+                            .map(|s| s.as_str())
+                            .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                            .unwrap_or("unknown panic");
+                        format!("Task panicked: {}", msg)
                     } else {
-                        tracing::error!("Tool execution task cancelled: {}", e);
+                        format!("Task cancelled: {}", e)
+                    };
+                    tracing::error!(reason = %reason, "Tool execution task failed");
+                    // We don't know which index panicked, so store for first empty slot
+                    if let Some(slot) = panicked_reasons.iter_mut().find(|s| s.is_none()) {
+                        *slot = Some(reason);
                     }
                 }
             }
         }
 
-        // Fill any panicked slots with error results
+        // Fill any panicked/missing slots with error results
+        let mut panic_iter = panicked_reasons.into_iter().flatten();
         results
             .into_iter()
             .enumerate()
             .map(|(i, opt)| {
-                opt.unwrap_or_else(|| ToolExecResult {
-                    result: Err(crate::error::ToolError::ExecutionFailed {
-                        name: selections[i].tool_name.clone(),
-                        reason: "Task failed during execution".to_string(),
+                opt.unwrap_or_else(|| {
+                    let reason = panic_iter
+                        .next()
+                        .unwrap_or_else(|| "Task failed during execution".to_string());
+                    ToolExecResult {
+                        result: Err(crate::error::ToolError::ExecutionFailed {
+                            name: selections[i].tool_name.clone(),
+                            reason,
+                        }
+                        .into()),
                     }
-                    .into()),
                 })
             })
             .collect()
@@ -847,39 +916,49 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 // ── emit_user_message interception ───────────────────────
                 // Deliver the message to the frontend via SSE so routine
                 // output appears in the live chat / notification area.
-                if selection.tool_name == "emit_user_message" {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
-                        let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or_default();
-                        let msg_type = parsed.get("message_type").and_then(|v| v.as_str()).unwrap_or("progress");
-                        if !msg.is_empty() {
-                            self.set_last_output(msg);
-                            self.emit_sse(SseEvent::RoutineLifecycle {
-                                routine_name: self.deps.routine_name.clone().unwrap_or_else(|| "job".to_string()),
-                                event: "message".to_string(),
-                                run_id: self.deps.routine_run_id.clone(),
-                                result_summary: Some(format!("[{}] {}", msg_type, msg)),
-                            });
-                        }
+                if selection.tool_name == "emit_user_message"
+                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output)
+                {
+                    let msg = parsed
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let msg_type = parsed
+                        .get("message_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("progress");
+                    if !msg.is_empty() {
+                        self.set_last_output(msg);
+                        self.emit_sse(SseEvent::RoutineLifecycle {
+                            routine_name: self
+                                .deps
+                                .routine_name
+                                .clone()
+                                .unwrap_or_else(|| "job".to_string()),
+                            event: "message".to_string(),
+                            run_id: self.deps.routine_run_id.clone(),
+                            result_summary: Some(format!("[{}] {}", msg_type, msg)),
+                        });
                     }
                 }
 
                 // ── canvas interception ──────────────────────────────────
                 // Push canvas actions via SSE so the frontend CanvasProvider
                 // picks them up, even from autonomous workers.
-                if selection.tool_name == "canvas" {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output) {
-                        if let Some(action) = parsed.get("action").and_then(|a| a.as_str()) {
-                            let panel_id = parsed.get("panel_id")
-                                .and_then(|p| p.as_str())
-                                .unwrap_or("default")
-                                .to_string();
-                            self.emit_sse(SseEvent::CanvasUpdate {
-                                panel_id,
-                                action: action.to_string(),
-                                content: Some(parsed.clone()),
-                            });
-                        }
-                    }
+                if selection.tool_name == "canvas"
+                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output)
+                    && let Some(action) = parsed.get("action").and_then(|a| a.as_str())
+                {
+                    let panel_id = parsed
+                        .get("panel_id")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    self.emit_sse(SseEvent::CanvasUpdate {
+                        panel_id,
+                        action: action.to_string(),
+                        content: Some(parsed.clone()),
+                    });
                 }
 
                 // Tool output never drives job completion. A malicious tool could
@@ -1034,7 +1113,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     /// inside each `mark_*` method, which was fragile and easy to miss.
     async fn finalize_routine_run(&self) {
         // Only relevant when dispatched from a routine.
-        let (run_id_str, routine_name) = match (&self.deps.routine_run_id, &self.deps.routine_name) {
+        let (run_id_str, routine_name) = match (&self.deps.routine_run_id, &self.deps.routine_name)
+        {
             (Some(rid), Some(rn)) => (rid.clone(), rn.clone()),
             _ => return,
         };
@@ -1048,10 +1128,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let (status, event, summary) = match self.context_manager().get_context(self.job_id).await {
             Ok(ctx) => {
                 // Extract the reason from the last state transition (if any).
-                let reason = ctx
-                    .transitions
-                    .last()
-                    .and_then(|t| t.reason.clone());
+                let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
                 match ctx.state {
                     JobState::Completed => (
                         crate::agent::routine::RunStatus::Ok,
@@ -1253,6 +1330,59 @@ impl From<TaskOutput> for Result<String, Error> {
             .into()
         })
     }
+}
+
+/// Compact context messages after plan execution to prevent orphaned tool_result bloat.
+///
+/// Keeps:
+/// - All System messages (system prompt, instructions)
+/// - The first User message (the original task)
+/// - A synthetic assistant summary of the plan
+///
+/// Strips:
+/// - Plan-era tool_result messages (with synthetic `plan_*` IDs)
+/// - Plan-era assistant messages with tool_calls
+/// - Intermediate user messages from orphan rewrites
+fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
+    use crate::llm::Role;
+
+    let pre_count = messages.len();
+    let pre_chars: usize = messages.iter().map(|m| m.estimated_chars()).sum();
+
+    let mut compacted = Vec::new();
+    let mut first_user_seen = false;
+
+    for msg in messages.iter() {
+        match msg.role {
+            Role::System => {
+                compacted.push(msg.clone());
+            }
+            Role::User if !first_user_seen => {
+                compacted.push(msg.clone());
+                first_user_seen = true;
+            }
+            _ => {} // Skip all plan-era messages
+        }
+    }
+
+    // Add a summary note about the completed plan
+    compacted.push(ChatMessage::assistant(format!(
+        "I executed a plan to accomplish: {}. \
+         The plan has been completed. Now I'll check for any remaining work \
+         or deliver final results.",
+        plan_goal,
+    )));
+
+    let post_chars: usize = compacted.iter().map(|m| m.estimated_chars()).sum();
+    tracing::info!(
+        "Post-plan compaction: {} messages ({} chars) → {} messages ({} chars)",
+        pre_count,
+        pre_chars,
+        compacted.len(),
+        post_chars
+    );
+
+    *messages = compacted;
 }
 
 #[cfg(test)]
@@ -1550,54 +1680,4 @@ mod tests {
             "Missing tool should produce an error, not a panic"
         );
     }
-}
-
-/// Compact context messages after plan execution to prevent orphaned tool_result bloat.
-///
-/// Keeps:
-/// - All System messages (system prompt, instructions)
-/// - The first User message (the original task)
-/// - A synthetic assistant summary of the plan
-///
-/// Strips:
-/// - Plan-era tool_result messages (with synthetic `plan_*` IDs)
-/// - Plan-era assistant messages with tool_calls
-/// - Intermediate user messages from orphan rewrites
-fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
-    use crate::llm::Role;
-
-    let pre_count = messages.len();
-    let pre_chars: usize = messages.iter().map(|m| m.estimated_chars()).sum();
-
-    let mut compacted = Vec::new();
-    let mut first_user_seen = false;
-
-    for msg in messages.iter() {
-        match msg.role {
-            Role::System => {
-                compacted.push(msg.clone());
-            }
-            Role::User if !first_user_seen => {
-                compacted.push(msg.clone());
-                first_user_seen = true;
-            }
-            _ => {} // Skip all plan-era messages
-        }
-    }
-
-    // Add a summary note about the completed plan
-    compacted.push(ChatMessage::assistant(format!(
-        "I executed a plan to accomplish: {}. \
-         The plan has been completed. Now I'll check for any remaining work \
-         or deliver final results.",
-        plan_goal,
-    )));
-
-    let post_chars: usize = compacted.iter().map(|m| m.estimated_chars()).sum();
-    tracing::info!(
-        "Post-plan compaction: {} messages ({} chars) → {} messages ({} chars)",
-        pre_count, pre_chars, compacted.len(), post_chars
-    );
-
-    *messages = compacted;
 }

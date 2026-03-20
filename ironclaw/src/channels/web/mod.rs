@@ -412,14 +412,27 @@ impl Channel for GatewayChannel {
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::SubagentSpawned { name, task, .. } => SseEvent::Status {
-                message: format!("{{\"subagent\":\"spawned\",\"name\":\"{}\",\"task\":\"{}\"}}", name, task),
+                message: format!(
+                    "{{\"subagent\":\"spawned\",\"name\":\"{}\",\"task\":\"{}\"}}",
+                    name, task
+                ),
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::SubagentProgress { message, category, .. } => SseEvent::Status {
-                message: format!("{{\"subagent\":\"progress\",\"category\":\"{}\",\"message\":\"{}\"}}", category, message),
+            StatusUpdate::SubagentProgress {
+                message, category, ..
+            } => SseEvent::Status {
+                message: format!(
+                    "{{\"subagent\":\"progress\",\"category\":\"{}\",\"message\":\"{}\"}}",
+                    category, message
+                ),
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::SubagentCompleted { name, success, duration_ms, .. } => SseEvent::Status {
+            StatusUpdate::SubagentCompleted {
+                name,
+                success,
+                duration_ms,
+                ..
+            } => SseEvent::Status {
                 message: format!(
                     "{{\"subagent\":\"completed\",\"name\":\"{}\",\"success\":{},\"duration_ms\":{}}}",
                     name, success, duration_ms

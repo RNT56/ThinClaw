@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Multimodal Capabilities (Images & Audio)
 
 When building an AI agent that operates in chat applications like iMessage, Telegram, or Discord, it must be able to "see" and "hear" attachments sent by users.

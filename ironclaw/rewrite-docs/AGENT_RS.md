@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Rebuilding the Pi Agent Orchestrator in Rust
 
 Rebuilding a "chat agent" is easy. You send a prompt to an LLM, wait for it to generate a tool call, run the tool, and send the result back.

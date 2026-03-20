@@ -254,7 +254,8 @@ fn truncate_content(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let safe_end = crate::util::floor_char_boundary(s, max_len);
+        format!("{}...", &s[..safe_end])
     }
 }
 

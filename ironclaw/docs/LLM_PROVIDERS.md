@@ -1,34 +1,24 @@
 # LLM Provider Configuration
 
-IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
-endpoint as well as Anthropic and Ollama directly. This guide covers the most common
-configurations.
+IronClaw defaults to `openai_compatible` so it works with any OpenAI-compatible
+endpoint out of the box. It also supports Anthropic, OpenAI, Ollama, and Tinfoil
+for private inference. This guide covers the most common configurations.
 
 ## Provider Overview
 
 | Provider | Backend value | Requires API key | Notes |
 |---|---|---|---|
-| NEAR AI | `nearai` | OAuth (browser) | Default; multi-model |
+| OpenRouter | `openai_compatible` | `LLM_API_KEY` | **Default**; 300+ models |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
-| OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
+| Tinfoil | `tinfoil` | `TINFOIL_API_KEY` | Private/confidential inference |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | vLLM / LiteLLM | `openai_compatible` | Optional | Self-hosted |
 | LM Studio | `openai_compatible` | No | Local GUI |
 
 ---
-
-## NEAR AI (default)
-
-No additional configuration required. On first run, `ironclaw onboard` opens a browser
-for OAuth authentication. Credentials are saved to `~/.ironclaw/session.json`.
-
-```env
-NEARAI_MODEL=claude-3-5-sonnet-20241022
-NEARAI_BASE_URL=https://private.near.ai
-```
 
 ---
 

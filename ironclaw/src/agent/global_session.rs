@@ -35,10 +35,10 @@ impl GlobalSessionConfig {
         if let Ok(val) = std::env::var("GLOBAL_SESSION_ENABLED") {
             config.enabled = val == "1" || val.eq_ignore_ascii_case("true");
         }
-        if let Ok(max) = std::env::var("GLOBAL_SESSION_MAX_ENTRIES") {
-            if let Ok(m) = max.parse() {
-                config.max_entries = m;
-            }
+        if let Ok(max) = std::env::var("GLOBAL_SESSION_MAX_ENTRIES")
+            && let Ok(m) = max.parse()
+        {
+            config.max_entries = m;
         }
         config
     }
@@ -126,7 +126,7 @@ impl GlobalSession {
     pub fn list(&self, tag_filter: Option<&str>) -> Vec<&GlobalEntry> {
         self.entries
             .iter()
-            .filter(|e| tag_filter.map_or(true, |tag| e.tags.iter().any(|t| t == tag)))
+            .filter(|e| tag_filter.is_none_or(|tag| e.tags.iter().any(|t| t == tag)))
             .collect()
     }
 

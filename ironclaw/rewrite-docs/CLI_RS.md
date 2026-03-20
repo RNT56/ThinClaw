@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # CLI: Command-Line Interface for ThinClaw
 
 ThinClaw ships a full CLI built with `clap` for managing the Orchestrator, channels, models, memory, cron, hooks, security, and more — accessible when the Tauri GUI isn't available (headless servers, SSH sessions, automation scripts).

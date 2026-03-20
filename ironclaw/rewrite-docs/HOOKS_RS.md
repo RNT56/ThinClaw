@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Lifecycle Hooks & External Triggers
 
 Hooks are the **reactive** counterpart to cron's **proactive** scheduling. While cron runs on a schedule, hooks fire in response to **external events** — a new email arrives, a webhook POSTs data, the agent boots, or a message is sent.

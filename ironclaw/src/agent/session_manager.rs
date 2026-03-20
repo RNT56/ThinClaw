@@ -32,6 +32,8 @@ pub struct SessionManager {
     /// Thread ownership: maps thread UUID → owner agent/channel name.
     thread_owners: RwLock<HashMap<Uuid, String>>,
     hooks: Option<Arc<HookRegistry>>,
+    /// IC-002: Per-user workspace write lock — prevents concurrent MEMORY.md / daily log writes.
+    workspace_locks: RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
 impl SessionManager {
@@ -43,6 +45,7 @@ impl SessionManager {
             undo_managers: RwLock::new(HashMap::new()),
             thread_owners: RwLock::new(HashMap::new()),
             hooks: None,
+            workspace_locks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -50,6 +53,25 @@ impl SessionManager {
     pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
         self.hooks = Some(hooks);
         self
+    }
+
+    /// IC-002: Get or create a per-user workspace write lock.
+    ///
+    /// The dispatcher should acquire `.write()` before workspace-mutating
+    /// operations (e.g., MEMORY.md, daily log) to prevent concurrent
+    /// writes from multiple channels for the same user.
+    pub async fn workspace_lock(&self, user_id: &str) -> Arc<tokio::sync::RwLock<()>> {
+        {
+            let locks = self.workspace_locks.read().await;
+            if let Some(lock) = locks.get(user_id) {
+                return Arc::clone(lock);
+            }
+        }
+        let mut locks = self.workspace_locks.write().await;
+        locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
     }
 
     /// Get or create a session for a user.
@@ -275,8 +297,9 @@ impl SessionManager {
     pub async fn prune_stale_sessions(&self, max_idle: std::time::Duration) -> usize {
         let cutoff = chrono::Utc::now() - chrono::TimeDelta::seconds(max_idle.as_secs() as i64);
 
-        // Find stale sessions (user_id + session_id)
-        let stale_sessions: Vec<(String, String)> = {
+        // Collect stale sessions (user_id, session_id, thread_ids) in one pass
+        // to avoid TOCTOU between finding stale sessions and reading their threads (Bug 25).
+        let stale: Vec<(String, String, Vec<Uuid>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
@@ -284,7 +307,8 @@ impl SessionManager {
                     // Try to lock; skip if contended (someone is actively using it)
                     let sess = session.try_lock().ok()?;
                     if sess.last_active_at < cutoff {
-                        Some((user_id.clone(), sess.id.to_string()))
+                        let thread_ids: Vec<Uuid> = sess.threads.keys().cloned().collect();
+                        Some((user_id.clone(), sess.id.to_string(), thread_ids))
                     } else {
                         None
                     }
@@ -292,26 +316,15 @@ impl SessionManager {
                 .collect()
         };
 
-        let stale_users: Vec<String> = stale_sessions
+        let stale_users: Vec<String> = stale.iter().map(|(uid, _, _)| uid.clone()).collect();
+        let stale_sessions: Vec<(String, String)> = stale
             .iter()
-            .map(|(user_id, _)| user_id.clone())
+            .map(|(uid, sid, _)| (uid.clone(), sid.clone()))
             .collect();
+        let stale_thread_ids: Vec<Uuid> = stale.into_iter().flat_map(|(_, _, tids)| tids).collect();
 
         if stale_users.is_empty() {
             return 0;
-        }
-
-        // Collect thread IDs from stale sessions for cleanup
-        let mut stale_thread_ids: Vec<Uuid> = Vec::new();
-        {
-            let sessions = self.sessions.read().await;
-            for user_id in &stale_users {
-                if let Some(session) = sessions.get(user_id)
-                    && let Ok(sess) = session.try_lock()
-                {
-                    stale_thread_ids.extend(sess.threads.keys());
-                }
-            }
         }
 
         // Fire OnSessionEnd hooks for stale sessions (fire-and-forget)
@@ -407,7 +420,7 @@ impl SessionManager {
             result.push(serde_json::json!({
                 "user_id": user_id,
                 "channel": session.threads.keys().next()
-                    .map(|_| user_id.split('@').last().unwrap_or("unknown"))
+                    .map(|_| user_id.split('@').next_back().unwrap_or("unknown"))
                     .unwrap_or("unknown"),
                 "thread_count": thread_count,
                 "last_active": last_active,

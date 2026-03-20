@@ -45,10 +45,13 @@ impl RotatableKey {
 
     /// Masked key for display.
     pub fn masked(&self) -> String {
-        if self.key.len() <= 8 {
+        let chars: Vec<char> = self.key.chars().collect();
+        if chars.len() <= 8 {
             "****".to_string()
         } else {
-            format!("{}...{}", &self.key[..4], &self.key[self.key.len() - 4..])
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}...{}", prefix, suffix)
         }
     }
 }

@@ -19,11 +19,11 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     AgentThinkTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool,
     DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool, JobEventsTool,
-    JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MemoryDeleteTool, PromptQueue, ReadFileTool, ShellTool,
-    SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
-    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
-    WriteFileTool,
+    JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryDeleteTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
+    ShellTool, SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, TtsTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -213,11 +213,8 @@ impl ToolRegistry {
         /// Tools that depend on dispatcher interception and cannot work in the
         /// autonomous plan-execution path.  `emit_user_message` is NOT listed
         /// here because the worker now delivers it via SSE.
-        const DISPATCHER_ONLY_TOOLS: &[&str] = &[
-            "spawn_subagent",
-            "list_subagents",
-            "cancel_subagent",
-        ];
+        const DISPATCHER_ONLY_TOOLS: &[&str] =
+            &["spawn_subagent", "list_subagents", "cancel_subagent"];
 
         self.tools
             .read()

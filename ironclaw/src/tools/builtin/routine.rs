@@ -143,9 +143,7 @@ impl Tool for RoutineCreateTool {
                         schedule, raw_schedule, e
                     ))
                 })?;
-                Trigger::Cron {
-                    schedule,
-                }
+                Trigger::Cron { schedule }
             }
             "event" => {
                 let pattern = params

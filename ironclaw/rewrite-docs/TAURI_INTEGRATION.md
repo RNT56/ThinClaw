@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # ThinClaw Tauri App — Integration Specification
 
 > **Date:** 2026-02-27 (final 2026-03-02 12:00 CET) · **Base:** IronClaw v0.12.0 · **Target:** Tauri v2 desktop app (Scrappy)

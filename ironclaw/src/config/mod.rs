@@ -47,8 +47,9 @@ pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
-    AnthropicDirectConfig, LlmBackend, LlmConfig, OllamaConfig, OpenAiCompatibleConfig,
-    OpenAiDirectConfig, ReliabilityConfig, TinfoilConfig,
+    AnthropicDirectConfig, BedrockDirectConfig, GeminiDirectConfig, LlamaCppConfig, LlmBackend,
+    LlmConfig, OllamaConfig, OpenAiCompatibleConfig, OpenAiDirectConfig, ReliabilityConfig,
+    TinfoilConfig,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -59,16 +60,90 @@ pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use self::webchat::{WebChatConfig, WebChatTheme};
 
-/// Thread-safe overlay for injected env vars (secrets loaded from DB).
+/// Thread-safe overlay for secrets injected from the keychain/secrets store.
 ///
 /// Used by `inject_llm_keys_from_secrets()` and `refresh_secrets()` to make
 /// API keys available to `optional_env()` without unsafe `set_var` calls.
-/// `optional_env()` checks real env vars first, then falls back to this overlay.
 ///
 /// Uses `RwLock` (not `OnceLock`) so secrets can be updated at runtime via
 /// `refresh_secrets()` without requiring a full restart.
 static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// IC-007: Thread-safe overlay for bridge-injected configuration.
+///
+/// The Tauri bridge (`ironclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
+/// UI-derived configuration (LLM backend, workspace mode, heartbeat, etc.) into
+/// IronClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
+///
+/// `optional_env()` checks this overlay FIRST (highest priority), then falls
+/// through to `INJECTED_VARS` (secrets), then to real env vars.
+///
+/// Lifecycle: populated on engine `start()`, cleared on engine `stop()`.
+static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// IC-007: Inject bridge configuration variables into the overlay.
+///
+/// Called by the Tauri bridge to pass Scrappy UI configuration to IronClaw's
+/// config resolvers without unsafe `set_var`. Values in the bridge overlay
+/// take priority over secrets and real env vars.
+///
+/// Merges into existing bridge vars (does not replace the entire map).
+pub fn inject_bridge_vars(vars: HashMap<String, String>) {
+    match BRIDGE_VARS.write() {
+        Ok(mut guard) => {
+            guard.extend(vars);
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.extend(vars);
+        }
+    }
+}
+
+/// IC-007: Remove specific keys from the bridge overlay.
+///
+/// Called by the bridge's `stop()` to clear LLM config so the next
+/// `start()` re-detects from fresh UI state.
+pub fn remove_bridge_vars(keys: &[&str]) {
+    match BRIDGE_VARS.write() {
+        Ok(mut guard) => {
+            for key in keys {
+                guard.remove(*key);
+            }
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            for key in keys {
+                guard.remove(*key);
+            }
+        }
+    }
+}
+
+/// IC-007: Clear all bridge overlay vars.
+///
+/// Called during full engine shutdown to reset all bridge-injected config.
+pub fn clear_bridge_vars() {
+    match BRIDGE_VARS.write() {
+        Ok(mut guard) => guard.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
+/// IC-007: Check whether a key exists in the bridge overlay.
+///
+/// Used by the bridge to replicate the `is_err()` guard logic:
+/// "only set defaults if the user hasn't already configured this var."
+pub fn bridge_var_exists(key: &str) -> bool {
+    if let Ok(guard) = BRIDGE_VARS.read()
+        && guard.contains_key(key)
+    {
+        return true;
+    }
+    std::env::var(key).is_ok()
+}
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
@@ -214,7 +289,10 @@ impl Config {
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
-                backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
+                backend: helpers::optional_env("OBSERVABILITY_BACKEND")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "none".to_string()),
             },
         })
     }
@@ -255,32 +333,31 @@ pub async fn inject_llm_keys_from_secrets(
             }
             Err(_) => {
                 // Also try the provider slug directly (e.g., "groq" as secret name)
-                if endpoint.secret_name != *slug {
-                    if let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await {
-                        injected.insert(
-                            endpoint.env_key_name.to_string(),
-                            decrypted.expose().to_string(),
-                        );
-                        tracing::debug!(
-                            "Loaded secret for provider '{}' via slug (env: {})",
-                            slug,
-                            endpoint.env_key_name
-                        );
-                    }
+                if endpoint.secret_name != *slug
+                    && let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await
+                {
+                    injected.insert(
+                        endpoint.env_key_name.to_string(),
+                        decrypted.expose().to_string(),
+                    );
+                    tracing::debug!(
+                        "Loaded secret for provider '{}' via slug (env: {})",
+                        slug,
+                        endpoint.env_key_name
+                    );
                 }
             }
         }
     }
 
     // Legacy generic compatible key (used by openrouter and custom LLM)
-    if !injected.contains_key("LLM_API_KEY") {
-        if let Ok(decrypted) = secrets
+    if !injected.contains_key("LLM_API_KEY")
+        && let Ok(decrypted) = secrets
             .get_decrypted(user_id, "llm_compatible_api_key")
             .await
-        {
-            injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
-            tracing::debug!("Loaded legacy llm_compatible_api_key for LLM_API_KEY");
-        }
+    {
+        injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
+        tracing::debug!("Loaded legacy llm_compatible_api_key for LLM_API_KEY");
     }
 
     let count = injected.len();
@@ -343,13 +420,12 @@ pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id
     }
 
     // Legacy generic compatible key
-    if !injected.contains_key("LLM_API_KEY") {
-        if let Ok(decrypted) = secrets
+    if !injected.contains_key("LLM_API_KEY")
+        && let Ok(decrypted) = secrets
             .get_decrypted(user_id, "llm_compatible_api_key")
             .await
-        {
-            injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
-        }
+    {
+        injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
     }
 
     let count = injected.len();

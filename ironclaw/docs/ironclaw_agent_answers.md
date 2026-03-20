@@ -2,6 +2,10 @@
 
 > **Compiled:** 2026-03-04 10:56 CET  
 > **Context:** Scrappy Tauri v2 desktop app (React + Rust), answering from codebase audit
+>
+> ⚠️ **Historical snapshot** — This document reflects the codebase state as of 2026-03-04.
+> Line number references have drifted significantly. The "50+ commands" figure is now 110+.
+> Use as design guidance, not as current code reference.
 
 ---
 

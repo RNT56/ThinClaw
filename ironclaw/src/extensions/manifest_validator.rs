@@ -71,10 +71,10 @@ impl ManifestValidator {
                 max: self.max_name_length,
             });
         }
-        if let Some(v) = &info.version {
-            if !is_valid_semver(v) {
-                errors.push(ValidationError::InvalidSemver(v.clone()));
-            }
+        if let Some(v) = &info.version
+            && !is_valid_semver(v)
+        {
+            errors.push(ValidationError::InvalidSemver(v.clone()));
         }
 
         // Description
@@ -104,10 +104,11 @@ impl ManifestValidator {
         }
 
         // URLs
-        if let Some(url) = &info.homepage_url {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                errors.push(ValidationError::InvalidUrl(url.clone()));
-            }
+        if let Some(url) = &info.homepage_url
+            && !url.starts_with("http://")
+            && !url.starts_with("https://")
+        {
+            errors.push(ValidationError::InvalidUrl(url.clone()));
         }
 
         let valid = errors.is_empty() && (!self.strict || warnings.is_empty());

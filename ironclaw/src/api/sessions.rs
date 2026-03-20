@@ -133,67 +133,69 @@ pub async fn get_history(
 
     // Verify ownership
     if thread_id.is_some()
-        && let Some(store) = store {
-            let owned = store
-                .conversation_belongs_to_user(tid, user_id)
-                .await
-                .unwrap_or(false);
-            if !owned && !sess.threads.contains_key(&tid) {
-                return Err(ApiError::SessionNotFound("Thread not found".into()));
-            }
+        && let Some(store) = store
+    {
+        let owned = store
+            .conversation_belongs_to_user(tid, user_id)
+            .await
+            .unwrap_or(false);
+        if !owned && !sess.threads.contains_key(&tid) {
+            return Err(ApiError::SessionNotFound("Thread not found".into()));
         }
+    }
 
     // Paginated DB query
     if before_cursor.is_some()
-        && let Some(store) = store {
-            let (messages, has_more) = store
-                .list_conversation_messages_paginated(tid, before_cursor, limit as i64)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        && let Some(store) = store
+    {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(tid, before_cursor, limit as i64)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns =
-                crate::channels::web::handlers::chat::build_turns_from_db_messages(&messages);
-            return Ok(HistoryResponse {
-                thread_id: tid,
-                turns,
-                has_more,
-                oldest_timestamp,
-            });
-        }
+        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+        let turns = crate::channels::web::handlers::chat::build_turns_from_db_messages(&messages);
+        return Ok(HistoryResponse {
+            thread_id: tid,
+            turns,
+            has_more,
+            oldest_timestamp,
+        });
+    }
 
     // Try in-memory first
     if let Some(thread) = sess.threads.get(&tid)
-        && !thread.turns.is_empty() {
-            let turns: Vec<TurnInfo> = thread
-                .turns
-                .iter()
-                .map(|t| TurnInfo {
-                    turn_number: t.turn_number,
-                    user_input: t.user_input.clone(),
-                    response: t.response.clone(),
-                    state: format!("{:?}", t.state),
-                    started_at: t.started_at.to_rfc3339(),
-                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                    tool_calls: t
-                        .tool_calls
-                        .iter()
-                        .map(|tc| ToolCallInfo {
-                            name: tc.name.clone(),
-                            has_result: tc.result.is_some(),
-                            has_error: tc.error.is_some(),
-                        })
-                        .collect(),
-                })
-                .collect();
+        && !thread.turns.is_empty()
+    {
+        let turns: Vec<TurnInfo> = thread
+            .turns
+            .iter()
+            .map(|t| TurnInfo {
+                turn_number: t.turn_number,
+                user_input: t.user_input.clone(),
+                response: t.response.clone(),
+                state: format!("{:?}", t.state),
+                started_at: t.started_at.to_rfc3339(),
+                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+                tool_calls: t
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCallInfo {
+                        name: tc.name.clone(),
+                        has_result: tc.result.is_some(),
+                        has_error: tc.error.is_some(),
+                    })
+                    .collect(),
+            })
+            .collect();
 
-            return Ok(HistoryResponse {
-                thread_id: tid,
-                turns,
-                has_more: false,
-                oldest_timestamp: None,
-            });
-        }
+        return Ok(HistoryResponse {
+            thread_id: tid,
+            turns,
+            has_more: false,
+            oldest_timestamp: None,
+        });
+    }
 
     // Fall back to DB
     if let Some(store) = store {

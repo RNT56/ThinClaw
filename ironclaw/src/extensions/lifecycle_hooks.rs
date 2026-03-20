@@ -119,6 +119,12 @@ pub struct AuditLogHook {
     events: Arc<Mutex<Vec<(String, LifecycleEvent)>>>,
 }
 
+impl Default for AuditLogHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuditLogHook {
     pub fn new() -> Self {
         Self {
@@ -127,15 +133,24 @@ impl AuditLogHook {
     }
 
     pub fn events(&self) -> Vec<(String, LifecycleEvent)> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .expect("lifecycle events mutex poisoned")
+            .clone()
     }
 
     pub fn len(&self) -> usize {
-        self.events.lock().unwrap().len()
+        self.events
+            .lock()
+            .expect("lifecycle events mutex poisoned")
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.events.lock().unwrap().is_empty()
+        self.events
+            .lock()
+            .expect("lifecycle events mutex poisoned")
+            .is_empty()
     }
 
     /// Return events as serializable flat structs for Tauri command response.
@@ -145,7 +160,7 @@ impl AuditLogHook {
     pub fn events_serialized(&self) -> Vec<SerializedLifecycleEvent> {
         self.events
             .lock()
-            .unwrap()
+            .expect("lifecycle events mutex poisoned")
             .iter()
             .map(|(ts, event)| SerializedLifecycleEvent {
                 timestamp: ts.clone(),
@@ -169,7 +184,10 @@ impl AuditLogHook {
 impl LifecycleHook for AuditLogHook {
     fn on_event(&self, event: &LifecycleEvent) {
         let timestamp = chrono::Utc::now().to_rfc3339();
-        self.events.lock().unwrap().push((timestamp, event.clone()));
+        self.events
+            .lock()
+            .expect("lifecycle events mutex poisoned")
+            .push((timestamp, event.clone()));
     }
 
     fn name(&self) -> &str {
@@ -183,6 +201,12 @@ pub struct MetricsHook {
     pub activations: Arc<AtomicU64>,
     pub deactivations: Arc<AtomicU64>,
     pub failures: Arc<AtomicU64>,
+}
+
+impl Default for MetricsHook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricsHook {

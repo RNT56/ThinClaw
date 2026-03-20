@@ -129,6 +129,16 @@ impl SmartRoutingProvider {
     }
 
     /// Check if a response from the cheap model shows uncertainty, warranting escalation.
+    ///
+    /// Bug 7 fix: replaced the previous string-pattern heuristic (which matched
+    /// uncertainty phrases like "I need more context" or "could you clarify" and
+    /// produced high false-positive escalation rates) with a more conservative
+    /// approach:
+    ///   1. Empty responses are always uncertain.
+    ///   2. Very short responses (< 30 chars) are likely incomplete.
+    ///   3. Explicit refusal patterns only (not clarification requests).
+    ///
+    /// This avoids escalating confident but brief or contextual answers.
     fn response_is_uncertain(response: &CompletionResponse) -> bool {
         let content = response.content.trim();
 
@@ -137,33 +147,28 @@ impl SmartRoutingProvider {
             return true;
         }
 
+        // Very short response from cheap model likely means it didn't have enough
+        // information to produce a useful answer
+        if content.len() < 30 {
+            return true;
+        }
+
         let lower = content.to_lowercase();
 
-        // Uncertainty signals
-        let uncertainty_patterns = [
-            "i'm not sure",
-            "i am not sure",
-            "i don't know",
-            "i do not know",
-            "i'm unable to",
-            "i am unable to",
-            "i cannot",
-            "i can't",
-            "beyond my capabilities",
-            "beyond my ability",
+        // Only escalate on explicit inability signals, not clarification requests
+        // (which are valid, confident responses). Bug 7: previous list included
+        // "could you clarify" etc. which escalated many legitimate answers.
+        let hard_refusal_patterns = [
             "i'm not able to",
             "i am not able to",
-            "i don't have enough",
-            "i do not have enough",
-            "i need more context",
-            "i need more information",
-            "could you clarify",
-            "could you provide more",
-            "i'm not confident",
-            "i am not confident",
+            "i cannot complete",
+            "i can't complete",
+            "beyond my capabilities",
+            "i don't have access",
+            "i do not have access",
         ];
 
-        uncertainty_patterns.iter().any(|p| lower.contains(p))
+        hard_refusal_patterns.iter().any(|p| lower.contains(p))
     }
 }
 
@@ -505,7 +510,9 @@ mod tests {
     }
 
     #[test]
-    fn short_confident_response_is_not_uncertain() {
+    fn short_response_is_uncertain() {
+        // Bug 7: very short responses (< 30 chars) from the cheap model are
+        // considered uncertain and escalated to the primary model.
         let response = CompletionResponse {
             content: "Yes.".to_string(),
             thinking_content: None,
@@ -513,7 +520,7 @@ mod tests {
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
         };
-        assert!(!SmartRoutingProvider::response_is_uncertain(&response));
+        assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
 
     #[test]

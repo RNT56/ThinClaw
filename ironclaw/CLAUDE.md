@@ -11,7 +11,7 @@
 - **Always available** - Multi-channel access with proactive background execution
 
 ### Features
-- **Multi-channel input**: TUI (Ratatui), HTTP webhooks, WASM channels (Telegram, Slack), web gateway
+- **Multi-channel input**: TUI, HTTP webhooks, web gateway, native (Discord, Signal, iMessage, Gmail, Nostr, Telegram, Slack), WASM channels
 - **Parallel job execution** with state machine and self-repair for stuck jobs
 - **Sandbox execution**: Docker container isolation with network proxy and credential injection
 - **Claude Code mode**: Delegate jobs to Claude CLI inside containers
@@ -22,8 +22,8 @@
 - **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
 - **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
-- **Multi-provider LLM**: NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil private inference
-- **Setup wizard**: 7-step interactive onboarding for first-run configuration
+- **Multi-provider LLM**: OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil, AWS Bedrock, Google Gemini, llama.cpp
+- **Setup wizard**: 9-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -47,94 +47,283 @@ RUST_LOG=ironclaw=debug cargo run
 
 ## Project Structure
 
+> Last verified: 2026-03-13 — 375 `.rs` files across 27 modules + 19 standalone files
+
 ```
 src/
 ├── lib.rs              # Library root, module declarations
 ├── main.rs             # Entry point, CLI args, startup
-├── config.rs           # Configuration from env vars
+├── app.rs              # AppBuilder (5-phase init), AppComponents
 ├── error.rs            # Error types (thiserror)
 │
-├── agent/              # Core agent logic
+├── boot_screen.rs      # Polished CLI startup screen
+├── bootstrap.rs        # .env loading, legacy config migration
+├── hardware_bridge.rs  # Sensor access bridge (camera, mic, screen)
+├── i18n.rs             # Internationalization
+├── qr_pairing.rs       # QR code based device pairing
+├── service.rs          # launchd/systemd service management
+├── settings.rs         # Settings struct, DB map serialization
+├── tailscale.rs        # Tailscale integration helpers
+├── talk_mode.rs        # Continuous voice conversation mode
+├── tauri_commands.rs   # Tauri embedding command exports
+├── testing.rs          # Test utilities
+├── tracing_fmt.rs      # Custom tracing formatter
+├── update_checker.rs   # Binary update checker
+├── util.rs             # Shared utilities
+├── voice_wake.rs       # Wake word detection (cpal audio)
+│
+├── agent/              # Core agent logic (30 files)
 │   ├── agent_loop.rs   # Main Agent struct, message handling loop
-│   ├── router.rs       # MessageIntent classification
-│   ├── scheduler.rs    # Parallel job scheduling
-│   ├── worker.rs       # Per-job execution with LLM reasoning
-│   ├── self_repair.rs  # Stuck job detection and recovery
-│   ├── heartbeat.rs    # Proactive periodic execution
-│   ├── session.rs      # Session/thread/turn model with state machine
-│   ├── session_manager.rs # Thread/session lifecycle management
+│   ├── agent_router.rs # Multi-agent workspace routing
+│   ├── commands.rs     # Agent command handlers
 │   ├── compaction.rs   # Context window management with turn summarization
 │   ├── context_monitor.rs # Memory pressure detection
-│   ├── undo.rs         # Turn-based undo/redo with checkpoints
-│   ├── submission.rs   # Submission parsing (undo, redo, compact, clear, etc.)
+│   ├── cost_guard.rs   # Token spending limits
+│   ├── cron_stagger.rs # Cron schedule staggering
 │   ├── dispatcher.rs   # Skill-aware job dispatching
-│   ├── task.rs         # Sub-task execution framework
+│   ├── global_session.rs # Global session state
+│   ├── heartbeat.rs    # Proactive periodic execution
+│   ├── job_monitor.rs  # Job monitoring
+│   ├── management_api.rs # Management API endpoints
+│   ├── presence.rs     # Presence tracking (beacons, stale pruning)
+│   ├── router.rs       # MessageIntent classification
 │   ├── routine.rs      # Routine types (Trigger, Action, Guardrails)
-│   └── routine_engine.rs # Routine execution (cron ticker, event matcher)
+│   ├── routine_audit.rs # Routine audit logging
+│   ├── routine_engine.rs # Routine execution (cron ticker, event matcher)
+│   ├── runtime_behavior.rs # Runtime behavior configuration
+│   ├── scheduler.rs    # Parallel job scheduling
+│   ├── self_repair.rs  # Stuck job detection and recovery
+│   ├── session.rs      # Session/thread/turn model with state machine
+│   ├── session_manager.rs # Thread/session lifecycle management
+│   ├── subagent_executor.rs # Sub-agent job execution
+│   ├── submission.rs   # Submission parsing (undo, redo, compact, etc.)
+│   ├── task.rs         # Sub-task execution framework
+│   ├── thread_inheritance.rs # Thread context inheritance
+│   ├── thread_ops.rs   # Thread operations
+│   ├── undo.rs         # Turn-based undo/redo with checkpoints
+│   └── worker.rs       # Per-job execution with LLM reasoning
 │
-├── channels/           # Multi-channel input
+├── api/                # Public REST API types (10 files)
+│   ├── chat.rs         # Chat API types
+│   ├── config.rs       # Config API
+│   ├── extensions.rs   # Extension API
+│   ├── memory.rs       # Memory API
+│   ├── routines.rs     # Routines API
+│   ├── sessions.rs     # Sessions API
+│   ├── skills.rs       # Skills API
+│   └── system.rs       # System API
+│
+├── channels/           # Multi-channel input (24 files + 2 subdirs)
 │   ├── channel.rs      # Channel trait, IncomingMessage, OutgoingResponse
 │   ├── manager.rs      # ChannelManager merges streams
-│   ├── cli/            # Full TUI with Ratatui
-│   │   ├── mod.rs      # TuiChannel implementation
-│   │   ├── app.rs      # Application state
-│   │   ├── render.rs   # UI rendering
-│   │   ├── events.rs   # Input handling
-│   │   ├── overlay.rs  # Approval overlays
-│   │   └── composer.rs # Message composition
-│   ├── http.rs         # HTTP webhook (axum) with secret validation
 │   ├── repl.rs         # Simple REPL (for testing)
+│   ├── http.rs         # HTTP webhook (axum) with secret validation
+│   ├── discord.rs      # Discord native channel
+│   ├── gmail.rs        # Gmail channel
+│   ├── gmail_wiring.rs # Gmail OAuth + IMAP wiring
+│   ├── imessage.rs     # iMessage channel (macOS)
+│   ├── imessage_wiring.rs # iMessage bridge wiring
+│   ├── nostr.rs        # Nostr protocol channel
+│   ├── signal.rs       # Signal native channel (signal-cli)
+│   ├── slack.rs        # Slack channel
+│   ├── telegram.rs     # Telegram native channel
+│   ├── canvas_gateway.rs # Canvas hosting gateway routes
+│   ├── webhook_server.rs # Generic webhook ingestion
+│   ├── ack_reaction.rs # Acknowledgment reactions
+│   ├── forward_download.rs # Media download forwarding
+│   ├── group_priming.rs # Group chat priming
+│   ├── health_monitor.rs # Channel health monitoring
+│   ├── reaction_machine.rs # Reaction state machine
+│   ├── self_message.rs # Self-messaging
+│   ├── status_view.rs  # Channel status views
+│   ├── tool_stream.rs  # Tool streaming
 │   ├── web/            # Web gateway (browser UI)
-│   │   ├── mod.rs      # Gateway builder, startup
 │   │   ├── server.rs   # Axum router, 40+ API endpoints
 │   │   ├── sse.rs      # SSE broadcast manager
 │   │   ├── ws.rs       # WebSocket gateway + connection tracking
-│   │   ├── types.rs    # Request/response types, SseEvent enum
 │   │   ├── auth.rs     # Bearer token auth middleware
 │   │   ├── log_layer.rs # Tracing layer for log streaming
 │   │   └── static/     # HTML, CSS, JS (single-page app)
 │   └── wasm/           # WASM channel runtime
-│       ├── mod.rs
 │       ├── bundled.rs  # Bundled channel discovery
 │       └── wrapper.rs  # Channel trait wrapper for WASM modules
 │
+├── cli/                # CLI subcommands (25 files)
+│   ├── agents.rs       # Agent management
+│   ├── browser.rs      # Browser automation commands
+│   ├── channels.rs     # Channel management
+│   ├── completion.rs   # Shell completion generation
+│   ├── config.rs       # Config management
+│   ├── cron.rs         # Cron/routine management
+│   ├── doctor.rs       # Diagnostics (DB, binary, LLM, Tailscale)
+│   ├── gateway.rs      # Gateway start/stop/status
+│   ├── logs.rs         # Log viewing
+│   ├── mcp.rs          # MCP server management
+│   ├── memory.rs       # Memory CLI (read, write, search, tree)
+│   ├── message.rs      # Single message mode
+│   ├── models.rs       # Model listing/selection
+│   ├── nodes.rs        # Multi-node management
+│   ├── oauth_defaults.rs # OAuth provider defaults
+│   ├── pairing.rs      # DM pairing commands
+│   ├── registry.rs     # Extension registry
+│   ├── service.rs      # Service install/start/stop/status
+│   ├── session_export.rs # Session export (md/json/csv/html)
+│   ├── sessions.rs     # Session management
+│   ├── status.rs       # Status diagnostics
+│   ├── subagent_spawn.rs # Sub-agent spawn commands
+│   ├── tool.rs         # Tool management
+│   └── update.rs       # Binary update
+│
+├── config/             # Structured configuration (24 files)
+│   ├── mod.rs          # Config struct, LlmBackend enum, from_env
+│   ├── agent.rs        # Agent config
+│   ├── builder.rs      # Config builder
+│   ├── channels.rs     # Channel config
+│   ├── database.rs     # Database config
+│   ├── embeddings.rs   # Embeddings config
+│   ├── heartbeat.rs    # Heartbeat config
+│   ├── hygiene.rs      # Memory hygiene config
+│   ├── llm.rs          # LLM provider config
+│   ├── mdns_discovery.rs # Bonjour/mDNS discovery
+│   ├── model_compat.rs # Model compatibility tables
+│   ├── network_modes.rs # Loopback/LAN/remote modes
+│   ├── provider_catalog.rs # Provider presets
+│   ├── routines.rs     # Routines config
+│   ├── safety.rs       # Safety layer config
+│   ├── sandbox.rs      # Sandbox config
+│   ├── secrets.rs      # Secrets config
+│   ├── skills.rs       # Skills config
+│   ├── tunnel.rs       # Tunnel config
+│   ├── wasm.rs         # WASM runtime config
+│   ├── watcher.rs      # Config file watcher
+│   └── webchat.rs      # Web chat config
+│
+├── extensions/         # Extension management (11 files)
+│   ├── manager.rs      # ExtensionManager
+│   ├── registry.rs     # Extension registry
+│   ├── clawhub.rs      # ClawHub registry client
+│   ├── discovery.rs    # Extension discovery
+│   ├── ext_health_monitor.rs # Extension health monitoring
+│   ├── lifecycle_hooks.rs # Extension lifecycle hooks
+│   ├── manifest_validator.rs # Manifest validation
+│   ├── plugin_interfaces.rs # Plugin interfaces
+│   ├── plugin_manifest.rs # Plugin manifest types
+│   └── plugin_routes.rs # Plugin API routes
+│
+├── hooks/              # Lifecycle hook system (5 files)
+│   ├── mod.rs          # HookEvent, HookRegistry
+│   ├── hook.rs         # Hook trait
+│   ├── bootstrap.rs    # Bootstrap hooks
+│   ├── bundled.rs      # Bundled hook implementations
+│   └── registry.rs     # Hook registry
+│
+├── llm/                # LLM integration (22 files)
+│   ├── mod.rs          # Provider factory, LlmBackend enum
+│   ├── provider.rs     # LlmProvider trait, message types
+│   ├── rig_adapter.rs  # Rig framework adapter
+│   ├── reasoning.rs    # Planning, tool selection, evaluation
+│   ├── circuit_breaker.rs # Circuit breaker for provider failures
+│   ├── retry.rs        # Retry with exponential backoff
+│   ├── failover.rs     # Multi-provider failover chain
+│   ├── smart_routing.rs # Cost-optimized model routing (cheap vs primary)
+│   ├── routing_policy.rs # Routing policy configuration
+│   ├── response_cache.rs # LLM response caching
+│   ├── response_cache_ext.rs # Cache extensions
+│   ├── costs.rs        # Token cost definitions
+│   ├── cost_tracker.rs # Token cost tracking
+│   ├── discovery.rs    # Auto model discovery (queries /v1/models)
+│   ├── embeddings.rs   # Embedding provider
+│   ├── extended_context.rs # Extended context handling
+│   ├── provider_presets.rs # Provider configuration presets
+│   ├── bedrock.rs      # AWS Bedrock provider adapter
+│   ├── gemini.rs       # Google Gemini provider adapter
+│   ├── llama_cpp.rs    # Native llama.cpp inference interface
+│   ├── llm_hooks.rs    # LLM lifecycle hooks
+│   └── llms_txt.rs     # LLMs.txt support
+│
+├── media/              # Media processing (12 files)
+│   ├── audio.rs        # Audio processing
+│   ├── video.rs        # Video pipeline
+│   ├── image.rs        # Image processing
+│   ├── pdf.rs          # PDF extraction
+│   ├── sticker.rs      # Sticker handling
+│   ├── tts.rs          # Text-to-speech (OpenAI)
+│   ├── tts_streaming.rs # Streaming TTS
+│   ├── cache.rs        # Media cache
+│   ├── limits.rs       # Size/duration limits
+│   ├── media_cache_config.rs # Cache configuration
+│   └── types.rs        # Shared media types
+│
+├── observability/      # Observability (5 files)
+│   ├── log.rs          # Log layer
+│   ├── multi.rs        # Multi-subscriber
+│   ├── noop.rs         # No-op implementation
+│   └── traits.rs       # Observable trait
+│
 ├── orchestrator/       # Internal HTTP API for sandbox containers
-│   ├── mod.rs
 │   ├── api.rs          # Axum endpoints (LLM proxy, events, prompts)
 │   ├── auth.rs         # Per-job bearer token store
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
 │
-├── worker/             # Runs inside Docker containers
-│   ├── mod.rs
-│   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
-│   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
-│   ├── api.rs          # HTTP client to orchestrator
-│   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
+├── pairing/            # Device pairing (2 files)
+│   ├── mod.rs          # Pairing protocol
+│   └── store.rs        # Pairing state storage
 │
-├── safety/             # Prompt injection defense
+├── registry/           # Extension registry (6 files)
+│   ├── artifacts.rs    # Artifact resolution
+│   ├── catalog.rs      # Catalog cache
+│   ├── embedded.rs     # Embedded registry
+│   ├── installer.rs    # Extension installer
+│   └── manifest.rs     # Registry manifest types
+│
+├── safety/             # Security layer (13 files)
 │   ├── sanitizer.rs    # Pattern detection, content escaping
 │   ├── validator.rs    # Input validation (length, encoding, patterns)
 │   ├── policy.rs       # PolicyRule system with severity/actions
-│   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
+│   ├── leak_detector.rs # Secret detection (API keys, tokens, etc.)
+│   ├── credential_detect.rs # Credential pattern detection
+│   ├── auth_profiles.rs # Auth profile management
+│   ├── dangerous_tools.rs # Dangerous tool detection
+│   ├── device_pairing.rs # Device pairing security
+│   ├── elevated.rs     # Elevated permission checks
+│   ├── key_rotation.rs # Secret key rotation
+│   ├── media_url.rs    # Media URL validation
+│   └── skill_path.rs   # Skill path traversal prevention
 │
-├── llm/                # LLM integration (multi-provider)
-│   ├── mod.rs          # Provider factory, LlmBackend enum
-│   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai_chat.rs  # NEAR AI Chat Completions provider (session token + API key auth)
-│   ├── reasoning.rs    # Planning, tool selection, evaluation
-│   ├── session.rs      # Session token management with auto-renewal
-│   ├── circuit_breaker.rs # Circuit breaker for provider failures
-│   ├── retry.rs        # Retry with exponential backoff
-│   ├── failover.rs     # Multi-provider failover chain
-│   ├── response_cache.rs # LLM response caching
-│   ├── costs.rs        # Token cost tracking
-│   └── rig_adapter.rs  # Rig framework adapter
+├── sandbox/            # Docker execution sandbox (9 files)
+│   ├── config.rs       # SandboxConfig, SandboxPolicy enum
+│   ├── manager.rs      # SandboxManager orchestration
+│   ├── container.rs    # ContainerRunner, Docker lifecycle
+│   ├── error.rs        # SandboxError types
+│   └── proxy/          # Network proxy for containers
+│       ├── http.rs     # HttpProxy, CredentialResolver trait
+│       ├── policy.rs   # NetworkPolicyDecider trait
+│       └── allowlist.rs # DomainAllowlist validation
 │
-├── tools/              # Extensible tool system
+├── secrets/            # Secrets management (5 files)
+│   ├── crypto.rs       # AES-256-GCM encryption
+│   ├── store.rs        # Secret storage
+│   └── types.rs        # Credential types
+│
+├── setup/              # Onboarding wizard (spec: src/setup/README.md)
+│   ├── mod.rs          # Entry point, check_onboard_needed()
+│   ├── wizard.rs       # 9-step interactive wizard
+│   ├── channels.rs     # Channel setup helpers
+│   └── prompts.rs      # Terminal prompts (select, confirm, secret)
+│
+├── skills/             # SKILL.md prompt extension system (7 files)
+│   ├── registry.rs     # SkillRegistry: discover, install, remove
+│   ├── selector.rs     # Deterministic scoring prefilter
+│   ├── attenuation.rs  # Trust-based tool ceiling
+│   ├── gating.rs       # Requirement checks (bins, env, config)
+│   ├── parser.rs       # SKILL.md frontmatter + markdown parser
+│   └── catalog.rs      # ClawHub registry client
+│
+├── tools/              # Extensible tool system (7 files + 4 subdirs)
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
 │   ├── registry.rs     # ToolRegistry for discovery
 │   ├── sandbox.rs      # Process-based sandbox (stub, superseded by wasm/)
-│   ├── builtin/        # Built-in tools
+│   ├── builtin/        # Built-in tools (25 files)
 │   │   ├── echo.rs, time.rs, json.rs, http.rs
 │   │   ├── file.rs     # ReadFile, WriteFile, ListDir, ApplyPatch
 │   │   ├── shell.rs    # Shell command execution
@@ -143,86 +332,59 @@ src/
 │   │   ├── routine.rs  # routine_create/list/update/delete/history
 │   │   ├── extension_tools.rs # Extension install/auth/activate/remove
 │   │   ├── skill_tools.rs # skill_list/search/install/remove tools
-│   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
+│   │   ├── canvas.rs   # A2UI canvas tool
+│   │   ├── browser.rs  # Browser automation (headless Chrome)
+│   │   ├── subagent.rs # Sub-agent delegation tool
+│   │   ├── agent_control.rs # Agent control (pause/resume/status)
+│   │   ├── camera_capture.rs # Camera capture (via hardware bridge)
+│   │   ├── screen_capture.rs # Screen capture (via hardware bridge)
+│   │   ├── device_info.rs # Device information tool
+│   │   ├── location.rs # Location services
+│   │   ├── html_converter.rs # HTML → markdown conversion
+│   │   ├── tts.rs      # Text-to-speech tool
+│   │   ├── discord_actions.rs # Discord-specific actions
+│   │   ├── slack_actions.rs # Slack-specific actions
+│   │   └── telegram_actions.rs # Telegram-specific actions
 │   ├── builder/        # Dynamic tool building
-│   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
-│   │   ├── templates.rs # Project scaffolding
-│   │   ├── testing.rs  # Test harness integration
-│   │   └── validation.rs # WASM validation
-│   ├── mcp/            # Model Context Protocol
-│   │   ├── client.rs   # MCP client over HTTP
-│   │   └── protocol.rs # JSON-RPC types
+│   │   ├── core.rs, templates.rs, testing.rs, validation.rs
+│   ├── mcp/            # Model Context Protocol (HTTP client)
+│   │   ├── client.rs, protocol.rs
 │   └── wasm/           # Full WASM sandbox (wasmtime)
-│       ├── runtime.rs  # Module compilation and caching
-│       ├── wrapper.rs  # Tool trait wrapper for WASM modules
-│       ├── host.rs     # Host functions (logging, time, workspace)
-│       ├── limits.rs   # Fuel metering and memory limiting
-│       ├── allowlist.rs # Network endpoint allowlisting
-│       ├── credential_injector.rs # Safe credential injection
-│       ├── loader.rs   # WASM tool discovery from filesystem
-│       ├── rate_limiter.rs # Per-tool rate limiting
-│       └── storage.rs  # Linear memory persistence
+│       ├── runtime.rs, wrapper.rs, host.rs, limits.rs
+│       ├── allowlist.rs, credential_injector.rs
+│       ├── loader.rs, rate_limiter.rs, storage.rs
+│
+├── tunnel/             # Tunnel providers (6 files)
+│   ├── tailscale.rs    # Tailscale serve + funnel
+│   ├── cloudflare.rs   # Cloudflare Tunnel
+│   ├── ngrok.rs        # ngrok tunnel
+│   ├── custom.rs       # Custom tunnel
+│   └── none.rs         # No tunnel
+│
+├── tui/                # Terminal UI (1 file)
+│   └── mod.rs          # TUI framework
 │
 ├── db/                 # Database abstraction layer
 │   ├── mod.rs          # Database trait (~60 async methods)
 │   ├── postgres.rs     # PostgreSQL backend (delegates to Store + Repository)
-│   ├── libsql_backend.rs # libSQL/Turso backend (embedded SQLite)
-│   └── libsql_migrations.rs # SQLite-dialect schema (idempotent)
+│   └── libsql_backend.rs # libSQL/Turso backend (embedded SQLite)
 │
-├── workspace/          # Persistent memory system (OpenClaw-inspired)
+├── workspace/          # Persistent memory system (11 files)
 │   ├── mod.rs          # Workspace struct, memory operations
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
 │   ├── chunker.rs      # Document chunking (800 tokens, 15% overlap)
-│   ├── embeddings.rs   # EmbeddingProvider trait, OpenAI implementation
+│   ├── embeddings.rs   # EmbeddingProvider trait
 │   ├── search.rs       # Hybrid search with RRF algorithm
 │   └── repository.rs   # PostgreSQL CRUD and search operations
 │
 ├── context/            # Job context isolation
-│   ├── state.rs        # JobState enum, JobContext, state machine
-│   ├── memory.rs       # ActionRecord, ConversationMemory
-│   └── manager.rs      # ContextManager for concurrent jobs
+│   ├── state.rs, memory.rs, manager.rs
 │
 ├── estimation/         # Cost/time/value estimation
-│   ├── cost.rs         # CostEstimator
-│   ├── time.rs         # TimeEstimator
-│   ├── value.rs        # ValueEstimator (profit margins)
-│   └── learner.rs      # Exponential moving average learning
+│   ├── cost.rs, time.rs, value.rs, learner.rs
 │
 ├── evaluation/         # Success evaluation
-│   ├── success.rs      # SuccessEvaluator trait, RuleBasedEvaluator, LlmEvaluator
-│   └── metrics.rs      # MetricsCollector, QualityMetrics
-│
-├── sandbox/            # Docker execution sandbox
-│   ├── mod.rs          # Public API, default allowlist
-│   ├── config.rs       # SandboxConfig, SandboxPolicy enum
-│   ├── manager.rs      # SandboxManager orchestration
-│   ├── container.rs    # ContainerRunner, Docker lifecycle
-│   ├── error.rs        # SandboxError types
-│   └── proxy/          # Network proxy for containers
-│       ├── mod.rs      # NetworkProxyBuilder
-│       ├── http.rs     # HttpProxy, CredentialResolver trait
-│       ├── policy.rs   # NetworkPolicyDecider trait
-│       └── allowlist.rs # DomainAllowlist validation
-│
-├── secrets/            # Secrets management
-│   ├── crypto.rs       # AES-256-GCM encryption
-│   ├── store.rs        # Secret storage
-│   └── types.rs        # Credential types
-│
-├── setup/              # Onboarding wizard (spec: src/setup/README.md)
-│   ├── mod.rs          # Entry point, check_onboard_needed()
-│   ├── wizard.rs       # 7-step interactive wizard
-│   ├── channels.rs     # Channel setup helpers
-│   └── prompts.rs      # Terminal prompts (select, confirm, secret)
-│
-├── skills/             # SKILL.md prompt extension system
-│   ├── mod.rs          # Core types (SkillTrust, LoadedSkill)
-│   ├── registry.rs     # SkillRegistry: discover, install, remove
-│   ├── selector.rs     # Deterministic scoring prefilter
-│   ├── attenuation.rs  # Trust-based tool ceiling
-│   ├── gating.rs       # Requirement checks (bins, env, config)
-│   ├── parser.rs       # SKILL.md frontmatter + markdown parser
-│   └── catalog.rs      # ClawHub registry client
+│   ├── success.rs, metrics.rs
 │
 └── history/            # Persistence
     ├── store.rs        # PostgreSQL repositories
@@ -340,14 +502,11 @@ LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
 # LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
-# NEAR AI (when LLM_BACKEND=nearai, the default)
-# Two auth modes: session token (default) or API key
-# Session token auth (default): uses browser OAuth on first run
-NEARAI_SESSION_TOKEN=sess_...           # hosting providers: set this
-NEARAI_BASE_URL=https://private.near.ai
-# API key auth: set NEARAI_API_KEY, base URL defaults to cloud-api.near.ai
-# NEARAI_API_KEY=...                    # API key from cloud.near.ai
-NEARAI_MODEL=claude-3-5-sonnet-20241022
+# LLM provider (default: openai_compatible)
+LLM_BACKEND=openai_compatible           # openai, anthropic, ollama, openai_compatible, tinfoil
+LLM_BASE_URL=https://openrouter.ai/api/v1  # For OpenAI-compatible
+LLM_API_KEY=sk-...                      # API key for the provider
+LLM_MODEL=anthropic/claude-sonnet-4-20250514
 
 # Agent settings
 AGENT_NAME=ironclaw
@@ -355,9 +514,6 @@ MAX_PARALLEL_JOBS=5
 
 # Embeddings (for semantic memory search)
 OPENAI_API_KEY=sk-...                   # For OpenAI embeddings
-# Or use NEAR AI embeddings:
-# EMBEDDING_PROVIDER=nearai
-# EMBEDDING_ENABLED=true
 EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large
 
 # Heartbeat (proactive periodic execution)
@@ -407,15 +563,19 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 
 ### LLM Providers
 
-IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
+IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `openai`, `anthropic`, `ollama`, `openai_compatible` (default), and `tinfoil`.
 
-**NEAR AI** -- Uses the Chat Completions API with dual auth support. Session token auth (default): authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google), base URL defaults to `https://private.near.ai`. API key auth: set `NEARAI_API_KEY` (from `cloud.near.ai`), base URL defaults to `https://cloud-api.near.ai`. Both modes use the same Chat Completions endpoint. Tool messages are flattened to plain text for compatibility. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment.
-
-**NEAR AI Cloud** -- Uses the OpenAI-compatible Chat Completions API (`https://cloud-api.near.ai/v1/chat/completions`). Authenticates with API keys from `cloud.near.ai`. Auto-selected when `NEARAI_API_KEY` is set (or explicitly via `NEARAI_API_MODE=chat_completions`). Tool messages are flattened to plain text for compatibility. Configure with `NEARAI_API_KEY` and `NEARAI_BASE_URL` (default: `https://cloud-api.near.ai`).
-
-**OpenAI-compatible** -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
+**OpenAI-compatible** (default) -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
+
+**AWS Bedrock** (`src/llm/bedrock.rs`) -- Adapts AWS Bedrock to the OpenAI-compatible format. Uses standard AWS credentials.
+
+**Google Gemini** (`src/llm/gemini.rs`) -- Adapts Google Gemini API (via AI Studio) to the OpenAI-compatible format.
+
+**llama.cpp** (`src/llm/llama_cpp.rs`) -- Native inference interface for local model loading via llama.cpp FFI bindings.
+
+**Smart Routing** (`src/llm/smart_routing.rs`) -- Cost-optimized routing that sends simple tasks to cheap models and complex tasks to primary models. Enabled via `SMART_ROUTING_ENABLED=true`.
 
 ## Database
 
@@ -619,14 +779,13 @@ Key test patterns:
 
 ## Current Limitations / TODOs
 
-1. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
-2. **Integration tests** - Need testcontainers setup for PostgreSQL
-3. **MCP stdio transport** - Only HTTP transport implemented
-4. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
-5. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
-6. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
-7. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway
-8. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
+1. **Integration tests** - Need testcontainers setup for PostgreSQL
+2. **MCP stdio transport** - Only HTTP transport implemented
+3. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
+4. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
+5. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
+6. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway
+7. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
 
 ## Tool Architecture
 
@@ -640,7 +799,7 @@ See `src/tools/README.md` for full tool architecture, adding new tools (built-in
 
 1. Create `src/channels/my_channel.rs`
 2. Implement the `Channel` trait
-3. Add config in `src/config.rs`
+3. Add config in `src/config/channels.rs`
 4. Wire up in `main.rs` channel setup section
 
 ## Debugging

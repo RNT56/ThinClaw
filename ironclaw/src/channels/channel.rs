@@ -203,7 +203,6 @@ pub enum StatusUpdate {
     },
 
     // ── Sub-agent lifecycle events ─────────────────────────────────────
-
     /// A sub-agent was spawned by the main agent.
     SubagentSpawned {
         /// Unique sub-agent ID.

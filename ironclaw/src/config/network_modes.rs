@@ -8,19 +8,15 @@ use serde::{Deserialize, Serialize};
 /// Network mode for the gateway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NetworkMode {
     /// Loopback only (127.0.0.1) — most secure, same-machine only.
+    #[default]
     Loopback,
     /// LAN mode (0.0.0.0) — accessible from local network.
     Lan,
     /// Remote mode — accessible from the internet (requires auth).
     Remote,
-}
-
-impl Default for NetworkMode {
-    fn default() -> Self {
-        Self::Loopback
-    }
 }
 
 impl NetworkMode {

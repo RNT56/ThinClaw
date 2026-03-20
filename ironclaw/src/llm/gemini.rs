@@ -5,8 +5,8 @@
 //!
 //! Configuration:
 //! - `GOOGLE_AI_API_KEY` — API key from Google AI Studio
-//! - `GEMINI_MODEL` — Model name (default: "gemini-2.0-flash")
-//! - `GEMINI_BASE_URL` — Base URL (default: "https://generativelanguage.googleapis.com/v1beta")
+//! - `GEMINI_MODEL` — Model name (default: "gemini-3.1-flash")
+//! - `GEMINI_BASE_URL` — Base URL (default: "https://generativelanguage.googleapis.com/v1beta/openai")
 
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +27,8 @@ impl Default for GeminiConfig {
     fn default() -> Self {
         Self {
             api_key: None,
-            model: "gemini-2.0-flash".to_string(),
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            model: "gemini-3.1-flash".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             max_output_tokens: 8192,
         }
     }
@@ -37,9 +37,12 @@ impl Default for GeminiConfig {
 impl GeminiConfig {
     /// Create from environment variables.
     pub fn from_env() -> Self {
-        let mut config = Self::default();
+        let api_key = std::env::var("GOOGLE_AI_API_KEY").ok();
 
-        config.api_key = std::env::var("GOOGLE_AI_API_KEY").ok();
+        let mut config = Self {
+            api_key,
+            ..Self::default()
+        };
 
         if let Ok(model) = std::env::var("GEMINI_MODEL") {
             config.model = model;
@@ -49,10 +52,10 @@ impl GeminiConfig {
             config.base_url = url;
         }
 
-        if let Ok(max) = std::env::var("GEMINI_MAX_OUTPUT_TOKENS") {
-            if let Ok(m) = max.parse() {
-                config.max_output_tokens = m;
-            }
+        if let Ok(max) = std::env::var("GEMINI_MAX_OUTPUT_TOKENS")
+            && let Ok(m) = max.parse()
+        {
+            config.max_output_tokens = m;
         }
 
         config
@@ -255,7 +258,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GeminiConfig::default();
-        assert_eq!(config.model, "gemini-2.0-flash");
+        assert_eq!(config.model, "gemini-3.1-flash");
         assert!(config.base_url.contains("googleapis.com"));
     }
 
@@ -300,7 +303,7 @@ mod tests {
             ..Default::default()
         };
         let url = config.generate_content_url();
-        assert!(url.contains("gemini-2.0-flash"));
+        assert!(url.contains("gemini-3.1-flash"));
         assert!(url.contains("test-key"));
     }
 

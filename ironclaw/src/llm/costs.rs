@@ -67,6 +67,21 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
+        // Google Gemini
+        "gemini-3.1-flash"
+        | "gemini-2.5-flash"
+        | "gemini-2.0-flash"
+        | "gemini-2.0-flash-exp"
+        | "gemini-1.5-flash"
+        | "gemini-1.5-flash-latest"
+        | "gemini-1.5-flash-8b" => Some((dec!(0.000000075), dec!(0.0000003))),
+        "gemini-2.5-pro"
+        | "gemini-2.0-pro"
+        | "gemini-2.0-pro-exp"
+        | "gemini-1.5-pro"
+        | "gemini-1.5-pro-latest" => Some((dec!(0.00000125), dec!(0.000005))),
+        "gemini-1.0-pro" => Some((dec!(0.0000005), dec!(0.0000015))),
+
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 

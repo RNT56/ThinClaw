@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Chat Commands & Control (Slash Commands)
 
 There is one final internal system that is crucial to rewrite if you want the agent to be controllable when you are away from your Mac.

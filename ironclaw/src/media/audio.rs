@@ -29,8 +29,11 @@ pub struct AudioExtractor {
 impl AudioExtractor {
     /// Create a new audio extractor with default settings.
     pub fn new() -> Self {
-        let whisper_url = std::env::var("WHISPER_HTTP_ENDPOINT")
-            .unwrap_or_else(|_| DEFAULT_WHISPER_URL.to_string());
+        // IC-007: Use optional_env to see bridge-injected vars
+        let whisper_url = crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_WHISPER_URL.to_string());
 
         // Log a warning if the URL is not using HTTPS (defense-in-depth)
         if !whisper_url.starts_with("https://")

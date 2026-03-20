@@ -130,9 +130,7 @@ impl SelfRepair for DefaultSelfRepair {
                 // Skip routine-dispatched jobs — these are managed by the
                 // worker's finalize_routine_run() and should not be interfered
                 // with by the self-repair mechanism.
-                if ctx.metadata.get("routine_dispatched")
-                    == Some(&serde_json::Value::Bool(true))
-                {
+                if ctx.metadata.get("routine_dispatched") == Some(&serde_json::Value::Bool(true)) {
                     tracing::debug!(
                         job_id = %job_id,
                         "Skipping routine-dispatched stuck job (managed by worker)"
@@ -340,10 +338,10 @@ impl SelfRepair for DefaultSelfRepair {
     }
 
     async fn dismiss_broken_tool(&self, tool_name: &str) {
-        if let Some(ref store) = self.store {
-            if let Err(e) = store.mark_tool_repaired(tool_name).await {
-                tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
-            }
+        if let Some(ref store) = self.store
+            && let Err(e) = store.mark_tool_repaired(tool_name).await
+        {
+            tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
         }
     }
 }

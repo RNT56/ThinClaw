@@ -249,13 +249,13 @@ impl VideoAnalyzer {
         let metadata = self.extract_metadata(path)?;
 
         // Check duration limits.
-        if let Some(dur) = metadata.duration_secs {
-            if dur > self.config.max_duration_secs {
-                return Err(VideoError::TooLong {
-                    duration_secs: dur,
-                    max_secs: self.config.max_duration_secs,
-                });
-            }
+        if let Some(dur) = metadata.duration_secs
+            && dur > self.config.max_duration_secs
+        {
+            return Err(VideoError::TooLong {
+                duration_secs: dur,
+                max_secs: self.config.max_duration_secs,
+            });
         }
 
         let mut keyframe_paths = Vec::new();

@@ -22,6 +22,12 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// Google Gemini via AI Studio (uses OpenAI-compatible endpoint)
+    Gemini,
+    /// AWS Bedrock (Converse API with SigV4 auth)
+    Bedrock,
+    /// Local llama.cpp GGUF inference (requires `llama-cpp` feature)
+    LlamaCpp,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -34,8 +40,11 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "gemini" | "google" | "google_ai" => Ok(Self::Gemini),
+            "bedrock" | "aws_bedrock" | "aws-bedrock" => Ok(Self::Bedrock),
+            "llama_cpp" | "llama-cpp" | "llamacpp" | "llama" => Ok(Self::LlamaCpp),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: openai, anthropic, ollama, openai_compatible, tinfoil, gemini, bedrock, llama_cpp",
                 s
             )),
         }
@@ -50,6 +59,9 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Gemini => write!(f, "gemini"),
+            Self::Bedrock => write!(f, "bedrock"),
+            Self::LlamaCpp => write!(f, "llama_cpp"),
         }
     }
 }
@@ -100,6 +112,51 @@ pub struct TinfoilConfig {
     /// API key. Initially `None` during early config resolution; populated
     /// after secret injection. Provider construction will fail if still `None`.
     pub api_key: Option<SecretString>,
+    pub model: String,
+}
+
+/// Configuration for Google Gemini via AI Studio.
+///
+/// Routes through Google's OpenAI-compatible gateway. The native Gemini API
+/// adapter (`llm::gemini::GeminiConfig`) is available for direct REST usage.
+#[derive(Debug, Clone)]
+pub struct GeminiDirectConfig {
+    /// API key from Google AI Studio (`GEMINI_API_KEY` / `GOOGLE_AI_API_KEY`).
+    pub api_key: Option<SecretString>,
+    /// Model name (default: "gemini-2.5-flash").
+    pub model: String,
+    /// Base URL — uses Google's OpenAI-compatible endpoint by default.
+    pub base_url: String,
+}
+
+/// Configuration for AWS Bedrock.
+#[derive(Debug, Clone)]
+pub struct BedrockDirectConfig {
+    /// AWS region (default: "us-east-1").
+    pub region: String,
+    /// Bedrock model ID (default: "anthropic.claude-3-sonnet-20240229-v1:0").
+    pub model_id: String,
+    /// AWS access key ID.
+    pub access_key_id: Option<String>,
+    /// AWS secret access key.
+    pub secret_access_key: Option<SecretString>,
+    /// Maximum output tokens.
+    pub max_tokens: u32,
+}
+
+/// Configuration for local llama.cpp GGUF inference.
+#[derive(Debug, Clone)]
+pub struct LlamaCppConfig {
+    /// Path to the GGUF model file.
+    pub model_path: String,
+    /// Context length (default: 4096).
+    pub context_length: u32,
+    /// Number of GPU layers to offload (default: 0 = CPU only).
+    pub gpu_layers: i32,
+    /// Base URL for the llama.cpp server (default: "http://localhost:8080").
+    /// When running llama.cpp in server mode, this is the HTTP endpoint.
+    pub server_url: String,
+    /// Model name to report (default: "llama-local").
     pub model: String,
 }
 
@@ -194,6 +251,12 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Google Gemini config (populated when backend=gemini)
+    pub gemini: Option<GeminiDirectConfig>,
+    /// AWS Bedrock config (populated when backend=bedrock)
+    pub bedrock: Option<BedrockDirectConfig>,
+    /// Local llama.cpp config (populated when backend=llama_cpp)
+    pub llama_cpp: Option<LlamaCppConfig>,
     /// Backend-agnostic reliability/routing settings
     pub reliability: ReliabilityConfig,
 }
@@ -306,6 +369,64 @@ impl LlmConfig {
             None
         };
 
+        let gemini = if backend == LlmBackend::Gemini {
+            let api_key = optional_env("GEMINI_API_KEY")?
+                .or_else(|| std::env::var("GOOGLE_AI_API_KEY").ok())
+                .map(SecretString::from);
+            let model = optional_env("GEMINI_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "gemini-3.1-flash".to_string());
+            let base_url = optional_env("GEMINI_BASE_URL")?.unwrap_or_else(|| {
+                "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
+            });
+            Some(GeminiDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
+        } else {
+            None
+        };
+
+        let bedrock = if backend == LlmBackend::Bedrock {
+            let region = optional_env("AWS_REGION")?.unwrap_or_else(|| "us-east-1".to_string());
+            let model_id = optional_env("BEDROCK_MODEL_ID")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "anthropic.claude-3-sonnet-20240229-v1:0".to_string());
+            let access_key_id = optional_env("AWS_ACCESS_KEY_ID")?;
+            let secret_access_key = optional_env("AWS_SECRET_ACCESS_KEY")?.map(SecretString::from);
+            let max_tokens: u32 = parse_optional_env("BEDROCK_MAX_TOKENS", 4096)?;
+            Some(BedrockDirectConfig {
+                region,
+                model_id,
+                access_key_id,
+                secret_access_key,
+                max_tokens,
+            })
+        } else {
+            None
+        };
+
+        let llama_cpp = if backend == LlmBackend::LlamaCpp {
+            let model_path = optional_env("LLAMA_MODEL_PATH")?.unwrap_or_default();
+            let context_length: u32 = parse_optional_env("LLAMA_CONTEXT_LENGTH", 4096)?;
+            let gpu_layers: i32 = parse_optional_env("LLAMA_GPU_LAYERS", 0)?;
+            let server_url = optional_env("LLAMA_SERVER_URL")?
+                .unwrap_or_else(|| "http://localhost:8080".to_string());
+            let model = optional_env("LLAMA_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "llama-local".to_string());
+            Some(LlamaCppConfig {
+                model_path,
+                context_length,
+                gpu_layers,
+                server_url,
+                model,
+            })
+        } else {
+            None
+        };
+
         // Resolve backend-agnostic reliability config
         let reliability = ReliabilityConfig {
             cheap_model: optional_env("LLM_CHEAP_MODEL")?,
@@ -334,6 +455,9 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            gemini,
+            bedrock,
+            llama_cpp,
             reliability,
         })
     }
@@ -366,6 +490,21 @@ impl LlmConfig {
                 .as_ref()
                 .map(|c| c.model.as_str())
                 .unwrap_or("kimi-k2-5"),
+            LlmBackend::Gemini => self
+                .gemini
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("gemini-3.1-flash"),
+            LlmBackend::Bedrock => self
+                .bedrock
+                .as_ref()
+                .map(|c| c.model_id.as_str())
+                .unwrap_or("anthropic.claude-3-sonnet-20240229-v1:0"),
+            LlmBackend::LlamaCpp => self
+                .llama_cpp
+                .as_ref()
+                .map(|c| c.model.as_str())
+                .unwrap_or("llama-local"),
         }
     }
 }

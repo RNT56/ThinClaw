@@ -19,9 +19,9 @@ pub mod bundled;
 pub mod hook;
 pub mod registry;
 
-pub use bootstrap::{bootstrap_hooks, HookBootstrapSummary};
+pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
 pub use bundled::{
-    register_bundle, register_bundled_hooks, HookBundleConfig, HookRegistrationSummary,
+    HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
 pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
 pub use registry::{HookInfo, HookRegistry};

@@ -316,8 +316,14 @@ impl RegistryCatalog {
                 kind_b: "channel",
                 prefix_b: "channels",
             }),
-            (true, false) => Ok(self.manifests.get(&format!("tools/{}", name)).unwrap()),
-            (false, true) => Ok(self.manifests.get(&format!("channels/{}", name)).unwrap()),
+            (true, false) => Ok(self
+                .manifests
+                .get(&format!("tools/{}", name))
+                .expect("key existence verified by contains_key check")),
+            (false, true) => Ok(self
+                .manifests
+                .get(&format!("channels/{}", name))
+                .expect("key existence verified by contains_key check")),
             (false, false) => Err(RegistryError::ExtensionNotFound(name.to_string())),
         }
     }

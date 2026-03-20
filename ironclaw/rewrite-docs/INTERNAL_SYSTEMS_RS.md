@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Internal Agent Systems: Heartbeats & Memory Documents
 
 You have discovered the elements that give OpenClaw its "personality" and true autonomy.

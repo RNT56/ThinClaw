@@ -402,10 +402,8 @@ impl AppBuilder {
     pub fn init_llm(
         &self,
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        let (llm, cheap_llm) = crate::llm::build_provider_chain(
-            &self.config.llm,
-            self.providers_settings.as_ref(),
-        )?;
+        let (llm, cheap_llm) =
+            crate::llm::build_provider_chain(&self.config.llm, self.providers_settings.as_ref())?;
         Ok((llm, cheap_llm))
     }
 
@@ -503,7 +501,9 @@ impl AppBuilder {
                 _ => {
                     // Unrestricted: full filesystem access — no restrictions at all.
                     // Intended for remote/server deployments or power users.
-                    tracing::info!("[app] Builder workspace: unrestricted (full filesystem access)");
+                    tracing::info!(
+                        "[app] Builder workspace: unrestricted (full filesystem access)"
+                    );
                     (None, None)
                 }
             };
@@ -812,7 +812,6 @@ impl AppBuilder {
                     tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
                     tools.register_dev_tools();
                 }
-
             }
         }
 
@@ -883,7 +882,7 @@ impl AppBuilder {
             &self.config.wasm.tools_dir,
             &self.config.channels.wasm_channels_dir,
             &active_tool_names,
-            &[],  // WASM channel names are loaded separately in the bridge
+            &[], // WASM channel names are loaded separately in the bridge
             &dev_loaded_tool_names,
         )
         .await;

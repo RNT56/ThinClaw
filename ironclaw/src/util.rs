@@ -25,6 +25,12 @@ pub fn llm_signals_completion(response: &str) -> bool {
     let lower = response.to_lowercase();
 
     // Superset of phrases from agent/worker.rs and worker/runtime.rs.
+    // Heartbeat-specific: HEARTBEAT_OK is the canonical completion signal
+    // for heartbeat routines. Check case-insensitively before phrase matching.
+    if lower.contains("heartbeat_ok") {
+        return true;
+    }
+
     let positive_phrases = [
         "job is complete",
         "job is done",
@@ -173,6 +179,20 @@ mod tests {
         assert!(!llm_signals_completion("JOB_DONE"));
         assert!(!llm_signals_completion(
             "The tool returned: TASK_COMPLETE signal"
+        ));
+    }
+
+    #[test]
+    fn signals_completion_heartbeat_ok() {
+        // HEARTBEAT_OK is the canonical heartbeat completion signal
+        assert!(llm_signals_completion("HEARTBEAT_OK"));
+        assert!(llm_signals_completion("heartbeat_ok"));
+        assert!(llm_signals_completion(
+            "Nothing needs attention. HEARTBEAT_OK"
+        ));
+        // Even embedded in a larger response
+        assert!(llm_signals_completion(
+            "All checks passed — HEARTBEAT_OK. No action items."
         ));
     }
 }

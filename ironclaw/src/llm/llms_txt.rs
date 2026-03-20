@@ -80,8 +80,10 @@ pub fn parse_llms_txt(content: &str, source_url: &str) -> LlmsTxt {
         let trimmed = line.trim();
 
         // Title (first H1)
-        if trimmed.starts_with("# ") && name.is_none() {
-            name = Some(trimmed[2..].trim().to_string());
+        if let Some(title) = trimmed.strip_prefix("# ")
+            && name.is_none()
+        {
+            name = Some(title.trim().to_string());
             continue;
         }
 
@@ -98,7 +100,7 @@ pub fn parse_llms_txt(content: &str, source_url: &str) -> LlmsTxt {
         }
 
         // Section headings
-        if trimmed.starts_with("## ") {
+        if let Some(section_title) = trimmed.strip_prefix("## ") {
             // Save previous section
             if let Some(heading) = current_heading.take() {
                 sections.push(LlmsTxtSection {
@@ -107,18 +109,18 @@ pub fn parse_llms_txt(content: &str, source_url: &str) -> LlmsTxt {
                     text: std::mem::take(&mut current_text).trim().to_string(),
                 });
             }
-            current_heading = Some(trimmed[3..].trim().to_string());
+            current_heading = Some(section_title.trim().to_string());
             continue;
         }
 
         // Links: [title](url): description
         // or - [title](url): description
         let link_line = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        if link_line.starts_with('[') {
-            if let Some(link) = parse_link(link_line) {
-                current_links.push(link);
-                continue;
-            }
+        if link_line.starts_with('[')
+            && let Some(link) = parse_link(link_line)
+        {
+            current_links.push(link);
+            continue;
         }
 
         // Regular text

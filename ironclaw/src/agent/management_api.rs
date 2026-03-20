@@ -89,10 +89,10 @@ impl AgentManagementStore {
             return false;
         }
         // Clear old default
-        if let Some(old_id) = &self.default_id {
-            if let Some(old) = self.agents.get_mut(old_id) {
-                old.is_default = false;
-            }
+        if let Some(old_id) = &self.default_id
+            && let Some(old) = self.agents.get_mut(old_id)
+        {
+            old.is_default = false;
         }
         self.default_id = Some(id.to_string());
         if let Some(agent) = self.agents.get_mut(id) {

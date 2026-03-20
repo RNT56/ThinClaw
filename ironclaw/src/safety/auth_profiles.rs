@@ -50,14 +50,13 @@ impl AuthProfile {
 
     /// Masked version of the API key for display.
     pub fn masked_key(&self) -> String {
-        if self.api_key.len() <= 8 {
+        let chars: Vec<char> = self.api_key.chars().collect();
+        if chars.len() <= 8 {
             "****".to_string()
         } else {
-            format!(
-                "{}...{}",
-                &self.api_key[..4],
-                &self.api_key[self.api_key.len() - 4..]
-            )
+            let prefix: String = chars[..4].iter().collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{}...{}", prefix, suffix)
         }
     }
 }
@@ -117,14 +116,13 @@ impl AuthProfileManager {
                 .map(|p| p.usage_count)
                 .min();
 
-            if let Some(min) = min_usage {
-                if let Some(profile) = profiles
+            if let Some(min) = min_usage
+                && let Some(profile) = profiles
                     .iter_mut()
                     .find(|p| p.healthy && p.usage_count == min)
-                {
-                    profile.usage_count += 1;
-                    return Some(profile);
-                }
+            {
+                profile.usage_count += 1;
+                return Some(profile);
             }
         }
         None
@@ -132,19 +130,19 @@ impl AuthProfileManager {
 
     /// Mark a profile as unhealthy.
     pub fn mark_unhealthy(&mut self, provider: &str, name: &str) {
-        if let Some(profiles) = self.profiles.get_mut(provider) {
-            if let Some(p) = profiles.iter_mut().find(|p| p.name == name) {
-                p.healthy = false;
-            }
+        if let Some(profiles) = self.profiles.get_mut(provider)
+            && let Some(p) = profiles.iter_mut().find(|p| p.name == name)
+        {
+            p.healthy = false;
         }
     }
 
     /// Mark a profile as healthy.
     pub fn mark_healthy(&mut self, provider: &str, name: &str) {
-        if let Some(profiles) = self.profiles.get_mut(provider) {
-            if let Some(p) = profiles.iter_mut().find(|p| p.name == name) {
-                p.healthy = true;
-            }
+        if let Some(profiles) = self.profiles.get_mut(provider)
+            && let Some(p) = profiles.iter_mut().find(|p| p.name == name)
+        {
+            p.healthy = true;
         }
     }
 

@@ -51,10 +51,10 @@ impl PostCompactionConfig {
             config.enabled = val != "0" && !val.eq_ignore_ascii_case("false");
         }
 
-        if let Ok(max) = std::env::var("POST_COMPACTION_MAX_TOKENS") {
-            if let Ok(m) = max.parse() {
-                config.max_tokens = m;
-            }
+        if let Ok(max) = std::env::var("POST_COMPACTION_MAX_TOKENS")
+            && let Ok(m) = max.parse()
+        {
+            config.max_tokens = m;
         }
 
         config
@@ -145,7 +145,8 @@ impl ContextInjector {
         }
 
         // Sort by priority (highest first)
-        self.fragments.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.fragments
+            .sort_by_key(|f| std::cmp::Reverse(f.priority));
 
         let mut result = Vec::new();
         let mut total_tokens = 0;

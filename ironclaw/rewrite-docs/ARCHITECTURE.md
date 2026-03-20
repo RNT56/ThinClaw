@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Architecture Comparison: OpenClaw vs. Your ThinClaw (Tauri)
 
 It is completely understandable why the architecture differences are confusing! You are bridging two fundamentally different ways of building a desktop application.

@@ -17,6 +17,7 @@ mod memory;
 pub mod routine;
 mod screen_capture;
 pub(crate) mod shell;
+pub(crate) mod shell_security;
 pub mod skill_tools;
 mod slack_actions;
 pub mod subagent;

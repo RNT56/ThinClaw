@@ -129,13 +129,12 @@ impl RoutingPolicy {
         if let (Ok(threshold), Ok(provider)) = (
             std::env::var("LLM_LARGE_CONTEXT_THRESHOLD"),
             std::env::var("LLM_LARGE_CONTEXT_PROVIDER"),
-        ) {
-            if let Ok(t) = threshold.parse() {
-                policy.add_rule(RoutingRule::LargeContext {
-                    threshold: t,
-                    provider,
-                });
-            }
+        ) && let Ok(t) = threshold.parse()
+        {
+            policy.add_rule(RoutingRule::LargeContext {
+                threshold: t,
+                provider,
+            });
         }
 
         if let Ok(provider) = std::env::var("LLM_VISION_PROVIDER") {

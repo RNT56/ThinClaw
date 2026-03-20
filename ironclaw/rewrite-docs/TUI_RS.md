@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # TUI: Interactive Terminal Chat Interface
 
 ThinClaw includes a rich terminal-based chat UI built with `ratatui`, providing the same chat experience as the Tauri desktop app — but inside a terminal. This is essential for SSH sessions, headless servers, tmux workflows, and users who prefer terminal-native tools.

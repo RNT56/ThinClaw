@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 /// WebChat theme preference.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum WebChatTheme {
     /// Light theme (white backgrounds, dark text).
     Light,
     /// Dark theme (dark backgrounds, light text).
     Dark,
     /// Follow system preference (prefers-color-scheme).
+    #[default]
     System,
 }
 
@@ -39,12 +41,6 @@ impl WebChatTheme {
     /// Whether the theme is a dark variant.
     pub fn is_dark(&self) -> bool {
         matches!(self, Self::Dark)
-    }
-}
-
-impl Default for WebChatTheme {
-    fn default() -> Self {
-        Self::System
     }
 }
 

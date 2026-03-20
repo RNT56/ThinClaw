@@ -118,10 +118,7 @@ impl Tool for MemorySearchTool {
 
         // MMR re-ranking on by default — reduces near-duplicate daily notes.
         // Lambda 0.7 = slight relevance bias (matches openclaw recommendation).
-        let use_mmr = params
-            .get("mmr")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let use_mmr = params.get("mmr").and_then(|v| v.as_bool()).unwrap_or(true);
 
         // Temporal decay on by default — 30-day half-life so older notes don't
         // crowd out recent ones on equal semantic similarity.
@@ -372,15 +369,13 @@ impl Tool for MemoryWriteTool {
                     .any(|p| normalized.eq_ignore_ascii_case(p))
                 {
                     if append {
-                        self.workspace
-                            .append(path, content)
-                            .await
-                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                        self.workspace.append(path, content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
                     } else {
-                        self.workspace
-                            .write(path, content)
-                            .await
-                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                        self.workspace.write(path, content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
                     }
                     let output = serde_json::json!({
                         "status": if append { "appended" } else { "rewritten" },
@@ -549,7 +544,6 @@ impl Tool for MemoryReadTool {
     }
 }
 
-
 /// Tool for viewing workspace structure as a tree.
 ///
 /// Returns a hierarchical view of files and directories with configurable depth.
@@ -682,7 +676,10 @@ pub struct MemoryDeleteTool {
 impl MemoryDeleteTool {
     /// Create a new memory delete tool.
     pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace, sse_sender: None }
+        Self {
+            workspace,
+            sse_sender: None,
+        }
     }
 
     /// Attach an SSE sender to enable lifecycle event emission.
@@ -753,11 +750,9 @@ impl Tool for MemoryDeleteTool {
 
         // If BOOTSTRAP.md was deleted, notify the bridge to update frontend state.
         let is_bootstrap = normalized.eq_ignore_ascii_case(crate::workspace::paths::BOOTSTRAP);
-        if is_bootstrap {
-            if let Some(ref tx) = self.sse_sender {
-                let _ = tx.send(crate::channels::web::types::SseEvent::BootstrapCompleted);
-                tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");
-            }
+        if is_bootstrap && let Some(ref tx) = self.sse_sender {
+            let _ = tx.send(crate::channels::web::types::SseEvent::BootstrapCompleted);
+            tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");
         }
 
         let output = serde_json::json!({

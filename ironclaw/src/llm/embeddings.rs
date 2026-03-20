@@ -104,8 +104,10 @@ impl EmbeddingConfig {
             _ => EmbeddingProvider::OpenAI,
         };
 
-        let mut config = Self::default();
-        config.provider = provider;
+        let mut config = Self {
+            provider,
+            ..Self::default()
+        };
         if let Ok(model) = std::env::var("EMBEDDING_MODEL") {
             config.model = model;
         }

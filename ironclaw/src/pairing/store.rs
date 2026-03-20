@@ -237,7 +237,7 @@ impl PairingStore {
         meta: Option<serde_json::Value>,
     ) -> Result<UpsertResult, PairingStoreError> {
         let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
 
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -332,7 +332,7 @@ impl PairingStore {
 
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
         let path = approve_attempts_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
 
         // Open (or create) and lock before reading so concurrent callers
         // don't clobber each other's writes.
@@ -505,7 +505,7 @@ impl PairingStore {
         }
 
         let path = block_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
 
         // Read existing content before opening for write
         let content = fs::read_to_string(&path).unwrap_or_default();
@@ -599,7 +599,7 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
 
         let file = fs::OpenOptions::new()
             .read(true)

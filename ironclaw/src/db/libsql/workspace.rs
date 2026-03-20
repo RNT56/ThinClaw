@@ -525,9 +525,9 @@ impl WorkspaceStore for LibSqlBackend {
             if sanitized_query.is_empty() {
                 Vec::new()
             } else {
-            let mut rows = conn
-                .query(
-                    r#"
+                let mut rows = conn
+                    .query(
+                        r#"
                     SELECT c.id, c.document_id, c.content
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
@@ -537,31 +537,31 @@ impl WorkspaceStore for LibSqlBackend {
                     ORDER BY rank
                     LIMIT ?4
                     "#,
-                    params![user_id, agent_id_str.as_deref(), sanitized_query, pre_limit],
-                )
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("FTS query failed: {}", e),
-                })?;
+                        params![user_id, agent_id_str.as_deref(), sanitized_query, pre_limit],
+                    )
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("FTS query failed: {}", e),
+                    })?;
 
-            let mut results = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("FTS row fetch failed: {}", e),
-                })?
-            {
-                results.push(RankedResult {
-                    chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
-                    document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                    content: get_text(&row, 2),
-                    rank: results.len() as u32 + 1,
-                    created_at: None,
-                    embedding: None,
-                });
-            }
-            results
+                let mut results = Vec::new();
+                while let Some(row) =
+                    rows.next()
+                        .await
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!("FTS row fetch failed: {}", e),
+                        })?
+                {
+                    results.push(RankedResult {
+                        chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                        document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                        content: get_text(&row, 2),
+                        rank: results.len() as u32 + 1,
+                        created_at: None,
+                        embedding: None,
+                    });
+                }
+                results
             } // end: else (sanitized_query not empty)
         } else {
             Vec::new()

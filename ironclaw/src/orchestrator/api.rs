@@ -1,6 +1,9 @@
 //! Internal HTTP API for worker-to-orchestrator communication.
 //!
 //! This runs on a separate port (default 50051) from the web gateway.
+//! **Note**: This is a plain HTTP/JSON API (powered by axum), NOT gRPC.
+//! Port 50051 was chosen as a well-known "internal service" port that avoids
+//! conflicts with the web gateway (default :3000) and common dev ports.
 //! All endpoints are authenticated via per-job bearer tokens.
 
 use std::collections::{HashMap, VecDeque};

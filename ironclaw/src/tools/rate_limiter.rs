@@ -127,6 +127,12 @@ pub struct RateLimiter {
     state: RwLock<HashMap<(String, String), ToolRateLimitState>>,
 }
 
+impl std::fmt::Debug for RateLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RateLimiter").finish_non_exhaustive()
+    }
+}
+
 impl RateLimiter {
     /// Create a new rate limiter.
     pub fn new() -> Self {

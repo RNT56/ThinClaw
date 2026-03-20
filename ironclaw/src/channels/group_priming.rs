@@ -40,10 +40,10 @@ impl GroupPrimingConfig {
             config.enabled = val != "0" && !val.eq_ignore_ascii_case("false");
         }
 
-        if let Ok(max) = std::env::var("GROUP_PRIMING_MAX_MEMBERS") {
-            if let Ok(m) = max.parse() {
-                config.max_members = m;
-            }
+        if let Ok(max) = std::env::var("GROUP_PRIMING_MAX_MEMBERS")
+            && let Ok(m) = max.parse()
+        {
+            config.max_members = m;
         }
 
         if let Ok(val) = std::env::var("GROUP_PRIMING_INCLUDE_IDS") {

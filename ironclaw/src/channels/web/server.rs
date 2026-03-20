@@ -2315,9 +2315,9 @@ async fn routines_trigger_handler(
         crate::agent::routine::RoutineAction::FullJob {
             title, description, ..
         } => format!("{}: {}", title, description),
-        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
-            prompt.clone().unwrap_or_else(|| "Heartbeat check".to_string())
-        }
+        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
+            .clone()
+            .unwrap_or_else(|| "Heartbeat check".to_string()),
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
@@ -2551,9 +2551,9 @@ async fn webhook_routine_trigger_handler(
             crate::agent::routine::RoutineAction::FullJob {
                 title, description, ..
             } => format!("{}: {}", title, description),
-            crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
-                prompt.clone().unwrap_or_else(|| "Heartbeat check".to_string())
-            }
+            crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
+                .clone()
+                .unwrap_or_else(|| "Heartbeat check".to_string()),
         };
 
         let content = format!("[webhook:{}] {}", routine.name, prompt);
@@ -2645,7 +2645,10 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
         crate::agent::routine::Trigger::SystemEvent { message, schedule } => {
             let sched = schedule.as_deref().unwrap_or("on-demand");
-            ("system_event".to_string(), format!("event: {} ({})", &message[..message.len().min(40)], sched))
+            (
+                "system_event".to_string(),
+                format!("event: {} ({})", &message[..message.len().min(40)], sched),
+            )
         }
     };
 

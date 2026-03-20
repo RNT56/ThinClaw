@@ -42,9 +42,9 @@ fn is_workspace_path(path: &str) -> bool {
 
     // Check if the file is directly in the root (no parent directory component)
     // e.g. "README.md" → blocked, but "clawi-site/README.md" → allowed
-    let is_root_level = p.parent().is_none_or(|parent| {
-        parent.as_os_str().is_empty() || parent == std::path::Path::new(".")
-    });
+    let is_root_level = p
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty() || parent == std::path::Path::new("."));
 
     if is_root_level && WORKSPACE_FILES.contains(&filename) {
         return true;
@@ -826,10 +826,7 @@ impl Tool for GrepTool {
     ) -> Result<ToolOutput, ToolError> {
         let pattern_str = require_str(&params, "pattern")?;
 
-        let path_str = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let is_regex = params
             .get("is_regex")
@@ -841,9 +838,7 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let include_pattern = params
-            .get("include_pattern")
-            .and_then(|v| v.as_str());
+        let include_pattern = params.get("include_pattern").and_then(|v| v.as_str());
 
         let context_lines = params
             .get("context_lines")
@@ -1026,7 +1021,13 @@ async fn collect_files(
                 continue;
             }
 
-            Box::pin(collect_files(&entry_path, files, include_pattern, depth + 1)).await?;
+            Box::pin(collect_files(
+                &entry_path,
+                files,
+                include_pattern,
+                depth + 1,
+            ))
+            .await?;
         } else if metadata.is_file() {
             // Apply include pattern filter
             if let Some(pattern) = include_pattern {
@@ -1054,13 +1055,11 @@ fn glob_matches(pattern: &str, filename: &str) -> bool {
         // Contains match: *test*
         let inner = &pattern[1..pattern.len() - 1];
         filename.contains(inner)
-    } else if pattern.starts_with('*') {
+    } else if let Some(suffix) = pattern.strip_prefix('*') {
         // Suffix match: *_test.rs
-        let suffix = &pattern[1..];
         filename.ends_with(suffix)
-    } else if pattern.ends_with('*') {
+    } else if let Some(prefix) = pattern.strip_suffix('*') {
         // Prefix match: test_*
-        let prefix = &pattern[..pattern.len() - 1];
         filename.starts_with(prefix)
     } else {
         // Exact match
@@ -1150,6 +1149,9 @@ mod tests {
         let tool = WriteFileTool::new().with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
 
+        // The is_workspace_path check runs on the raw path string from the LLM,
+        // which is always a relative filename like "HEARTBEAT.md", not an absolute
+        // path. The base_dir join happens later in validate_path.
         let workspace_files = &[
             "HEARTBEAT.md",
             "MEMORY.md",
@@ -1161,11 +1163,10 @@ mod tests {
         ];
 
         for filename in workspace_files {
-            let path = dir.path().join(filename);
             let err = tool
                 .execute(
                     serde_json::json!({
-                        "path": path.to_str().unwrap(),
+                        "path": filename,
                         "content": "test"
                     }),
                     &ctx,

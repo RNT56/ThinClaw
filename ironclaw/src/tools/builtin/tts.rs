@@ -59,9 +59,10 @@ impl TtsTool {
     async fn resolve_api_key(&self) -> Result<String, ToolError> {
         // Try secrets store first
         if let Some(secrets) = &self.secrets
-            && let Ok(decrypted) = secrets.get_decrypted("default", "openai_api_key").await {
-                return Ok(decrypted.expose().to_string());
-            }
+            && let Ok(decrypted) = secrets.get_decrypted("default", "openai_api_key").await
+        {
+            return Ok(decrypted.expose().to_string());
+        }
 
         // Fall back to environment variable
         std::env::var("OPENAI_API_KEY").map_err(|_| {
@@ -94,9 +95,10 @@ impl TtsTool {
 
         // gpt-4o-mini-tts supports instructions for voice style
         if let Some(inst) = instructions
-            && model == "gpt-4o-mini-tts" {
-                body["instructions"] = serde_json::Value::String(inst.to_string());
-            }
+            && model == "gpt-4o-mini-tts"
+        {
+            body["instructions"] = serde_json::Value::String(inst.to_string());
+        }
 
         let response = self
             .client

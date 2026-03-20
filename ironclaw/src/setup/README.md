@@ -39,9 +39,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
    a. Load .env files (dotenvy::dotenv() then load_ironclaw_env())
    b. check_onboard_needed() → run wizard if needed
    c. Config::from_env()     → build config from env vars
-   d. Create SessionManager  → load session token
-   e. ensure_authenticated() → validate session (NEAR AI only)
-   f. ... rest of agent startup
+   d. ... rest of agent startup
 ```
 
 **Critical ordering:** `.env` files must be loaded (step 3a) before
@@ -50,7 +48,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 8-Step Wizard
+## The 9-Step Wizard
 
 ### Overview
 
@@ -62,7 +60,8 @@ Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
 Step 7: Extensions (tools)
-Step 8: Background Tasks (heartbeat)
+Step 8: Docker Sandbox
+Step 9: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```
@@ -167,13 +166,12 @@ env-var mode or skipped secrets.
 
 | Provider | Auth Method | Secret Name | Env Var |
 |----------|-------------|-------------|---------|
-| NEAR AI Chat | Browser OAuth or session token | - | `NEARAI_SESSION_TOKEN` |
-| NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
 | OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 | OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| Tinfoil | API key | `tinfoil_api_key` | `TINFOIL_API_KEY` |
 
 ¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
 OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
@@ -190,20 +188,6 @@ Switching between them overwrites the same credential slot.
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
-
-**NEAR AI** (`setup_nearai`):
-- Calls `session_manager.ensure_authenticated()` which shows the auth menu:
-  - Options 1-2 (GitHub/Google): browser OAuth → **NEAR AI Chat** mode
-    (Responses API at `private.near.ai`, session token auth)
-  - Option 4: NEAR AI Cloud API key → **NEAR AI Cloud** mode
-    (Chat Completions API at `cloud-api.near.ai`, API key auth)
-- **NEAR AI Chat** path: session token saved to `~/.ironclaw/session.json`.
-  Hosting providers can set `NEARAI_SESSION_TOKEN` env var directly (takes
-  precedence over file-based tokens).
-- **NEAR AI Cloud** path: `NEARAI_API_KEY` saved to `~/.ironclaw/.env`
-  (bootstrap) and encrypted secrets store (`llm_nearai_api_key`).
-  `LlmConfig::resolve()` auto-selects `ChatCompletions` mode when the
-  API key is present.
 
 **`self.llm_api_key` caching:** The wizard caches the API key as
 `Option<SecretString>` so that Step 4 (model fetching) and Step 5
@@ -245,11 +229,9 @@ key first, then falls back to the standard env var.
 **Flow:**
 1. Ask "Enable semantic search?" (default: yes)
 2. Detect available providers:
-   - NEAR AI: if backend is `nearai` OR valid session exists
    - OpenAI: if `OPENAI_API_KEY` in env OR (backend is `openai` AND cached key)
-3. If both available → let user choose
-4. If only one → use it
-5. If neither → disable embeddings
+3. If available → use it
+4. If not → disable embeddings
 
 **Default model:** `text-embedding-3-small` (for both providers)
 
@@ -330,7 +312,20 @@ Searches for `registry/` directory in order:
 
 ---
 
-### Step 8: Heartbeat
+### Step 8: Docker Sandbox
+
+**Module:** `wizard.rs` → `step_sandbox()`
+
+**Goal:** Configure Docker execution sandbox for isolated tool execution.
+
+**Flow:**
+1. Ask "Enable Docker sandbox?" (default: no)
+2. If yes: configure image, memory limits, timeout, CPU limits
+3. Store in `self.settings.sandbox`
+
+---
+
+### Step 9: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 
@@ -361,11 +356,11 @@ LLM_BACKEND="openai_compatible"
 LLM_BASE_URL="http://my-vllm:8000/v1"
 ```
 
-Or for PostgreSQL + NEAR AI:
+Or for PostgreSQL:
 ```env
 DATABASE_BACKEND="postgres"
 DATABASE_URL="postgres://user:pass@localhost/ironclaw"
-LLM_BACKEND="nearai"
+LLM_BACKEND="openai_compatible"
 ```
 
 Or for Ollama:
@@ -375,8 +370,8 @@ OLLAMA_BASE_URL="http://localhost:11434"
 ```
 
 **Why separate?** Chicken-and-egg: you need `DATABASE_BACKEND` to know
-which database to connect to, and `LLM_BACKEND` to know whether to
-attempt NEAR AI session auth -- neither can be stored in the database.
+which database to connect to, and `LLM_BACKEND` to know how to
+configure the provider — neither can be stored in the database.
 
 **Layer 2: Database settings table** (everything else)
 
@@ -386,10 +381,10 @@ keyed by `(user_id, key)`. Written by `set_all_settings()`.
 Settings are serialized via `Settings::to_db_map()` as dotted paths:
 ```
 database_backend = "libsql"
-llm_backend = "nearai"
+llm_backend = "openai_compatible"
 selected_model = "anthropic/claude-sonnet-4-5"
 embeddings.enabled = "true"
-embeddings.provider = "nearai"
+embeddings.provider = "openai"
 channels.http_enabled = "true"
 heartbeat.enabled = "true"
 heartbeat.interval_secs = "300"
@@ -446,7 +441,6 @@ Bootstrap vars written to `~/.ironclaw/.env`:
 - `LLM_BACKEND` (always, when set)
 - `LLM_BASE_URL` (if openai_compatible)
 - `OLLAMA_BASE_URL` (if ollama)
-- `NEARAI_API_KEY` (if API key auth path)
 - `ONBOARD_COMPLETED` (always, "true")
 
 **Invariant:** Both Layer 1 and Layer 2 must be written. If the database
@@ -479,7 +473,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource, // Keychain | Env | None
 
     // Step 3: Inference
-    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+    pub llm_backend: Option<String>,         // "anthropic" | "openai" | "ollama" | "openai_compatible" | "tinfoil"
     pub ollama_base_url: Option<String>,
     pub openai_compatible_base_url: Option<String>,
 
@@ -583,24 +577,15 @@ Must properly restore terminal state on all exit paths.
 
 ### Remote Server Authentication
 
-On remote/VPS servers, the browser-based OAuth flow for NEAR AI may not
-work because `http://127.0.0.1:9876` is unreachable from the user's
-local browser.
+On remote/VPS servers without a desktop environment, use providers that
+authenticate via API keys (Anthropic, OpenAI, OpenRouter, Tinfoil) rather
+than browser-based OAuth flows.
 
-**Solutions:**
-
-1. **NEAR AI Cloud API key (option 4 in auth menu):** Get an API key
-   from `https://cloud.near.ai` and paste it into the terminal. No
-   local listener is needed. The key is saved to `~/.ironclaw/.env`
-   and the encrypted secrets store. Uses the OpenAI-compatible
-   ChatCompletions API mode.
-
-2. **Custom callback URL:** Set `IRONCLAW_OAUTH_CALLBACK_URL` to a
-   publicly accessible URL (e.g., via SSH tunnel or reverse proxy) that
-   forwards to port 9876 on the server:
-   ```bash
-   export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
-   ```
+For custom OAuth callbacks, set `IRONCLAW_OAUTH_CALLBACK_URL` to a
+publicly accessible URL:
+```bash
+export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
+```
 
 The `callback_url()` function in `oauth_defaults.rs` checks this env var
 and falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.

@@ -85,16 +85,16 @@ impl ReadAuditor {
         for rule_path in &self.config.rule_paths {
             let full_path = format!("{}/{}", workspace_root, rule_path);
 
-            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                if !content.trim().is_empty() {
-                    let estimated_tokens = estimate_tokens(&content);
-                    self.rules.push(WorkspaceRule {
-                        source: rule_path.clone(),
-                        content,
-                        scope: RuleScope::Global,
-                        estimated_tokens,
-                    });
-                }
+            if let Ok(content) = std::fs::read_to_string(&full_path)
+                && !content.trim().is_empty()
+            {
+                let estimated_tokens = estimate_tokens(&content);
+                self.rules.push(WorkspaceRule {
+                    source: rule_path.clone(),
+                    content,
+                    scope: RuleScope::Global,
+                    estimated_tokens,
+                });
             }
         }
     }

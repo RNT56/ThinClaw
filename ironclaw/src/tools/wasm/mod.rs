@@ -109,6 +109,7 @@ pub use credential_injector::{
     CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
+pub use rate_limiter::{WasmDenyReason, WasmRateLimitConfig, WasmRateLimiter};
 
 // Storage (V2)
 #[cfg(feature = "libsql")]

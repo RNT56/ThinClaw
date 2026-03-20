@@ -194,7 +194,8 @@ impl ChannelHostState {
                 max = MAX_MESSAGE_CONTENT_SIZE,
                 "Message content too large, truncating"
             );
-            let mut truncated = msg.content[..MAX_MESSAGE_CONTENT_SIZE].to_string();
+            let safe_end = crate::util::floor_char_boundary(&msg.content, MAX_MESSAGE_CONTENT_SIZE);
+            let mut truncated = msg.content[..safe_end].to_string();
             truncated.push_str("... (truncated)");
             let msg = EmittedMessage {
                 content: truncated,
