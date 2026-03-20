@@ -27,9 +27,9 @@
 
 ## Philosophy
 
-IronClaw is built on a simple principle: **your AI assistant should work for you, not against you**.
+ThinClaw is built on a simple principle: **your AI assistant should work for you, not against you**.
 
-In a world where AI systems are increasingly opaque about data handling and aligned with corporate interests, IronClaw takes a different approach:
+In a world where AI systems are increasingly opaque about data handling and aligned with corporate interests, ThinClaw takes a different approach:
 
 - **Your data stays yours** — All information is stored locally, encrypted, and never leaves your control
 - **Transparency by design** — Open source, auditable, no hidden telemetry or data harvesting
@@ -37,7 +37,7 @@ In a world where AI systems are increasingly opaque about data handling and alig
 - **Defense in depth** — Multiple security layers protect against prompt injection and data exfiltration
 - **Bring your own model** — Works with any LLM provider, no vendor lock-in
 
-IronClaw is the AI assistant you can actually trust with your personal and professional life.
+ThinClaw is the AI assistant you can actually trust with your personal and professional life.
 
 ## Features
 
@@ -60,7 +60,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### 🧩 Self-Expanding
 
-- **Dynamic Tool Building** — Describe what you need, and IronClaw builds it as a WASM tool
+- **Dynamic Tool Building** — Describe what you need, and ThinClaw builds it as a WASM tool
 - **MCP Protocol** — Connect to Model Context Protocol servers for additional capabilities
 - **Plugin Architecture** — Drop in new WASM tools and channels without restarting
 - **ClawHub** — Extension marketplace to discover, install, and manage tools from a curated catalog
@@ -83,7 +83,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ## LLM Providers
 
-IronClaw works with **any OpenAI-compatible endpoint** out of the box. The default backend is `OpenAiCompatible`, giving you maximum flexibility:
+ThinClaw works with **any OpenAI-compatible endpoint** out of the box. The default backend is `OpenAiCompatible`, giving you maximum flexibility:
 
 | Provider | Backend Value | Required Env Vars |
 |----------|--------------|-------------------|
@@ -139,7 +139,7 @@ Visit the [Releases page](https://github.com/RNT56/ThinClaw/releases/) to see th
 <details>
   <summary>Install via Windows Installer (Windows)</summary>
 
-Download the [Windows Installer](https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+Download the [Windows Installer](https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-x86_64-pc-windows-msvc.msi) and run it.
 
 </details>
 
@@ -147,7 +147,7 @@ Download the [Windows Installer](https://github.com/RNT56/ThinClaw/releases/late
   <summary>Install via PowerShell script (Windows)</summary>
 
 ```sh
-irm https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-installer.ps1 | iex
+irm https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.ps1 | iex
 ```
 
 </details>
@@ -156,7 +156,7 @@ irm https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-installe
   <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 ```
 </details>
 
@@ -164,7 +164,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RNT56/ThinClaw/releases
   <summary>Install via Homebrew (macOS/Linux)</summary>
 
 ```sh
-brew install ironclaw
+brew install thinclaw
 ```
 
 </details>
@@ -198,22 +198,22 @@ For **full release** (after modifying channel sources), run `./scripts/build-all
 **Option A: PostgreSQL** (production, requires running server)
 
 ```bash
-createdb ironclaw
-psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+createdb thinclaw
+psql thinclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 **Option B: libSQL** (embedded, zero dependencies)
 
-No setup needed — the database file is created automatically at `~/.ironclaw/ironclaw.db` on first run.
+No setup needed — the database file is created automatically at `~/.thinclaw/thinclaw.db` on first run.
 
 For Turso cloud sync, set `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`.
 
 ## Configuration
 
-Run the setup wizard to configure IronClaw:
+Run the setup wizard to configure ThinClaw:
 
 ```bash
-ironclaw onboard
+thinclaw onboard
 ```
 
 The wizard guides you through:
@@ -229,16 +229,16 @@ The wizard guides you through:
 9. **Background tasks** — Heartbeat and routine scheduling
 
 Settings are persisted in the connected database. Bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`)
-are written to `~/.ironclaw/.env` so they are available before the database connects.
+are written to `~/.thinclaw/.env` so they are available before the database connects.
 
 ### Environment Variables
 
-You can also configure IronClaw directly via environment variables or a `.env` file:
+You can also configure ThinClaw directly via environment variables or a `.env` file:
 
 ```env
 # Database (choose one)
 DATABASE_BACKEND=postgres          # or: libsql
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
+DATABASE_URL=postgres://user:pass@localhost/thinclaw
 
 # LLM Provider
 LLM_BACKEND=openai_compatible     # or: anthropic, openai, ollama, tinfoil
@@ -264,7 +264,7 @@ GATEWAY_PORT=3000
 
 ## Security
 
-IronClaw implements defense in depth to protect your data and prevent misuse.
+ThinClaw implements defense in depth to protect your data and prevent misuse.
 
 ### WASM Sandbox
 
@@ -385,34 +385,34 @@ External content passes through multiple security layers:
 
 ```bash
 # First-time setup (configures database, providers, channels)
-ironclaw onboard
+thinclaw onboard
 
 # Start interactive REPL
-ironclaw
+thinclaw
 
 # Single message mode
-ironclaw --message "What's the weather in Berlin?"
+thinclaw --message "What's the weather in Berlin?"
 
 # With debug logging
-RUST_LOG=ironclaw=debug ironclaw
+RUST_LOG=thinclaw=debug thinclaw
 
 # Run diagnostics
-ironclaw doctor
+thinclaw doctor
 
 # Check system status
-ironclaw status
+thinclaw status
 ```
 
 ## Deployment
 
-IronClaw can be deployed as a **standalone headless agent** on a dedicated server (Mac Mini, VPS, etc.) and connected to the [Scrappy](https://github.com/RNT56/scrappy) desktop app for remote control.
+ThinClaw can be deployed as a **standalone headless agent** on a dedicated server (Mac Mini, VPS, etc.) and connected to the [Scrappy](https://github.com/RNT56/scrappy) desktop app for remote control.
 
 **Quick Start (Mac Mini / macOS):**
 
 ```bash
 git clone https://github.com/RNT56/ThinClaw.git && cd ThinClaw
 cargo build --release --features libsql
-./target/release/ironclaw   # Runs the onboarding wizard on first launch
+./target/release/thinclaw   # Runs the onboarding wizard on first launch
 ```
 
 Enable the **Gateway** channel during setup, then connect Scrappy via **Settings → Gateway → Connect Existing**.
@@ -439,7 +439,7 @@ cargo fmt
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run tests
-createdb ironclaw_test
+createdb thinclaw_test
 cargo test
 
 # Run specific test
@@ -450,9 +450,9 @@ cargo test test_name
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
-## OpenClaw Heritage
+## OpenClaw & IronClaw Heritage
 
-IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
+ThinClaw is an evolved Rust reimplementation of the legacy projects [OpenClaw](https://github.com/openclaw/openclaw) and IronClaw. See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
 
 Key differences:
 
