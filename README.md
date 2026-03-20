@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="ironclaw.png?v=2" alt="IronClaw" width="200"/>
+  <img src="Thinclaw_IC_01_nobg.png" alt="ThinClaw" width="200"/>
 </p>
 
-<h1 align="center">IronClaw</h1>
+<h1 align="center">ThinClaw</h1>
 
 <p align="center">
   <strong>Your secure personal AI assistant, always on your side</strong>
@@ -10,8 +10,6 @@
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License: MIT OR Apache-2.0" /></a>
-  <a href="https://t.me/ironclawAI"><img src="https://img.shields.io/badge/Telegram-%40ironclawAI-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram: @ironclawAI" /></a>
-  <a href="https://www.reddit.com/r/ironclawAI/"><img src="https://img.shields.io/badge/Reddit-r%2FironclawAI-FF4500?style=flat&logo=reddit&logoColor=white" alt="Reddit: r/ironclawAI" /></a>
 </p>
 
 <p align="center">
@@ -20,6 +18,7 @@
   <a href="#llm-providers">LLM Providers</a> •
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
+  <a href="#deployment">Deployment</a> •
   <a href="#security">Security</a> •
   <a href="#architecture">Architecture</a>
 </p>
@@ -51,7 +50,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### 🌐 Always Available
 
-- **Multi-channel** — REPL, HTTP webhooks, WASM channels (Telegram, Slack, Discord, WhatsApp), Nostr, Signal, and web gateway
+- **Multi-channel** — REPL, HTTP webhooks, WASM channels (Telegram, Slack, Discord, WhatsApp), Nostr, Signal, Gmail, iMessage, and web gateway
 - **Web Gateway** — Browser UI with real-time SSE/WebSocket streaming, chat threads, memory browser, and extension management
 - **Docker Sandbox** — Isolated container execution with per-job tokens and orchestrator/worker pattern
 - **Routines** — Cron schedules, event triggers, webhook handlers for background automation
@@ -64,8 +63,9 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - **Dynamic Tool Building** — Describe what you need, and IronClaw builds it as a WASM tool
 - **MCP Protocol** — Connect to Model Context Protocol servers for additional capabilities
 - **Plugin Architecture** — Drop in new WASM tools and channels without restarting
-- **Extension Registry** — Install, update, and manage tools from a curated catalog
+- **ClawHub** — Extension marketplace to discover, install, and manage tools from a curated catalog
 - **Skills Framework** — Structured multi-step procedures with frontmatter metadata
+- **Subagent Orchestration** — Spawn parallel sub-agents with tool filtering, iteration caps, and timeout enforcement
 
 ### 🧠 Persistent Memory
 
@@ -90,8 +90,12 @@ IronClaw works with **any OpenAI-compatible endpoint** out of the box. The defau
 | **OpenRouter** (300+ models) | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | **Anthropic** (Claude) | `anthropic` | `ANTHROPIC_API_KEY` |
 | **OpenAI** (GPT) | `openai` | `OPENAI_API_KEY` |
+| **Google Gemini** | `gemini` | `GEMINI_API_KEY` |
+| **AWS Bedrock** | `bedrock` | `BEDROCK_PROXY_URL`, AWS credentials |
 | **Ollama** (local) | `ollama` | `OLLAMA_BASE_URL` (optional) |
+| **llama.cpp** (local) | `llama_cpp` | `LLAMA_CPP_SERVER_URL` |
 | **Tinfoil** (private inference) | `tinfoil` | `TINFOIL_API_KEY` |
+| **Groq** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
 | **Together AI** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
 | **Fireworks AI** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
 | **vLLM / LiteLLM** (self-hosted) | `openai_compatible` | `LLM_BASE_URL` |
@@ -113,9 +117,9 @@ All backends support these optional reliability settings:
 |---------|---------|---------|-------------|
 | Retries | `LLM_MAX_RETRIES` | 3 | Retry transient failures with backoff |
 | Circuit breaker | `CIRCUIT_BREAKER_THRESHOLD` | disabled | Open circuit after N consecutive failures |
-| Failover | `LLM_FALLBACK_MODEL` | none | Automatic fallback to a secondary model |
+| Multi-provider failover | `LLM_FALLBACK_MODEL` | none | Automatic failover across enabled providers with cooldown |
+| Smart routing | `LLM_CHEAP_MODEL` | none | Route lightweight tasks (heartbeat, evaluation) to a cheap model |
 | Response cache | `RESPONSE_CACHE_ENABLED` | false | Cache repeated prompts to save tokens |
-| Cheap model | `LLM_CHEAP_MODEL` | none | Fast model for lightweight tasks (heartbeat, routing) |
 
 See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
 
@@ -130,12 +134,12 @@ See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
 
 ## Download or Build
 
-Visit the [Releases page](https://github.com/nearai/ironclaw/releases/) to see the latest updates.
+Visit the [Releases page](https://github.com/RNT56/ThinClaw/releases/) to see the latest updates.
 
 <details>
   <summary>Install via Windows Installer (Windows)</summary>
 
-Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+Download the [Windows Installer](https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
 
 </details>
 
@@ -143,7 +147,7 @@ Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/lat
   <summary>Install via PowerShell script (Windows)</summary>
 
 ```sh
-irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+irm https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-installer.ps1 | iex
 ```
 
 </details>
@@ -152,7 +156,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
   <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RNT56/ThinClaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 </details>
 
@@ -172,8 +176,8 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 
 ```bash
 # Clone the repository
-git clone https://github.com/nearai/ironclaw.git
-cd ironclaw
+git clone https://github.com/RNT56/ThinClaw.git
+cd ThinClaw
 
 # Build (full features — PostgreSQL + libSQL + all runtime modules)
 cargo build --release
@@ -244,8 +248,14 @@ LLM_MODEL=anthropic/claude-sonnet-4
 
 # Embeddings
 EMBEDDING_ENABLED=true
-EMBEDDING_PROVIDER=openai          # or: ollama
+EMBEDDING_PROVIDER=openai          # or: ollama, gemini
 OPENAI_API_KEY=sk-...
+
+# Google Gemini (native backend)
+GEMINI_API_KEY=...
+
+# llama.cpp (local server)
+LLAMA_CPP_SERVER_URL=http://localhost:8080
 
 # Web Gateway
 GATEWAY_ENABLED=true
@@ -264,6 +274,7 @@ All untrusted tools run in isolated WebAssembly containers:
 - **Endpoint allowlisting** — HTTP requests only to approved hosts/paths
 - **Credential injection** — Secrets injected at host boundary, never exposed to WASM code
 - **Leak detection** — Scans requests and responses for secret exfiltration attempts
+- **Key rotation** — Automated credential rotation management with configurable policies
 - **Rate limiting** — Per-tool request limits to prevent abuse
 - **Resource limits** — Memory, CPU, and execution time constraints
 
@@ -280,6 +291,12 @@ External content passes through multiple security layers:
 - Content sanitization and escaping
 - Policy rules with severity levels (Block/Warn/Review/Sanitize)
 - Tool output wrapping for safe LLM context injection
+
+### Device Pairing
+
+- Secure device authentication for multi-device access
+- Approval-based pairing flow with cryptographic verification
+- Per-device session isolation
 
 ### Data Protection
 
@@ -336,13 +353,17 @@ External content passes through multiple security layers:
 | **Router** | Classifies user intent (command, query, task) |
 | **Scheduler** | Manages parallel job execution with priorities |
 | **Worker** | Executes jobs with LLM reasoning and tool calls |
+| **Subagent Executor** | Parallel sub-agent orchestration with tool filtering and sandboxing |
 | **Orchestrator** | Container lifecycle, LLM proxying, per-job auth |
 | **Web Gateway** | Browser UI with chat, memory, jobs, logs, extensions, routines |
+| **Canvas Gateway** | Rich interactive UI canvas for agent-generated content |
 | **Routines Engine** | Scheduled (cron) and reactive (event, webhook) background tasks |
 | **Workspace** | Persistent memory with hybrid full-text + vector search |
-| **Safety Layer** | Prompt injection defense, leak detection, and content sanitization |
+| **Safety Layer** | Prompt injection defense, leak detection, key rotation, and content sanitization |
+| **ClawHub** | Extension marketplace — discover, install, and manage tools from a curated catalog |
 | **Skill Registry** | Structured multi-step procedures with discovery and execution |
 | **Hardware Bridge** | Sensor access (camera, mic, screen) with per-request approval |
+| **Health Monitor** | Channel health checking and automatic recovery |
 | **Cost Guard** | Token usage tracking and configurable spending limits |
 
 ### Feature Flags
@@ -355,6 +376,9 @@ External content passes through multiple security layers:
 | `libsql` | Embedded libSQL/Turso support | ✅ |
 | `html-to-markdown` | Web page → markdown conversion | ✅ |
 | `repl` | Interactive terminal REPL + boot screen | ✅ |
+| `web-gateway` | Browser UI with SSE/WebSocket streaming | ✅ |
+| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ |
+| `docker-sandbox` | Isolated container execution for untrusted code | ✅ |
 | `voice` | Voice wake word detection (cpal audio capture) | |
 
 ## Usage
@@ -379,6 +403,32 @@ ironclaw doctor
 ironclaw status
 ```
 
+## Deployment
+
+IronClaw can be deployed as a **standalone headless agent** on a dedicated server (Mac Mini, VPS, etc.) and connected to the [Scrappy](https://github.com/RNT56/scrappy) desktop app for remote control.
+
+**Quick Start (Mac Mini / macOS):**
+
+```bash
+git clone https://github.com/RNT56/ThinClaw.git && cd ThinClaw
+cargo build --release --features libsql
+./target/release/ironclaw   # Runs the onboarding wizard on first launch
+```
+
+Enable the **Gateway** channel during setup, then connect Scrappy via **Settings → Gateway → Connect Existing**.
+
+**Deployment options:**
+
+| Method | Best For | Guide |
+|--------|----------|-------|
+| Direct binary | Mac Mini, macOS/Linux servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-1-direct-binary-recommended-for-mac-mini) |
+| Docker Compose | Linux VPS, cloud servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-2-docker-compose-any-os) |
+| Scrappy one-click | Linux servers (automated SSH) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-3-automated-deploy-from-scrappy-linux-targets) |
+
+The comprehensive deployment guide covers: Tailscale VPN setup, auto-start on boot (launchd/systemd), macOS-specific features (Keychain, iMessage, Metal GPU), environment variable reference, and troubleshooting.
+
+📖 **Full guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
 ## Development
 
 ```bash
@@ -396,6 +446,7 @@ cargo test
 cargo test test_name
 ```
 
+- **Deployment & Remote Setup**: See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for standalone, Docker, and Scrappy connection guides.
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 

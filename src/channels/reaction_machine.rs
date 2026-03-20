@@ -86,10 +86,10 @@ impl ReactionStateMachine {
             }
 
             // Check debounce
-            if let Some(last_call) = entry.last_api_call {
-                if now.duration_since(last_call) < self.debounce {
-                    return false; // Too soon, skip this transition
-                }
+            if let Some(last_call) = entry.last_api_call
+                && now.duration_since(last_call) < self.debounce
+            {
+                return false; // Too soon, skip this transition
             }
 
             entry.state = new_state;

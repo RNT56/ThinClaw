@@ -101,15 +101,15 @@ impl MediaCacheConfig {
         if let Ok(dir) = std::env::var("MEDIA_CACHE_DIR") {
             config.cache_dir = dir;
         }
-        if let Ok(max) = std::env::var("MEDIA_CACHE_MAX_SIZE") {
-            if let Ok(m) = max.parse::<u64>() {
-                config.global_max_size_bytes = m;
-            }
+        if let Ok(max) = std::env::var("MEDIA_CACHE_MAX_SIZE")
+            && let Ok(m) = max.parse::<u64>()
+        {
+            config.global_max_size_bytes = m;
         }
-        if let Ok(ttl) = std::env::var("MEDIA_CACHE_TTL") {
-            if let Ok(t) = ttl.parse() {
-                config.default_policy.ttl_secs = t;
-            }
+        if let Ok(ttl) = std::env::var("MEDIA_CACHE_TTL")
+            && let Ok(t) = ttl.parse()
+        {
+            config.default_policy.ttl_secs = t;
         }
         config
     }
@@ -128,10 +128,10 @@ impl MediaCacheConfig {
 
     /// Resolve the cache directory (expand ~).
     pub fn resolved_cache_dir(&self) -> String {
-        if self.cache_dir.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return format!("{}{}", home, &self.cache_dir[1..]);
-            }
+        if self.cache_dir.starts_with("~/")
+            && let Ok(home) = std::env::var("HOME")
+        {
+            return format!("{}{}", home, &self.cache_dir[1..]);
         }
         self.cache_dir.clone()
     }

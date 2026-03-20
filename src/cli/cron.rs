@@ -218,13 +218,19 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
         let trigger_info = match &r.trigger {
             crate::agent::routine::Trigger::Cron { schedule } => {
                 if schedule.len() > 13 {
-                    format!("{}…", &schedule[..12])
+                    let end = schedule
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i < 12)
+                        .last()
+                        .unwrap_or(0);
+                    format!("{}…", &schedule[..end])
                 } else {
                     schedule.clone()
                 }
             }
             crate::agent::routine::Trigger::Event { pattern, .. } => {
-                format!("event:{}", &pattern[..pattern.len().min(8)])
+                format!("event:{}", pattern.chars().take(8).collect::<String>())
             }
             crate::agent::routine::Trigger::Webhook { .. } => "webhook".to_string(),
             crate::agent::routine::Trigger::Manual => "manual".to_string(),
@@ -232,7 +238,14 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
         };
 
         let desc = if r.description.len() > 30 {
-            format!("{}…", &r.description[..29])
+            let end = r
+                .description
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i < 29)
+                .last()
+                .unwrap_or(0);
+            format!("{}…", &r.description[..end])
         } else {
             r.description.clone()
         };
@@ -240,7 +253,25 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
         println!(
             "{:<36}  {:<20}  {:<8}  {:<15}  {:<6}  {}",
             r.id,
-            &r.name[..r.name.len().min(20)],
+            {
+                let name_end = r
+                    .name
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i < 20)
+                    .last()
+                    .map(|i| {
+                        // include the char at this position
+                        r.name[i..]
+                            .chars()
+                            .next()
+                            .map(|c| i + c.len_utf8())
+                            .unwrap_or(i)
+                    })
+                    .unwrap_or(r.name.len())
+                    .min(r.name.len());
+                &r.name[..name_end]
+            },
             if r.enabled { "✅" } else { "⏸" },
             trigger_info,
             r.run_count,
@@ -422,16 +453,22 @@ async fn trigger_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyh
         } => {
             format!("{}: {}", title, description)
         }
-        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
-            prompt.clone().unwrap_or_else(|| "Heartbeat check".to_string())
-        }
+        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
+            .clone()
+            .unwrap_or_else(|| "Heartbeat check".to_string()),
     };
 
     println!("🔄 Triggering routine '{}' ({})", routine.name, routine.id);
     println!(
         "   Prompt: {}",
         if prompt.len() > 60 {
-            format!("{}…", &prompt[..57])
+            let end = prompt
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i < 57)
+                .last()
+                .unwrap_or(0);
+            format!("{}…", &prompt[..end])
         } else {
             prompt
         }
@@ -514,7 +551,10 @@ fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     // Auto-normalize 5/6-field to 7-field so lint works with standard cron
     let normalized = crate::agent::routine::normalize_cron_expr(expression);
     if normalized != expression {
-        println!("ℹ️  Auto-normalized: \"{}\" → \"{}\"", expression, normalized);
+        println!(
+            "ℹ️  Auto-normalized: \"{}\" → \"{}\"",
+            expression, normalized
+        );
     }
 
     // Try to parse the cron expression
@@ -531,7 +571,7 @@ fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     println!();
 
     // Show next N fire times
-    let count = count.max(1).min(50); // clamp to [1, 50]
+    let count = count.clamp(1, 50);
     let upcoming: Vec<_> = schedule.upcoming(chrono::Utc).take(count).collect();
 
     if upcoming.is_empty() {

@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Remote Deployment & PII Security
 
 You brought up two extremely valid and sophisticated points. Let's address the API Key leak question first, because it is the most critical security concern, followed by how we achieve OpenClaw's remote deployment capability.

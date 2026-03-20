@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Channel Trigger Mechanics (When to Reply)
 
 If you connect an AI Agent directly to a bustling Slack or Discord workspace, disaster will strike if you do not implement proper **Trigger Mechanics**. Without them, the agent will attempt to reply to every single message sent by every human, rapidly exhausting API credits and annoying everyone.

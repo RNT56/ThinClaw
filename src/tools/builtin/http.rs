@@ -108,9 +108,9 @@ impl HttpTool {
 fn validate_url(url: &str, url_allowlist: &[String]) -> Result<reqwest::Url, ToolError> {
     // Silently upgrade http:// to https:// — the agent frequently writes http://
     // in tool calls even when the site supports HTTPS. This avoids confusing errors.
-    let url = if url.starts_with("http://") {
-        tracing::debug!("[http] Upgrading http:// to https:// for {}", &url[7..]);
-        std::borrow::Cow::Owned(format!("https://{}", &url[7..]))
+    let url = if let Some(rest) = url.strip_prefix("http://") {
+        tracing::debug!("[http] Upgrading http:// to https:// for {}", rest);
+        std::borrow::Cow::Owned(format!("https://{}", rest))
     } else {
         std::borrow::Cow::Borrowed(url)
     };
@@ -120,9 +120,10 @@ fn validate_url(url: &str, url_allowlist: &[String]) -> Result<reqwest::Url, Too
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 
     if parsed.scheme() != "https" {
-        return Err(ToolError::NotAuthorized(
-            format!("only https:// URLs are allowed (got '{}')", parsed.scheme()),
-        ));
+        return Err(ToolError::NotAuthorized(format!(
+            "only https:// URLs are allowed (got '{}')",
+            parsed.scheme()
+        )));
     }
 
     let host = parsed

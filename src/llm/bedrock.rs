@@ -50,10 +50,10 @@ impl BedrockConfig {
             config.model_id = model;
         }
 
-        if let Ok(max) = std::env::var("BEDROCK_MAX_TOKENS") {
-            if let Ok(m) = max.parse() {
-                config.max_tokens = m;
-            }
+        if let Ok(max) = std::env::var("BEDROCK_MAX_TOKENS")
+            && let Ok(m) = max.parse()
+        {
+            config.max_tokens = m;
         }
 
         config

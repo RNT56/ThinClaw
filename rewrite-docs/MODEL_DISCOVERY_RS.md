@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Model & Provider Discovery in Rust
 
 To provide a seamless experience, `ThinClaw` must dynamically discover available AI models rather than relying on a hardcoded list. This applies to both **Local Inference Engines** (fetching weights from Hugging Face) and **Cloud Providers** (OpenAI, Anthropic, OpenRouter).

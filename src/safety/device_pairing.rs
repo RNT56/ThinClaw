@@ -57,36 +57,36 @@ impl PairingStore {
 
     /// Approve a pending pairing.
     pub fn approve(&mut self, device_id: &str, timestamp: &str) -> bool {
-        if let Some(record) = self.records.get_mut(device_id) {
-            if record.state == PairingState::Pending {
-                record.state = PairingState::Paired;
-                record.updated_at = timestamp.to_string();
-                return true;
-            }
+        if let Some(record) = self.records.get_mut(device_id)
+            && record.state == PairingState::Pending
+        {
+            record.state = PairingState::Paired;
+            record.updated_at = timestamp.to_string();
+            return true;
         }
         false
     }
 
     /// Reject a pending pairing.
     pub fn reject(&mut self, device_id: &str, timestamp: &str) -> bool {
-        if let Some(record) = self.records.get_mut(device_id) {
-            if record.state == PairingState::Pending {
-                record.state = PairingState::Rejected;
-                record.updated_at = timestamp.to_string();
-                return true;
-            }
+        if let Some(record) = self.records.get_mut(device_id)
+            && record.state == PairingState::Pending
+        {
+            record.state = PairingState::Rejected;
+            record.updated_at = timestamp.to_string();
+            return true;
         }
         false
     }
 
     /// Revoke an existing pairing.
     pub fn revoke(&mut self, device_id: &str, timestamp: &str) -> bool {
-        if let Some(record) = self.records.get_mut(device_id) {
-            if record.state == PairingState::Paired {
-                record.state = PairingState::Revoked;
-                record.updated_at = timestamp.to_string();
-                return true;
-            }
+        if let Some(record) = self.records.get_mut(device_id)
+            && record.state == PairingState::Paired
+        {
+            record.state = PairingState::Revoked;
+            record.updated_at = timestamp.to_string();
+            return true;
         }
         false
     }

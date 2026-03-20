@@ -160,7 +160,8 @@ impl HostState {
 
         // Truncate overly long messages
         let message = if message.len() > MAX_LOG_MESSAGE_BYTES {
-            let mut truncated = message[..MAX_LOG_MESSAGE_BYTES].to_string();
+            let end = crate::util::floor_char_boundary(&message, MAX_LOG_MESSAGE_BYTES);
+            let mut truncated = message[..end].to_string();
             truncated.push_str("... (truncated)");
             truncated
         } else {

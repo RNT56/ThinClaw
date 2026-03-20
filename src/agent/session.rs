@@ -92,7 +92,9 @@ impl Session {
             Some(id) => {
                 if self.threads.contains_key(&id) {
                     // Safe: contains_key confirmed the entry exists.
-                    self.threads.get_mut(&id).unwrap()
+                    self.threads
+                        .get_mut(&id)
+                        .expect("contains_key confirmed entry exists")
                 } else {
                     // Stale active_thread ID: create a new thread, which
                     // updates self.active_thread to the new thread's ID.

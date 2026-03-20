@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Sandboxing & Code Execution (Node.js vs. ThinClaw)
 
 One of the most dangerous things an AI agent can do is execute code or bash scripts on the user's machine.

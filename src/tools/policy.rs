@@ -23,8 +23,10 @@ use serde::{Deserialize, Serialize};
 /// Policy controlling which tools are accessible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ToolAccessPolicy {
     /// All tools are available.
+    #[default]
     AllowAll,
     /// Only the listed tools are available.
     AllowList {
@@ -36,12 +38,6 @@ pub enum ToolAccessPolicy {
         /// Tool names to deny.
         tools: HashSet<String>,
     },
-}
-
-impl Default for ToolAccessPolicy {
-    fn default() -> Self {
-        Self::AllowAll
-    }
 }
 
 impl ToolAccessPolicy {
@@ -128,10 +124,10 @@ impl ToolPolicyManager {
         }
 
         // 2. Check channel-level override.
-        if let Some(ch) = channel {
-            if let Some(policy) = self.channel_policies.get(ch) {
-                return policy.allows(tool_name);
-            }
+        if let Some(ch) = channel
+            && let Some(policy) = self.channel_policies.get(ch)
+        {
+            return policy.allows(tool_name);
         }
 
         // 3. Fall back to global default.
@@ -166,10 +162,10 @@ impl ToolPolicyManager {
         }
 
         // Channel-level overrides.
-        if let Some(ch) = channel {
-            if let Some(policy) = self.channel_policies.get(ch) {
-                return policy;
-            }
+        if let Some(ch) = channel
+            && let Some(policy) = self.channel_policies.get(ch)
+        {
+            return policy;
         }
 
         &self.default_policy

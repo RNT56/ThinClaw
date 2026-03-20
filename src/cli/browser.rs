@@ -116,12 +116,12 @@ fn find_browser() -> Option<PathBuf> {
             return Some(path.to_path_buf());
         }
         // Check in PATH
-        if let Ok(output) = Command::new("which").arg(candidate).output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path_str.is_empty() {
-                    return Some(PathBuf::from(path_str));
-                }
+        if let Ok(output) = Command::new("which").arg(candidate).output()
+            && output.status.success()
+        {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                return Some(PathBuf::from(path_str));
             }
         }
     }
@@ -189,15 +189,15 @@ fn extract_text_from_html(html: &str) -> String {
                 in_tag = true;
                 // Check for script/style opening
                 let lower = html.to_lowercase();
-                if let Some(pos) = lower.find("<script") {
-                    if pos == text.len() {
-                        in_script = true;
-                    }
+                if let Some(pos) = lower.find("<script")
+                    && pos == text.len()
+                {
+                    in_script = true;
                 }
-                if let Some(pos) = lower.find("<style") {
-                    if pos == text.len() {
-                        in_style = true;
-                    }
+                if let Some(pos) = lower.find("<style")
+                    && pos == text.len()
+                {
+                    in_style = true;
                 }
             }
             '>' => {
@@ -253,7 +253,7 @@ fn extract_links(html: &str, base_url: &str) -> Vec<PageLink> {
                 url::Url::parse(href)
                     .ok()
                     .and_then(|u| u.host_str().map(String::from))
-                    .map_or(false, |h| &h != host)
+                    .is_some_and(|h| &h != host)
             } else {
                 href.starts_with("http")
             };
@@ -284,11 +284,11 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                     println!("✅ Browser found: {}", path.display());
 
                     // Try getting version
-                    if let Ok(output) = Command::new(&path).arg("--version").output() {
-                        if output.status.success() {
-                            let version = String::from_utf8_lossy(&output.stdout);
-                            println!("   Version: {}", version.trim());
-                        }
+                    if let Ok(output) = Command::new(&path).arg("--version").output()
+                        && output.status.success()
+                    {
+                        let version = String::from_utf8_lossy(&output.stdout);
+                        println!("   Version: {}", version.trim());
                     }
                 }
                 None => {

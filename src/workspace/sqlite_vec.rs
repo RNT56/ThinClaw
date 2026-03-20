@@ -48,10 +48,10 @@ impl SqliteVecConfig {
         if let Ok(path) = std::env::var("SQLITE_VEC_DB") {
             config.db_path = path;
         }
-        if let Ok(dims) = std::env::var("SQLITE_VEC_DIMENSIONS") {
-            if let Ok(d) = dims.parse() {
-                config.dimensions = d;
-            }
+        if let Ok(dims) = std::env::var("SQLITE_VEC_DIMENSIONS")
+            && let Ok(d) = dims.parse()
+        {
+            config.dimensions = d;
         }
         if let Ok(metric) = std::env::var("SQLITE_VEC_METRIC") {
             config.distance_metric = match metric.to_lowercase().as_str() {
@@ -95,10 +95,10 @@ impl SqliteVecConfig {
 
     /// Resolve the actual path (expand ~).
     pub fn resolved_path(&self) -> String {
-        if self.db_path.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return format!("{}{}", home, &self.db_path[1..]);
-            }
+        if self.db_path.starts_with("~/")
+            && let Ok(home) = std::env::var("HOME")
+        {
+            return format!("{}{}", home, &self.db_path[1..]);
         }
         self.db_path.clone()
     }

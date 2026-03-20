@@ -54,6 +54,10 @@ pub struct RoutineEngine {
     system_event_tx: Option<mpsc::Sender<IncomingMessage>>,
     /// Optional subagent executor for running non-heartbeat automations as subagents.
     subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// IC-018: Tracked handles for all running routine tasks.
+    /// Uses `std::sync::Mutex` intentionally: `JoinSet::spawn()` is synchronous
+    /// and we must never hold an `async` lock across a non-async call (Bug 14 fix).
+    active_tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
 }
 
 impl RoutineEngine {
@@ -77,6 +81,7 @@ impl RoutineEngine {
             sse_tx: None,
             system_event_tx: None,
             subagent_executor: None,
+            active_tasks: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
         }
     }
 
@@ -169,7 +174,8 @@ impl RoutineEngine {
             }
 
             let detail = truncate(&message.content, 200);
-            self.spawn_fire(routine.clone(), "event", Some(detail));
+            self.spawn_fire(routine.clone(), "event", Some(detail))
+                .await;
             fired += 1;
         }
 
@@ -230,14 +236,17 @@ impl RoutineEngine {
                     let next = detail
                         .as_ref()
                         .and_then(|s| next_cron_fire(s).unwrap_or(None));
-                    let _ = self.store.update_routine_runtime(
-                        routine.id,
-                        Utc::now(),
-                        next,
-                        routine.run_count + 1,
-                        routine.consecutive_failures,
-                        &routine.state,
-                    ).await;
+                    let _ = self
+                        .store
+                        .update_routine_runtime(
+                            routine.id,
+                            Utc::now(),
+                            next,
+                            routine.run_count + 1,
+                            routine.consecutive_failures,
+                            &routine.state,
+                        )
+                        .await;
                 } else {
                     tracing::warn!(
                         routine = %routine.name,
@@ -247,7 +256,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            self.spawn_fire(routine, "cron", detail);
+            self.spawn_fire(routine, "cron", detail).await;
         }
     }
 
@@ -316,7 +325,12 @@ impl RoutineEngine {
     }
 
     /// Spawn a fire in a background task.
-    fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
+    async fn spawn_fire(
+        &self,
+        routine: Routine,
+        trigger_type: &str,
+        trigger_detail: Option<String>,
+    ) {
         let run = RoutineRun {
             id: Uuid::new_v4(),
             routine_id: routine.id,
@@ -343,15 +357,66 @@ impl RoutineEngine {
             subagent_executor: self.subagent_executor.clone(),
         };
 
-        // Record the run in DB, then spawn execution
+        // Record the run in DB, then spawn execution (IC-018: tracked via JoinSet)
         let store = self.store.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store.create_routine_run(&run).await {
-                tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
-                return;
+        let tasks = self.active_tasks.clone();
+        // Bug 14 fix: use std::sync::Mutex (sync lock) so we never hold an async
+        // lock across the synchronous JoinSet::spawn() call.
+        if let Ok(mut guard) = tasks.lock() {
+            guard.spawn(async move {
+                if let Err(e) = store.create_routine_run(&run).await {
+                    tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
+                    return;
+                }
+                execute_routine(engine, routine, run).await;
+            });
+        } else {
+            tracing::error!(routine = %routine.name, "active_tasks mutex poisoned — routine not spawned");
+        }
+    }
+
+    /// IC-018: Abort all running routine tasks. Called on engine shutdown.
+    pub async fn abort_all(&self) {
+        // std::sync::Mutex — lock is sync, no await inside the guard scope.
+        if let Ok(mut guard) = self.active_tasks.lock() {
+            guard.abort_all();
+        }
+        tracing::info!("Aborted all running routine tasks");
+    }
+
+    /// IC-006: Reap zombie routine runs that are still in `Running` status.
+    ///
+    /// Uses the existing `cleanup_stale_routine_runs()` DB method which marks
+    /// all Running runs as Failed. This prevents slot exhaustion when the process
+    /// crashes mid-run or a routine hangs beyond the check interval.
+    pub async fn reap_zombie_runs(&self) {
+        match self.store.cleanup_stale_routine_runs().await {
+            Ok(reaped) => {
+                if reaped > 0 {
+                    // Bug 4 fix: use per-item fetch_sub instead of non-atomic load→store.
+                    // A bulk load→store races with concurrent fetch_sub(1) calls from
+                    // normally-completing routines, causing double-decrements that drive
+                    // running_count to 0 and permanently block new routines.
+                    for _ in 0..reaped {
+                        // saturating_sub via compare-exchange loop prevents underflow.
+                        let prev = self.running_count.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |c| Some(c.saturating_sub(1)),
+                        );
+                        let _ = prev; // always succeeds; result is informational only
+                    }
+                    tracing::info!(
+                        "IC-006: Reaped {} zombie routine runs, running_count now {}",
+                        reaped,
+                        self.running_count.load(Ordering::Relaxed)
+                    );
+                }
             }
-            execute_routine(engine, routine, run).await;
-        });
+            Err(e) => {
+                tracing::error!("Failed to reap zombie routine runs: {}", e);
+            }
+        }
     }
 
     fn check_cooldown(&self, routine: &Routine) -> bool {
@@ -405,6 +470,19 @@ impl EngineContext {
     }
 }
 
+/// IC-006: Spawn a periodic zombie reaper for routine runs.
+/// Checks every 2 minutes for runs that have exceeded the 10-minute TTL.
+pub fn spawn_zombie_reaper(engine: Arc<RoutineEngine>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(120));
+        interval.tick().await; // skip immediate tick
+        loop {
+            interval.tick().await;
+            engine.reap_zombie_runs().await;
+        }
+    })
+}
+
 /// Execute a routine run. Handles both lightweight and full_job modes.
 async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
@@ -442,11 +520,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             active_start_hour,
             active_end_hour,
             target,
-        } => execute_heartbeat(
-            &ctx, &routine, &run,
-            *light_context, prompt.as_deref(), *include_reasoning,
-            *active_start_hour, *active_end_hour, target,
-        ).await,
+        } => {
+            execute_heartbeat(
+                &ctx,
+                &routine,
+                &run,
+                *light_context,
+                prompt.as_deref(),
+                *include_reasoning,
+                *active_start_hour,
+                *active_end_hour,
+                target,
+            )
+            .await
+        }
     };
 
     // Decrement running count
@@ -472,10 +559,17 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         } else {
             None
         };
-        let _ = ctx.store.update_routine_runtime(
-            routine.id, now, next_fire, routine.run_count + 1,
-            routine.consecutive_failures, &routine.state,
-        ).await;
+        let _ = ctx
+            .store
+            .update_routine_runtime(
+                routine.id,
+                now,
+                next_fire,
+                routine.run_count + 1,
+                routine.consecutive_failures,
+                &routine.state,
+            )
+            .await;
         return;
     }
 
@@ -613,10 +707,11 @@ async fn execute_as_subagent(
                 )),
             });
 
-            Ok((RunStatus::Running, Some(format!(
-                "Subagent spawned (id: {})",
-                result.agent_id
-            )), None))
+            Ok((
+                RunStatus::Running,
+                Some(format!("Subagent spawned (id: {})", result.agent_id)),
+                None,
+            ))
         }
         Err(e) => Err(RoutineError::ExecutionFailed {
             reason: format!("Failed to spawn subagent: {}", e),
@@ -674,7 +769,9 @@ async fn execute_full_job(
         routine_name: routine.name.clone(),
         event: "dispatched".to_string(),
         run_id: Some(run.id.to_string()),
-        result_summary: Some(format!("Job {job_id} queued — worker running with full tool access")),
+        result_summary: Some(format!(
+            "Job {job_id} queued — worker running with full tool access"
+        )),
     });
 
     // Also broadcast the generic job started event for job view
@@ -706,7 +803,8 @@ Do not infer or repeat old tasks from prior chats. Check each item and report fi
 \n\
 If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
 \n\
-If something needs attention, provide a concise summary of what needs action. \
+If something needs attention, provide a short, specific summary of what needs action. \
+Do NOT echo these instructions back — give real findings only. \
 Use `emit_user_message` to deliver your findings to the user.\n\
 \n\
 You may edit HEARTBEAT.md to add, remove, or update checklist items as needed.";
@@ -745,7 +843,11 @@ async fn execute_heartbeat(
                 active = %format!("{:02}:00-{:02}:00", s, e),
                 "Heartbeat outside active hours — skipping"
             );
-            return Ok((RunStatus::Ok, Some("Skipped — outside active hours".to_string()), None));
+            return Ok((
+                RunStatus::Ok,
+                Some("Skipped — outside active hours".to_string()),
+                None,
+            ));
         }
     }
 
@@ -754,7 +856,11 @@ async fn execute_heartbeat(
         Ok(Some(content)) if !crate::agent::heartbeat::is_effectively_empty(&content) => content,
         Ok(_) => {
             tracing::debug!(routine = %routine.name, "HEARTBEAT.md is empty or missing — skipping");
-            return Ok((RunStatus::Ok, Some("HEARTBEAT_OK — checklist empty".to_string()), None));
+            return Ok((
+                RunStatus::Ok,
+                Some("HEARTBEAT_OK — checklist empty".to_string()),
+                None,
+            ));
         }
         Err(e) => {
             return Err(RoutineError::ExecutionFailed {
@@ -763,39 +869,21 @@ async fn execute_heartbeat(
         }
     };
 
-    // 2. Build daily log context
-    let mut daily_context = String::new();
-    let today = chrono::Utc::now().date_naive();
-
-    if let Ok(doc) = ctx.workspace.today_log().await {
-        if !doc.content.trim().is_empty() {
-            let capped = crate::agent::heartbeat::cap_daily_log(&doc.content, 3000);
-            daily_context.push_str(&format!(
-                "\n\n## Daily Log — {} (today)\n\n{}",
-                today.format("%Y-%m-%d"),
-                capped
-            ));
-        }
-    }
-
-    if let Some(yesterday) = today.pred_opt() {
-        if let Ok(doc) = ctx.workspace.daily_log(yesterday).await {
-            if !doc.content.trim().is_empty() {
-                let capped = crate::agent::heartbeat::cap_daily_log(&doc.content, 2000);
-                daily_context.push_str(&format!(
-                    "\n\n## Daily Log — {} (yesterday)\n\n{}",
-                    yesterday.format("%Y-%m-%d"),
-                    capped
-                ));
-            }
-        }
-    }
+    // IC-013: Use shared function to build daily log context
+    let daily_context = crate::agent::heartbeat::build_daily_context(&ctx.workspace).await;
 
     // 3. Build the full prompt
     let prompt_body = custom_prompt.unwrap_or(DEFAULT_HEARTBEAT_PROMPT);
+    let logs_note = if daily_context.is_empty() {
+        "\n\nNote: No daily logs exist yet (no conversations recorded). \
+         Any checklist items that reference daily logs are automatically satisfied. \
+         If all items depend on daily logs, reply HEARTBEAT_OK."
+    } else {
+        ""
+    };
     let full_prompt = format!(
-        "{}\n\n## HEARTBEAT.md\n\n{}{}",
-        prompt_body, checklist, daily_context
+        "{}\n\n## HEARTBEAT.md\n\n{}{}{}",
+        prompt_body, checklist, daily_context, logs_note
     );
 
     if !light_context {
@@ -804,12 +892,13 @@ async fn execute_heartbeat(
         // The dispatcher processes it as a normal turn with full session history
         // and tool access. The response flows through normal SSE → chat.
         if let Some(ref tx) = ctx.system_event_tx {
-            let message = IncomingMessage::new("heartbeat", "system", &full_prompt)
-                .with_metadata(serde_json::json!({
+            let message = IncomingMessage::new("heartbeat", "system", &full_prompt).with_metadata(
+                serde_json::json!({
                     "source": "heartbeat",
                     "routine_name": routine.name,
                     "run_id": run.id.to_string(),
-                }));
+                }),
+            );
 
             if let Err(e) = tx.send(message).await {
                 return Err(RoutineError::ExecutionFailed {
@@ -839,18 +928,58 @@ async fn execute_heartbeat(
     }
 
     // ── Light-context mode: dispatch as isolated worker job ──────────
-    // Uses the same worker pipeline as FullJob but with the heartbeat
-    // prompt as the job description.
+    // Uses the reserved overflow slot so heartbeats never get blocked
+    // by "Maximum parallel jobs exceeded" when user jobs fill all slots.
     let title = format!("Heartbeat: {}", routine.name);
-    execute_full_job(
-        ctx,
-        routine,
-        run,
-        &title,
-        &full_prompt,
-        5, // Lower max_iterations for heartbeat (vs 10 for full jobs)
-    )
-    .await
+    let scheduler = ctx
+        .scheduler
+        .as_ref()
+        .ok_or_else(|| RoutineError::JobDispatchFailed {
+            reason: "scheduler not available".to_string(),
+        })?;
+
+    let metadata = serde_json::json!({ "max_iterations": 5, "heartbeat": true });
+
+    let job_id = scheduler
+        .dispatch_job_reserved_for_routine(
+            &routine.user_id,
+            &title,
+            &full_prompt,
+            Some(metadata),
+            routine.name.clone(),
+            run.id.to_string(),
+        )
+        .await
+        .map_err(|e| RoutineError::JobDispatchFailed {
+            reason: format!("failed to dispatch heartbeat job: {e}"),
+        })?;
+
+    // Link the routine run to the dispatched job
+    if let Err(e) = ctx.store.link_routine_run_to_job(run.id, job_id).await {
+        tracing::error!(
+            routine = %routine.name,
+            "Failed to link heartbeat run to job: {}", e
+        );
+    }
+
+    ctx.broadcast_sse(SseEvent::RoutineLifecycle {
+        routine_name: routine.name.clone(),
+        event: "dispatched".to_string(),
+        run_id: Some(run.id.to_string()),
+        result_summary: Some(format!("Heartbeat job {job_id} dispatched (reserved slot)")),
+    });
+
+    tracing::info!(
+        routine = %routine.name,
+        job_id = %job_id,
+        "Dispatched heartbeat via reserved slot"
+    );
+
+    Ok((
+        RunStatus::Running,
+        Some(format!("Dispatched heartbeat job {job_id} (reserved slot)")),
+        None,
+    ))
 }
 
 /// Execute a lightweight routine (single LLM call).
@@ -1022,6 +1151,8 @@ pub fn spawn_cron_ticker(
         loop {
             ticker.tick().await;
             engine.check_cron_triggers().await;
+            // IC-006: Reap zombie runs on each cron interval
+            engine.reap_zombie_runs().await;
         }
     })
 }

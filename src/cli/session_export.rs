@@ -99,10 +99,10 @@ impl SessionExporter {
         for r in records {
             let role = capitalize(&r.role);
             out.push_str(&format!("## {}\n", role));
-            if self.include_timestamps {
-                if let Some(ts) = &r.timestamp {
-                    out.push_str(&format!("*{}*\n\n", ts));
-                }
+            if self.include_timestamps
+                && let Some(ts) = &r.timestamp
+            {
+                out.push_str(&format!("*{}*\n\n", ts));
             }
             out.push_str(&r.content);
             out.push_str("\n\n");
@@ -162,10 +162,10 @@ impl SessionExporter {
                 class,
                 capitalize(&r.role)
             ));
-            if self.include_timestamps {
-                if let Some(ts) = &r.timestamp {
-                    out.push_str(&format!("<small>{}</small>\n", ts));
-                }
+            if self.include_timestamps
+                && let Some(ts) = &r.timestamp
+            {
+                out.push_str(&format!("<small>{}</small>\n", ts));
             }
             out.push_str(&format!("<p>{}</p>\n</div>\n", html_escape(&r.content)));
         }

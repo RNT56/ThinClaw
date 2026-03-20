@@ -165,25 +165,26 @@ impl Sanitizer {
         // Regex patterns for more complex detection
         let regex_patterns = vec![
             RegexPattern {
-                regex: Regex::new(r"(?i)base64[:\s]+[A-Za-z0-9+/=]{50,}").unwrap(),
+                regex: Regex::new(r"(?i)base64[:\s]+[A-Za-z0-9+/=]{50,}")
+                    .expect("constant regex pattern must compile"),
                 name: "base64_payload".to_string(),
                 severity: Severity::Medium,
                 description: "Potential encoded payload".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"(?i)eval\s*\(").unwrap(),
+                regex: Regex::new(r"(?i)eval\s*\(").expect("constant regex pattern must compile"),
                 name: "eval_call".to_string(),
                 severity: Severity::High,
                 description: "Potential code evaluation attempt".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"(?i)exec\s*\(").unwrap(),
+                regex: Regex::new(r"(?i)exec\s*\(").expect("constant regex pattern must compile"),
                 name: "exec_call".to_string(),
                 severity: Severity::High,
                 description: "Potential code execution attempt".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"\x00").unwrap(),
+                regex: Regex::new(r"\x00").expect("constant regex pattern must compile"),
                 name: "null_byte".to_string(),
                 severity: Severity::Critical,
                 description: "Null byte injection attempt".to_string(),

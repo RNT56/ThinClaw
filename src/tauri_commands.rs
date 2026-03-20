@@ -317,10 +317,10 @@ pub fn routing_status(policy: &RoutingPolicy) -> Result<RoutingStatusResponse, S
     for rule in policy.rules() {
         match rule {
             RoutingRule::LargeContext { provider, .. }
-            | RoutingRule::VisionContent { provider } => {
-                if !providers.contains(provider) {
-                    providers.push(provider.clone());
-                }
+            | RoutingRule::VisionContent { provider }
+                if !providers.contains(provider) =>
+            {
+                providers.push(provider.clone());
             }
             RoutingRule::Fallback {
                 primary, fallbacks, ..
@@ -491,7 +491,7 @@ pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
 
     let token_response = client
         .post(GmailOAuthConfig::TOKEN_URL)
-        .basic_auth(&creds.client_id, Some(&creds.client_secret))
+        .basic_auth(creds.client_id, Some(&creds.client_secret))
         .form(&token_params)
         .send()
         .await

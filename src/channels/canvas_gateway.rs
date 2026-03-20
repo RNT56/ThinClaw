@@ -115,14 +115,14 @@ impl CanvasStore {
         panels.retain(|_, p| !p.is_expired(self.ttl));
 
         // LRU eviction if at capacity
-        if panels.len() >= MAX_ACTIVE_PANELS && !panels.contains_key(&panel_id) {
-            if let Some(oldest_key) = panels
+        if panels.len() >= MAX_ACTIVE_PANELS
+            && !panels.contains_key(&panel_id)
+            && let Some(oldest_key) = panels
                 .iter()
                 .min_by_key(|(_, p)| p.updated_at)
                 .map(|(k, _)| k.clone())
-            {
-                panels.remove(&oldest_key);
-            }
+        {
+            panels.remove(&oldest_key);
         }
 
         panels.insert(

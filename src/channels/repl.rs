@@ -165,13 +165,29 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
             for (key, value) in map {
                 let val_str = match value {
                     serde_json::Value::String(s) => {
-                        let display = if s.len() > 120 { &s[..120] } else { s };
+                        let display = if s.len() > 120 {
+                            let end = s
+                                .char_indices()
+                                .map(|(i, _)| i)
+                                .take_while(|&i| i < 120)
+                                .last()
+                                .unwrap_or(0);
+                            &s[..end]
+                        } else {
+                            s
+                        };
                         format!("\x1b[32m\"{display}\"\x1b[0m")
                     }
                     other => {
                         let rendered = other.to_string();
                         if rendered.len() > 120 {
-                            format!("{}...", &rendered[..120])
+                            let end = rendered
+                                .char_indices()
+                                .map(|(i, _)| i)
+                                .take_while(|&i| i < 120)
+                                .last()
+                                .unwrap_or(0);
+                            format!("{}...", &rendered[..end])
                         } else {
                             rendered
                         }
@@ -184,7 +200,13 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
         other => {
             let pretty = serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
             let truncated = if pretty.len() > 300 {
-                format!("{}...", &pretty[..300])
+                let end = pretty
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i < 300)
+                    .last()
+                    .unwrap_or(0);
+                format!("{}...", &pretty[..end])
             } else {
                 pretty
             };
@@ -623,7 +645,7 @@ impl Channel for ReplChannel {
                     "interim_result" => "\x1b[32m📋 ",
                     _ => "\x1b[34m💬 ",
                 };
-                eprintln!("{prefix}[agent]{}\x1b[0m", "");
+                eprintln!("{prefix}[agent]\x1b[0m");
                 let skin = make_skin();
                 let text = termimad::FmtText::from(&skin, &content, Some(width));
                 eprint!("{text}");

@@ -49,18 +49,22 @@ impl Default for MdnsConfig {
 impl MdnsConfig {
     /// Create from environment.
     pub fn from_env() -> Self {
-        let mut config = Self::default();
-        config.enabled = std::env::var("MDNS_ENABLED")
+        let enabled = std::env::var("MDNS_ENABLED")
             .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
+
+        let mut config = Self {
+            enabled,
+            ..Self::default()
+        };
 
         if let Ok(name) = std::env::var("MDNS_SERVICE_NAME") {
             config.service_name = name;
         }
-        if let Ok(port) = std::env::var("PORT") {
-            if let Ok(p) = port.parse() {
-                config.port = p;
-            }
+        if let Ok(port) = std::env::var("PORT")
+            && let Ok(p) = port.parse()
+        {
+            config.port = p;
         }
         config
     }

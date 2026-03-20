@@ -56,15 +56,15 @@ impl LanceDbConfig {
         if let Ok(table) = std::env::var("LANCEDB_TABLE") {
             config.table_name = table;
         }
-        if let Ok(dims) = std::env::var("LANCEDB_DIMENSIONS") {
-            if let Ok(d) = dims.parse() {
-                config.dimensions = d;
-            }
+        if let Ok(dims) = std::env::var("LANCEDB_DIMENSIONS")
+            && let Ok(d) = dims.parse()
+        {
+            config.dimensions = d;
         }
-        if let Ok(max) = std::env::var("LANCEDB_MAX_CAPTURE") {
-            if let Ok(m) = max.parse() {
-                config.max_capture_length = m;
-            }
+        if let Ok(max) = std::env::var("LANCEDB_MAX_CAPTURE")
+            && let Ok(m) = max.parse()
+        {
+            config.max_capture_length = m;
         }
         config
     }
@@ -76,10 +76,10 @@ impl LanceDbConfig {
 
     /// Resolve the URI (expand ~).
     pub fn resolved_uri(&self) -> String {
-        if self.uri.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return format!("{}{}", home, &self.uri[1..]);
-            }
+        if self.uri.starts_with("~/")
+            && let Ok(home) = std::env::var("HOME")
+        {
+            return format!("{}{}", home, &self.uri[1..]);
         }
         self.uri.clone()
     }

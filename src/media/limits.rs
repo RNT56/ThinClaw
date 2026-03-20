@@ -50,10 +50,10 @@ impl MediaLimits {
 
         for channel in &channels {
             let env_key = format!("{}_MAX_MEDIA_MB", channel.to_uppercase());
-            if let Ok(val) = std::env::var(&env_key) {
-                if let Ok(mb) = val.parse::<u64>() {
-                    overrides.insert(channel.to_string(), mb * 1024 * 1024);
-                }
+            if let Ok(val) = std::env::var(&env_key)
+                && let Ok(mb) = val.parse::<u64>()
+            {
+                overrides.insert(channel.to_string(), mb * 1024 * 1024);
             }
         }
 

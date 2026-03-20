@@ -59,10 +59,10 @@ impl DockerChromiumConfig {
         if let Ok(res) = std::env::var("CHROMIUM_RESOLUTION") {
             config.resolution = res;
         }
-        if let Ok(port) = std::env::var("CHROMIUM_DEBUG_PORT") {
-            if let Ok(p) = port.parse() {
-                config.debug_port = p;
-            }
+        if let Ok(port) = std::env::var("CHROMIUM_DEBUG_PORT")
+            && let Ok(p) = port.parse()
+        {
+            config.debug_port = p;
         }
         config
     }

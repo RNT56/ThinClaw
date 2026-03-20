@@ -257,11 +257,10 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                 Ok(resp) => {
                     if resp.status().is_success() {
                         println!("  ✅ Connection successful!");
-                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            if let Some(content) = body["choices"][0]["message"]["content"].as_str()
-                            {
-                                println!("  Response: {}", content.trim());
-                            }
+                        if let Ok(body) = resp.json::<serde_json::Value>().await
+                            && let Some(content) = body["choices"][0]["message"]["content"].as_str()
+                        {
+                            println!("  Response: {}", content.trim());
                         }
                     } else {
                         println!("  ❌ HTTP {}", resp.status());

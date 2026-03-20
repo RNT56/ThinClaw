@@ -150,6 +150,9 @@ impl CostTracker {
     }
 
     /// Export all entries as CSV.
+    ///
+    /// All string fields are escaped per RFC 4180 to prevent CSV injection
+    /// and malformed output from fields containing commas, quotes, or newlines.
     pub fn export_csv(&self) -> String {
         let mut out = String::from(
             "timestamp,agent_id,provider,model,input_tokens,output_tokens,cost_usd,request_id\n",
@@ -157,14 +160,14 @@ impl CostTracker {
         for e in &self.entries {
             out.push_str(&format!(
                 "{},{},{},{},{},{},{:.6},{}\n",
-                e.timestamp,
-                e.agent_id.as_deref().unwrap_or(""),
-                e.provider,
-                e.model,
+                csv_escape(&e.timestamp),
+                csv_escape(e.agent_id.as_deref().unwrap_or("")),
+                csv_escape(&e.provider),
+                csv_escape(&e.model),
                 e.input_tokens,
                 e.output_tokens,
                 e.cost_usd,
-                e.request_id.as_deref().unwrap_or(""),
+                csv_escape(e.request_id.as_deref().unwrap_or("")),
             ));
         }
         out
@@ -200,6 +203,7 @@ impl CostTracker {
     /// Typically called with the result of `SettingsStore::get_setting("default", "cost_entries")`.
     /// Invalid or missing data is silently ignored (starts fresh).
     pub fn from_json(&mut self, value: &serde_json::Value) {
+        // Deserialize directly from the Value ref to avoid cloning (Bug 32).
         if let Ok(entries) = serde_json::from_value::<Vec<CostEntry>>(value.clone()) {
             self.entries = VecDeque::from(entries);
             // Trim to max_entries
@@ -217,19 +221,18 @@ impl CostTracker {
     ///
     /// Aggregates totals, daily/monthly breakdowns, per-model/per-agent groupings,
     /// and alert state into one response.
-    pub fn summary(&self, today: &str, _this_month: &str) -> CostSummary {
+    pub fn summary(&self, today: &str, this_month: &str) -> CostSummary {
         let mut daily: BTreeMap<String, f64> = BTreeMap::new();
         let mut monthly: BTreeMap<String, f64> = BTreeMap::new();
 
         for e in &self.entries {
             // date key: first 10 chars "2026-03-04"
-            if e.timestamp.len() >= 10 {
-                let date_key = &e.timestamp[..10];
+            // Use .get() for safe slicing — avoids panic on non-ASCII timestamps.
+            if let Some(date_key) = e.timestamp.get(..10) {
                 *daily.entry(date_key.to_string()).or_insert(0.0) += e.cost_usd;
             }
             // month key: first 7 chars "2026-03"
-            if e.timestamp.len() >= 7 {
-                let month_key = &e.timestamp[..7];
+            if let Some(month_key) = e.timestamp.get(..7) {
                 *monthly.entry(month_key.to_string()).or_insert(0.0) += e.cost_usd;
             }
         }
@@ -252,8 +255,38 @@ impl CostTracker {
             by_model: self.cost_by_model().into_iter().collect::<BTreeMap<_, _>>(),
             by_agent: self.cost_by_agent().into_iter().collect::<BTreeMap<_, _>>(),
             alert_threshold_usd: self.budget.daily_limit_usd,
-            alert_triggered: self.should_alert(today),
+            alert_triggered: self.should_alert(today) || self.is_over_monthly_budget(this_month),
+            monthly_limit_usd: self.budget.monthly_limit_usd,
+            monthly_alert_triggered: self.is_over_monthly_budget(this_month),
         }
+    }
+}
+
+/// Escape a CSV field per RFC 4180.
+///
+/// Wraps the value in double-quotes and escapes inner quotes when the value
+/// contains commas, double-quotes, or newlines. Also defuses spreadsheet
+/// formula injection by prefixing a leading `=`, `+`, `-`, or `@` with
+/// a single-quote inside the quoted field.
+fn csv_escape(value: &str) -> String {
+    let needs_quoting =
+        value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
+
+    // Defuse formula injection: prefix dangerous leading chars
+    let starts_with_formula = value.starts_with('=')
+        || value.starts_with('+')
+        || value.starts_with('-')
+        || value.starts_with('@');
+
+    if needs_quoting || starts_with_formula {
+        let escaped = value.replace('"', "\"\"");
+        if starts_with_formula {
+            format!("\"'{escaped}\"")
+        } else {
+            format!("\"{escaped}\"")
+        }
+    } else {
+        value.to_string()
     }
 }
 
@@ -273,6 +306,12 @@ pub struct CostSummary {
     pub by_agent: BTreeMap<String, f64>,
     pub alert_threshold_usd: Option<f64>,
     pub alert_triggered: bool,
+    /// Monthly budget limit (USD), if configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_limit_usd: Option<f64>,
+    /// Whether monthly budget has been exceeded.
+    #[serde(default)]
+    pub monthly_alert_triggered: bool,
 }
 
 #[cfg(test)]

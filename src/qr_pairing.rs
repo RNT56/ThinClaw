@@ -54,8 +54,7 @@ impl PairingInfo {
             .split('&')
             .filter_map(|pair| {
                 let (key, value) = pair.split_once('=')?;
-                
-                
+
                 Some((key.to_string(), value.to_string()))
             })
             .collect();

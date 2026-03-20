@@ -39,10 +39,10 @@ impl DockerInitConfig {
         if let Ok(dir) = std::env::var("INIT_SCRIPTS_DIR") {
             config.init_dir = dir;
         }
-        if let Ok(timeout) = std::env::var("INIT_TIMEOUT") {
-            if let Ok(t) = timeout.parse() {
-                config.timeout_secs = t;
-            }
+        if let Ok(timeout) = std::env::var("INIT_TIMEOUT")
+            && let Ok(t) = timeout.parse()
+        {
+            config.timeout_secs = t;
         }
         if std::env::var("INIT_CONTINUE_ON_ERROR").is_ok() {
             config.fail_fast = false;

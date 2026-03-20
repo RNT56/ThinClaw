@@ -65,6 +65,40 @@ impl ContextManager {
         Ok(job_id)
     }
 
+    /// Create a job in the reserved overflow slot for system tasks.
+    ///
+    /// Normal jobs are capped at `max_jobs`. System jobs (heartbeats, routines)
+    /// get **one additional slot** (`max_jobs + 1`), so they can always run even
+    /// when user jobs have saturated the pool. This prevents cascading
+    /// "Maximum parallel jobs exceeded" failures for heartbeats.
+    pub async fn create_job_reserved(
+        &self,
+        user_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Uuid, JobError> {
+        let mut contexts = self.contexts.write().await;
+        let active_count = contexts.values().filter(|c| c.state.is_active()).count();
+
+        // Allow max_jobs + 1 for reserved/system jobs
+        let reserved_limit = self.max_jobs + 1;
+        if active_count >= reserved_limit {
+            return Err(JobError::MaxJobsExceeded {
+                max: reserved_limit,
+            });
+        }
+
+        let context = JobContext::with_user(user_id, title, description);
+        let job_id = context.job_id;
+        contexts.insert(job_id, context);
+        drop(contexts);
+
+        let memory = Memory::new(job_id);
+        self.memories.write().await.insert(job_id, memory);
+
+        Ok(job_id)
+    }
+
     /// Get a job context by ID.
     pub async fn get_context(&self, job_id: Uuid) -> Result<JobContext, JobError> {
         self.contexts

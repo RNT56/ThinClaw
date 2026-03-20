@@ -31,7 +31,8 @@ const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_REPLY_TARGETS: usize = 10000;
 const MAX_ERROR_LOG_BODY: usize = 1024;
 
-const REPLY_TARGETS_CAP: NonZeroUsize = NonZeroUsize::new(MAX_REPLY_TARGETS).unwrap();
+const REPLY_TARGETS_CAP: NonZeroUsize =
+    NonZeroUsize::new(MAX_REPLY_TARGETS).expect("MAX_REPLY_TARGETS is non-zero");
 
 /// Recipient classification for outbound messages.
 #[derive(Debug, Clone, PartialEq, Eq)]

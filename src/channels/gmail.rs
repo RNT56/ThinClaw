@@ -531,10 +531,10 @@ impl GmailChannel {
             .find_map(|h| {
                 if h.name.eq_ignore_ascii_case("from") {
                     // Extract email from "Name <email>" format
-                    if let Some(start) = h.value.find('<') {
-                        if let Some(end) = h.value.find('>') {
-                            return Some(h.value[start + 1..end].to_string());
-                        }
+                    if let Some(start) = h.value.find('<')
+                        && let Some(end) = h.value.find('>')
+                    {
+                        return Some(h.value[start + 1..end].to_string());
                     }
                     Some(h.value.clone())
                 } else {
@@ -581,10 +581,10 @@ impl GmailChannel {
         let snippet = msg.snippet.clone().unwrap_or_default();
 
         // Try to get full body from payload.
-        if let Some(ref payload) = msg.payload {
-            if let Some(text) = Self::extract_text_from_payload(payload) {
-                return text;
-            }
+        if let Some(ref payload) = msg.payload
+            && let Some(text) = Self::extract_text_from_payload(payload)
+        {
+            return text;
         }
 
         snippet
@@ -593,33 +593,30 @@ impl GmailChannel {
     /// Recursively extract text/plain content from payload.
     fn extract_text_from_payload(payload: &GmailPayload) -> Option<String> {
         // Direct body (for simple messages without MIME parts).
-        if payload.mime_type.as_deref() == Some("text/plain") {
-            if let Some(ref body) = payload.body {
-                if let Some(ref data) = body.data {
-                    return Self::decode_base64url(data);
-                }
-            }
+        if payload.mime_type.as_deref() == Some("text/plain")
+            && let Some(ref body) = payload.body
+            && let Some(ref data) = body.data
+        {
+            return Self::decode_base64url(data);
         }
 
         // Check parts (for multipart messages).
         if let Some(ref parts) = payload.parts {
             for part in parts {
-                if part.mime_type.as_deref() == Some("text/plain") {
-                    if let Some(ref body) = part.body {
-                        if let Some(ref data) = body.data {
-                            return Self::decode_base64url(data);
-                        }
-                    }
+                if part.mime_type.as_deref() == Some("text/plain")
+                    && let Some(ref body) = part.body
+                    && let Some(ref data) = body.data
+                {
+                    return Self::decode_base64url(data);
                 }
                 // Recurse into nested parts.
                 if let Some(ref nested) = part.parts {
                     for nested_part in nested {
-                        if nested_part.mime_type.as_deref() == Some("text/plain") {
-                            if let Some(ref body) = nested_part.body {
-                                if let Some(ref data) = body.data {
-                                    return Self::decode_base64url(data);
-                                }
-                            }
+                        if nested_part.mime_type.as_deref() == Some("text/plain")
+                            && let Some(ref body) = nested_part.body
+                            && let Some(ref data) = body.data
+                        {
+                            return Self::decode_base64url(data);
                         }
                     }
                 }
@@ -723,18 +720,16 @@ impl GmailChannel {
                     // Process each notification.
                     for pubsub_msg in &received {
                         // Decode notification data.
-                        if let Some(ref data) = pubsub_msg.message.data {
-                            if let Some(decoded) = Self::decode_base64url(data) {
-                                if let Ok(notification) =
-                                    serde_json::from_str::<GmailNotification>(&decoded)
-                                {
-                                    tracing::debug!(
-                                        email = ?notification.email_address,
-                                        history_id = ?notification.history_id,
-                                        "Gmail notification: new mail"
-                                    );
-                                }
-                            }
+                        if let Some(ref data) = pubsub_msg.message.data
+                            && let Some(decoded) = Self::decode_base64url(data)
+                            && let Ok(notification) =
+                                serde_json::from_str::<GmailNotification>(&decoded)
+                        {
+                            tracing::debug!(
+                                email = ?notification.email_address,
+                                history_id = ?notification.history_id,
+                                "Gmail notification: new mail"
+                            );
                         }
                     }
 

@@ -1,12 +1,9 @@
 //! Proactive heartbeat system for periodic execution.
 //!
-//! The heartbeat runner executes periodically (default: every 30 minutes) and:
-//! 1. Reads the HEARTBEAT.md checklist
-//! 2. Runs an agent turn to process the checklist
-//! 3. Reports any findings to the configured channel
-//!
-//! If nothing needs attention, the agent replies "HEARTBEAT_OK" and no
-//! message is sent to the user.
+//! The heartbeat runner provides a standalone heartbeat mode that executes
+//! periodically (default: every 30 minutes). In the typical Tauri integration,
+//! heartbeats are executed via [`crate::agent::routine_engine::RoutineEngine`]
+//! which is the primary path. This module is used as a fallback or in CLI mode.
 //!
 //! # Usage
 //!
@@ -211,49 +208,31 @@ impl HeartbeatRunner {
         // Without this, the agent can't evaluate checklist items that
         // reference "daily logs" or "recent activity". We inject today's
         // and yesterday's logs (capped to avoid token explosion).
-        let mut daily_context = String::new();
-        let today = chrono::Utc::now().date_naive();
-
-        // Today's log
-        if let Ok(doc) = self.workspace.today_log().await {
-            if !doc.content.trim().is_empty() {
-                let capped = cap_daily_log(&doc.content, 3000);
-                daily_context.push_str(&format!(
-                    "\n\n## Daily Log — {} (today)\n\n{}",
-                    today.format("%Y-%m-%d"),
-                    capped
-                ));
-            }
-        }
-
-        // Yesterday's log
-        if let Some(yesterday) = today.pred_opt() {
-            if let Ok(doc) = self.workspace.daily_log(yesterday).await {
-                if !doc.content.trim().is_empty() {
-                    let capped = cap_daily_log(&doc.content, 2000);
-                    daily_context.push_str(&format!(
-                        "\n\n## Daily Log — {} (yesterday)\n\n{}",
-                        yesterday.format("%Y-%m-%d"),
-                        capped
-                    ));
-                }
-            }
-        }
+        // IC-013: Use shared function to build daily log context
+        let daily_context = build_daily_context(&self.workspace).await;
 
         // Build the heartbeat prompt
+        let logs_note = if daily_context.is_empty() {
+            "\n\nNote: No daily logs exist yet (no conversations recorded). \
+             Any checklist items that reference daily logs are automatically satisfied. \
+             If all items depend on daily logs, reply HEARTBEAT_OK."
+        } else {
+            ""
+        };
+
         let prompt = format!(
             "Read the HEARTBEAT.md checklist below and follow it strictly. \
              Do not infer or repeat old tasks. Check each item and report findings.\n\
              \n\
              If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
              \n\
-             If something needs attention, provide a concise summary of what needs action.\n\
+             If something needs attention, provide a short, specific summary of what \
+             needs action. Do NOT echo these instructions back — give real findings only.\n\
              \n\
              ## HEARTBEAT.md\n\
              \n\
-             {}{}",
-            checklist,
-            daily_context
+             {}{}{}",
+            checklist, daily_context, logs_note
         );
 
         // Get the system prompt for context
@@ -275,20 +254,21 @@ impl HeartbeatRunner {
             ]
         };
 
-        // Use the model's context_length to set max_tokens. The API returns
-        // the total context window; we cap output at half of that (the rest is
-        // the prompt) with a floor of 4096.
+        // Use a modest max_tokens for heartbeat responses. Heartbeats are
+        // short status checks — they never need more than a few hundred tokens.
+        // Previously used ctx/2 which was wasteful on large-context models (Bug 27).
         let max_tokens = match self.llm.model_metadata().await {
             Ok(meta) => {
-                let from_api = meta.context_length.map(|ctx| ctx / 2).unwrap_or(4096);
-                from_api.max(4096)
+                // Use at most 2048, but respect smaller models
+                let from_api = meta.context_length.map(|ctx| ctx / 4).unwrap_or(2048);
+                from_api.clamp(512, 2048)
             }
             Err(e) => {
                 tracing::warn!(
                     "Could not fetch model metadata, using default max_tokens: {}",
                     e
                 );
-                4096
+                2048
             }
         };
 
@@ -378,21 +358,62 @@ pub fn strip_html_comments(content: &str) -> String {
     result
 }
 
-/// Cap a daily log to `max_chars`, truncating on a line boundary.
+/// Cap a daily log to approximately `max_bytes`, truncating on a line boundary.
 ///
 /// Keeps the most recent entries (end of file) since daily logs are
 /// append-only with newest entries last.
-pub fn cap_daily_log(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+pub fn cap_daily_log(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
         return content.to_string();
     }
-    // Take from the end so we get the most recent entries
-    let tail = &content[content.len() - max_chars..];
+    // Find the nearest char boundary at or after (len - max_bytes) so we
+    // never slice into a multi-byte UTF-8 character.
+    let target_start = content.len() - max_bytes;
+    let safe_start = content
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| i >= target_start)
+        .unwrap_or(content.len());
+    let tail = &content[safe_start..];
     // Find the first newline to start on a clean line boundary
     match tail.find('\n') {
         Some(idx) => format!("[...truncated...]\n{}", &tail[idx + 1..]),
         None => format!("[...truncated...]\n{}", tail),
     }
+}
+
+/// IC-013: Shared daily log context builder for heartbeat.
+///
+/// Reads today's and yesterday's daily logs from the workspace, caps them
+/// to avoid token explosion, and returns a formatted string.
+pub async fn build_daily_context(workspace: &crate::workspace::Workspace) -> String {
+    let mut daily_context = String::new();
+    let today = chrono::Utc::now().date_naive();
+
+    if let Ok(doc) = workspace.today_log().await
+        && !doc.content.trim().is_empty()
+    {
+        let capped = cap_daily_log(&doc.content, 3000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log — {} (today)\n\n{}",
+            today.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    if let Some(yesterday) = today.pred_opt()
+        && let Ok(doc) = workspace.daily_log(yesterday).await
+        && !doc.content.trim().is_empty()
+    {
+        let capped = cap_daily_log(&doc.content, 2000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log — {} (yesterday)\n\n{}",
+            yesterday.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    daily_context
 }
 
 /// Spawn the heartbeat runner as a background task.

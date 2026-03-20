@@ -54,10 +54,10 @@ impl ElevatedConfig {
             }
         }
 
-        if let Ok(timeout) = std::env::var("ELEVATED_TIMEOUT") {
-            if let Ok(secs) = timeout.parse() {
-                config.timeout = Duration::from_secs(secs);
-            }
+        if let Ok(timeout) = std::env::var("ELEVATED_TIMEOUT")
+            && let Ok(secs) = timeout.parse()
+        {
+            config.timeout = Duration::from_secs(secs);
         }
 
         if let Ok(val) = std::env::var("ELEVATED_REQUIRE_CONFIRM") {
@@ -111,10 +111,10 @@ impl ElevatedMode {
         if !self.active.load(Ordering::SeqCst) {
             return false;
         }
-        if let Some(activated) = self.activated_at {
-            if activated.elapsed() > self.config.timeout {
-                return false; // Expired
-            }
+        if let Some(activated) = self.activated_at
+            && activated.elapsed() > self.config.timeout
+        {
+            return false; // Expired
         }
         true
     }

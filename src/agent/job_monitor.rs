@@ -49,6 +49,8 @@ pub fn spawn_job_monitor(
                     }
 
                     match event {
+                        // IC-025: Only forward assistant messages — system/tool messages
+                        // are too noisy for the parent agent's context window.
                         SseEvent::JobMessage { role, content, .. } if role == "assistant" => {
                             let msg = IncomingMessage::new(
                                 "job_monitor",

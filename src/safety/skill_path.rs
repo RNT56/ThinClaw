@@ -126,12 +126,12 @@ impl SkillPathConfig {
         // Check for symlinks
         if !self.allow_symlinks && full_path.exists() {
             let metadata = std::fs::symlink_metadata(&full_path);
-            if let Ok(meta) = metadata {
-                if meta.file_type().is_symlink() {
-                    return Err(SkillPathError::SymlinkDetected {
-                        path: full_path.display().to_string(),
-                    });
-                }
+            if let Ok(meta) = metadata
+                && meta.file_type().is_symlink()
+            {
+                return Err(SkillPathError::SymlinkDetected {
+                    path: full_path.display().to_string(),
+                });
             }
         }
 

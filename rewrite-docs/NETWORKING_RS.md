@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Networking Architecture: Tailscale-First Connectivity
 
 This document defines the complete network topology for ThinClaw in all deployment modes. It answers the core questions: **How do components find each other? How is the connection secured? How does service discovery work?**

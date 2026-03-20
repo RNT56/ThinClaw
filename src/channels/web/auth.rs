@@ -80,33 +80,31 @@ pub async fn auth_middleware(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<IpAddr>().ok());
 
-        if let Some(ip) = source_ip {
-            if is_trusted_ip(&ip, &auth.trusted_proxy_ips) {
-                if let Some(user_header) = headers.get(proxy_header.as_str()) {
-                    if user_header.to_str().is_ok() {
-                        tracing::debug!(
-                            proxy_header = %proxy_header,
-                            source_ip = %ip,
-                            "Trusted-proxy auth accepted"
-                        );
-                        return next.run(request).await;
-                    }
-                }
-            }
+        if let Some(ip) = source_ip
+            && is_trusted_ip(&ip, &auth.trusted_proxy_ips)
+            && let Some(user_header) = headers.get(proxy_header.as_str())
+            && user_header.to_str().is_ok()
+        {
+            tracing::debug!(
+                proxy_header = %proxy_header,
+                source_ip = %ip,
+                "Trusted-proxy auth accepted"
+            );
+            return next.run(request).await;
         }
 
         // For loopback connections (no X-Real-IP header), check if the proxy
         // header is present and loopback is trusted
         if source_ip.is_none() && auth.trusted_proxy_ips.is_empty() {
             // No X-Real-IP means likely a direct loopback connection
-            if let Some(user_header) = headers.get(proxy_header.as_str()) {
-                if user_header.to_str().is_ok() {
-                    tracing::debug!(
-                        proxy_header = %proxy_header,
-                        "Trusted-proxy auth accepted (loopback)"
-                    );
-                    return next.run(request).await;
-                }
+            if let Some(user_header) = headers.get(proxy_header.as_str())
+                && user_header.to_str().is_ok()
+            {
+                tracing::debug!(
+                    proxy_header = %proxy_header,
+                    "Trusted-proxy auth accepted (loopback)"
+                );
+                return next.run(request).await;
             }
         }
     }

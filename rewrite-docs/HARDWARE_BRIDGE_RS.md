@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Hardware Bridge: Local Sensor Access for Remote Agents
 
 When the Rust Orchestrator is deployed remotely (headless VPS or Mac Mini), it does not have physical access to the user's camera, microphone, or screen. However, the local Tauri Companion App **does**.

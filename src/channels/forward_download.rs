@@ -42,10 +42,10 @@ impl ForwardDownloadConfig {
             config.enabled = val != "0" && !val.eq_ignore_ascii_case("false");
         }
 
-        if let Ok(mb) = std::env::var("FORWARD_DOWNLOAD_MAX_MB") {
-            if let Ok(m) = mb.parse::<u64>() {
-                config.max_bytes = m * 1024 * 1024;
-            }
+        if let Ok(mb) = std::env::var("FORWARD_DOWNLOAD_MAX_MB")
+            && let Ok(m) = mb.parse::<u64>()
+        {
+            config.max_bytes = m * 1024 * 1024;
         }
 
         config
@@ -89,10 +89,10 @@ pub fn is_forwarded(metadata: &serde_json::Value) -> bool {
     }
 
     // Discord — message_reference with type "FORWARD" or "DEFAULT" (reply)
-    if let Some(ref_data) = metadata.get("message_reference") {
-        if ref_data.get("message_id").is_some() {
-            return true;
-        }
+    if let Some(ref_data) = metadata.get("message_reference")
+        && ref_data.get("message_id").is_some()
+    {
+        return true;
     }
 
     // Signal — quote field indicates forwarded/quoted message

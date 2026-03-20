@@ -101,6 +101,10 @@ impl CachedProvider {
 /// Hashes the model name, messages, and response-affecting parameters
 /// (max_tokens, temperature, stop_sequences) via SHA-256. Two requests
 /// with identical content and parameters produce the same key.
+///
+/// Note: The system prompt is included implicitly — it is prepended to
+/// `messages` as a system-role `ChatMessage` before the request is built,
+/// so it is captured by the `serde_json::to_string(&request.messages)` hash.
 fn cache_key(model: &str, request: &CompletionRequest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(model.as_bytes());

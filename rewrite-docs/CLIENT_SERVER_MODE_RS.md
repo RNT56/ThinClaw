@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # Deployment Modes & Cloud LLM Execution
 
 To clarify exactly how Cloud LLMs (like OpenAI's GPT-4o or Anthropic's Claude 3.5 Sonnet) interact with your hardware, we need to distinguish between _the LLM API_ and _the Orchestrator_.

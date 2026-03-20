@@ -257,6 +257,16 @@ impl Agent {
         self.deps.canvas_store.as_ref()
     }
 
+    /// Get the scheduler (public for Tauri/API integration — TTL reaper).
+    pub fn scheduler(&self) -> &Arc<Scheduler> {
+        &self.scheduler
+    }
+
+    /// Get the context manager (public for Tauri/API integration — TTL reaper).
+    pub fn context_manager(&self) -> &Arc<crate::context::ContextManager> {
+        &self.context_manager
+    }
+
     /// Select active skills for a message using deterministic prefiltering.
     pub(super) async fn select_active_skills(
         &self,
@@ -302,16 +312,33 @@ pub struct BackgroundTasksHandle {
     pruning_handle: tokio::task::JoinHandle<()>,
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
+    // IC-003: Previously leaked — notification forwarder is now tracked
+    notification_forwarder_handle: Option<tokio::task::JoinHandle<()>>,
+    // Bug 5 fix: zombie reaper was previously untracked and leaked on shutdown
+    zombie_reaper_handle: Option<tokio::task::JoinHandle<()>>,
     health_monitor: Option<Arc<crate::channels::ChannelHealthMonitor>>,
     /// Receiver for system events (heartbeat messages injected by the routine engine).
     /// The message loop polls this to process heartbeat turns when the dispatcher is idle.
-    pub system_event_rx: Option<tokio::sync::mpsc::Receiver<IncomingMessage>>,
+    /// Wrapped in a Mutex so the Tauri bridge can `.take()` it without consuming `self`.
+    system_event_mutex: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<IncomingMessage>>>,
 }
 
 impl BackgroundTasksHandle {
     /// Get a reference to the routine engine, if routines are enabled.
     pub fn routine_engine(&self) -> Option<&Arc<RoutineEngine>> {
         self.routine_handle.as_ref().map(|(_, engine)| engine)
+    }
+
+    /// Take the system event receiver for external consumption.
+    ///
+    /// In standalone mode, `Agent::run()` consumes this via its select! loop.
+    /// In Tauri/desktop mode, the bridge must call this to extract the receiver
+    /// and spawn its own consumer task. Returns a `MutexGuard` wrapping
+    /// `Option<Receiver>` — call `.take()` to claim ownership.
+    pub async fn lock_system_events(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, Option<tokio::sync::mpsc::Receiver<IncomingMessage>>> {
+        self.system_event_mutex.lock().await
     }
 }
 
@@ -445,15 +472,18 @@ impl Agent {
             if hygiene_cfg.enabled {
                 if let Some(workspace) = self.workspace() {
                     let ws = Arc::clone(workspace);
-                    let interval_secs = self.heartbeat_config
-                        .as_ref()
-                        .map(|c| c.interval_secs)
-                        .unwrap_or(1800);
+                    // Bug 8 fix: read interval from hygiene_config, not heartbeat_config.
+                    // HygieneConfig uses cadence_hours, not interval_secs.
+                    let interval_secs = u64::from(
+                        self.hygiene_config
+                            .as_ref()
+                            .map(|h| h.cadence_hours)
+                            .unwrap_or(12),
+                    ) * 3600;
 
                     Some(tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(interval_secs),
-                        );
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(interval_secs));
                         // Don't run immediately on startup
                         interval.tick().await;
                         loop {
@@ -479,8 +509,7 @@ impl Agent {
 
         // ── Routine engine ──────────────────────────────────────────────
         // Create the system event channel for heartbeat → main session injection.
-        let (system_event_tx, system_event_rx) =
-            tokio::sync::mpsc::channel::<IncomingMessage>(16);
+        let (system_event_tx, system_event_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(16);
 
         let routine_handle = if let Some(ref rt_config) = self.routine_config {
             if rt_config.enabled {
@@ -522,20 +551,16 @@ impl Agent {
                     engine.refresh_event_cache().await;
 
                     // ── Auto-register heartbeat as a routine ─────────────
-                    if let Some(ref hb_config) = self.heartbeat_config {
-                        if hb_config.enabled {
-                            if let Err(e) = upsert_heartbeat_routine(
-                                store,
-                                hb_config,
-                            ).await {
-                                tracing::error!("Failed to register heartbeat routine: {}", e);
-                            }
-                        }
+                    if let Some(ref hb_config) = self.heartbeat_config
+                        && hb_config.enabled
+                        && let Err(e) = upsert_heartbeat_routine(store, hb_config).await
+                    {
+                        tracing::error!("Failed to register heartbeat routine: {}", e);
                     }
 
-                    // Spawn notification forwarder
+                    // Spawn notification forwarder (IC-003: track handle for cleanup)
                     let channels = self.channels.clone();
-                    tokio::spawn(async move {
+                    let notification_forwarder_handle = tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             let user = response
                                 .metadata
@@ -567,7 +592,7 @@ impl Agent {
                         rt_config.max_concurrent_routines
                     );
 
-                    Some((cron_handle, engine))
+                    Some((cron_handle, engine, notification_forwarder_handle))
                 } else {
                     tracing::warn!("Routines enabled but store/workspace not available");
                     None
@@ -588,13 +613,26 @@ impl Agent {
             Some(monitor)
         };
 
+        let (routine_handle, notification_forwarder_handle) = match routine_handle {
+            Some((cron, engine, notify_handle)) => (Some((cron, engine)), Some(notify_handle)),
+            None => (None, None),
+        };
+
+        // Bug 5 fix: spawn and track the zombie reaper handle so it is aborted
+        // during shutdown_background() instead of leaking indefinitely.
+        let zombie_reaper_handle = routine_handle.as_ref().map(|(_, engine)| {
+            crate::agent::routine_engine::spawn_zombie_reaper(Arc::clone(engine))
+        });
+
         BackgroundTasksHandle {
             repair_handle,
             pruning_handle,
             heartbeat_handle,
             routine_handle,
+            notification_forwarder_handle,
+            zombie_reaper_handle,
             health_monitor,
-            system_event_rx: Some(system_event_rx),
+            system_event_mutex: tokio::sync::Mutex::new(Some(system_event_rx)),
         }
     }
 
@@ -610,8 +648,18 @@ impl Agent {
         if let Some(h) = handle.heartbeat_handle {
             h.abort();
         }
-        if let Some((cron_handle, _)) = handle.routine_handle {
+        if let Some((cron_handle, engine)) = handle.routine_handle {
             cron_handle.abort();
+            // IC-018: Abort all running routine tasks
+            engine.abort_all().await;
+        }
+        // IC-003: Abort notification forwarder
+        if let Some(h) = handle.notification_forwarder_handle {
+            h.abort();
+        }
+        // Bug 5 fix: abort zombie reaper (was previously untracked and leaked)
+        if let Some(h) = handle.zombie_reaper_handle {
+            h.abort();
         }
         if let Some(ref monitor) = handle.health_monitor {
             monitor.stop().await;
@@ -630,10 +678,10 @@ impl Agent {
         let mut message_stream = self.channels.start_all().await?;
 
         // Start background tasks
-        let mut bg = self.start_background_tasks().await;
+        let bg = self.start_background_tasks().await;
 
         // Extract system event receiver for the message loop
-        let mut system_event_rx = bg.system_event_rx.take();
+        let mut system_event_rx = bg.lock_system_events().await.take();
 
         // ── Config file watcher ─────────────────────────────────────
         let config_watcher = {
@@ -1095,10 +1143,9 @@ async fn upsert_heartbeat_routine(
                 routine.enabled = true;
                 routine.action = action;
                 routine.updated_at = chrono::Utc::now();
-                store
-                    .update_routine(&routine)
-                    .await
-                    .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
+                store.update_routine(&routine).await.map_err(|e| {
+                    Error::Database(crate::error::DatabaseError::Query(e.to_string()))
+                })?;
                 tracing::info!(
                     "Updated heartbeat routine: schedule='{}', next_fire={:?}",
                     schedule,

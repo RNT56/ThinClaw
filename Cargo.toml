@@ -99,7 +99,7 @@ regex = "1"
 aho-corasick = "1"
 
 # YAML parsing for SKILL.md frontmatter
-serde_yml = "0.0.12"
+serde_yaml_ng = "0.10"
 
 # Filesystem paths
 dirs = "6"
@@ -120,8 +120,8 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"  # WASI support for component model
+wasmtime = { version = "36", features = ["component-model"] }
+wasmtime-wasi = "36"  # WASI support for component model
 wasmparser = "0.220"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -267,3 +267,21 @@ x86_64-unknown-linux-gnu = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"
+
+# ── Lint configuration ──────────────────────────────────────────────────
+# These settings are applied by both `cargo clippy` and CI.
+# Warnings are treated as errors in CI via `clippy -- -D warnings`.
+[lints.clippy]
+# Design choices — allow these intentionally:
+too_many_arguments    = "allow"  # Builder/config functions legitimately need many params
+should_implement_trait = "allow"  # from_str() helpers aren't always FromStr
+module_name_repetitions = "allow"  # e.g. WorkspaceStorage in workspace module
+
+# Documentation nits — allow (don't block PRs on doc formatting):
+doc_overindented_list_items = "allow"
+doc_lazy_continuation      = "allow"
+
+[lints.rust]
+# Treat unused imports as warnings (default), not errors.
+# CI will still catch them via `-D warnings`.
+unused_imports = "warn"

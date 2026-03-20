@@ -49,16 +49,16 @@ impl CacheConfig {
             config.cache_dir = PathBuf::from(dir);
         }
 
-        if let Ok(hours) = std::env::var("MEDIA_CACHE_TTL_HOURS") {
-            if let Ok(h) = hours.parse::<u64>() {
-                config.ttl = Duration::from_secs(h * 3600);
-            }
+        if let Ok(hours) = std::env::var("MEDIA_CACHE_TTL_HOURS")
+            && let Ok(h) = hours.parse::<u64>()
+        {
+            config.ttl = Duration::from_secs(h * 3600);
         }
 
-        if let Ok(mb) = std::env::var("MEDIA_CACHE_MAX_MB") {
-            if let Ok(m) = mb.parse::<u64>() {
-                config.max_bytes = m * 1024 * 1024;
-            }
+        if let Ok(mb) = std::env::var("MEDIA_CACHE_MAX_MB")
+            && let Ok(m) = mb.parse::<u64>()
+        {
+            config.max_bytes = m * 1024 * 1024;
         }
 
         config
@@ -99,16 +99,14 @@ impl MediaCache {
         }
 
         // Check TTL
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(age) = SystemTime::now().duration_since(modified) {
-                    if age > self.config.ttl {
-                        // Expired — remove it
-                        let _ = std::fs::remove_file(&path);
-                        return None;
-                    }
-                }
-            }
+        if let Ok(metadata) = std::fs::metadata(&path)
+            && let Ok(modified) = metadata.modified()
+            && let Ok(age) = SystemTime::now().duration_since(modified)
+            && age > self.config.ttl
+        {
+            // Expired — remove it
+            let _ = std::fs::remove_file(&path);
+            return None;
         }
 
         Some(path)
@@ -190,15 +188,13 @@ impl MediaCache {
             let entry = entry?;
             let metadata = entry.metadata()?;
 
-            if metadata.is_file() {
-                if let Ok(modified) = metadata.modified() {
-                    if let Ok(age) = now.duration_since(modified) {
-                        if age > self.config.ttl {
-                            let _ = std::fs::remove_file(entry.path());
-                            pruned += 1;
-                        }
-                    }
-                }
+            if metadata.is_file()
+                && let Ok(modified) = metadata.modified()
+                && let Ok(age) = now.duration_since(modified)
+                && age > self.config.ttl
+            {
+                let _ = std::fs::remove_file(entry.path());
+                pruned += 1;
             }
         }
 

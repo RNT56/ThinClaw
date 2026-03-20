@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn test_backup_binary_path() {
         let path = backup_binary_path();
-        assert!(path.extension().map_or(false, |e| e == "bak"));
+        assert!(path.extension().is_some_and(|e| e == "bak"));
     }
 
     #[test]

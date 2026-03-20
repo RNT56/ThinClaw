@@ -234,7 +234,15 @@ Be brief but capture all important details. Use bullet points."#,
             .with_temperature(0.3);
 
         let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
-        let (text, _) = reasoning.complete(request).await?;
+        let (text, usage) = reasoning.complete(request).await?;
+
+        // Log compaction LLM usage for cost awareness (Bug 30).
+        tracing::info!(
+            "[compaction] Summary LLM call: input_tokens={}, output_tokens={}",
+            usage.input_tokens,
+            usage.output_tokens,
+        );
+
         Ok(text)
     }
 

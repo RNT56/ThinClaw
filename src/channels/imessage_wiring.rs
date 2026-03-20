@@ -46,18 +46,18 @@ impl IMessageConfig {
         if let Ok(path) = std::env::var("IMESSAGE_CHAT_DB") {
             config.chat_db_path = path;
         }
-        if let Ok(interval) = std::env::var("IMESSAGE_POLL_INTERVAL") {
-            if let Ok(secs) = interval.parse() {
-                config.poll_interval_secs = secs;
-            }
+        if let Ok(interval) = std::env::var("IMESSAGE_POLL_INTERVAL")
+            && let Ok(secs) = interval.parse()
+        {
+            config.poll_interval_secs = secs;
         }
         if let Ok(contacts) = std::env::var("IMESSAGE_CONTACTS") {
             config.monitored_contacts = contacts.split(',').map(|s| s.trim().to_string()).collect();
         }
-        if let Ok(max_age) = std::env::var("IMESSAGE_MAX_AGE") {
-            if let Ok(secs) = max_age.parse() {
-                config.max_message_age_secs = secs;
-            }
+        if let Ok(max_age) = std::env::var("IMESSAGE_MAX_AGE")
+            && let Ok(secs) = max_age.parse()
+        {
+            config.max_message_age_secs = secs;
         }
 
         config

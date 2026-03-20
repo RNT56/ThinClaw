@@ -45,15 +45,15 @@ impl QmdConfig {
         if let Ok(path) = std::env::var("QMD_DATA_PATH") {
             config.data_path = path;
         }
-        if let Ok(dims) = std::env::var("QMD_DIMENSIONS") {
-            if let Ok(d) = dims.parse() {
-                config.dimensions = d;
-            }
+        if let Ok(dims) = std::env::var("QMD_DIMENSIONS")
+            && let Ok(d) = dims.parse()
+        {
+            config.dimensions = d;
         }
-        if let Ok(sq) = std::env::var("QMD_SUBQUANTIZERS") {
-            if let Ok(n) = sq.parse() {
-                config.num_subquantizers = n;
-            }
+        if let Ok(sq) = std::env::var("QMD_SUBQUANTIZERS")
+            && let Ok(n) = sq.parse()
+        {
+            config.num_subquantizers = n;
         }
         config
     }
@@ -76,10 +76,10 @@ impl QmdConfig {
 
     /// Resolve the data path (expand ~).
     pub fn resolved_path(&self) -> String {
-        if self.data_path.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return format!("{}{}", home, &self.data_path[1..]);
-            }
+        if self.data_path.starts_with("~/")
+            && let Ok(home) = std::env::var("HOME")
+        {
+            return format!("{}{}", home, &self.data_path[1..]);
         }
         self.data_path.clone()
     }
@@ -90,7 +90,7 @@ impl QmdConfig {
         if self.dimensions == 0 {
             errors.push("Dimensions must be > 0".to_string());
         }
-        if self.dimensions % self.num_subquantizers != 0 {
+        if !self.dimensions.is_multiple_of(self.num_subquantizers) {
             errors.push(format!(
                 "Dimensions ({}) must be divisible by num_subquantizers ({})",
                 self.dimensions, self.num_subquantizers

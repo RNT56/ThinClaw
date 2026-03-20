@@ -209,8 +209,14 @@ pub fn format_citations(results: &[SearchResult]) -> String {
             .map(|c| format!(" {}", c.inline()))
             .unwrap_or_default();
 
-        let preview = if result.content.len() > 200 {
-            format!("{}...", &result.content[..200])
+        let preview = if result.content.chars().count() > 200 {
+            let byte_offset = result
+                .content
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(result.content.len());
+            format!("{}...", &result.content[..byte_offset])
         } else {
             result.content.clone()
         };

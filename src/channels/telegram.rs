@@ -849,10 +849,11 @@ fn split_message(text: &str) -> Vec<String> {
             break;
         }
 
-        // Try to split at a newline near the limit
-        let split_at = remaining[..MAX_MESSAGE_LENGTH]
+        // Try to split at a newline near the limit (safe for multi-byte UTF-8)
+        let safe_end = crate::util::floor_char_boundary(remaining, MAX_MESSAGE_LENGTH);
+        let split_at = remaining[..safe_end]
             .rfind('\n')
-            .unwrap_or(MAX_MESSAGE_LENGTH);
+            .unwrap_or(safe_end);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start_matches('\n');

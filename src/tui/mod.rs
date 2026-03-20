@@ -10,6 +10,8 @@
 //! - Ctrl+C: abort active run / double-tap to exit
 //! - Local shell via `!` prefix
 
+mod rendering;
+
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -19,7 +21,6 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::*;
 use tokio::sync::mpsc;
 
 use crate::channels::StatusUpdate;
@@ -283,7 +284,7 @@ impl TuiApp {
                 };
                 self.input_history_idx = Some(idx);
                 self.input = self.input_history[idx].clone();
-                self.cursor_pos = self.input.len();
+                self.cursor_pos = self.input.chars().count();
                 KeyAction::Continue
             }
             // Down: history next
@@ -293,7 +294,7 @@ impl TuiApp {
                         let new_idx = idx + 1;
                         self.input_history_idx = Some(new_idx);
                         self.input = self.input_history[new_idx].clone();
-                        self.cursor_pos = self.input.len();
+                        self.cursor_pos = self.input.chars().count();
                     } else {
                         self.input_history_idx = None;
                         self.input.clear();
@@ -320,7 +321,7 @@ impl TuiApp {
                 KeyAction::Continue
             }
             (_, KeyCode::End) => {
-                self.cursor_pos = self.input.len();
+                self.cursor_pos = self.input.chars().count();
                 KeyAction::Continue
             }
             // Left/Right cursor
@@ -329,7 +330,7 @@ impl TuiApp {
                 KeyAction::Continue
             }
             (_, KeyCode::Right) => {
-                if self.cursor_pos < self.input.len() {
+                if self.cursor_pos < self.input.chars().count() {
                     self.cursor_pos += 1;
                 }
                 KeyAction::Continue
@@ -338,14 +339,20 @@ impl TuiApp {
             (_, KeyCode::Backspace) => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
-                    self.input.remove(self.cursor_pos);
+                    // Convert char index to byte offset for String::remove()
+                    if let Some((byte_idx, _)) = self.input.char_indices().nth(self.cursor_pos) {
+                        self.input.remove(byte_idx);
+                    }
                 }
                 KeyAction::Continue
             }
             // Delete
             (_, KeyCode::Delete) => {
-                if self.cursor_pos < self.input.len() {
-                    self.input.remove(self.cursor_pos);
+                if self.cursor_pos < self.input.chars().count() {
+                    // Convert char index to byte offset for String::remove()
+                    if let Some((byte_idx, _)) = self.input.char_indices().nth(self.cursor_pos) {
+                        self.input.remove(byte_idx);
+                    }
                 }
                 KeyAction::Continue
             }
@@ -358,7 +365,14 @@ impl TuiApp {
             }
             // Character input
             (_, KeyCode::Char(c)) => {
-                self.input.insert(self.cursor_pos, c);
+                // Convert char index to byte offset for String::insert()
+                let byte_pos = self
+                    .input
+                    .char_indices()
+                    .nth(self.cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.input.len());
+                self.input.insert(byte_pos, c);
                 self.cursor_pos += 1;
                 KeyAction::Continue
             }
@@ -582,242 +596,11 @@ impl TuiApp {
 
         if matches.len() == 1 {
             self.input = format!("{} ", matches[0]);
-            self.cursor_pos = self.input.len();
+            self.cursor_pos = self.input.chars().count();
         }
     }
 
-    // ── Rendering ────────────────────────────────────────────────────
-
-    fn render(&mut self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Header
-                Constraint::Min(5),    // Chat area
-                Constraint::Length(3), // Input
-                Constraint::Length(1), // Status bar
-            ])
-            .split(frame.area());
-
-        self.render_header(frame, chunks[0]);
-        self.render_chat(frame, chunks[1]);
-        self.render_input(frame, chunks[2]);
-        self.render_status(frame, chunks[3]);
-    }
-
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let header = Line::from(vec![
-            Span::styled(
-                " IronClaw ",
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Rgb(80, 80, 200))
-                    .bold(),
-            ),
-            Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&self.model, Style::default().fg(Color::Cyan)),
-            Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("Agent: {}", self.agent_id),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(header), area);
-    }
-
-    fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
-        // Count lines first (no borrow conflict)
-        let line_count = self.count_chat_lines();
-        self.total_chat_lines = line_count;
-
-        // Clamp scroll to valid range
-        let visible_height = area.height.saturating_sub(2); // borders
-        if self.scroll_offset == u16::MAX || self.total_chat_lines <= visible_height {
-            // Auto-scroll to bottom
-            self.scroll_offset = self.total_chat_lines.saturating_sub(visible_height);
-        }
-
-        let chat_text = self.build_chat_text();
-        let chat = Paragraph::new(chat_text)
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset, 0));
-
-        frame.render_widget(chat, area);
-    }
-
-    fn render_input(&self, frame: &mut Frame, area: Rect) {
-        let input = Paragraph::new(self.input.as_str()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(100, 100, 200)))
-                .title(Span::styled(
-                    " Message (/help for commands) ",
-                    Style::default().fg(Color::Rgb(150, 150, 255)),
-                )),
-        );
-        frame.render_widget(input, area);
-
-        // Position cursor
-        #[allow(clippy::cast_possible_truncation)]
-        frame.set_cursor_position((area.x + self.cursor_pos as u16 + 1, area.y + 1));
-    }
-
-    fn render_status(&self, frame: &mut Frame, area: Rect) {
-        let streaming_indicator = if self.active_stream.is_some() {
-            Span::styled(" ● ", Style::default().fg(Color::Green))
-        } else {
-            Span::styled(" ○ ", Style::default().fg(Color::DarkGray))
-        };
-
-        let status_line = Line::from(vec![
-            streaming_indicator,
-            Span::styled(&self.status_text, Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!(" │ {} ", self.model),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(status_line), area);
-    }
-
-    /// Count total lines for scroll calculation (no borrow of text data).
-    fn count_chat_lines(&self) -> u16 {
-        let mut count: u16 = 0;
-        for msg in &self.messages {
-            match msg {
-                ChatMessage::User { .. } => count += 1,
-                ChatMessage::Assistant { text, .. } => {
-                    count += 1; // label
-                    count += text.lines().count() as u16;
-                }
-                ChatMessage::ToolCall { args, result, .. } => {
-                    count += 2; // top + bottom border
-                    if !args.is_empty() {
-                        count += args.lines().take(5).count() as u16;
-                    }
-                    if let Some(r) = result {
-                        count += r.lines().take(10).count() as u16;
-                    }
-                }
-                ChatMessage::System { text } => {
-                    count += text.lines().count() as u16;
-                }
-            }
-            count += 1; // spacing
-        }
-        if self.active_stream.is_some() {
-            count += 5; // approximate
-        }
-        count
-    }
-
-    fn build_chat_text(&self) -> Text<'_> {
-        let mut lines = Vec::new();
-
-        for msg in &self.messages {
-            match msg {
-                ChatMessage::User { text } => {
-                    lines.push(Line::from(vec![
-                        Span::styled("You: ", Style::default().fg(Color::Green).bold()),
-                        Span::raw(text),
-                    ]));
-                }
-                ChatMessage::Assistant { text, model, .. } => {
-                    let label = model.as_deref().unwrap_or("AI");
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("{label}: "),
-                        Style::default().fg(Color::Cyan).bold(),
-                    )]));
-                    // Add content lines
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {line}"),
-                            Style::default().fg(Color::White),
-                        )));
-                    }
-                }
-                ChatMessage::ToolCall {
-                    name,
-                    args,
-                    result,
-                    is_error,
-                } => {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ┌─ Tool: {name} ─"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    if !args.is_empty() {
-                        for arg_line in args.lines().take(5) {
-                            lines.push(Line::from(Span::styled(
-                                format!("  │ {arg_line}"),
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        }
-                    }
-                    if let Some(result) = result {
-                        let color = if *is_error {
-                            Color::Red
-                        } else {
-                            Color::DarkGray
-                        };
-                        for line in result.lines().take(10) {
-                            lines.push(Line::from(Span::styled(
-                                format!("  │ {line}"),
-                                Style::default().fg(color),
-                            )));
-                        }
-                    }
-                    lines.push(Line::from(Span::styled(
-                        "  └──────────────",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                ChatMessage::System { text } => {
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            line,
-                            Style::default().fg(Color::Yellow).italic(),
-                        )));
-                    }
-                }
-            }
-            lines.push(Line::from("")); // Spacing
-        }
-
-        // Active streaming
-        if let Some(stream) = &self.active_stream {
-            let display = stream.display_text();
-            if !display.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{}: ", self.model),
-                    Style::default().fg(Color::Cyan).bold(),
-                )]));
-                for line in display.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
-                        Style::default().fg(Color::White),
-                    )));
-                }
-                lines.push(Line::from(Span::styled(
-                    "  ▊",
-                    Style::default().fg(Color::Cyan),
-                )));
-            } else {
-                // Show thinking indicator
-                lines.push(Line::from(Span::styled(
-                    "  ⠋ Thinking...",
-                    Style::default().fg(Color::Cyan),
-                )));
-            }
-        }
-
-        Text::from(lines)
-    }
+    // Rendering methods are in tui/rendering.rs
 }
 
 /// Convert a StatusUpdate to a TuiUpdate.

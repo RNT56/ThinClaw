@@ -1,3 +1,7 @@
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+
+---
+
 # The Principle of Least Privilege: Isolating the LLM
 
 It is very common to feel like the "Agent" is a sentient program running loose on your computer with total access to your private data.

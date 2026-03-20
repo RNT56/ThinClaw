@@ -720,6 +720,13 @@ where
     use futures::StreamExt;
     use rig::streaming::{StreamedAssistantContent, ToolCallDeltaContent};
 
+    // Track tool call indices for ToolCallDelta events. Each distinct tool call
+    // ID gets an incrementing index so the downstream accumulator can separate
+    // parallel tool calls correctly.
+    let mut tc_id_to_index: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut next_tc_index: u32 = 0;
+
     let stream = async_stream::stream! {
         while let Some(chunk_result) = streaming_resp.next().await {
             match chunk_result {
@@ -755,8 +762,20 @@ where
                         ToolCallDeltaContent::Name(n) => (Some(n), None),
                         ToolCallDeltaContent::Delta(d) => (None, Some(d)),
                     };
+                    // Assign a stable index per tool call ID so the downstream
+                    // accumulator can group deltas for parallel tool calls.
+                    let index = if id.is_empty() {
+                        // Empty ID on continuation deltas — use the last assigned index
+                        next_tc_index.saturating_sub(1)
+                    } else {
+                        *tc_id_to_index.entry(id.clone()).or_insert_with(|| {
+                            let idx = next_tc_index;
+                            next_tc_index += 1;
+                            idx
+                        })
+                    };
                     yield Ok(StreamChunk::ToolCallDelta {
-                        index: 0,
+                        index,
                         id,
                         name: name_delta,
                         arguments_delta: args_delta,
