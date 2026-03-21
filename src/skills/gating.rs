@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn test_missing_env_var_fails() {
         let req = GatingRequirements {
-            env: vec!["__IRONCLAW_TEST_NONEXISTENT_VAR__".to_string()],
+            env: vec!["__THINCLAW_TEST_NONEXISTENT_VAR__".to_string()],
             ..Default::default()
         };
         let result = check_requirements_sync(&req);

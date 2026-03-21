@@ -441,7 +441,7 @@ pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
 
     // Check that we have the built-in Google credentials.
     let creds = oauth_defaults::builtin_credentials("gmail_oauth_token").ok_or_else(|| {
-        "Gmail OAuth credentials not available. Rebuild with IRONCLAW_GOOGLE_CLIENT_ID set."
+        "Gmail OAuth credentials not available. Rebuild with THINCLAW_GOOGLE_CLIENT_ID set."
             .to_string()
     })?;
 

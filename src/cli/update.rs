@@ -138,7 +138,7 @@ fn backup_binary_path() -> PathBuf {
 /// Fetch the latest release info from the API.
 async fn fetch_latest_release(channel: &str) -> anyhow::Result<ReleaseInfo> {
     let url =
-        std::env::var("IRONCLAW_RELEASES_URL").unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_string());
+        std::env::var("THINCLAW_RELEASES_URL").unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_string());
 
     let client = reqwest::Client::builder()
         .user_agent(format!("thinclaw/{}", CURRENT_VERSION))

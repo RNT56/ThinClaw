@@ -52,7 +52,7 @@ impl RuntimeBehavior {
             config.skill_path_compaction = val != "0" && !val.eq_ignore_ascii_case("false");
         }
 
-        if let Ok(home) = std::env::var("IRONCLAW_HOME") {
+        if let Ok(home) = std::env::var("THINCLAW_HOME") {
             config.thinclaw_home = PathBuf::from(home);
         }
 

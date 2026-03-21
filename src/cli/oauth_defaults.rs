@@ -19,7 +19,7 @@
 //!
 //! Default credentials are hardcoded below. They can be overridden at:
 //!
-//! - **Compile time**: Set IRONCLAW_GOOGLE_CLIENT_ID / IRONCLAW_GOOGLE_CLIENT_SECRET
+//! - **Compile time**: Set THINCLAW_GOOGLE_CLIENT_ID / THINCLAW_GOOGLE_CLIENT_SECRET
 //!   env vars before building to replace the hardcoded defaults.
 //! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
 //!   env vars, which take priority over built-in defaults.
@@ -38,34 +38,34 @@ pub struct OAuthCredentials {
 
 /// Google OAuth "Desktop App" credentials, shared across all Google tools.
 /// Compile-time env vars override the hardcoded defaults below.
-const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
+const GOOGLE_CLIENT_ID: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_ID") {
     Some(v) => v,
     None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",
 };
-const GOOGLE_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_SECRET") {
+const GOOGLE_CLIENT_SECRET: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_SECRET") {
     Some(v) => v,
     None => "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",
 };
 
 /// GitHub OAuth App credentials.
 /// For "installed app" pattern (non-web), client_secret is semi-public.
-/// Override at compile time with IRONCLAW_GITHUB_CLIENT_ID / IRONCLAW_GITHUB_CLIENT_SECRET.
-const GITHUB_CLIENT_ID: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_ID") {
+/// Override at compile time with THINCLAW_GITHUB_CLIENT_ID / THINCLAW_GITHUB_CLIENT_SECRET.
+const GITHUB_CLIENT_ID: &str = match option_env!("THINCLAW_GITHUB_CLIENT_ID") {
     Some(v) => v,
     None => "Ov23liIronClawGHApp01",
 };
-const GITHUB_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_SECRET") {
+const GITHUB_CLIENT_SECRET: &str = match option_env!("THINCLAW_GITHUB_CLIENT_SECRET") {
     Some(v) => v,
     None => "thinclaw_gh_default_secret_placeholder",
 };
 
 /// Notion Integration credentials.
-/// Override at compile time with IRONCLAW_NOTION_CLIENT_ID / IRONCLAW_NOTION_CLIENT_SECRET.
-const NOTION_CLIENT_ID: &str = match option_env!("IRONCLAW_NOTION_CLIENT_ID") {
+/// Override at compile time with THINCLAW_NOTION_CLIENT_ID / THINCLAW_NOTION_CLIENT_SECRET.
+const NOTION_CLIENT_ID: &str = match option_env!("THINCLAW_NOTION_CLIENT_ID") {
     Some(v) => v,
     None => "thinclaw-notion-integration",
 };
-const NOTION_CLIENT_SECRET: &str = match option_env!("IRONCLAW_NOTION_CLIENT_SECRET") {
+const NOTION_CLIENT_SECRET: &str = match option_env!("THINCLAW_NOTION_CLIENT_SECRET") {
     Some(v) => v,
     None => "thinclaw_notion_default_secret_placeholder",
 };
@@ -142,11 +142,11 @@ pub const OAUTH_CALLBACK_PORT: u16 = 9876;
 
 /// Returns the OAuth callback base URL.
 ///
-/// Checks `IRONCLAW_OAUTH_CALLBACK_URL` env var first (useful for remote/VPS
+/// Checks `THINCLAW_OAUTH_CALLBACK_URL` env var first (useful for remote/VPS
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
 /// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
-    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
+    std::env::var("THINCLAW_OAUTH_CALLBACK_URL")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
@@ -481,11 +481,11 @@ mod tests {
     fn test_callback_host_env_override() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
-        let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        let original_url = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("OAUTH_CALLBACK_HOST", "203.0.113.10");
-            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            std::env::remove_var("THINCLAW_OAUTH_CALLBACK_URL");
         }
         assert_eq!(callback_host(), "203.0.113.10");
         // callback_url() fallback should incorporate the custom host
@@ -499,7 +499,7 @@ mod tests {
                 std::env::remove_var("OAUTH_CALLBACK_HOST");
             }
             if let Some(val) = original_url {
-                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                std::env::set_var("THINCLAW_OAUTH_CALLBACK_URL", val);
             }
         }
     }
@@ -508,11 +508,11 @@ mod tests {
     fn test_callback_url_default() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         // Clear both env vars to test default behavior
-        let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        let original_url = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            std::env::remove_var("THINCLAW_OAUTH_CALLBACK_URL");
             std::env::remove_var("OAUTH_CALLBACK_HOST");
         }
         let url = callback_url();
@@ -520,7 +520,7 @@ mod tests {
         // Restore
         unsafe {
             if let Some(val) = original_url {
-                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                std::env::set_var("THINCLAW_OAUTH_CALLBACK_URL", val);
             }
             if let Some(val) = original_host {
                 std::env::set_var("OAUTH_CALLBACK_HOST", val);
@@ -531,11 +531,11 @@ mod tests {
     #[test]
     fn test_callback_url_env_override() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
-        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        let original = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var(
-                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "THINCLAW_OAUTH_CALLBACK_URL",
                 "https://myserver.example.com:9876",
             );
         }
@@ -544,9 +544,9 @@ mod tests {
         // Restore
         unsafe {
             if let Some(val) = original {
-                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                std::env::set_var("THINCLAW_OAUTH_CALLBACK_URL", val);
             } else {
-                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                std::env::remove_var("THINCLAW_OAUTH_CALLBACK_URL");
             }
         }
     }
