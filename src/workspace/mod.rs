@@ -58,7 +58,10 @@ pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, OllamaEmbeddings, OpenAiEmbeddings};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
-pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+pub use search::{
+    RankedResult, SearchConfig, SearchResult, apply_temporal_decay, expand_query_keywords,
+    mmr_rerank, reciprocal_rank_fusion,
+};
 pub use workspace_core::Workspace;
 
 use std::sync::Arc;
