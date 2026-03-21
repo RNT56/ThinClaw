@@ -1,0 +1,15 @@
+[Unit]
+Description=ThinClaw AI Assistant
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/opt/thinclaw/thinclaw run --no-onboard
+WorkingDirectory=/opt/thinclaw
+Restart=always
+RestartSec=10
+Environment=HOME=/opt/thinclaw
+
+[Install]
+WantedBy=multi-user.target

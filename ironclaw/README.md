@@ -127,10 +127,33 @@ See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
 
 ### Prerequisites
 
-- Rust 1.92+
-- One of:
-  - **PostgreSQL 15+** with [pgvector](https://github.com/pgvector/pgvector) extension
-  - **libSQL** (embedded, zero dependencies) with optional [Turso](https://turso.tech) cloud sync
+**Pre-built binary** (via installer script or Releases page): No prerequisites — the binary is self-contained.
+
+**Compile from source:**
+
+| Prerequisite | Purpose | Install |
+|---|---|---|
+| Xcode CLI Tools (macOS) | C compiler, linker | `xcode-select --install` |
+| build-essential + libssl-dev (Linux) | C compiler, OpenSSL | `sudo apt install build-essential pkg-config libssl-dev` |
+| **Rust 1.92+** | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **wasm32-wasip2 target** | WASM compilation | `rustup target add wasm32-wasip2` |
+| **wasm-tools** | WASM component model | `cargo install wasm-tools --locked` |
+| **cargo-component** | Build WASM extensions | `cargo install cargo-component --locked` |
+| Git | Clone the repo | Pre-installed on macOS; `apt install git` (Linux) |
+
+**One-click setup** (installs all prerequisites automatically):
+
+```bash
+# macOS — full deploy (installs everything, builds, launches):
+./scripts/mac-deploy.sh
+
+# Developer setup (any OS — installs WASM toolchain, runs tests):
+./scripts/dev-setup.sh
+```
+
+**Database** (choose one):
+- **libSQL** (embedded, zero dependencies) — recommended for single-server / Mac Mini
+- **PostgreSQL 15+** with [pgvector](https://github.com/pgvector/pgvector) — production multi-server
 
 ## Download or Build
 
