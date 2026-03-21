@@ -15,7 +15,12 @@
     "capabilities": "google-docs-tool.capabilities.json",
     "crate_name": "google-docs-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/latest/download/google-docs-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",

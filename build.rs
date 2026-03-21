@@ -1,11 +1,20 @@
-//! Build script: compile Telegram channel WASM from source.
+//! Build script: compile WASM extensions and embed registry catalog.
 //!
 //! Do not commit compiled WASM binaries — they are a supply chain risk.
-//! This script builds telegram.wasm from channels-src/telegram before the main crate compiles.
+//!
+//! ## Default behavior
+//! Builds telegram.wasm from channels-src/telegram and embeds the registry
+//! catalog JSON into the binary via `include_str!`.
+//!
+//! ## `bundled-wasm` feature
+//! When compiled with `--features bundled-wasm`, **all** WASM extensions
+//! (10 tools + 4 channels) are built and embedded into the binary via
+//! `include_bytes!`. At install time, they are extracted to
+//! `~/.thinclaw/{tools,channels}/` — zero network dependency.
 //!
 //! Reproducible build:
 //!   cargo build --release
-//! (build.rs invokes the channel build automatically)
+//!   cargo build --release --features bundled-wasm   # air-gapped
 //!
 //! Prerequisites: rustup target add wasm32-wasip2, cargo install wasm-tools
 
@@ -20,7 +29,18 @@ fn main() {
     // ── Embed registry manifests ────────────────────────────────────────
     embed_registry_catalog(&root);
 
-    // ── Build Telegram channel WASM ─────────────────────────────────────
+    // ── Feature: bundled-wasm ───────────────────────────────────────────
+    // Build ALL WASM extensions and generate include_bytes! entries.
+    if env::var("CARGO_FEATURE_BUNDLED_WASM").is_ok() {
+        build_all_wasm_extensions(&root);
+    } else {
+        // Default: only build Telegram channel WASM
+        build_telegram_channel(&root);
+    }
+}
+
+/// Build only the Telegram channel WASM (default build behavior).
+fn build_telegram_channel(root: &Path) {
     let channel_dir = root.join("channels-src/telegram");
     let wasm_out = channel_dir.join("telegram.wasm");
 
@@ -43,7 +63,7 @@ fn main() {
             "--manifest-path",
             channel_dir.join("Cargo.toml").to_str().unwrap(),
         ])
-        .current_dir(&root)
+        .current_dir(root)
         .status()
     {
         Ok(s) => s,
@@ -80,7 +100,7 @@ fn main() {
             "-o",
             wasm_out.to_str().unwrap(),
         ])
-        .current_dir(&root)
+        .current_dir(root)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -100,7 +120,7 @@ fn main() {
                 "-o",
                 stripped.to_str().unwrap(),
             ])
-            .current_dir(&root)
+            .current_dir(root)
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -108,6 +128,201 @@ fn main() {
             let _ = std::fs::rename(&stripped, &wasm_out);
         }
     }
+}
+
+/// Build all WASM extensions and generate `bundled_wasm_entries.rs` for `include_bytes!`.
+///
+/// Reads every manifest from `registry/{tools,channels}/*.json`, builds the
+/// corresponding WASM component, and copies it (plus capabilities JSON) to
+/// `$OUT_DIR/wasm_bundles/`. Then generates a Rust source file that pairs each
+/// extension name with `include_bytes!` references.
+fn build_all_wasm_extensions(root: &Path) {
+    use std::fs;
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let bundles_dir = out_dir.join("wasm_bundles");
+    fs::create_dir_all(&bundles_dir).unwrap();
+
+    // Rerun if any extension source changes
+    println!("cargo:rerun-if-changed=tools-src");
+    println!("cargo:rerun-if-changed=channels-src");
+
+    // Collect all manifests
+    let registry_dir = root.join("registry");
+    let mut entries: Vec<BundleEntry> = Vec::new();
+
+    for (subdir, kind) in &[("tools", "tool"), ("channels", "channel")] {
+        let dir = registry_dir.join(subdir);
+        if !dir.is_dir() {
+            continue;
+        }
+
+        let mut manifest_files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().is_file() && e.path().extension().and_then(|x| x.to_str()) == Some("json")
+            })
+            .collect();
+        manifest_files.sort_by_key(|e| e.file_name());
+
+        for entry in manifest_files {
+            let content = match fs::read_to_string(entry.path()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let manifest: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("cargo:warning=Failed to parse {}: {}", entry.path().display(), e);
+                    continue;
+                }
+            };
+
+            let name = manifest["name"].as_str().unwrap_or("").to_string();
+            let source_dir = manifest["source"]["dir"].as_str().unwrap_or("").to_string();
+            let caps_file = manifest["source"]["capabilities"].as_str().unwrap_or("").to_string();
+            let crate_name = manifest["source"]["crate_name"].as_str().unwrap_or("").to_string();
+
+            if name.is_empty() || source_dir.is_empty() || crate_name.is_empty() {
+                continue;
+            }
+
+            let abs_source_dir = root.join(&source_dir);
+            if !abs_source_dir.is_dir() {
+                eprintln!(
+                    "cargo:warning=bundled-wasm: Source dir '{}' not found for '{}', skipping",
+                    source_dir, name
+                );
+                continue;
+            }
+
+            // Build the WASM component
+            eprintln!("cargo:warning=bundled-wasm: Building {} ({})...", name, kind);
+
+            let build_ok = Command::new("cargo")
+                .args([
+                    "build",
+                    "--release",
+                    "--target",
+                    "wasm32-wasip2",
+                    "--manifest-path",
+                    abs_source_dir.join("Cargo.toml").to_str().unwrap(),
+                ])
+                .current_dir(root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if !build_ok {
+                eprintln!(
+                    "cargo:warning=bundled-wasm: Build failed for '{}', skipping",
+                    name
+                );
+                continue;
+            }
+
+            // Find the built artifact
+            let snake_crate = crate_name.replace('-', "_");
+            let mut wasm_src = None;
+            for triple in &["wasm32-wasip2", "wasm32-wasip1", "wasm32-wasi"] {
+                let candidate = abs_source_dir
+                    .join("target")
+                    .join(triple)
+                    .join("release")
+                    .join(format!("{}.wasm", snake_crate));
+                if candidate.exists() {
+                    wasm_src = Some(candidate);
+                    break;
+                }
+            }
+
+            let wasm_src = match wasm_src {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "cargo:warning=bundled-wasm: No WASM output found for '{}', skipping",
+                        name
+                    );
+                    continue;
+                }
+            };
+
+            // Copy WASM to bundles dir
+            let wasm_dst = bundles_dir.join(format!("{}.wasm", name));
+            if let Err(e) = fs::copy(&wasm_src, &wasm_dst) {
+                eprintln!(
+                    "cargo:warning=bundled-wasm: Failed to copy WASM for '{}': {}",
+                    name, e
+                );
+                continue;
+            }
+
+            // Copy capabilities if present
+            let caps_src = abs_source_dir.join(&caps_file);
+            let has_caps = if caps_src.exists() {
+                let caps_dst = bundles_dir.join(format!("{}.capabilities.json", name));
+                fs::copy(&caps_src, &caps_dst).is_ok()
+            } else {
+                false
+            };
+
+            entries.push(BundleEntry {
+                name,
+                kind: kind.to_string(),
+                has_caps,
+            });
+
+            eprintln!("cargo:warning=bundled-wasm: ✓ {}", entries.last().unwrap().name);
+        }
+    }
+
+    // Generate Rust source: bundled_wasm_entries.rs
+    let mut code = String::new();
+    code.push_str("// Auto-generated by build.rs — do not edit.\n");
+    code.push_str("// Contains include_bytes! entries for all bundled WASM extensions.\n\n");
+    code.push_str("/// Bundled WASM extension entry: (name, kind, wasm_bytes, caps_bytes)\n");
+    code.push_str(
+        "pub const BUNDLED_ENTRIES: &[(&str, &str, &[u8], Option<&[u8]>)] = &[\n",
+    );
+
+    for entry in &entries {
+        let wasm_path = bundles_dir.join(format!("{}.wasm", entry.name));
+        let caps_expr = if entry.has_caps {
+            let caps_path = bundles_dir.join(format!("{}.capabilities.json", entry.name));
+            format!(
+                "Some(include_bytes!({:?}))",
+                caps_path.to_str().unwrap()
+            )
+        } else {
+            "None".to_string()
+        };
+
+        code.push_str(&format!(
+            "    ({name:?}, {kind:?}, include_bytes!({wasm:?}), {caps}),\n",
+            name = entry.name,
+            kind = entry.kind,
+            wasm = wasm_path.to_str().unwrap(),
+            caps = caps_expr,
+        ));
+    }
+
+    code.push_str("];\n");
+
+    let entries_path = out_dir.join("bundled_wasm_entries.rs");
+    fs::write(&entries_path, code).unwrap();
+
+    eprintln!(
+        "cargo:warning=bundled-wasm: Embedded {} extensions into binary",
+        entries.len()
+    );
+}
+
+struct BundleEntry {
+    name: String,
+    kind: String,
+    has_caps: bool,
 }
 
 /// Collect all registry manifests into a single JSON blob at compile time.

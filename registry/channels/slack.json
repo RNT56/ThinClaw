@@ -15,7 +15,12 @@
     "capabilities": "slack.capabilities.json",
     "crate_name": "slack-channel"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/latest/download/slack-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Slack",
