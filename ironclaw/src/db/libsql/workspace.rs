@@ -14,7 +14,7 @@ use crate::db::WorkspaceStore;
 use crate::error::WorkspaceError;
 use crate::workspace::{
     MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
-    reciprocal_rank_fusion,
+    apply_temporal_decay, expand_query_keywords, mmr_rerank, reciprocal_rank_fusion,
 };
 
 use chrono::Utc;
@@ -512,15 +512,25 @@ impl WorkspaceStore for LibSqlBackend {
         let pre_limit = config.pre_fusion_limit as i64;
 
         let fts_results = if config.use_fts {
+            // Expand query with morphological variants for better FTS recall.
+            let keywords = expand_query_keywords(query);
             // Sanitize query for FTS5: quote each word individually so special
             // characters (hyphens, colons, etc.) aren't interpreted as FTS5
             // operators. e.g. "time-sensitive notes" → `"time" "sensitive" "notes"`
-            let sanitized_query: String = query
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .filter(|w| !w.is_empty())
-                .map(|w| format!("\"{}\"", w))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let sanitized_query: String = if keywords.is_empty() {
+                query
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|w| !w.is_empty())
+                    .map(|w| format!("\"{}\"", w))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                keywords
+                    .iter()
+                    .map(|w| format!("\"{}\"", w))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            };
 
             if sanitized_query.is_empty() {
                 Vec::new()
@@ -620,6 +630,35 @@ impl WorkspaceStore for LibSqlBackend {
             );
         }
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        // Collect timestamps from raw results before fusion
+        let mut doc_timestamps = HashMap::new();
+        for r in fts_results.iter().chain(vector_results.iter()) {
+            if let Some(ts) = r.created_at {
+                doc_timestamps.entry(r.document_id).or_insert(ts);
+            }
+        }
+
+        let mut results = reciprocal_rank_fusion(fts_results, vector_results, config);
+
+        // Apply temporal decay if configured.
+        if let Some(half_life) = config.temporal_decay_half_life_days
+            && !doc_timestamps.is_empty()
+        {
+            apply_temporal_decay(&mut results, half_life, &doc_timestamps);
+        }
+
+        // Apply MMR diversity re-ranking if configured.
+        // Note: libsql vector search doesn't return embeddings, so MMR is a no-op
+        // unless embeddings are separately provided. Log a warning.
+        if config.enable_mmr {
+            tracing::debug!(
+                "MMR re-ranking requested but libsql vector search does not return embeddings; \
+                 MMR will have no effect on diversity"
+            );
+            let empty_embeddings = HashMap::new();
+            results = mmr_rerank(results, &empty_embeddings, config.mmr_lambda, config.limit);
+        }
+
+        Ok(results)
     }
 }
