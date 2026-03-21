@@ -8,10 +8,10 @@ use crate::error::ConfigError;
 pub struct SkillsConfig {
     /// Whether the skills system is enabled.
     pub enabled: bool,
-    /// Directory containing user-placed skills (default: ~/.ironclaw/skills/).
+    /// Directory containing user-placed skills (default: ~/.thinclaw/skills/).
     /// Skills here are loaded with `Trusted` trust level.
     pub local_dir: PathBuf,
-    /// Directory containing registry-installed skills (default: ~/.ironclaw/installed_skills/).
+    /// Directory containing registry-installed skills (default: ~/.thinclaw/installed_skills/).
     /// Skills here are loaded with `Installed` trust level and get read-only tool access.
     pub installed_dir: PathBuf,
     /// Maximum number of skills that can be active simultaneously.
@@ -32,19 +32,19 @@ impl Default for SkillsConfig {
     }
 }
 
-/// Get the default user skills directory (~/.ironclaw/skills/).
+/// Get the default user skills directory (~/.thinclaw/skills/).
 fn default_skills_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("skills")
 }
 
-/// Get the default installed skills directory (~/.ironclaw/installed_skills/).
+/// Get the default installed skills directory (~/.thinclaw/installed_skills/).
 fn default_installed_skills_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("installed_skills")
 }
 

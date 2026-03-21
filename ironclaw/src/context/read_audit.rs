@@ -27,8 +27,8 @@ impl Default for ReadAuditConfig {
             enabled: true,
             max_rule_tokens: 500,
             rule_paths: vec![
-                ".ironclaw/rules.md".to_string(),
-                ".ironclaw/workspace-rules.md".to_string(),
+                ".thinclaw/rules.md".to_string(),
+                ".thinclaw/workspace-rules.md".to_string(),
                 "RULES.md".to_string(),
             ],
             include_agent_rules: true,

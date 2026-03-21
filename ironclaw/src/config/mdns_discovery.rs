@@ -1,13 +1,13 @@
 //! Bonjour/mDNS device discovery.
 //!
-//! Enables automatic discovery of IronClaw instances on the local network
+//! Enables automatic discovery of ThinClaw instances on the local network
 //! using mDNS (Bonjour/Avahi) service advertisement and browsing.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// mDNS service type for IronClaw.
-pub const SERVICE_TYPE: &str = "_ironclaw._tcp";
+/// mDNS service type for ThinClaw.
+pub const SERVICE_TYPE: &str = "_thinclaw._tcp";
 
 /// Configuration for mDNS discovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,11 +33,11 @@ impl Default for MdnsConfig {
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "ironclaw".to_string());
+            .unwrap_or_else(|| "thinclaw".to_string());
 
         Self {
             enabled: false,
-            service_name: format!("IronClaw on {}", hostname),
+            service_name: format!("ThinClaw on {}", hostname),
             port: 3000,
             ttl_secs: 120,
             txt_properties: HashMap::new(),
@@ -161,14 +161,14 @@ mod tests {
 
     #[test]
     fn test_service_type() {
-        assert_eq!(SERVICE_TYPE, "_ironclaw._tcp");
+        assert_eq!(SERVICE_TYPE, "_thinclaw._tcp");
     }
 
     #[test]
     fn test_default_config() {
         let config = MdnsConfig::default();
         assert!(!config.enabled);
-        assert!(config.service_name.contains("IronClaw"));
+        assert!(config.service_name.contains("ThinClaw"));
     }
 
     #[test]

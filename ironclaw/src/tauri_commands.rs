@@ -110,7 +110,7 @@ pub fn clawhub_prepare_install(
         Some(entry) => {
             let install_dir = dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".ironclaw")
+                .join(".thinclaw")
                 .join("tools")
                 .join(&entry.name);
 
@@ -652,7 +652,7 @@ pub struct RoutineCreateParams {
     #[serde(default)]
     pub notify: Option<NotifyConfig>,
     /// Optional directory to write the routine file.
-    /// Defaults to `~/.ironclaw/routines/`.
+    /// Defaults to `~/.thinclaw/routines/`.
     pub routines_dir: Option<std::path::PathBuf>,
 }
 
@@ -689,7 +689,7 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     let dir = params.routines_dir.unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".thinclaw")
             .join("routines")
     });
 

@@ -61,7 +61,7 @@ pub struct WebChatConfig {
     pub theme: WebChatTheme,
     /// Custom accent color for the web UI (hex, e.g. "#22c55e").
     pub accent_color: Option<String>,
-    /// Whether to show the "Powered by IronClaw" badge.
+    /// Whether to show the "Powered by ThinClaw" badge.
     pub show_branding: bool,
 }
 

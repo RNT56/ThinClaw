@@ -5,7 +5,7 @@
 //! as JSON and loaded on startup.
 //!
 //! ```text
-//! ~/.ironclaw/plugins.json
+//! ~/.thinclaw/plugins.json
 //! ┌──────────────────────────────────────────┐
 //! │ {                                        │
 //! │   "version": 1,                          │

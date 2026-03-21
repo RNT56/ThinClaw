@@ -162,9 +162,9 @@ pub struct InstallOutcome {
 pub struct RegistryInstaller {
     /// Root of the repo (parent of `registry/`), used to resolve `source.dir`.
     repo_root: PathBuf,
-    /// Directory for installed tools (`~/.ironclaw/tools/`).
+    /// Directory for installed tools (`~/.thinclaw/tools/`).
     tools_dir: PathBuf,
-    /// Directory for installed channels (`~/.ironclaw/channels/`).
+    /// Directory for installed channels (`~/.thinclaw/channels/`).
     channels_dir: PathBuf,
 }
 
@@ -182,8 +182,8 @@ impl RegistryInstaller {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self {
             repo_root,
-            tools_dir: home.join(".ironclaw").join("tools"),
-            channels_dir: home.join(".ironclaw").join("channels"),
+            tools_dir: home.join(".thinclaw").join("tools"),
+            channels_dir: home.join(".thinclaw").join("channels"),
         }
     }
 
@@ -781,8 +781,8 @@ mod tests {
     fn test_installer_creation() {
         let installer = RegistryInstaller::new(
             PathBuf::from("/repo"),
-            PathBuf::from("/home/.ironclaw/tools"),
-            PathBuf::from("/home/.ironclaw/channels"),
+            PathBuf::from("/home/.thinclaw/tools"),
+            PathBuf::from("/home/.thinclaw/channels"),
         );
         assert_eq!(installer.repo_root, PathBuf::from("/repo"));
     }

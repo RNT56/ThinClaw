@@ -4,7 +4,7 @@
 //! are stored by content hash (SHA-256) in a configurable cache directory.
 //!
 //! Configuration via env vars:
-//! - `MEDIA_CACHE_DIR` — cache directory (default: `$HOME/.ironclaw/media_cache`)
+//! - `MEDIA_CACHE_DIR` — cache directory (default: `$HOME/.thinclaw/media_cache`)
 //! - `MEDIA_CACHE_TTL_HOURS` — time-to-live in hours (default: 24)
 //! - `MEDIA_CACHE_MAX_MB` — maximum total cache size in MB (default: 500)
 
@@ -29,7 +29,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         let cache_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".thinclaw")
             .join("media_cache");
 
         Self {

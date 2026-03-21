@@ -158,9 +158,9 @@ impl TailscaleDiscovery {
             let is_orchestrator = peer
                 .tags
                 .as_ref()
-                .map(|tags| tags.iter().any(|t| t.contains("ironclaw")))
+                .map(|tags| tags.iter().any(|t| t.contains("thinclaw")))
                 .unwrap_or(false)
-                || hostname.contains("ironclaw")
+                || hostname.contains("thinclaw")
                 || hostname.contains("molty");
 
             if !is_orchestrator {

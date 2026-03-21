@@ -35,7 +35,7 @@ pub enum LanceMetric {
 impl Default for LanceDbConfig {
     fn default() -> Self {
         Self {
-            uri: "~/.ironclaw/lancedb".to_string(),
+            uri: "~/.thinclaw/lancedb".to_string(),
             table_name: "embeddings".to_string(),
             dimensions: 1536,
             num_sub_vectors: None,

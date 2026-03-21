@@ -264,7 +264,7 @@ impl ToolRegistry {
         // Browser tool with user-local profile dir
         let browser_profile = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("ironclaw")
+            .join("thinclaw")
             .join("browser-profile");
         self.register_sync(Arc::new(BrowserTool::new(browser_profile)));
 

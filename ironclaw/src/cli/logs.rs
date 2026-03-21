@@ -15,7 +15,7 @@ use clap::Subcommand;
 fn default_log_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("logs")
 }
 

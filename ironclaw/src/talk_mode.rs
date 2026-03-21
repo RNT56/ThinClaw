@@ -191,7 +191,7 @@ impl TalkModeRuntime {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".ironclaw/audio/recording_{ts}.{ext}"));
+            .join(format!(".thinclaw/audio/recording_{ts}.{ext}"));
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -577,7 +577,7 @@ impl Tool for TalkModeTool {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".ironclaw/audio/recording_{ts}.wav"));
+            .join(format!(".thinclaw/audio/recording_{ts}.wav"));
 
         // Record audio
         record_audio(&path, duration, 16000).await?;

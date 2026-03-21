@@ -34,10 +34,17 @@ use crate::setup::prompts::{
     print_success, secret_input, select_many, select_one,
 };
 
-// unused const, keep commented for clarity / future use
+// Channel selection indices — must match the order in step_channels() options vec.
 // const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
+const CHANNEL_INDEX_DISCORD: usize = 3;
+const CHANNEL_INDEX_SLACK: usize = 4;
+const CHANNEL_INDEX_NOSTR: usize = 5;
+const CHANNEL_INDEX_GMAIL: usize = 6;
+#[cfg(target_os = "macos")]
+const CHANNEL_INDEX_IMESSAGE: usize = 7;
+// WASM channels start after the native channels (dynamically computed as `native_count`)
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +83,7 @@ pub struct SetupConfig {
     pub channels_only: bool,
 }
 
-/// Interactive setup wizard for IronClaw.
+/// Interactive setup wizard for ThinClaw.
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
@@ -129,7 +136,7 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
-        print_header("IronClaw Setup Wizard");
+        print_header("ThinClaw Setup Wizard");
 
         if self.config.channels_only {
             // Channels-only mode: reconnect to existing DB and load settings
@@ -138,7 +145,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 9;
+            let total_steps = 16;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -161,41 +168,76 @@ impl SetupWizard {
             self.step_security().await?;
             self.persist_after_step().await;
 
-            // Step 3: Inference provider selection (unless skipped)
+            // Step 3: Agent Identity
+            print_step(3, total_steps, "Agent Identity");
+            self.step_agent_identity()?;
+            self.persist_after_step().await;
+
+            // Step 4: Inference provider selection (unless skipped)
             if !self.config.skip_auth {
-                print_step(3, total_steps, "Inference Provider");
+                print_step(4, total_steps, "Inference Provider");
                 self.step_inference_provider().await?;
             } else {
                 print_info("Skipping inference provider setup (using existing config)");
             }
             self.persist_after_step().await;
 
-            // Step 4: Model selection
-            print_step(4, total_steps, "Model Selection");
+            // Step 5: Model selection
+            print_step(5, total_steps, "Model Selection");
             self.step_model_selection().await?;
             self.persist_after_step().await;
 
-            // Step 5: Embeddings
-            print_step(5, total_steps, "Embeddings (Semantic Search)");
+            // Step 6: Embeddings
+            print_step(6, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
             self.persist_after_step().await;
 
-            // Step 6: Channel configuration
-            print_step(6, total_steps, "Channel Configuration");
+            // Step 7: Channel configuration
+            print_step(7, total_steps, "Channel Configuration");
             self.step_channels().await?;
             self.persist_after_step().await;
 
-            // Step 7: Extensions (tools)
-            print_step(7, total_steps, "Extensions");
+            // Step 8: Extensions (tools)
+            print_step(8, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Docker Sandbox
-            print_step(8, total_steps, "Docker Sandbox");
+            // Step 9: Docker Sandbox
+            print_step(9, total_steps, "Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 9: Heartbeat
-            print_step(9, total_steps, "Background Tasks");
+            // Step 10: Routines
+            print_step(10, total_steps, "Routines (Scheduled Tasks)");
+            self.step_routines()?;
+            self.persist_after_step().await;
+
+            // Step 11: Skills
+            print_step(11, total_steps, "Skills");
+            self.step_skills()?;
+            self.persist_after_step().await;
+
+            // Step 12: Claude Code
+            print_step(12, total_steps, "Claude Code Sandbox");
+            self.step_claude_code()?;
+            self.persist_after_step().await;
+
+            // Step 13: Smart Routing
+            print_step(13, total_steps, "Smart Routing");
+            self.step_smart_routing()?;
+            self.persist_after_step().await;
+
+            // Step 14: Web UI
+            print_step(14, total_steps, "Web UI");
+            self.step_web_ui()?;
+            self.persist_after_step().await;
+
+            // Step 15: Observability
+            print_step(15, total_steps, "Observability");
+            self.step_observability()?;
+            self.persist_after_step().await;
+
+            // Step 16: Heartbeat
+            print_step(16, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
         }
@@ -231,7 +273,7 @@ impl SetupWizard {
 
         #[allow(unreachable_code)]
         Err(SetupError::Database(
-            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
+            "No database configured. Run full setup first (thinclaw onboard).".to_string(),
         ))
     }
 
@@ -240,7 +282,7 @@ impl SetupWizard {
     async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
         let url = std::env::var("DATABASE_URL").map_err(|_| {
             SetupError::Database(
-                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
+                "DATABASE_URL not set. Run full setup first (thinclaw onboard).".to_string(),
             )
         })?;
 
@@ -472,7 +514,7 @@ impl SetupWizard {
         }
 
         println!();
-        print_info("IronClaw uses an embedded SQLite database (libSQL).");
+        print_info("ThinClaw uses an embedded SQLite database (libSQL).");
         print_info("No external database server required.");
         println!();
 
@@ -1314,7 +1356,7 @@ impl SetupWizard {
         // Discover available WASM channels
         let channels_dir = dirs::home_dir()
             .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/channels");
+            .join(".thinclaw/channels");
 
         let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> = discovered_channels
@@ -1325,7 +1367,7 @@ impl SetupWizard {
         // Build channel list from registry (if available) + bundled + discovered
         let wasm_channel_names = build_channel_options(&discovered_channels);
 
-        // Build options list dynamically
+        // Build options list dynamically: native channels first, then WASM
         let mut options: Vec<(String, bool)> = vec![
             ("CLI/TUI (always enabled)".to_string(), true),
             (
@@ -1333,9 +1375,16 @@ impl SetupWizard {
                 self.settings.channels.http_enabled,
             ),
             ("Signal".to_string(), self.settings.channels.signal_enabled),
+            ("Discord".to_string(), self.settings.channels.discord_enabled),
+            ("Slack".to_string(), self.settings.channels.slack_enabled),
+            ("Nostr".to_string(), self.settings.channels.nostr_enabled),
+            ("Gmail".to_string(), self.settings.channels.gmail_enabled),
         ];
 
-        let non_wasm_count = options.len();
+        #[cfg(target_os = "macos")]
+        options.push(("iMessage".to_string(), self.settings.channels.imessage_enabled));
+
+        let native_count = options.len();
 
         // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
@@ -1358,7 +1407,7 @@ impl SetupWizard {
             .iter()
             .enumerate()
             .filter_map(|(idx, name)| {
-                if selected.contains(&(non_wasm_count + idx)) {
+                if selected.contains(&(native_count + idx)) {
                     Some(name.clone())
                 } else {
                     None
@@ -1406,8 +1455,10 @@ impl SetupWizard {
         }
 
         // Determine if we need secrets context
-        let needs_secrets =
-            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
+        let needs_secrets = selected.contains(&CHANNEL_INDEX_HTTP)
+            || selected.contains(&CHANNEL_INDEX_DISCORD)
+            || selected.contains(&CHANNEL_INDEX_SLACK)
+            || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -1458,6 +1509,236 @@ impl SetupWizard {
             self.settings.channels.signal_dm_policy = None;
             self.settings.channels.signal_group_policy = None;
             self.settings.channels.signal_group_allow_from = None;
+        }
+
+        // Discord channel
+        if selected.contains(&CHANNEL_INDEX_DISCORD) {
+            println!();
+            print_info("Discord requires a Bot Token from https://discord.com/developers/applications");
+            println!();
+
+            let token = if let Some(existing) = std::env::var("DISCORD_BOT_TOKEN").ok().filter(|s| !s.is_empty()) {
+                let masked = mask_api_key(&existing);
+                if confirm(&format!("Use existing DISCORD_BOT_TOKEN ({})?", masked), true)
+                    .map_err(SetupError::Io)?
+                {
+                    existing
+                } else {
+                    secret_input("Discord bot token").map_err(SetupError::Io)?.expose_secret().to_string()
+                }
+            } else {
+                secret_input("Discord bot token").map_err(SetupError::Io)?.expose_secret().to_string()
+            };
+
+            // Store via secrets if available
+            if let Some(ref ctx) = secrets {
+                if let Err(e) = ctx
+                    .save_secret("discord_bot_token", &secrecy::SecretString::from(token.clone()))
+                    .await
+                {
+                    print_info(&format!("Could not store token in secrets: {}", e));
+                }
+            }
+            self.settings.channels.discord_bot_token = Some(token);
+
+            let guild_id = optional_input("Guild ID (restrict to single server, blank = all)", None)
+                .map_err(SetupError::Io)?;
+            if let Some(ref gid) = guild_id {
+                if !gid.is_empty() {
+                    self.settings.channels.discord_guild_id = Some(gid.clone());
+                }
+            }
+
+            let allow_from = optional_input(
+                "Allowed channel IDs (comma-separated, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from {
+                if !af.is_empty() {
+                    self.settings.channels.discord_allow_from = Some(af.clone());
+                }
+            }
+
+            self.settings.channels.discord_enabled = true;
+            print_success("Discord channel configured");
+        } else {
+            self.settings.channels.discord_enabled = false;
+        }
+
+        // Slack channel
+        if selected.contains(&CHANNEL_INDEX_SLACK) {
+            println!();
+            print_info("Slack requires both a Bot Token (xoxb-...) and an App-Level Token (xapp-...)");
+            print_info("Create these at https://api.slack.com/apps");
+            println!();
+
+            let bot_token = if let Some(existing) = std::env::var("SLACK_BOT_TOKEN").ok().filter(|s| !s.is_empty()) {
+                let masked = mask_api_key(&existing);
+                if confirm(&format!("Use existing SLACK_BOT_TOKEN ({})?", masked), true)
+                    .map_err(SetupError::Io)?
+                {
+                    existing
+                } else {
+                    secret_input("Slack bot token (xoxb-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                }
+            } else {
+                secret_input("Slack bot token (xoxb-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+            };
+
+            let app_token = if let Some(existing) = std::env::var("SLACK_APP_TOKEN").ok().filter(|s| !s.is_empty()) {
+                let masked = mask_api_key(&existing);
+                if confirm(&format!("Use existing SLACK_APP_TOKEN ({})?", masked), true)
+                    .map_err(SetupError::Io)?
+                {
+                    existing
+                } else {
+                    secret_input("Slack app-level token (xapp-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                }
+            } else {
+                secret_input("Slack app-level token (xapp-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+            };
+
+            // Store via secrets if available
+            if let Some(ref ctx) = secrets {
+                if let Err(e) = ctx
+                    .save_secret("slack_bot_token", &secrecy::SecretString::from(bot_token.clone()))
+                    .await
+                {
+                    print_info(&format!("Could not store bot token in secrets: {}", e));
+                }
+                if let Err(e) = ctx
+                    .save_secret("slack_app_token", &secrecy::SecretString::from(app_token.clone()))
+                    .await
+                {
+                    print_info(&format!("Could not store app token in secrets: {}", e));
+                }
+            }
+            self.settings.channels.slack_bot_token = Some(bot_token);
+            self.settings.channels.slack_app_token = Some(app_token);
+
+            let allow_from = optional_input(
+                "Allowed Slack channel/DM IDs (comma-separated, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from {
+                if !af.is_empty() {
+                    self.settings.channels.slack_allow_from = Some(af.clone());
+                }
+            }
+
+            self.settings.channels.slack_enabled = true;
+            print_success("Slack channel configured");
+        } else {
+            self.settings.channels.slack_enabled = false;
+        }
+
+        // Nostr channel
+        if selected.contains(&CHANNEL_INDEX_NOSTR) {
+            println!();
+            print_info("Nostr connects to relay servers to receive and send messages.");
+            println!();
+
+            let default_relays = "wss://relay.damus.io,wss://nos.lol";
+            let relays = optional_input(
+                "Relay URLs (comma-separated)",
+                Some(default_relays),
+            )
+            .map_err(SetupError::Io)?;
+            let relay_str = relays
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| default_relays.to_string());
+            self.settings.channels.nostr_relays = Some(relay_str);
+
+            let allow_from = optional_input(
+                "Allowed public keys (comma-separated hex/npub, '*' = all, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from {
+                if !af.is_empty() {
+                    self.settings.channels.nostr_allow_from = Some(af.clone());
+                }
+            }
+
+            self.settings.channels.nostr_enabled = true;
+            print_success("Nostr channel configured");
+            print_info("Set NOSTR_SECRET_KEY env var with your nsec/hex private key before starting.");
+        } else {
+            self.settings.channels.nostr_enabled = false;
+        }
+
+        // Gmail channel
+        if selected.contains(&CHANNEL_INDEX_GMAIL) {
+            println!();
+            print_info("Gmail requires GCP project with Pub/Sub and Gmail API enabled.");
+            print_info("Follow: https://developers.google.com/gmail/api/guides/push");
+            println!();
+
+            let project_id = input("GCP project ID").map_err(SetupError::Io)?;
+            self.settings.channels.gmail_project_id = Some(project_id);
+
+            let sub_id = input("Pub/Sub subscription ID").map_err(SetupError::Io)?;
+            self.settings.channels.gmail_subscription_id = Some(sub_id);
+
+            let topic_id = input("Pub/Sub topic ID").map_err(SetupError::Io)?;
+            self.settings.channels.gmail_topic_id = Some(topic_id);
+
+            let allowed_senders = optional_input(
+                "Allowed sender emails (comma-separated, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref senders) = allowed_senders {
+                if !senders.is_empty() {
+                    self.settings.channels.gmail_allowed_senders = Some(senders.clone());
+                }
+            }
+
+            self.settings.channels.gmail_enabled = true;
+            print_success("Gmail channel configured");
+            print_info("Run `thinclaw auth gmail` to complete OAuth2 authentication before starting.");
+        } else {
+            self.settings.channels.gmail_enabled = false;
+        }
+
+        // iMessage channel (macOS only)
+        #[cfg(target_os = "macos")]
+        if selected.contains(&CHANNEL_INDEX_IMESSAGE) {
+            println!();
+            print_info("iMessage uses the native macOS Messages database.");
+            print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
+            println!();
+
+            let allow_from = optional_input(
+                "Allowed contacts (comma-separated phone/email, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from {
+                if !af.is_empty() {
+                    self.settings.channels.imessage_allow_from = Some(af.clone());
+                }
+            }
+
+            let poll_interval = optional_input(
+                "Polling interval in seconds",
+                Some("5"),
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref pi) = poll_interval {
+                if let Ok(n) = pi.parse::<u64>() {
+                    self.settings.channels.imessage_poll_interval = Some(n);
+                }
+            }
+
+            self.settings.channels.imessage_enabled = true;
+            print_success("iMessage channel configured");
+        }
+        #[cfg(target_os = "macos")]
+        if !selected.contains(&CHANNEL_INDEX_IMESSAGE) {
+            self.settings.channels.imessage_enabled = false;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -1516,13 +1797,13 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 7: Extensions (tools) installation from registry.
+    /// Step 8: Extensions (tools) installation from registry.
     async fn step_extensions(&mut self) -> Result<(), SetupError> {
         let catalog = match load_registry_catalog() {
             Some(c) => c,
             None => {
                 print_info("Extension registry not found. Skipping tool installation.");
-                print_info("Install tools manually with: ironclaw tool install <path>");
+                print_info("Install tools manually with: thinclaw tool install <path>");
                 return Ok(());
             }
         };
@@ -1540,13 +1821,13 @@ impl SetupWizard {
 
         print_info("Available tools from the extension registry:");
         print_info("Select which tools to install. You can install more later with:");
-        print_info("  ironclaw registry install <name>");
+        print_info("  thinclaw registry install <name>");
         println!();
 
         // Check which tools are already installed
         let tools_dir = dirs::home_dir()
             .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/tools");
+            .join(".thinclaw/tools");
 
         let installed_tools = discover_installed_tools(&tools_dir).await;
 
@@ -1588,7 +1869,7 @@ impl SetupWizard {
             tools_dir.clone(),
             dirs::home_dir()
                 .unwrap_or_default()
-                .join(".ironclaw/channels"),
+                .join(".thinclaw/channels"),
         );
 
         let mut installed_count = 0;
@@ -1615,7 +1896,7 @@ impl SetupWizard {
                     {
                         let provider = auth.provider.as_deref().unwrap_or(&tool.name);
                         // Only mention unique providers (Google tools share auth)
-                        let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                        let hint = format!("  {} - thinclaw tool auth {}", provider, tool.name);
                         if !auth_needed
                             .iter()
                             .any(|h| h.starts_with(&format!("  {} -", provider)))
@@ -1646,9 +1927,9 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    /// Step 9: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
+        print_info("ThinClaw can execute code, run builds, and use tools inside Docker");
         print_info("containers. This keeps your system safe -- commands from the LLM run");
         print_info("in an isolated sandbox with no access to your credentials, limited");
         print_info("filesystem access, and network traffic restricted to an allowlist.");
@@ -1724,7 +2005,261 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 9: Heartbeat configuration.
+    /// Step 3: Agent identity (name).
+    fn step_agent_identity(&mut self) -> Result<(), SetupError> {
+        print_info("Give your ThinClaw agent a name. This is used in greetings,");
+        print_info("the boot screen, and session metadata.");
+        println!();
+
+        let current = &self.settings.agent.name;
+        let default_label = format!("current: {}", current);
+        let name = optional_input("Agent name", Some(&default_label))
+            .map_err(SetupError::Io)?;
+
+        if let Some(n) = name {
+            if !n.is_empty() {
+                self.settings.agent.name = n.clone();
+                print_success(&format!("Agent name set to '{}'", n));
+            } else {
+                print_success(&format!("Keeping '{}'", current));
+            }
+        } else {
+            print_success(&format!("Keeping '{}'", current));
+        }
+
+        Ok(())
+    }
+
+    /// Step 10: Routines (scheduled tasks).
+    fn step_routines(&mut self) -> Result<(), SetupError> {
+        print_info("Routines let ThinClaw execute scheduled tasks automatically.");
+        print_info("Examples: periodic file backups, daily summaries, cron-style jobs.");
+        println!();
+
+        if !confirm("Enable routines?", true).map_err(SetupError::Io)? {
+            self.settings.routines_enabled = false;
+            print_info("Routines disabled. Enable later with ROUTINES_ENABLED=true.");
+            return Ok(());
+        }
+
+        self.settings.routines_enabled = true;
+        print_success("Routines enabled");
+        Ok(())
+    }
+
+    /// Step 11: Skills.
+    fn step_skills(&mut self) -> Result<(), SetupError> {
+        print_info("Skills are composable capability plugins that give ThinClaw");
+        print_info("domain-specific knowledge (e.g., coding standards, deployment");
+        print_info("procedures). They are loaded from ~/.thinclaw/skills/.");
+        println!();
+
+        if !confirm("Enable skills system?", true).map_err(SetupError::Io)? {
+            self.settings.skills_enabled = false;
+            print_info("Skills disabled. Enable later with SKILLS_ENABLED=true.");
+            return Ok(());
+        }
+
+        self.settings.skills_enabled = true;
+        print_success("Skills system enabled");
+        Ok(())
+    }
+
+    /// Step 12: Claude Code sandbox.
+    fn step_claude_code(&mut self) -> Result<(), SetupError> {
+        // Claude Code requires the Docker sandbox to be enabled
+        if !self.settings.sandbox.enabled {
+            print_info("Claude Code requires Docker sandbox (disabled in step 9).");
+            print_info("Skipping Claude Code configuration.");
+            self.settings.claude_code_enabled = false;
+            return Ok(());
+        }
+
+        print_info("Claude Code sandbox allows ThinClaw to delegate complex coding");
+        print_info("tasks to Anthropic's Claude Code CLI running inside a Docker container.");
+        print_info("Requires an Anthropic API key or Claude Code OAuth session.");
+        println!();
+
+        if !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)? {
+            self.settings.claude_code_enabled = false;
+            print_info("Claude Code disabled. Enable later with CLAUDE_CODE_ENABLED=true.");
+            return Ok(());
+        }
+
+        self.settings.claude_code_enabled = true;
+
+        // Model
+        let model = optional_input(
+            "Claude Code model",
+            Some("default: sonnet"),
+        )
+        .map_err(SetupError::Io)?;
+        if let Some(m) = model {
+            if !m.is_empty() {
+                self.settings.claude_code_model = Some(m);
+            }
+        }
+
+        // Max turns
+        let turns = optional_input(
+            "Max agentic turns",
+            Some("default: 50"),
+        )
+        .map_err(SetupError::Io)?;
+        if let Some(t) = turns {
+            if let Ok(n) = t.parse::<u32>() {
+                self.settings.claude_code_max_turns = Some(n);
+            }
+        }
+
+        let model_display = self.settings.claude_code_model.as_deref().unwrap_or("sonnet");
+        let turns_display = self.settings.claude_code_max_turns.unwrap_or(50);
+        print_success(&format!(
+            "Claude Code enabled (model: {}, max turns: {})",
+            model_display, turns_display
+        ));
+
+        Ok(())
+    }
+
+    /// Step 13: Smart Routing configuration.
+    ///
+    /// Allows setting a cheap/fast model for lightweight tasks like
+    /// routing decisions, heartbeat checks, and prompt evaluation.
+    fn step_smart_routing(&mut self) -> Result<(), SetupError> {
+        print_info("Smart Routing can use a cheaper/faster model for lightweight tasks");
+        print_info("(e.g., routing decisions, heartbeat checks, prompt evaluation).");
+        print_info("The primary model is still used for complex conversations.");
+        println!();
+
+        if !confirm("Configure a cheap model for smart routing?", false)
+            .map_err(SetupError::Io)?
+        {
+            print_info("Smart routing disabled — all tasks use the primary model.");
+            return Ok(());
+        }
+
+        println!();
+        print_info("Format: provider/model (e.g., \"groq/llama-3.1-8b-instant\",");
+        print_info("\"openai/gpt-4o-mini\", \"anthropic/claude-3-5-haiku-20241022\")");
+
+        let current = self.settings.providers.cheap_model.as_deref().unwrap_or("");
+        let cheap_model = if current.is_empty() {
+            input("Cheap model").map_err(SetupError::Io)?
+        } else {
+            let keep = confirm(
+                &format!("Keep current cheap model ({})?", current),
+                true,
+            )
+            .map_err(SetupError::Io)?;
+            if keep {
+                current.to_string()
+            } else {
+                input("Cheap model").map_err(SetupError::Io)?
+            }
+        };
+
+        if !cheap_model.is_empty() {
+            self.settings.providers.cheap_model = Some(cheap_model.clone());
+            print_success(&format!("Smart routing enabled — cheap model: {}", cheap_model));
+        } else {
+            print_info("No cheap model set — smart routing disabled.");
+        }
+
+        Ok(())
+    }
+
+    /// Step 14: Web UI (WebChat) configuration.
+    ///
+    /// Configures the gateway dashboard appearance: theme, accent color,
+    /// and branding badge visibility.
+    fn step_web_ui(&mut self) -> Result<(), SetupError> {
+        print_info("ThinClaw includes a web dashboard (gateway UI) for chat and monitoring.");
+        print_info("You can customize its appearance here.");
+        println!();
+
+        if !confirm("Customize web UI appearance?", false).map_err(SetupError::Io)? {
+            print_info("Using defaults (system theme, default accent color, branding shown).");
+            return Ok(());
+        }
+
+        println!();
+
+        // Theme selection
+        let theme_options: &[&str] = &[
+            "System (follow OS preference)",
+            "Light",
+            "Dark",
+        ];
+        let theme_idx = select_one("Theme", theme_options).map_err(SetupError::Io)?;
+        let theme = match theme_idx {
+            1 => "light",
+            2 => "dark",
+            _ => "system",
+        };
+        self.settings.webchat_theme = theme.to_string();
+
+        // Accent color
+        let accent = optional_input(
+            "Accent color (hex, e.g. #22c55e)",
+            Some("leave blank for default"),
+        )
+        .map_err(SetupError::Io)?;
+        if let Some(ref color) = accent {
+            if !color.is_empty() {
+                self.settings.webchat_accent_color = Some(color.clone());
+            }
+        }
+
+        // Branding badge
+        let show_branding = confirm(
+            "Show \"Powered by ThinClaw\" badge?",
+            true,
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.webchat_show_branding = show_branding;
+
+        let accent_display = self
+            .settings
+            .webchat_accent_color
+            .as_deref()
+            .unwrap_or("default");
+        print_success(&format!(
+            "Web UI configured (theme: {}, accent: {}, branding: {})",
+            theme, accent_display, if show_branding { "shown" } else { "hidden" }
+        ));
+
+        Ok(())
+    }
+
+    /// Step 15: Observability configuration.
+    ///
+    /// Selects the event and metric recording backend.
+    fn step_observability(&mut self) -> Result<(), SetupError> {
+        print_info("Observability records events and metrics for debugging and monitoring.");
+        println!();
+
+        let options: &[&str] = &[
+            "None (no overhead, default)",
+            "Log (structured events via tracing)",
+        ];
+        let idx = select_one("Observability backend", options).map_err(SetupError::Io)?;
+        let backend = match idx {
+            1 => "log",
+            _ => "none",
+        };
+        self.settings.observability_backend = backend.to_string();
+
+        if backend == "log" {
+            print_success("Observability enabled — events will be emitted via tracing.");
+        } else {
+            print_info("Observability disabled — zero overhead mode.");
+        }
+
+        Ok(())
+    }
+
+    /// Step 16: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -1810,7 +2345,7 @@ impl SetupWizard {
         Ok(saved)
     }
 
-    /// Write bootstrap environment variables to `~/.ironclaw/.env`.
+    /// Write bootstrap environment variables to `~/.thinclaw/.env`.
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
@@ -1873,6 +2408,102 @@ impl SetupWizard {
             && !group_allow_from.is_empty()
         {
             env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
+        }
+
+        // Discord channel env vars
+        if self.settings.channels.discord_enabled {
+            env_vars.push(("DISCORD_ENABLED", "true".to_string()));
+        }
+        if let Some(ref token) = self.settings.channels.discord_bot_token {
+            env_vars.push(("DISCORD_BOT_TOKEN", token.clone()));
+        }
+        if let Some(ref guild_id) = self.settings.channels.discord_guild_id {
+            env_vars.push(("DISCORD_GUILD_ID", guild_id.clone()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.discord_allow_from {
+            env_vars.push(("DISCORD_ALLOW_FROM", allow_from.clone()));
+        }
+
+        // Slack channel env vars
+        if self.settings.channels.slack_enabled {
+            env_vars.push(("SLACK_ENABLED", "true".to_string()));
+        }
+        if let Some(ref token) = self.settings.channels.slack_bot_token {
+            env_vars.push(("SLACK_BOT_TOKEN", token.clone()));
+        }
+        if let Some(ref token) = self.settings.channels.slack_app_token {
+            env_vars.push(("SLACK_APP_TOKEN", token.clone()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.slack_allow_from {
+            env_vars.push(("SLACK_ALLOW_FROM", allow_from.clone()));
+        }
+
+        // Nostr channel env vars
+        if self.settings.channels.nostr_enabled {
+            env_vars.push(("NOSTR_ENABLED", "true".to_string()));
+        }
+        if let Some(ref relays) = self.settings.channels.nostr_relays {
+            env_vars.push(("NOSTR_RELAYS", relays.clone()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.nostr_allow_from {
+            env_vars.push(("NOSTR_ALLOW_FROM", allow_from.clone()));
+        }
+
+        // Gmail channel env vars
+        if self.settings.channels.gmail_enabled {
+            env_vars.push(("GMAIL_ENABLED", "true".to_string()));
+        }
+        if let Some(ref project_id) = self.settings.channels.gmail_project_id {
+            env_vars.push(("GMAIL_PROJECT_ID", project_id.clone()));
+        }
+        if let Some(ref sub_id) = self.settings.channels.gmail_subscription_id {
+            env_vars.push(("GMAIL_SUBSCRIPTION_ID", sub_id.clone()));
+        }
+        if let Some(ref topic_id) = self.settings.channels.gmail_topic_id {
+            env_vars.push(("GMAIL_TOPIC_ID", topic_id.clone()));
+        }
+        if let Some(ref senders) = self.settings.channels.gmail_allowed_senders {
+            env_vars.push(("GMAIL_ALLOWED_SENDERS", senders.clone()));
+        }
+
+        // iMessage channel env vars
+        if self.settings.channels.imessage_enabled {
+            env_vars.push(("IMESSAGE_ENABLED", "true".to_string()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.imessage_allow_from {
+            env_vars.push(("IMESSAGE_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(ref interval) = self.settings.channels.imessage_poll_interval {
+            env_vars.push(("IMESSAGE_POLL_INTERVAL", interval.to_string()));
+        }
+
+        // Web Gateway env vars
+        if let Some(ref port) = self.settings.channels.gateway_port {
+            env_vars.push(("GATEWAY_PORT", port.to_string()));
+        }
+        if let Some(ref token) = self.settings.channels.gateway_auth_token {
+            env_vars.push(("GATEWAY_AUTH_TOKEN", token.clone()));
+        }
+
+        // Smart Routing env vars
+        if let Some(ref model) = self.settings.providers.cheap_model {
+            env_vars.push(("CHEAP_MODEL", model.clone()));
+        }
+
+        // Web UI env vars
+        if self.settings.webchat_theme != "system" {
+            env_vars.push(("WEBCHAT_THEME", self.settings.webchat_theme.clone()));
+        }
+        if let Some(ref color) = self.settings.webchat_accent_color {
+            env_vars.push(("WEBCHAT_ACCENT_COLOR", color.clone()));
+        }
+        if !self.settings.webchat_show_branding {
+            env_vars.push(("WEBCHAT_SHOW_BRANDING", "false".to_string()));
+        }
+
+        // Observability env vars
+        if self.settings.observability_backend != "none" {
+            env_vars.push(("OBSERVABILITY_BACKEND", self.settings.observability_backend.clone()));
         }
 
         if !env_vars.is_empty() {
@@ -1972,7 +2603,7 @@ impl SetupWizard {
         let _ = loaded;
     }
 
-    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
+    /// Save settings to the database and `~/.thinclaw/.env`, then print summary.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
@@ -2074,6 +2705,31 @@ impl SetupWizard {
             println!("    - HTTP: enabled (port {})", port);
         }
 
+        if self.settings.channels.signal_enabled {
+            println!("    - Signal: enabled");
+        }
+
+        if self.settings.channels.discord_enabled {
+            println!("    - Discord: enabled");
+        }
+
+        if self.settings.channels.slack_enabled {
+            println!("    - Slack: enabled");
+        }
+
+        if self.settings.channels.nostr_enabled {
+            println!("    - Nostr: enabled");
+        }
+
+        if self.settings.channels.gmail_enabled {
+            println!("    - Gmail: enabled");
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.settings.channels.imessage_enabled {
+            println!("    - iMessage: enabled");
+        }
+
         for channel_name in &self.settings.channels.wasm_channels {
             let mode = if has_tunnel { "webhook" } else { "polling" };
             println!(
@@ -2083,6 +2739,12 @@ impl SetupWizard {
             );
         }
 
+        println!("  Agent: {}", self.settings.agent.name);
+
+        if let Some(ref cheap_model) = self.settings.providers.cheap_model {
+            println!("  Smart routing: {} (cheap)", cheap_model);
+        }
+
         if self.settings.heartbeat.enabled {
             println!(
                 "  Heartbeat: every {} minutes",
@@ -2090,13 +2752,35 @@ impl SetupWizard {
             );
         }
 
+        if self.settings.routines_enabled {
+            println!("  Routines: enabled");
+        }
+
+        if self.settings.skills_enabled {
+            println!("  Skills: enabled");
+        }
+
+        if self.settings.claude_code_enabled {
+            let model = self.settings.claude_code_model.as_deref().unwrap_or("sonnet");
+            println!("  Claude Code: enabled (model: {})", model);
+        }
+
+        if self.settings.webchat_theme != "system" || self.settings.webchat_accent_color.is_some() {
+            let accent = self.settings.webchat_accent_color.as_deref().unwrap_or("default");
+            println!("  Web UI: theme={}, accent={}", self.settings.webchat_theme, accent);
+        }
+
+        if self.settings.observability_backend != "none" {
+            println!("  Observability: {}", self.settings.observability_backend);
+        }
+
         println!();
         println!("To start the agent, run:");
-        println!("  ironclaw");
+        println!("  thinclaw");
         println!();
         println!("To change settings later:");
-        println!("  ironclaw config set <setting> <value>");
-        println!("  ironclaw onboard");
+        println!("  thinclaw config set <setting> <value>");
+        println!("  thinclaw onboard");
         println!();
 
         Ok(())
@@ -2586,7 +3270,7 @@ async fn install_selected_registry_channels(
 
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            dirs::home_dir().unwrap_or_default().join(".thinclaw/tools"),
             channels_dir.to_path_buf(),
         );
 

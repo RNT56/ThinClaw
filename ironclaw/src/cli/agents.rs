@@ -120,7 +120,7 @@ async fn list_agents(router: &AgentRouter, format: &str) {
     let agents = router.list_agents().await;
 
     if agents.is_empty() {
-        println!("No agents registered. Use 'ironclaw agents add' to register one.");
+        println!("No agents registered. Use 'thinclaw agents add' to register one.");
         return;
     }
 

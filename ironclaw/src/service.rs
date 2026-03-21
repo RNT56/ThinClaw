@@ -1,10 +1,10 @@
 //! OS service management for running IronClaw as a daemon.
 //!
 //! Generates and manages platform-native service definitions:
-//! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.ironclaw.daemon.plist`
+//! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.thinclaw.daemon.plist`
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/ironclaw.service`
 //!
-//! The installed service runs `ironclaw run` (the default agent mode) and is
+//! The installed service runs `thinclaw run` (the default agent mode) and is
 //! configured to restart automatically on failure.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-const SERVICE_LABEL: &str = "com.ironclaw.daemon";
+const SERVICE_LABEL: &str = "com.thinclaw.daemon";
 const SYSTEMD_UNIT: &str = "ironclaw.service";
 
 // ── Public dispatch ─────────────────────────────────────────────
@@ -252,7 +252,7 @@ fn linux_unit_path() -> Result<PathBuf> {
 
 fn ironclaw_logs_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
-    Ok(home.join(".ironclaw").join("logs"))
+    Ok(home.join(".thinclaw").join("logs"))
 }
 
 // ── Shell helpers ───────────────────────────────────────────────
@@ -332,7 +332,7 @@ mod tests {
         let path = macos_plist_path().unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.ends_with("Library/LaunchAgents/com.ironclaw.daemon.plist"),
+            s.ends_with("Library/LaunchAgents/com.thinclaw.daemon.plist"),
             "unexpected path: {s}"
         );
     }
@@ -352,6 +352,6 @@ mod tests {
     fn logs_dir_under_ironclaw() {
         let path = ironclaw_logs_dir().unwrap();
         let s = path.to_string_lossy();
-        assert!(s.ends_with(".ironclaw/logs"), "unexpected path: {s}");
+        assert!(s.ends_with(".thinclaw/logs"), "unexpected path: {s}");
     }
 }

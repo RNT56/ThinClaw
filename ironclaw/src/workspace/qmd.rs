@@ -27,7 +27,7 @@ pub struct QmdConfig {
 impl Default for QmdConfig {
     fn default() -> Self {
         Self {
-            data_path: "~/.ironclaw/qmd.bin".to_string(),
+            data_path: "~/.thinclaw/qmd.bin".to_string(),
             dimensions: 1536,
             num_subquantizers: 8,
             bits_per_code: 8,

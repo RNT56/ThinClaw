@@ -46,7 +46,7 @@ fn capture_path(custom: Option<&str>) -> PathBuf {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".ironclaw/camera/capture_{ts}.jpg"))
+            .join(format!(".thinclaw/camera/capture_{ts}.jpg"))
     }
 }
 
@@ -208,7 +208,7 @@ impl Tool for CameraCaptureTool {
             "properties": {
                 "output_path": {
                     "type": "string",
-                    "description": "Custom output file path. Default: ~/.ironclaw/camera/capture_<timestamp>.jpg"
+                    "description": "Custom output file path. Default: ~/.thinclaw/camera/capture_<timestamp>.jpg"
                 },
                 "warmup_seconds": {
                     "type": "number",

@@ -222,7 +222,7 @@ async fn try_pg_connect() -> Result<(), String> {
 fn check_workspace_dir() -> CheckResult {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+        .join(".thinclaw");
 
     if dir.exists() {
         if dir.is_dir() {

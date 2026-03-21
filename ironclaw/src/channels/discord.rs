@@ -298,8 +298,8 @@ impl DiscordChannel {
                 "intents": GATEWAY_INTENTS,
                 "properties": {
                     "os": std::env::consts::OS,
-                    "browser": "ironclaw",
-                    "device": "ironclaw"
+                    "browser": "thinclaw",
+                    "device": "thinclaw"
                 }
             }
         })

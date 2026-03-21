@@ -5,7 +5,7 @@
 //!
 //! Configuration:
 //! - `SKILL_DOWNLOAD_DIR` — allowed base directory for skill downloads
-//!   (default: `$HOME/.ironclaw/skills`)
+//!   (default: `$HOME/.thinclaw/skills`)
 //! - `SKILL_ALLOW_SYMLINKS` — whether to allow symlinks in skill paths (default: false)
 
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ impl Default for SkillPathConfig {
     fn default() -> Self {
         let base_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".thinclaw")
             .join("skills");
 
         Self {
