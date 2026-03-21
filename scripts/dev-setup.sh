@@ -54,3 +54,8 @@ echo "  cargo run                            # Run with default features"
 echo "  cargo test                           # Test suite (libsql temp DB)"
 echo "  cargo test --all-features            # Full test suite"
 echo "  cargo clippy --all-features          # Lint all code"
+echo ""
+echo "Deployment builds:"
+echo "  cargo build --release                # Standard (extensions downloaded on demand)"
+echo "  cargo build --release --features bundled-wasm  # Air-gapped (all WASM embedded)"
+

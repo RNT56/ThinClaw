@@ -185,6 +185,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 
+[build-dependencies]
+serde_json = "1"
+
 [features]
 default = ["full"]
 # Desktop embedding (Tauri) — minimal footprint, no heavy runtime modules
@@ -215,6 +218,10 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+# Embed all WASM extensions into the binary for air-gapped / zero-network deployments.
+# Extensions are extracted to ~/.thinclaw/{tools,channels}/ on first install.
+# Increases binary size by ~6-13 MB but requires no network access.
+bundled-wasm = []
 # Voice wake word detection — adds cpal for audio capture.
 # Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
 voice = ["dep:cpal"]
