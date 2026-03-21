@@ -1,6 +1,6 @@
 //! Alternative config format support: JSON5 and YAML.
 //!
-//! IronClaw's default config is JSON, but users may prefer:
+//! ThinClaw's default config is JSON, but users may prefer:
 //! - JSON5: supports comments, trailing commas, unquoted keys
 //! - YAML: human-friendly, widely used for config files
 //!
@@ -440,9 +440,9 @@ mod tests {
 
     #[test]
     fn test_preprocess_yaml() {
-        let input = "# Config\nname: IronClaw\nversion: 1\nenabled: true";
+        let input = "# Config\nname: ThinClaw\nversion: 1\nenabled: true";
         let value = preprocess_yaml(input).unwrap();
-        assert_eq!(value["name"], "IronClaw");
+        assert_eq!(value["name"], "ThinClaw");
         assert_eq!(value["version"], 1);
         assert_eq!(value["enabled"], true);
     }
@@ -466,9 +466,9 @@ mod tests {
 
     #[test]
     fn test_serialize_yaml() {
-        let value = serde_json::json!({"name": "IronClaw", "version": 1});
+        let value = serde_json::json!({"name": "ThinClaw", "version": 1});
         let yaml = serialize_config(&value, ConfigFormat::Yaml).unwrap();
-        assert!(yaml.contains("name: IronClaw"));
+        assert!(yaml.contains("name: ThinClaw"));
     }
 
     #[test]

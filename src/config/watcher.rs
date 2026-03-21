@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_watcher_nonexistent_file() {
-        let watcher = ConfigWatcher::new("/tmp/nonexistent_ironclaw_config_test.toml");
+        let watcher = ConfigWatcher::new("/tmp/nonexistent_thinclaw_config_test.toml");
         assert!(!watcher.file_exists());
     }
 
@@ -232,14 +232,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_now_no_file() {
-        let watcher = ConfigWatcher::new("/tmp/nonexistent_ironclaw_config_test.toml");
+        let watcher = ConfigWatcher::new("/tmp/nonexistent_thinclaw_config_test.toml");
         let changed = watcher.check_now().await;
         assert!(!changed);
     }
 
     #[tokio::test]
     async fn test_check_now_detects_change() {
-        let path = "/tmp/ironclaw_watcher_test.toml";
+        let path = "/tmp/thinclaw_watcher_test.toml";
         // Create the file
         std::fs::write(path, "initial").unwrap();
 

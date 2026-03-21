@@ -299,11 +299,11 @@ fn print_help() {
     println!();
 }
 
-/// Get the history file path (~/.ironclaw/history).
+/// Get the history file path (~/.thinclaw/history).
 fn history_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("history")
 }
 

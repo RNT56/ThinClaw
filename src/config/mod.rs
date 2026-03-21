@@ -1,7 +1,7 @@
-//! Configuration for IronClaw.
+//! Configuration for ThinClaw.
 //!
 //! Settings are loaded with priority: env var > database > default.
-//! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
+//! `DATABASE_URL` lives in `~/.thinclaw/.env` (loaded via dotenvy early
 //! in startup). Everything else comes from env vars, the DB settings
 //! table, or auto-detection.
 
@@ -72,9 +72,9 @@ static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 
 /// IC-007: Thread-safe overlay for bridge-injected configuration.
 ///
-/// The Tauri bridge (`ironclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
+/// The Tauri bridge (`thinclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
 /// UI-derived configuration (LLM backend, workspace mode, heartbeat, etc.) into
-/// IronClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
+/// ThinClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
 ///
 /// `optional_env()` checks this overlay FIRST (highest priority), then falls
 /// through to `INJECTED_VARS` (secrets), then to real env vars.
@@ -85,7 +85,7 @@ static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 
 /// IC-007: Inject bridge configuration variables into the overlay.
 ///
-/// Called by the Tauri bridge to pass Scrappy UI configuration to IronClaw's
+/// Called by the Tauri bridge to pass Scrappy UI configuration to ThinClaw's
 /// config resolvers without unsafe `set_var`. Values in the bridge overlay
 /// take priority over secrets and real env vars.
 ///
@@ -186,7 +186,7 @@ impl Config {
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
+        crate::bootstrap::load_thinclaw_env();
 
         // Load all settings from DB into a Settings struct
         let mut db_settings = match store.get_all_settings(user_id).await {
@@ -209,7 +209,7 @@ impl Config {
     /// and by CLI commands that don't have DB access.
     /// Falls back to legacy `settings.json` on disk if present.
     ///
-    /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
+    /// Loads both `./.env` (standard, higher priority) and `~/.thinclaw/.env`
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_toml(None).await
@@ -220,7 +220,7 @@ impl Config {
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
+        crate::bootstrap::load_thinclaw_env();
         let mut settings = Settings::load();
 
         // Overlay TOML config file (values win over JSON settings)
@@ -232,7 +232,7 @@ impl Config {
     /// Load and merge a TOML config file into settings.
     ///
     /// If `explicit_path` is `Some`, loads from that path (errors are fatal).
-    /// If `None`, tries the default path `~/.ironclaw/config.toml` (missing
+    /// If `None`, tries the default path `~/.thinclaw/config.toml` (missing
     /// file is silently ignored).
     fn apply_toml_overlay(
         settings: &mut Settings,
@@ -388,7 +388,7 @@ fn update_injected_vars(new_vars: HashMap<String, String>) {
 ///
 /// This is the zero-downtime secret refresh API. When a user updates an API
 /// key in Scrappy's UI, Scrappy writes it to the SecretsStore and then calls
-/// this function. IronClaw re-reads all secrets, updates the injected vars
+/// this function. ThinClaw re-reads all secrets, updates the injected vars
 /// overlay, and the next config resolution picks up the new keys.
 ///
 /// Returns the number of secrets that were (re)loaded.

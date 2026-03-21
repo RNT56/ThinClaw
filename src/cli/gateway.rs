@@ -48,7 +48,7 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
 fn pid_file_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home)
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("gateway.pid")
 }
 
@@ -76,7 +76,7 @@ async fn start_gateway(
 
         if alive {
             anyhow::bail!(
-                "Gateway is already running (PID {}). Stop it first with: ironclaw gateway stop",
+                "Gateway is already running (PID {}). Stop it first with: thinclaw gateway stop",
                 pid
             );
         } else {
@@ -116,18 +116,18 @@ async fn start_gateway(
         }
         std::fs::write(&pid_path, pid.to_string())?;
 
-        // The actual gateway runs as part of `ironclaw run`. In foreground mode,
-        // we tell the user to use `ironclaw run` with gateway enabled.
+        // The actual gateway runs as part of `thinclaw run`. In foreground mode,
+        // we tell the user to use `thinclaw run` with gateway enabled.
         println!(
             "Note: The gateway starts as part of the agent. Run:\n\n  \
-             GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} ironclaw run\n",
+             GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
             gw_host, gw_port
         );
 
         // Clean up PID file.
         let _ = std::fs::remove_file(&pid_path);
     } else {
-        // Background: spawn `ironclaw run` as a detached child process.
+        // Background: spawn `thinclaw run` as a detached child process.
         let exe = std::env::current_exe()?;
 
         let child = std::process::Command::new(&exe)
@@ -152,7 +152,7 @@ async fn start_gateway(
             "🌐 Gateway started on {}:{} (PID {})",
             gw_host, gw_port, pid
         );
-        println!("   Stop with: ironclaw gateway stop");
+        println!("   Stop with: thinclaw gateway stop");
     }
 
     Ok(())

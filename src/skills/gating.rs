@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn test_missing_binary_fails() {
         let req = GatingRequirements {
-            bins: vec!["__ironclaw_nonexistent_binary_xyz__".to_string()],
+            bins: vec!["__thinclaw_nonexistent_binary_xyz__".to_string()],
             ..Default::default()
         };
         let result = check_requirements_sync(&req);
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_missing_config_fails() {
         let req = GatingRequirements {
-            config: vec!["/nonexistent/path/ironclaw_test.conf".to_string()],
+            config: vec!["/nonexistent/path/thinclaw_test.conf".to_string()],
             ..Default::default()
         };
         let result = check_requirements_sync(&req);

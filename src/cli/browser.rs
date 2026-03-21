@@ -312,7 +312,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             screenshot,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `ironclaw browser check` for setup info.")
+                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
             let html = headless_dom_dump(&browser, &url, wait)?;
@@ -352,7 +352,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             height,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `ironclaw browser check` for setup info.")
+                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
             headless_screenshot(&browser, &url, &output, width, height)?;
@@ -361,7 +361,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
 
         BrowserCommand::Links { url, external_only } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `ironclaw browser check` for setup info.")
+                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
             let html = headless_dom_dump(&browser, &url, 3)?;

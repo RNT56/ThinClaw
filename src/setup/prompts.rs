@@ -261,7 +261,7 @@ pub fn confirm(prompt: &str, default: bool) -> io::Result<bool> {
 /// # Example
 ///
 /// ```ignore
-/// print_header("IronClaw Setup Wizard");
+/// print_header("ThinClaw Setup Wizard");
 /// ```
 pub fn print_header(text: &str) {
     let width = text.len() + 4;

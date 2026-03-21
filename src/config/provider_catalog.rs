@@ -1,7 +1,7 @@
 //! Built-in provider endpoint catalog.
 //!
 //! Maps provider IDs to their API endpoint details, default models, and
-//! secret store key names. This catalog enables IronClaw to work with 20+
+//! secret store key names. This catalog enables ThinClaw to work with 20+
 //! providers without requiring explicit base_url configuration.
 //!
 //! ## Usage

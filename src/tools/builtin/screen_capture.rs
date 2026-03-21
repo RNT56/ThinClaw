@@ -46,7 +46,7 @@ fn screenshot_path(custom: Option<&str>) -> PathBuf {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".ironclaw/screenshots/screen_{ts}.png"))
+            .join(format!(".thinclaw/screenshots/screen_{ts}.png"))
     }
 }
 
@@ -209,7 +209,7 @@ impl Tool for ScreenCaptureTool {
                 },
                 "output_path": {
                     "type": "string",
-                    "description": "Custom output file path. Default: ~/.ironclaw/screenshots/screen_<timestamp>.png"
+                    "description": "Custom output file path. Default: ~/.thinclaw/screenshots/screen_<timestamp>.png"
                 },
                 "delay_seconds": {
                     "type": "integer",

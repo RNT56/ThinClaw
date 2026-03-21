@@ -1,6 +1,6 @@
 //! Pairing store: pending requests, allowFrom list, and blockFrom list.
 //!
-//! Stored in ~/.ironclaw/{channel}-pairing.json, {channel}-allowFrom.json,
+//! Stored in ~/.thinclaw/{channel}-pairing.json, {channel}-allowFrom.json,
 //! and {channel}-blockFrom.json.
 
 use std::collections::HashSet;
@@ -80,7 +80,7 @@ struct BlockFromStoreFile {
 fn default_pairing_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
 }
 
 fn safe_channel_key(channel: &str) -> Result<String, PairingStoreError> {
@@ -185,7 +185,7 @@ pub struct PairingStore {
 }
 
 impl PairingStore {
-    /// Create a new pairing store using default directory (~/.ironclaw).
+    /// Create a new pairing store using default directory (~/.thinclaw).
     pub fn new() -> Self {
         Self {
             base_dir: default_pairing_dir(),

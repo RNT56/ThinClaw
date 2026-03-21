@@ -1,34 +1,34 @@
-//! Bootstrap helpers for IronClaw.
+//! Bootstrap helpers for ThinClaw.
 //!
 //! The only setting that truly needs disk persistence before the database is
 //! available is `DATABASE_URL` (chicken-and-egg: can't connect to DB without
 //! it). Everything else is auto-detected or read from env vars.
 //!
-//! File: `~/.ironclaw/.env` (standard dotenvy format)
+//! File: `~/.thinclaw/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
 
-/// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
-pub fn ironclaw_env_path() -> PathBuf {
+/// Path to the ThinClaw-specific `.env` file: `~/.thinclaw/.env`.
+pub fn thinclaw_env_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join(".env")
 }
 
-/// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
+/// Load env vars from `~/.thinclaw/.env` (in addition to the standard `.env`).
 ///
 /// Call this **after** `dotenvy::dotenv()` so that the standard `./.env`
-/// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
+/// takes priority over `~/.thinclaw/.env`. dotenvy never overwrites
 /// existing env vars, so the effective priority is:
 ///
-///   explicit env vars > `./.env` > `~/.ironclaw/.env`
+///   explicit env vars > `./.env` > `~/.thinclaw/.env`
 ///
-/// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
+/// If `~/.thinclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
 /// upgrade from the old config format).
-pub fn load_ironclaw_env() {
-    let path = ironclaw_env_path();
+pub fn load_thinclaw_env() {
+    let path = thinclaw_env_path();
 
     if !path.exists() {
         // One-time upgrade: extract DATABASE_URL from legacy bootstrap.json
@@ -42,10 +42,10 @@ pub fn load_ironclaw_env() {
 
 /// If `bootstrap.json` exists, pull `database_url` out of it and write `.env`.
 fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
-    let ironclaw_dir = env_path
+    let thinclaw_dir = env_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let bootstrap_path = ironclaw_dir.join("bootstrap.json");
+    let bootstrap_path = thinclaw_dir.join("bootstrap.json");
 
     if !bootstrap_path.exists() {
         return;
@@ -81,7 +81,7 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     }
 }
 
-/// Write database bootstrap vars to `~/.ironclaw/.env`.
+/// Write database bootstrap vars to `~/.thinclaw/.env`.
 ///
 /// These settings form the chicken-and-egg layer: they must be available
 /// from the filesystem (env vars) BEFORE any database connection, because
@@ -92,7 +92,7 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
 /// Values are double-quoted so that `#` (common in URL-encoded passwords)
 /// and other shell-special characters are preserved by dotenvy.
 pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    let path = thinclaw_env_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -108,14 +108,14 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Update or add a single variable in `~/.ironclaw/.env`, preserving existing content.
+/// Update or add a single variable in `~/.thinclaw/.env`, preserving existing content.
 ///
 /// Unlike `save_bootstrap_env` (which overwrites the entire file), this
 /// reads the current `.env`, replaces the line for `key` if it exists,
 /// or appends it otherwise. Use this when writing a single bootstrap var
 /// outside the wizard (which manages the full set via `save_bootstrap_env`).
 pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    let path = thinclaw_env_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -166,7 +166,7 @@ fn restrict_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write `DATABASE_URL` to `~/.ironclaw/.env`.
+/// Write `DATABASE_URL` to `~/.thinclaw/.env`.
 ///
 /// Convenience wrapper around `save_bootstrap_env` for single-value migration
 /// paths. Prefer `save_bootstrap_env` for new code.
@@ -174,7 +174,7 @@ pub fn save_database_url(url: &str) -> std::io::Result<()> {
     save_bootstrap_env(&[("DATABASE_URL", url)])
 }
 
-/// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
+/// One-time migration of legacy `~/.thinclaw/settings.json` into the database.
 ///
 /// Only runs when a `settings.json` exists on disk AND the DB has no settings
 /// yet. After the wizard writes directly to the DB, this path is only hit by
@@ -185,10 +185,10 @@ pub async fn migrate_disk_to_db(
     store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
-    let ironclaw_dir = dirs::home_dir()
+    let thinclaw_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
-    let legacy_settings_path = ironclaw_dir.join("settings.json");
+        .join(".thinclaw");
+    let legacy_settings_path = thinclaw_dir.join("settings.json");
 
     if !legacy_settings_path.exists() {
         tracing::debug!("No legacy settings.json found, skipping disk-to-DB migration");
@@ -221,15 +221,15 @@ pub async fn migrate_disk_to_db(
         tracing::info!("Migrated {} settings to database", db_map.len());
     }
 
-    // 2. Write DATABASE_URL to ~/.ironclaw/.env
+    // 2. Write DATABASE_URL to ~/.thinclaw/.env
     if let Some(ref url) = settings.database_url {
         save_database_url(url)
             .map_err(|e| MigrationError::Io(format!("Failed to write .env: {}", e)))?;
-        tracing::info!("Wrote DATABASE_URL to {}", ironclaw_env_path().display());
+        tracing::info!("Wrote DATABASE_URL to {}", thinclaw_env_path().display());
     }
 
     // 3. Migrate mcp-servers.json if it exists
-    let mcp_path = ironclaw_dir.join("mcp-servers.json");
+    let mcp_path = thinclaw_dir.join("mcp-servers.json");
     if mcp_path.exists() {
         match std::fs::read_to_string(&mcp_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -258,7 +258,7 @@ pub async fn migrate_disk_to_db(
     }
 
     // 4. Migrate session.json if it exists
-    let session_path = ironclaw_dir.join("session.json");
+    let session_path = thinclaw_dir.join("session.json");
     if session_path.exists() {
         match std::fs::read_to_string(&session_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -290,7 +290,7 @@ pub async fn migrate_disk_to_db(
     rename_to_migrated(&legacy_settings_path);
 
     // 6. Clean up old bootstrap.json if it exists (superseded by .env)
-    let old_bootstrap = ironclaw_dir.join("bootstrap.json");
+    let old_bootstrap = thinclaw_dir.join("bootstrap.json");
     if old_bootstrap.exists() {
         rename_to_migrated(&old_bootstrap);
         tracing::info!("Renamed old bootstrap.json to .migrated");
@@ -329,14 +329,14 @@ mod tests {
         let env_path = dir.path().join(".env");
 
         // Write in the quoted format that save_database_url uses
-        let url = "postgres://localhost:5432/ironclaw_test";
+        let url = "postgres://localhost:5432/thinclaw_test";
         std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
 
         // Verify the content is a valid dotenv line (quoted)
         let content = std::fs::read_to_string(&env_path).unwrap();
         assert_eq!(
             content,
-            "DATABASE_URL=\"postgres://localhost:5432/ironclaw_test\"\n"
+            "DATABASE_URL=\"postgres://localhost:5432/thinclaw_test\"\n"
         );
 
         // Verify dotenvy can parse it (strips quotes automatically)
@@ -356,7 +356,7 @@ mod tests {
 
         // URLs with # in the password are common (URL-encoded special chars).
         // Without quoting, dotenvy treats # as a comment delimiter.
-        let url = "postgres://user:p%23ss@localhost:5432/ironclaw";
+        let url = "postgres://user:p%23ss@localhost:5432/thinclaw";
         std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
 
         let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
@@ -415,9 +415,9 @@ INJECTED="pwned"#;
     }
 
     #[test]
-    fn test_ironclaw_env_path() {
-        let path = ironclaw_env_path();
-        assert!(path.ends_with(".ironclaw/.env"));
+    fn test_thinclaw_env_path() {
+        let path = thinclaw_env_path();
+        assert!(path.ends_with(".thinclaw/.env"));
     }
 
     #[test]
@@ -428,7 +428,7 @@ INJECTED="pwned"#;
 
         // Write a legacy bootstrap.json
         let bootstrap_json = serde_json::json!({
-            "database_url": "postgres://localhost/ironclaw_upgrade",
+            "database_url": "postgres://localhost/thinclaw_upgrade",
             "database_pool_size": 5,
             "secrets_master_key_source": "keychain",
             "onboard_completed": true
@@ -450,7 +450,7 @@ INJECTED="pwned"#;
         let content = std::fs::read_to_string(&env_path).unwrap();
         assert_eq!(
             content,
-            "DATABASE_URL=\"postgres://localhost/ironclaw_upgrade\"\n"
+            "DATABASE_URL=\"postgres://localhost/thinclaw_upgrade\"\n"
         );
 
         // bootstrap.json should be renamed to .migrated
@@ -503,7 +503,7 @@ INJECTED="pwned"#;
 
         let vars = [
             ("DATABASE_BACKEND", "libsql"),
-            ("LIBSQL_PATH", "/home/user/.ironclaw/ironclaw.db"),
+            ("LIBSQL_PATH", "/home/user/.thinclaw/thinclaw.db"),
         ];
 
         // Write manually to the temp path (save_bootstrap_env uses the global path)
@@ -527,7 +527,7 @@ INJECTED="pwned"#;
             parsed[1],
             (
                 "LIBSQL_PATH".to_string(),
-                "/home/user/.ironclaw/ironclaw.db".to_string()
+                "/home/user/.thinclaw/thinclaw.db".to_string()
             )
         );
     }

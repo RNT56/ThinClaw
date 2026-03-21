@@ -1,6 +1,6 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
+//! Stores user preferences in ~/.thinclaw/settings.json.
 //! Settings are loaded with env var > settings.json > default priority.
 
 use std::collections::HashMap;
@@ -117,6 +117,47 @@ pub struct Settings {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
+
+    // === Step 10: Routines ===
+    /// Whether the routines system is enabled.
+    #[serde(default = "default_true")]
+    pub routines_enabled: bool,
+
+    // === Step 11: Skills ===
+    /// Whether the skills system is enabled.
+    #[serde(default = "default_true")]
+    pub skills_enabled: bool,
+
+    // === Step 12: Claude Code ===
+    /// Whether Claude Code sandbox is enabled.
+    #[serde(default)]
+    pub claude_code_enabled: bool,
+
+    /// Claude Code model (e.g., "sonnet", "opus").
+    #[serde(default)]
+    pub claude_code_model: Option<String>,
+
+    /// Maximum agentic turns for Claude Code.
+    #[serde(default)]
+    pub claude_code_max_turns: Option<u32>,
+
+    // === Step 14: Web UI ===
+    /// WebChat theme preference: "light", "dark", or "system".
+    #[serde(default = "default_webchat_theme")]
+    pub webchat_theme: String,
+
+    /// Custom accent color for the web UI (hex, e.g. "#22c55e").
+    #[serde(default)]
+    pub webchat_accent_color: Option<String>,
+
+    /// Whether to show the "Powered by ThinClaw" badge in the Web UI.
+    #[serde(default = "default_true")]
+    pub webchat_show_branding: bool,
+
+    // === Step 15: Observability ===
+    /// Observability backend: "none", "log".
+    #[serde(default = "default_observability_backend")]
+    pub observability_backend: String,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -298,6 +339,96 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub telegram_owner_id: Option<i64>,
 
+    // === Discord ===
+    /// Whether Discord channel is enabled.
+    #[serde(default)]
+    pub discord_enabled: bool,
+
+    /// Discord bot token.
+    #[serde(default)]
+    pub discord_bot_token: Option<String>,
+
+    /// Discord guild ID (optional, restrict to single server).
+    #[serde(default)]
+    pub discord_guild_id: Option<String>,
+
+    /// Discord allowed channel IDs (comma-separated, empty = all).
+    #[serde(default)]
+    pub discord_allow_from: Option<String>,
+
+    // === Slack ===
+    /// Whether Slack channel is enabled.
+    #[serde(default)]
+    pub slack_enabled: bool,
+
+    /// Slack Bot User OAuth Token (xoxb-...).
+    #[serde(default)]
+    pub slack_bot_token: Option<String>,
+
+    /// Slack App-Level Token (xapp-...) for Socket Mode.
+    #[serde(default)]
+    pub slack_app_token: Option<String>,
+
+    /// Slack allowed channel/DM IDs (comma-separated, empty = all).
+    #[serde(default)]
+    pub slack_allow_from: Option<String>,
+
+    // === Nostr ===
+    /// Whether Nostr channel is enabled.
+    #[serde(default)]
+    pub nostr_enabled: bool,
+
+    /// Nostr relay URLs (comma-separated).
+    #[serde(default)]
+    pub nostr_relays: Option<String>,
+
+    /// Nostr public keys allowed to interact (comma-separated hex/npub, or '*').
+    #[serde(default)]
+    pub nostr_allow_from: Option<String>,
+
+    // === Gmail ===
+    /// Whether Gmail channel is enabled.
+    #[serde(default)]
+    pub gmail_enabled: bool,
+
+    /// GCP project ID for Gmail.
+    #[serde(default)]
+    pub gmail_project_id: Option<String>,
+
+    /// Pub/Sub subscription ID for Gmail.
+    #[serde(default)]
+    pub gmail_subscription_id: Option<String>,
+
+    /// Pub/Sub topic ID for Gmail.
+    #[serde(default)]
+    pub gmail_topic_id: Option<String>,
+
+    /// Gmail allowed senders (comma-separated, empty = all).
+    #[serde(default)]
+    pub gmail_allowed_senders: Option<String>,
+
+    // === iMessage (macOS only) ===
+    /// Whether iMessage channel is enabled.
+    #[serde(default)]
+    pub imessage_enabled: bool,
+
+    /// iMessage allowed contacts (comma-separated phone/email, empty = all).
+    #[serde(default)]
+    pub imessage_allow_from: Option<String>,
+
+    /// iMessage polling interval in seconds.
+    #[serde(default)]
+    pub imessage_poll_interval: Option<u64>,
+
+    // === Web Gateway ===
+    /// Web Gateway port (default: 3000).
+    #[serde(default)]
+    pub gateway_port: Option<u16>,
+
+    /// Web Gateway auth token.
+    #[serde(default)]
+    pub gateway_auth_token: Option<String>,
+
     /// Enabled WASM channels by name.
     /// Channels not in this list but present in the channels directory will still load.
     /// This is primarily used by the setup wizard to track which channels were configured.
@@ -452,7 +583,7 @@ pub struct AgentSettings {
 }
 
 fn default_agent_name() -> String {
-    "ironclaw".to_string()
+    "thinclaw".to_string()
 }
 
 fn default_max_parallel_jobs() -> u32 {
@@ -493,6 +624,14 @@ fn default_thinking_budget_tokens() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_webchat_theme() -> String {
+    "system".to_string()
+}
+
+fn default_observability_backend() -> String {
+    "none".to_string()
 }
 
 impl Default for AgentSettings {
@@ -626,7 +765,7 @@ fn default_sandbox_cpu_shares() -> u32 {
 }
 
 fn default_sandbox_image() -> String {
-    "ironclaw-worker:latest".to_string()
+    "thinclaw-worker:latest".to_string()
 }
 
 impl Default for SandboxSettings {
@@ -769,11 +908,11 @@ impl Settings {
         map
     }
 
-    /// Get the default settings file path (~/.ironclaw/settings.json).
+    /// Get the default settings file path (~/.thinclaw/settings.json).
     pub fn default_path() -> std::path::PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".thinclaw")
             .join("settings.json")
     }
 
@@ -790,11 +929,11 @@ impl Settings {
         }
     }
 
-    /// Default TOML config file path (~/.ironclaw/config.toml).
+    /// Default TOML config file path (~/.thinclaw/config.toml).
     pub fn default_toml_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".thinclaw")
             .join("config.toml")
     }
 
@@ -820,13 +959,13 @@ impl Settings {
             .map_err(|e| format!("failed to serialize settings: {}", e))?;
 
         let content = format!(
-            "# IronClaw configuration file.\n\
+            "# ThinClaw configuration file.\n\
              #\n\
              # Priority: env var > this file > database settings > defaults.\n\
              # Uncomment and edit values to override defaults.\n\
-             # Run `ironclaw config init` to regenerate this file.\n\
+             # Run `thinclaw config init` to regenerate this file.\n\
              #\n\
-             # Documentation: https://github.com/nearai/ironclaw\n\
+             # Documentation: https://github.com/RNT56/thinclaw\n\
              \n\
              {raw}"
         );
@@ -1102,7 +1241,7 @@ mod tests {
     fn test_get_setting() {
         let settings = Settings::default();
 
-        assert_eq!(settings.get("agent.name"), Some("ironclaw".to_string()));
+        assert_eq!(settings.get("agent.name"), Some("thinclaw".to_string()));
         assert_eq!(
             settings.get("agent.max_parallel_jobs"),
             Some("5".to_string())
@@ -1131,7 +1270,7 @@ mod tests {
 
         settings.agent.name = "custom".to_string();
         settings.reset("agent.name").unwrap();
-        assert_eq!(settings.agent.name, "ironclaw");
+        assert_eq!(settings.agent.name, "thinclaw");
     }
 
     #[test]
@@ -1306,7 +1445,7 @@ mod tests {
         Settings::default().save_toml(&path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
 
-        assert!(content.starts_with("# IronClaw configuration file."));
+        assert!(content.starts_with("# ThinClaw configuration file."));
         assert!(content.contains("[agent]"));
         assert!(content.contains("[heartbeat]"));
     }
@@ -1349,9 +1488,9 @@ mod tests {
     }
 
     #[test]
-    fn default_toml_path_under_ironclaw() {
+    fn default_toml_path_under_thinclaw() {
         let path = Settings::default_toml_path();
-        assert!(path.to_string_lossy().contains(".ironclaw"));
+        assert!(path.to_string_lossy().contains(".thinclaw"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
     }
 

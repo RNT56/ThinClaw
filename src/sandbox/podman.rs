@@ -71,7 +71,7 @@ impl Default for PodmanConfig {
             rootless: true,
             limits: PodmanLimits::default(),
             network: PodmanNetwork::default(),
-            labels: vec![("managed-by".to_string(), "ironclaw".to_string())],
+            labels: vec![("managed-by".to_string(), "thinclaw".to_string())],
         }
     }
 }
@@ -190,7 +190,7 @@ mod tests {
     fn test_labels() {
         let config = PodmanConfig::default();
         let args = config.run_args(None, &["echo"]);
-        assert!(args.iter().any(|a| a.contains("managed-by=ironclaw")));
+        assert!(args.iter().any(|a| a.contains("managed-by=thinclaw")));
     }
 
     #[test]

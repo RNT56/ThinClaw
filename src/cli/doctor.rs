@@ -222,7 +222,7 @@ async fn try_pg_connect() -> Result<(), String> {
 fn check_workspace_dir() -> CheckResult {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+        .join(".thinclaw");
 
     if dir.exists() {
         if dir.is_dir() {
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn check_binary_skips_nonexistent() {
-        match check_binary("__ironclaw_nonexistent_binary__", &["--version"]) {
+        match check_binary("__thinclaw_nonexistent_binary__", &["--version"]) {
             CheckResult::Skip(_) => {}
             other => panic!(
                 "expected Skip for nonexistent binary, got: {}",

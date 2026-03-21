@@ -152,7 +152,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     // Config path
     println!(
         "\n  Config:      {}",
-        crate::bootstrap::ironclaw_env_path().display()
+        crate::bootstrap::thinclaw_env_path().display()
     );
 
     Ok(())
@@ -206,13 +206,13 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
 fn default_tools_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("tools")
 }
 
 fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("channels")
 }

@@ -67,7 +67,7 @@ pub use update::{UpdateCommand, run_update_command};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "ironclaw")]
+#[command(name = "thinclaw")]
 #[command(
     about = "Secure personal AI assistant that protects your data and expands its capabilities"
 )]

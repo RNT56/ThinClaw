@@ -88,7 +88,7 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
 /// List all channels.
 async fn list_channels(format: &str) -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    crate::bootstrap::load_ironclaw_env();
+    crate::bootstrap::load_thinclaw_env();
 
     let mut channels: Vec<serde_json::Value> = Vec::new();
 
@@ -111,7 +111,7 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
     // Check for WASM channels directory.
     let wasm_dir = dirs::home_dir()
         .unwrap_or_default()
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("channels");
     if wasm_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&wasm_dir)
@@ -173,7 +173,7 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
 /// Show details for a specific channel.
 async fn channel_info(channel: &str) -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    crate::bootstrap::load_ironclaw_env();
+    crate::bootstrap::load_thinclaw_env();
 
     let known = KNOWN_CHANNELS.iter().find(|c| c.name == channel);
 
@@ -234,7 +234,7 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
             // Check WASM channels.
             let wasm_dir = dirs::home_dir()
                 .unwrap_or_default()
-                .join(".ironclaw")
+                .join(".thinclaw")
                 .join("channels");
             let wasm_path = wasm_dir.join(format!("{}.wasm", channel));
 
@@ -245,7 +245,7 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                 println!("Size: {:.1} KB", metadata.len() as f64 / 1024.0);
             } else {
                 anyhow::bail!(
-                    "Unknown channel '{}'. Use 'ironclaw channels list' to see available channels.",
+                    "Unknown channel '{}'. Use 'thinclaw channels list' to see available channels.",
                     channel
                 );
             }

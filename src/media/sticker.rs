@@ -100,7 +100,7 @@ impl Default for StickerConfig {
             enabled: true,
             max_size: 5 * 1024 * 1024, // 5 MB
             max_dimension: 512,
-            temp_dir: std::env::temp_dir().join("ironclaw-stickers"),
+            temp_dir: std::env::temp_dir().join("thinclaw-stickers"),
         }
     }
 }

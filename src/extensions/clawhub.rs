@@ -24,7 +24,7 @@ pub struct ClawHubConfig {
 impl Default for ClawHubConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://hub.ironclaw.dev".to_string(),
+            base_url: "https://hub.thinclaw.dev".to_string(),
             api_key: None,
             timeout_secs: 10,
             cache_ttl_secs: 3600,
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ClawHubConfig::default();
-        assert_eq!(config.base_url, "https://hub.ironclaw.dev");
+        assert_eq!(config.base_url, "https://hub.thinclaw.dev");
         assert!(config.enabled);
         assert_eq!(config.cache_ttl_secs, 3600);
     }

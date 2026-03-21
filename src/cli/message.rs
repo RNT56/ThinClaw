@@ -74,7 +74,7 @@ async fn send_message(
         if e.is_connect() {
             anyhow::anyhow!(
                 "Could not connect to gateway at {}. Is the agent running?\n\
-                 Start with: ironclaw run\n\
+                 Start with: thinclaw run\n\
                  Or specify --gateway-url",
                 base_url
             )

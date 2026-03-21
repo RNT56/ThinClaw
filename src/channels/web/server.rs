@@ -1823,7 +1823,7 @@ async fn extensions_install_handler(
                 crate::extensions::ExtensionSource::WasmBuildable { .. } => {
                     format!(
                         "'{}' requires building from source. \
-                         Run `ironclaw registry install {}` from the CLI.",
+                         Run `thinclaw registry install {}` from the CLI.",
                         req.name, req.name
                     )
                 }
@@ -1928,7 +1928,7 @@ async fn project_file_handler(
     serve_project_file(&project_id, &path).await
 }
 
-/// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
+/// Shared logic: resolve the file inside `~/.thinclaw/projects/{project_id}/`,
 /// guard against path traversal, and stream the content with the right MIME type.
 async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
     // Reject project_id values that could escape the projects directory.
@@ -1942,7 +1942,7 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
 
     let base = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("projects")
         .join(project_id);
 

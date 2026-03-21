@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default release API URL.
-const DEFAULT_RELEASES_URL: &str = "https://api.github.com/repos/ironclaw-ai/ironclaw/releases";
+const DEFAULT_RELEASES_URL: &str = "https://api.github.com/repos/RNT56/ThinClaw/releases";
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum UpdateCommand {
@@ -131,7 +131,7 @@ pub fn is_newer_version(current: &str, available: &str) -> bool {
 
 /// Path for the backup binary (used for rollback).
 fn backup_binary_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ironclaw"));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("thinclaw"));
     exe.with_extension("bak")
 }
 
@@ -141,7 +141,7 @@ async fn fetch_latest_release(channel: &str) -> anyhow::Result<ReleaseInfo> {
         std::env::var("IRONCLAW_RELEASES_URL").unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_string());
 
     let client = reqwest::Client::builder()
-        .user_agent(format!("ironclaw/{}", CURRENT_VERSION))
+        .user_agent(format!("thinclaw/{}", CURRENT_VERSION))
         .build()?;
 
     let response = client.get(&url).send().await?;
@@ -254,7 +254,7 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                             println!("\n   Release notes:\n   {}", preview);
                         }
 
-                        println!("\n   Run `ironclaw update install` to update.");
+                        println!("\n   Run `thinclaw update install` to update.");
                     } else {
                         println!("✅ Already up to date (v{}).", CURRENT_VERSION);
                     }

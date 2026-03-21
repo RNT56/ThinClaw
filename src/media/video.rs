@@ -264,7 +264,7 @@ impl VideoAnalyzer {
         if Self::ffmpeg_available() {
             // Create a temporary output directory for keyframes.
             let out_dir = std::env::temp_dir().join(format!(
-                "ironclaw_video_{}",
+                "thinclaw_video_{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

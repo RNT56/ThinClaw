@@ -779,7 +779,7 @@ async fn handle_streaming(
     let sse = Sse::new(stream).keep_alive(KeepAlive::new().text(""));
     let mut response = sse.into_response();
     response.headers_mut().insert(
-        "x-ironclaw-streaming",
+        "x-thinclaw-streaming",
         HeaderValue::from_static(if is_native { "native" } else { "simulated" }),
     );
     Ok(response)
@@ -834,7 +834,7 @@ pub async fn models_handler(
                     "id": name,
                     "object": "model",
                     "created": created,
-                    "owned_by": "ironclaw"
+                    "owned_by": "thinclaw"
                 })
             })
             .collect(),
@@ -844,7 +844,7 @@ pub async fn models_handler(
                 "id": model_name,
                 "object": "model",
                 "created": created,
-                "owned_by": "ironclaw"
+                "owned_by": "thinclaw"
             })]
         }
         Err(e) => return Err(map_llm_error(e)),

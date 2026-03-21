@@ -84,43 +84,43 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Doctor) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return run_status_command().await;
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return run_gateway_command(gw_cmd.clone()).await;
         }
         Some(Command::Channels(ch_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return run_channels_command(ch_cmd.clone()).await;
         }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_message_command(msg_cmd.clone()).await;
         }
         Some(Command::Models(model_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_model_command(model_cmd.clone()).await;
         }
         Some(Command::Completion(completion)) => {
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
             channels_only,
         }) => {
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -170,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             // In standalone CLI mode, create a fresh router.
             // Runtime agent routing state is in-memory only.
             let router = thinclaw::agent::AgentRouter::new();
@@ -180,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             // In standalone CLI mode, create a fresh session manager.
             // Runtime session state is in-memory only.
             let mgr = std::sync::Arc::new(thinclaw::agent::SessionManager::new());
@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Logs(log_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            thinclaw::bootstrap::load_ironclaw_env();
+            thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_log_command(log_cmd.clone()).await;
         }
         Some(Command::Browser(browser_cmd)) => {
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     // Load .env files early so DATABASE_URL (and any other vars) are
     // available to all subsequent env-based config resolution.
     let _ = dotenvy::dotenv();
-    thinclaw::bootstrap::load_ironclaw_env();
+    thinclaw::bootstrap::load_thinclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -233,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("  {}", hint);
             eprintln!();
             eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+                "Run 'thinclaw onboard' to configure, or set the required environment variables."
             );
             std::process::exit(1);
         }
@@ -547,7 +547,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if gmail_config.oauth_token.is_none() {
                     tracing::warn!(
-                        "Gmail channel has no OAuth token. Run `ironclaw auth gmail` to authenticate."
+                        "Gmail channel has no OAuth token. Run `thinclaw auth gmail` to authenticate."
                     );
                 }
             }

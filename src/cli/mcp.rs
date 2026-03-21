@@ -185,7 +185,7 @@ async fn add_server(
 
     if requires_auth {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
     }
 
     println!();
@@ -219,7 +219,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("  No MCP servers configured.");
         println!();
         println!("  Add a server with:");
-        println!("    ironclaw mcp add <name> <url> [--client-id <id>]");
+        println!("    thinclaw mcp add <name> <url> [--client-id <id>]");
         println!();
         return Ok(());
     }
@@ -322,9 +322,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!("  The server may require a different authentication method,");
             println!("  or you may need to configure OAuth manually:");
             println!();
-            println!("    ironclaw mcp remove {}", name);
+            println!("    thinclaw mcp remove {}", name);
             println!(
-                "    ironclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    thinclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -367,7 +367,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // OAuth configured but no tokens - need to authenticate
         println!();
         println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+            "  ✗ Not authenticated. Run 'thinclaw mcp auth {}' first.",
             name
         );
         println!();
@@ -425,12 +425,12 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     println!(
                         "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
                     );
-                    println!("    ironclaw mcp auth {}", name);
+                    println!("    thinclaw mcp auth {}", name);
                 } else {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
                     println!();
-                    println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+                    println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
                 }
             } else {
                 println!("  ✗ Connection failed: {}", e);
@@ -506,7 +506,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
 
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
+            "SECRETS_MASTER_KEY not set. Run 'thinclaw onboard' first or set it in .env"
         )
     })?;
 

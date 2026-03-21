@@ -589,7 +589,7 @@ impl BrowserTool {
 
         // Save to temp file — use a deterministic name so repeated screenshots
         // from the same session overwrite rather than accumulating.
-        let screenshot_path = std::env::temp_dir().join("ironclaw_browser_screenshot.png");
+        let screenshot_path = std::env::temp_dir().join("thinclaw_browser_screenshot.png");
 
         tokio::fs::write(&screenshot_path, &screenshot_bytes)
             .await
