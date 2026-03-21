@@ -276,7 +276,7 @@ fn print_help() {
     let r = "\x1b[0m"; // reset
 
     println!();
-    println!("  {h}IronClaw REPL{r}");
+    println!("  {h}ThinClaw REPL{r}");
     println!();
     println!("  {h}Commands{r}");
     println!("  {c}/help{r}              {d}show this help{r}");
@@ -361,7 +361,7 @@ impl Channel for ReplChannel {
             let _ = rl.load_history(&hist_path);
 
             if !suppress_banner.load(Ordering::Relaxed) {
-                println!("\x1b[1mIronClaw\x1b[0m  /help for commands, /quit to exit");
+                println!("\x1b[1mThinClaw\x1b[0m  /help for commands, /quit to exit");
                 println!();
             }
 

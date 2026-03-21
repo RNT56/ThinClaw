@@ -16,7 +16,7 @@
 //!   └─ Implements LlamaModel via llama-cpp-2 FFI
 //! ```
 //!
-//! # Usage with IronClaw
+//! # Usage with ThinClaw
 //!
 //! When `llama.cpp` bindings are compiled in, `LlmBackend::LlamaCpp` becomes
 //! available. The backend creates a `LlamaCppBackend` instance and wraps it

@@ -653,7 +653,7 @@ impl ExtensionManager {
                 }
 
                 Ok(format!(
-                    "Removed channel '{}'. Restart IronClaw for the change to take effect.",
+                    "Removed channel '{}'. Restart ThinClaw for the change to take effect.",
                     name
                 ))
             }
@@ -1963,7 +1963,7 @@ impl ExtensionManager {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed(
-                    "WASM channel runtime not configured. Restart IronClaw to activate."
+                    "WASM channel runtime not configured. Restart ThinClaw to activate."
                         .to_string(),
                 )
             })?;
@@ -2464,7 +2464,7 @@ impl ExtensionManager {
                 Ok(SetupResult {
                     message: format!(
                         "Configuration saved for '{}'. \
-                         Automatic activation failed ({}), restart IronClaw to activate.",
+                         Automatic activation failed ({}), restart ThinClaw to activate.",
                         name, e
                     ),
                     activated: false,

@@ -18,7 +18,7 @@ use crate::sandbox::connect_docker;
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
-    /// Standard IronClaw worker with proxied LLM calls.
+    /// Standard ThinClaw worker with proxied LLM calls.
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
@@ -141,7 +141,7 @@ pub struct CompletionResult {
 /// There is a time-of-check/time-of-use gap between `canonicalize()` here
 /// and the actual Docker `binds.push()` in the caller. In a multi-tenant
 /// system a malicious actor could swap a symlink after validation. This is
-/// acceptable in IronClaw's single-tenant design where the user controls
+/// acceptable in ThinClaw's single-tenant design where the user controls
 /// the filesystem.
 fn validate_bind_mount_path(
     dir: &std::path::Path,

@@ -1,8 +1,8 @@
-# IronClaw Development Guide
+# ThinClaw Development Guide
 
 ## Project Overview
 
-**IronClaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
+**ThinClaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
 
 ### Core Philosophy
 - **User-first security** - Your data stays yours, encrypted and local
@@ -42,7 +42,7 @@ cargo test
 cargo test test_name
 
 # Run with logging
-RUST_LOG=ironclaw=debug cargo run
+RUST_LOG=thinclaw=debug cargo run
 ```
 
 ## Project Structure
@@ -497,8 +497,8 @@ Environment variables (see `.env.example`):
 ```bash
 # Database backend (default: postgres)
 DATABASE_BACKEND=postgres               # or "libsql" / "turso"
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
-LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
+DATABASE_URL=postgres://user:pass@localhost/thinclaw
+LIBSQL_PATH=~/.thinclaw/thinclaw.db    # libSQL local path (default)
 # LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
@@ -509,7 +509,7 @@ LLM_API_KEY=sk-...                      # API key for the provider
 LLM_MODEL=anthropic/claude-sonnet-4-20250514
 
 # Agent settings
-AGENT_NAME=ironclaw
+AGENT_NAME=thinclaw
 MAX_PARALLEL_JOBS=5
 
 # Embeddings (for semantic memory search)
@@ -531,7 +531,7 @@ GATEWAY_USER_ID=default
 
 # Docker sandbox
 SANDBOX_ENABLED=true
-SANDBOX_IMAGE=ironclaw-worker:latest
+SANDBOX_IMAGE=thinclaw-worker:latest
 SANDBOX_MEMORY_LIMIT_MB=512
 SANDBOX_TIMEOUT_SECS=1800
 SANDBOX_CPU_LIMIT=1.0                  # CPU cores per container
@@ -563,7 +563,7 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 
 ### LLM Providers
 
-IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `openai`, `anthropic`, `ollama`, `openai_compatible` (default), and `tinfoil`.
+ThinClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `openai`, `anthropic`, `ollama`, `openai_compatible` (default), and `tinfoil`.
 
 **OpenAI-compatible** (default) -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
 
@@ -579,7 +579,7 @@ IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `openai`,
 
 ## Database
 
-IronClaw supports two database backends, selected at compile time via Cargo feature flags and at runtime via the `DATABASE_BACKEND` environment variable.
+ThinClaw supports two database backends, selected at compile time via Cargo feature flags and at runtime via the `DATABASE_BACKEND` environment variable.
 
 **IMPORTANT: All new features that touch persistence MUST support both backends.** Implement the operation as a method on the `Database` trait in `src/db/mod.rs`, then add the implementation in both `src/db/postgres.rs` (delegate to Store/Repository) and `src/db/libsql_backend.rs` (native SQL).
 
@@ -683,7 +683,7 @@ Skills are SKILL.md files that extend the agent's prompt with domain-specific in
 
 | Trust Level | Source | Tool Access |
 |-------------|--------|-------------|
-| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
+| **Trusted** | User-placed in `~/.thinclaw/skills/` or workspace `skills/` | All tools available to the agent |
 | **Installed** | Downloaded from ClawHub registry | Read-only tools only (no shell, file write, HTTP) |
 
 ### SKILL.md Format
@@ -728,9 +728,9 @@ Four built-in tools for managing skills at runtime:
 
 ### Skill Directories
 
-- `~/.ironclaw/skills/` -- User's global skills (trusted)
+- `~/.thinclaw/skills/` -- User's global skills (trusted)
 - `<workspace>/skills/` -- Per-workspace skills (trusted)
-- `~/.ironclaw/installed_skills/` -- Registry-installed skills (installed trust)
+- `~/.thinclaw/installed_skills/` -- Registry-installed skills (installed trust)
 
 ### Testing Skills
 
@@ -791,7 +791,7 @@ Key test patterns:
 
 **Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare their requirements through `capabilities.json` files (API endpoints, credentials, rate limits, auth setup). Service-specific auth flows, CLI commands, and configuration do not belong in the main agent.
 
-Tools can be built as **WASM** (sandboxed, credential-injected, single binary) or **MCP servers** (ecosystem of pre-built servers, any language, but no sandbox). Both are first-class via `ironclaw tool install`. Auth is declared in capabilities files with OAuth and manual token entry support.
+Tools can be built as **WASM** (sandboxed, credential-injected, single binary) or **MCP servers** (ecosystem of pre-built servers, any language, but no sandbox). Both are first-class via `thinclaw tool install`. Auth is declared in capabilities files with OAuth and manual token entry support.
 
 See `src/tools/README.md` for full tool architecture, adding new tools (built-in Rust and WASM), auth JSON examples, and WASM vs MCP decision guide.
 
@@ -806,13 +806,13 @@ See `src/tools/README.md` for full tool architecture, adding new tools (built-in
 
 ```bash
 # Verbose logging
-RUST_LOG=ironclaw=trace cargo run
+RUST_LOG=thinclaw=trace cargo run
 
 # Just the agent module
-RUST_LOG=ironclaw::agent=debug cargo run
+RUST_LOG=thinclaw::agent=debug cargo run
 
 # With HTTP request logging
-RUST_LOG=ironclaw=debug,tower_http=debug cargo run
+RUST_LOG=thinclaw=debug,tower_http=debug cargo run
 ```
 
 ## Module Specifications

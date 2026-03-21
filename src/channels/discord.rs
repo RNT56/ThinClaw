@@ -345,7 +345,7 @@ impl Channel for DiscordChannel {
         let bot_name = me
             .get("username")
             .and_then(|v| v.as_str())
-            .unwrap_or("IronClaw");
+            .unwrap_or("ThinClaw");
         tracing::info!("Discord bot connected as {} ({})", bot_name, bot_user_id);
 
         // Spawn Gateway connection

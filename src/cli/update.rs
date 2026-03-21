@@ -1,6 +1,6 @@
 //! Self-update CLI command.
 //!
-//! Checks for new versions of IronClaw and optionally installs updates.
+//! Checks for new versions of ThinClaw and optionally installs updates.
 //! Supports multiple update channels:
 //! - `stable`  — production releases
 //! - `beta`    — pre-release builds
@@ -217,7 +217,7 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
     match cmd {
         UpdateCommand::Info => {
             let info = BuildInfo::current();
-            println!("IronClaw v{}", info.version);
+            println!("ThinClaw v{}", info.version);
             println!("  Target:  {}", info.target);
             println!("  Profile: {}", info.profile);
             println!("  Rustc:   {}", info.rustc_version);
@@ -337,7 +337,7 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
 
             std::fs::rename(&temp_path, &current)?;
             println!(
-                "✅ Updated to v{}. Restart IronClaw for changes to take effect.",
+                "✅ Updated to v{}. Restart ThinClaw for changes to take effect.",
                 release.version
             );
         }
@@ -353,7 +353,7 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
             let current = std::env::current_exe()?;
             std::fs::rename(&backup, &current)?;
             println!("✅ Rolled back to previous version.");
-            println!("Restart IronClaw for changes to take effect.");
+            println!("Restart ThinClaw for changes to take effect.");
         }
     }
 

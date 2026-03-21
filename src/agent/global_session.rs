@@ -173,10 +173,10 @@ mod tests {
     #[test]
     fn test_upsert_and_get() {
         let mut session = GlobalSession::new(test_config());
-        session.upsert("project", "IronClaw", "telegram");
+        session.upsert("project", "ThinClaw", "telegram");
 
         let entry = session.get("project").unwrap();
-        assert_eq!(entry.value, "IronClaw");
+        assert_eq!(entry.value, "ThinClaw");
         assert_eq!(entry.source_channel, "telegram");
     }
 
@@ -221,12 +221,12 @@ mod tests {
     #[test]
     fn test_context_string() {
         let mut session = GlobalSession::new(test_config());
-        session.upsert("project", "IronClaw", "tg");
+        session.upsert("project", "ThinClaw", "tg");
         session.upsert("sprint", "9", "discord");
 
         let ctx = session.to_context_string();
         assert!(ctx.contains("[Global Context]"));
-        assert!(ctx.contains("project: IronClaw"));
+        assert!(ctx.contains("project: ThinClaw"));
         assert!(ctx.contains("sprint: 9"));
     }
 

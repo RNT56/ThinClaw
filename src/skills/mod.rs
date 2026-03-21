@@ -1,4 +1,4 @@
-//! OpenClaw SKILL.md-based skills system for IronClaw.
+//! OpenClaw SKILL.md-based skills system for ThinClaw.
 //!
 //! Skills are SKILL.md files (YAML frontmatter + markdown prompt) that extend the
 //! agent's behavior through prompt-level instructions. Unlike code-level tools
