@@ -14,12 +14,7 @@
     "capabilities": "google-slides-tool.capabilities.json",
     "crate_name": "google-slides-tool"
   },
-  "artifacts": {
-    "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/latest/download/google-slides-wasm32-wasip2.tar.gz",
-      "sha256": null
-    }
-  },
+  "artifacts": {},
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",
