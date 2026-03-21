@@ -1,6 +1,6 @@
 version: '3.9'
 
-# IronClaw Remote Agent — Docker Compose deployment
+# ThinClaw Remote Agent — Docker Compose deployment
 #
 # Quick start:
 #   cp .env.template .env
@@ -11,11 +11,11 @@ version: '3.9'
 # Auth token: value of GATEWAY_AUTH_TOKEN in .env
 
 services:
-  ironclaw:
+  thinclaw:
     build:
       context: ..  # ironclaw/ directory (one level up from deploy/)
       dockerfile: Dockerfile
-    container_name: ironclaw-remote
+    container_name: thinclaw-remote
     restart: unless-stopped
     ports:
       - "18789:18789"   # Gateway HTTP API (Scrappy connects here)
@@ -30,10 +30,10 @@ services:
       - HEARTBEAT_NOTIFY_CHANNEL=gateway
       # Database
       - DATABASE_BACKEND=${DATABASE_BACKEND:-libsql}
-      - LIBSQL_PATH=/data/ironclaw.db
+      - LIBSQL_PATH=/data/thinclaw.db
     volumes:
-      - ironclaw-data:/data
-      - ironclaw-workspace:/workspace
+      - thinclaw-data:/data
+      - thinclaw-workspace:/workspace
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,33 +45,33 @@ services:
       retries: 3
       start_period: 20s
     networks:
-      - ironclaw-net
+      - thinclaw-net
 
   postgres:
     image: pgvector/pgvector:pg15
-    container_name: ironclaw-postgres
+    container_name: thinclaw-postgres
     restart: unless-stopped
     profiles:
       - postgres   # Only started when: docker compose --profile postgres up
     environment:
-      POSTGRES_DB: ironclaw
-      POSTGRES_USER: ${POSTGRES_USER:-ironclaw}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ironclaw}
+      POSTGRES_DB: thinclaw
+      POSTGRES_USER: ${POSTGRES_USER:-thinclaw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-thinclaw}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ironclaw}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-thinclaw}"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - ironclaw-net
+      - thinclaw-net
 
 volumes:
-  ironclaw-data:
-  ironclaw-workspace:
+  thinclaw-data:
+  thinclaw-workspace:
   pgdata:
 
 networks:
-  ironclaw-net:
+  thinclaw-net:
     driver: bridge

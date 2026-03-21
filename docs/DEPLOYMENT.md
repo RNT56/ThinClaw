@@ -1,17 +1,18 @@
-# IronClaw Deployment Guide
+# ThinClaw Deployment Guide
 
-This guide covers every way to deploy IronClaw as a standalone agent and connect it to the **Scrappy** desktop app. Whether you're setting up a dedicated Mac Mini, a Linux VPS, or a Docker container, this document has you covered.
+This guide covers every way to deploy ThinClaw as a standalone agent and connect it to the **Scrappy** desktop app. Whether you're setting up a dedicated Mac Mini, a Linux VPS, or a Docker container, this document has you covered.
 
 ---
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
+- [Prerequisites](#prerequisites)
 - [Deployment Paths](#deployment-paths)
   - [Path 1: Direct Binary (Mac Mini / macOS / Linux)](#path-1-direct-binary-recommended-for-mac-mini)
   - [Path 2: Docker Compose (Any OS)](#path-2-docker-compose-any-os)
   - [Path 3: Automated Deploy from Scrappy](#path-3-automated-deploy-from-scrappy-linux-targets)
-- [Connecting Scrappy to IronClaw](#connecting-scrappy-to-ironclaw)
+- [WASM Extension Deployment](#wasm-extension-deployment)
+- [Connecting Scrappy to ThinClaw](#connecting-scrappy-to-thinclaw)
 - [Securing the Connection (Tailscale)](#securing-the-connection-tailscale)
 - [Auto-Start on Boot](#auto-start-on-boot)
   - [macOS: launchd](#macos-launchd)
@@ -22,9 +23,53 @@ This guide covers every way to deploy IronClaw as a standalone agent and connect
 
 ---
 
+## Prerequisites
+
+### Pre-Built Binary (download from Releases)
+
+If you install ThinClaw via the [shell/PowerShell installer](https://github.com/RNT56/ThinClaw/releases), **no prerequisites are needed** — the binary is self-contained. WASM extensions are downloaded from GitHub Releases on first install.
+
+### Compile from Source
+
+To build ThinClaw from source, you need the following tools:
+
+| Prerequisite | Purpose | Install Command |
+|---|---|---|
+| **Xcode CLI Tools** (macOS) | C compiler, linker | `xcode-select --install` |
+| **build-essential + libssl-dev** (Linux) | C compiler, OpenSSL headers | `sudo apt install build-essential pkg-config libssl-dev` |
+| **Rust 1.92+** | Rust compiler and Cargo | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **wasm32-wasip2 target** | WASM compilation target | `rustup target add wasm32-wasip2` |
+| **wasm-tools** | WASM component model conversion | `cargo install wasm-tools --locked` |
+| **cargo-component** | Build WASM extensions from source | `cargo install cargo-component --locked` |
+| **Git** | Clone the repository | Pre-installed on macOS; `apt install git` on Linux |
+
+**Optional:**
+
+| Prerequisite | Purpose | Install Command |
+|---|---|---|
+| **Docker** | Docker sandbox feature, Docker Compose deployment | `brew install docker` (macOS) or [docs.docker.com](https://docs.docker.com/engine/install/) |
+| **PostgreSQL 15+ + pgvector** | Production database (alternative to libSQL) | `brew install postgresql@15` (macOS) or `apt install postgresql` |
+
+### One-Click Setup Scripts
+
+Instead of installing prerequisites manually, use the provided setup scripts:
+
+```bash
+# macOS — installs everything and builds ThinClaw:
+./scripts/mac-deploy.sh
+
+# macOS — prerequisites only (no build):
+./scripts/mac-deploy.sh --install-only
+
+# Developer setup (any OS) — installs WASM toolchain, runs tests:
+./scripts/dev-setup.sh
+```
+
+---
+
 ## Architecture Overview
 
-IronClaw is a **dual-mode** Rust agent. It can run as:
+ThinClaw is a **dual-mode** Rust agent. It can run as:
 
 1. **Embedded Library** — inside the Scrappy desktop app (Tauri), using in-process IPC
 2. **Standalone Binary** — headless server with its own HTTP/WebSocket/SSE gateway
@@ -38,7 +83,7 @@ Both modes share the same core. The difference is how messages enter and leave t
 │  Your MacBook/iMac  │ ◄═══════════════════════► │  Dedicated Server      │
 │                     │         port 18789         │  (Mac Mini / VPS)      │
 │  Scrappy Desktop    │                            │                        │
-│  "Remote Mode"      │                            │  IronClaw Agent        │
+│  "Remote Mode"      │                            │  ThinClaw Agent        │
 │                     │                            │  ├─ LLM inference      │
 │  Controls the agent │                            │  ├─ Tool execution     │
 │  via Gateway proxy  │                            │  ├─ Persistent memory  │
@@ -57,18 +102,34 @@ The Scrappy app acts as the **control plane** — it sends messages and displays
 
 Best for: **macOS (Mac Mini / Mac Studio)** or any machine where you want native performance and access to OS features (Keychain, iMessage, Metal GPU).
 
-#### Prerequisites
+#### One-Click Deploy (macOS)
+
+```bash
+# From a fresh Mac Mini — installs everything, builds, and launches:
+curl -fsSL https://raw.githubusercontent.com/RNT56/ThinClaw/main/scripts/mac-deploy.sh | bash
+
+# Air-gapped variant (embeds all WASM extensions in binary):
+curl -fsSL https://raw.githubusercontent.com/RNT56/ThinClaw/main/scripts/mac-deploy.sh | bash -s -- --bundled
+```
+
+#### Manual Setup
 
 ```bash
 # macOS
 xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
+rustup target add wasm32-wasip2
+cargo install wasm-tools --locked
+cargo install cargo-component --locked
 
 # Linux (Ubuntu/Debian)
-sudo apt install build-essential pkg-config libssl-dev
+sudo apt install build-essential pkg-config libssl-dev git
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
+rustup target add wasm32-wasip2
+cargo install wasm-tools --locked
+cargo install cargo-component --locked
 ```
 
 #### Build
@@ -83,21 +144,24 @@ cargo build --release --features libsql
 
 # Or build with both database backends
 cargo build --release --features "libsql,postgres"
+
+# Air-gapped build (all WASM extensions embedded in binary):
+cargo build --release --features "libsql,bundled-wasm"
 ```
 
-The binary will be at `./target/release/ironclaw`.
+The binary will be at `./target/release/thinclaw`.
 
 #### First Run — Onboarding Wizard
 
-On first launch, IronClaw auto-detects that no database is configured and launches the interactive **9-step setup wizard**:
+On first launch, ThinClaw auto-detects that no database is configured and launches the interactive **9-step setup wizard**:
 
 ```bash
-./target/release/ironclaw
+./target/release/thinclaw
 ```
 
 | Step | What It Configures |
-|------|--------------------|
-| 1. Database | LibSQL local file (`~/.ironclaw/ironclaw.db`) — press Enter for defaults |
+|------|------|
+| 1. Database | LibSQL local file (`~/.thinclaw/thinclaw.db`) — press Enter for defaults |
 | 2. Security | Master key for encrypting secrets — choose **macOS Keychain** on Mac |
 | 3. Inference Provider | LLM backend: Anthropic, OpenAI, Ollama, OpenRouter, or any OpenAI-compatible |
 | 4. Model Selection | Pick a model from the provider's catalog |
@@ -119,7 +183,7 @@ You **must** enable the Gateway channel for Scrappy to connect. When prompted:
 
 #### First Run — Manual Configuration (Alternative)
 
-If you prefer to skip the wizard, create `~/.ironclaw/.env` manually:
+If you prefer to skip the wizard, create `~/.thinclaw/.env` manually:
 
 ```env
 # LLM Provider (choose one)
@@ -140,7 +204,7 @@ GATEWAY_AUTH_TOKEN=your-64-char-secret-token-here
 
 # Database
 DATABASE_BACKEND=libsql
-LIBSQL_PATH=/Users/yourname/.ironclaw/ironclaw.db
+LIBSQL_PATH=/Users/yourname/.thinclaw/thinclaw.db
 
 # Agent Identity
 AGENT_NAME=mac-mini-agent
@@ -161,16 +225,16 @@ OPENAI_API_KEY=sk-...
 Then run with:
 
 ```bash
-./target/release/ironclaw run --no-onboard
+./target/release/thinclaw run --no-onboard
 ```
 
 #### Verify
 
-IronClaw prints a boot screen on startup:
+ThinClaw prints a boot screen on startup:
 
 ```
 ╭──────────────────────────────────────╮
-│  🦀 IronClaw v0.x.x                 │
+│  🦀 ThinClaw v0.12.0                │
 │  Agent: mac-mini-agent               │
 │  LLM: anthropic (claude-sonnet-4-5)  │
 │  Database: libsql ✓                  │
@@ -199,7 +263,7 @@ A successful response returns `{"status":"ok", ...}`.
 Best for: **Linux VPS / cloud servers**, or any machine with Docker Desktop (macOS/Windows).
 
 ```bash
-cd ironclaw/deploy/
+cd deploy/
 cp .env.template .env
 
 # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
@@ -223,7 +287,7 @@ See `deploy/.env.template` for all available configuration options.
 
 ### Path 3: Automated Deploy from Scrappy (Linux Targets)
 
-The Scrappy desktop app can deploy IronClaw to a Linux server in one click:
+The Scrappy desktop app can deploy ThinClaw to a Linux server in one click:
 
 1. Go to **Settings → Gateway** in the Scrappy App.
 2. Click **Deploy New Remote Agent**.
@@ -236,9 +300,51 @@ Scrappy will SCP the deploy bundle, install Docker, generate an auth token, and 
 
 ---
 
-## Connecting Scrappy to IronClaw
+## WASM Extension Deployment
 
-Once IronClaw is running (via any path above), connect your Scrappy desktop app:
+ThinClaw ships 14 WASM extensions (10 tools + 4 channels). Two strategies are available depending on your deployment environment:
+
+### Option A: Download from GitHub Releases (Default)
+
+The standard binary downloads extensions from GitHub Releases on first install. The CI pipeline (`release.yml`) automatically builds all WASM extensions, creates `.tar.gz` bundles with SHA256 checksums, and publishes them as release assets.
+
+```bash
+# Standard build — small binary, extensions downloaded on demand
+cargo build --release
+
+# Install an extension at runtime (downloads from GitHub Releases)
+thinclaw extension install telegram
+```
+
+This is the recommended approach for machines with internet access.
+
+### Option B: Embedded WASM (Air-Gapped / Zero-Network)
+
+For headless deployments on machines without reliable internet (e.g., Mac Mini behind NAT), compile with the `bundled-wasm` feature to embed all WASM extensions directly into the binary:
+
+```bash
+# Air-gapped build — all extensions embedded (+6-13 MB binary size)
+cargo build --release --features bundled-wasm
+
+# Or use the convenience script:
+./scripts/build-all.sh --bundled
+
+# Or use the 1-click Mac deploy:
+./scripts/mac-deploy.sh --bundled
+```
+
+When `bundled-wasm` is active, `thinclaw extension install <name>` extracts the extension from the binary instead of downloading — zero network dependency.
+
+**Install priority chain:**
+1. Bundled WASM (if `--features bundled-wasm` was used at compile time)
+2. Download from GitHub Releases (if `artifacts.url` is set in the manifest)
+3. Build from local source tree (developer builds only)
+
+---
+
+## Connecting Scrappy to ThinClaw
+
+Once ThinClaw is running (via any path above), connect your Scrappy desktop app:
 
 1. Open the Scrappy app on your main machine.
 2. Go to **Settings → Gateway**.
@@ -304,7 +410,7 @@ sudo tailscale up
 ### Step 3: Find the Server's Tailscale IP
 
 ```bash
-# On the IronClaw server (Mac Mini / VPS)
+# On the ThinClaw server (Mac Mini / VPS)
 tailscale ip -4
 # Example output: 100.64.0.2
 ```
@@ -316,10 +422,10 @@ In Scrappy's **Connect Existing** dialog:
 
 ### Step 5: (Optional) Restrict to Tailscale Only
 
-On the IronClaw server, bind the gateway to the Tailscale interface only:
+On the ThinClaw server, bind the gateway to the Tailscale interface only:
 
 ```env
-# ~/.ironclaw/.env
+# ~/.thinclaw/.env
 GATEWAY_HOST=100.64.0.2   # Tailscale IP instead of 0.0.0.0
 ```
 
@@ -348,13 +454,13 @@ sudo ufw allow in on tailscale0 to any port 18789 proto tcp
 If you prefer not to use Tailscale, set up a reverse proxy:
 
 ```nginx
-# /etc/nginx/sites-available/ironclaw
+# /etc/nginx/sites-available/thinclaw
 server {
     listen 443 ssl;
-    server_name ironclaw.yourdomain.com;
+    server_name thinclaw.yourdomain.com;
 
-    ssl_certificate     /etc/letsencrypt/live/ironclaw.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/ironclaw.yourdomain.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/thinclaw.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/thinclaw.yourdomain.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:18789;
@@ -368,7 +474,7 @@ server {
 }
 ```
 
-Then connect Scrappy to `https://ironclaw.yourdomain.com`.
+Then connect Scrappy to `https://thinclaw.yourdomain.com`.
 
 ---
 
@@ -376,21 +482,21 @@ Then connect Scrappy to `https://ironclaw.yourdomain.com`.
 
 ### macOS: launchd
 
-Create a launch agent so IronClaw starts automatically when the Mac Mini boots:
+Create a launch agent so ThinClaw starts automatically when the Mac Mini boots:
 
 ```bash
-cat > ~/Library/LaunchAgents/com.ironclaw.agent.plist << 'EOF'
+cat > ~/Library/LaunchAgents/com.thinclaw.agent.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ironclaw.agent</string>
+    <string>com.thinclaw.agent</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/yourname/ThinClaw/target/release/ironclaw</string>
+        <string>/Users/yourname/ThinClaw/target/release/thinclaw</string>
         <string>run</string>
         <string>--no-onboard</string>
     </array>
@@ -405,10 +511,10 @@ cat > ~/Library/LaunchAgents/com.ironclaw.agent.plist << 'EOF'
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/yourname/.ironclaw/ironclaw.log</string>
+    <string>/Users/yourname/.thinclaw/thinclaw.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/yourname/.ironclaw/ironclaw.err</string>
+    <string>/Users/yourname/.thinclaw/thinclaw.err</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -426,28 +532,28 @@ Manage the service:
 
 ```bash
 # Load (start on boot)
-launchctl load ~/Library/LaunchAgents/com.ironclaw.agent.plist
+launchctl load ~/Library/LaunchAgents/com.thinclaw.agent.plist
 
 # Unload (stop auto-start)
-launchctl unload ~/Library/LaunchAgents/com.ironclaw.agent.plist
+launchctl unload ~/Library/LaunchAgents/com.thinclaw.agent.plist
 
 # Check status
-launchctl list | grep ironclaw
+launchctl list | grep thinclaw
 
 # View logs
-tail -f ~/.ironclaw/ironclaw.log
+tail -f ~/.thinclaw/thinclaw.log
 ```
 
 You can also use the built-in service command:
 
 ```bash
 # Install as a service (auto-detects launchd on macOS)
-ironclaw service install
+thinclaw service install
 
 # Start / stop / status
-ironclaw service start
-ironclaw service stop
-ironclaw service status
+thinclaw service start
+thinclaw service stop
+thinclaw service status
 ```
 
 ### Linux: systemd
@@ -455,20 +561,20 @@ ironclaw service status
 For Docker-based deployments, `setup.sh --systemd` creates the service automatically. For direct binary:
 
 ```ini
-# /etc/systemd/system/ironclaw.service
+# /etc/systemd/system/thinclaw.service
 [Unit]
-Description=IronClaw AI Agent
+Description=ThinClaw AI Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=ironclaw
-WorkingDirectory=/opt/ironclaw
-ExecStart=/opt/ironclaw/ironclaw run --no-onboard
+User=thinclaw
+WorkingDirectory=/opt/thinclaw
+ExecStart=/opt/thinclaw/thinclaw run --no-onboard
 Restart=always
 RestartSec=10
-Environment=HOME=/home/ironclaw
+Environment=HOME=/home/thinclaw
 
 [Install]
 WantedBy=multi-user.target
@@ -476,18 +582,18 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable ironclaw
-sudo systemctl start ironclaw
+sudo systemctl enable thinclaw
+sudo systemctl start thinclaw
 
 # View logs
-journalctl -u ironclaw -f
+journalctl -u thinclaw -f
 ```
 
 ---
 
 ## macOS-Specific Features
 
-When IronClaw runs on macOS (e.g., a Mac Mini), it gains access to capabilities unavailable on Linux/Docker:
+When ThinClaw runs on macOS (e.g., a Mac Mini), it gains access to capabilities unavailable on Linux/Docker:
 
 | Feature | How to Enable | Notes |
 |---------|--------------|-------|
@@ -513,7 +619,7 @@ On first use, macOS will prompt for the following permissions in **System Settin
 
 ## Environment Reference
 
-Comprehensive list of all environment variables. Set these in `~/.ironclaw/.env` or export them.
+Comprehensive list of all environment variables. Set these in `~/.thinclaw/.env` or export them.
 
 ### Required
 
@@ -537,7 +643,7 @@ Comprehensive list of all environment variables. Set these in `~/.ironclaw/.env`
 |----------|---------|-------------|
 | `DATABASE_BACKEND` | `postgres` | `postgres` or `libsql` |
 | `DATABASE_URL` | *(none)* | PostgreSQL connection string |
-| `LIBSQL_PATH` | `~/.ironclaw/ironclaw.db` | LibSQL local file path |
+| `LIBSQL_PATH` | `~/.thinclaw/thinclaw.db` | LibSQL local file path |
 | `LIBSQL_URL` | *(none)* | Turso cloud sync URL |
 | `LIBSQL_AUTH_TOKEN` | *(none)* | Turso auth token |
 
@@ -545,7 +651,7 @@ Comprehensive list of all environment variables. Set these in `~/.ironclaw/.env`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_NAME` | `ironclaw` | Agent display name |
+| `AGENT_NAME` | `thinclaw` | Agent display name |
 | `CLI_ENABLED` | `true` | Enable REPL mode. Set `false` for headless |
 | `MAX_PARALLEL_JOBS` | `5` | Max concurrent jobs |
 | `AGENT_AUTO_APPROVE_TOOLS` | `false` | Auto-approve tool calls (dangerous!) |
@@ -592,7 +698,7 @@ See `CLAUDE.md` for the complete configuration reference.
 
 | Issue | Solution |
 |-------|---------|
-| `curl: Connection refused` on port 18789 | Ensure `GATEWAY_HOST=0.0.0.0` (not `127.0.0.1`). Verify IronClaw is running |
+| `curl: Connection refused` on port 18789 | Ensure `GATEWAY_HOST=0.0.0.0` (not `127.0.0.1`). Verify ThinClaw is running |
 | Scrappy "Test & Save" fails | Check the URL includes the port. Verify auth token matches. Test with `curl` first |
 | Can't reach server from another machine | Check firewall rules. Use `curl http://<ip>:18789/api/health` from the client |
 | Works on LAN but not remotely | Use Tailscale or set up port forwarding / reverse proxy |
@@ -601,7 +707,7 @@ See `CLAUDE.md` for the complete configuration reference.
 
 | Issue | Solution |
 |-------|---------|
-| Keychain dialog keeps appearing | Normal on first run — click "Allow Always". IronClaw caches after first access |
+| Keychain dialog keeps appearing | Normal on first run — click "Allow Always". ThinClaw caches after first access |
 | iMessage channel not working | Grant Full Disk Access in System Settings → Privacy → Full Disk Access |
 | Metal inference slow | Check model is fully loaded to GPU. Adjust memory allocation in Settings |
 | Agent stops when closing Terminal | Use launchd (see Auto-Start section) or run in `tmux`/`screen` |
@@ -610,42 +716,42 @@ See `CLAUDE.md` for the complete configuration reference.
 
 | Issue | Solution |
 |-------|---------|
-| `ONBOARD_COMPLETED` not set | Run `ironclaw onboard` to re-run the wizard |
-| Agent won't start after crash | Check `~/.ironclaw/ironclaw.log`. Run `ironclaw doctor` for diagnostics |
-| Missing tools | Run `ironclaw tool list` to see available tools. Re-run onboarding Step 7 |
-| Database errors | Run `ironclaw doctor` — it checks DB connectivity and migrations |
+| `ONBOARD_COMPLETED` not set | Run `thinclaw onboard` to re-run the wizard |
+| Agent won't start after crash | Check `~/.thinclaw/thinclaw.log`. Run `thinclaw doctor` for diagnostics |
+| Missing tools | Run `thinclaw tool list` to see available tools. Re-run onboarding Step 7 |
+| Database errors | Run `thinclaw doctor` — it checks DB connectivity and migrations |
 
 ### CLI Quick Reference
 
 ```bash
 # Start agent
-ironclaw run
+thinclaw run
 
 # Start with specific config
-ironclaw run --config /path/to/config.toml
+thinclaw run --config /path/to/config.toml
 
 # Re-run onboarding wizard
-ironclaw onboard
+thinclaw onboard
 
 # Diagnostics
-ironclaw doctor
-ironclaw status
+thinclaw doctor
+thinclaw status
 
 # Log management
-ironclaw logs tail
+thinclaw logs tail
 
 # Service management
-ironclaw service install
-ironclaw service start
-ironclaw service stop
-ironclaw service status
+thinclaw service install
+thinclaw service start
+thinclaw service stop
+thinclaw service status
 
 # Tool management
-ironclaw tool list
-ironclaw tool install <name>
+thinclaw tool list
+thinclaw tool install <name>
 
 # Update binary
-ironclaw update
+thinclaw update
 ```
 
 ---

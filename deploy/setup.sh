@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# IronClaw Remote Deployment Setup Script
+# ThinClaw Remote Deployment Setup Script
 # ============================================================================
 #
-# Bootstraps a Linux server for running the IronClaw agent via Docker Compose.
+# Bootstraps a Linux server for running the ThinClaw agent via Docker Compose.
 #
 # Core features (always installed):
 #   - Docker Engine + Docker Compose
 #   - UFW Firewall (allows SSH + port 18789)
 #   - Fail2ban (SSH brute-force protection)
-#   - IronClaw Docker Compose stack
+#   - ThinClaw Docker Compose stack
 #
 # Optional features (via flags):
 #   --tailscale <auth-key>   Install Tailscale VPN and join the network
-#   --systemd                Create a systemd service for IronClaw
+#   --systemd                Create a systemd service for ThinClaw
 #
 # Usage:
 #   sudo bash setup.sh --token <gateway_token> [--tailscale <ts-key>] [--systemd]
@@ -63,14 +63,14 @@ fi
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IRONCLAW_PORT=18789
+THINCLAW_PORT=18789
 
 echo "============================================================"
-echo "  IronClaw Remote Agent Setup"
+echo "  ThinClaw Remote Agent Setup"
 echo "============================================================"
 echo ""
 echo "Deploy directory: $DEPLOY_DIR"
-echo "Gateway port:     $IRONCLAW_PORT"
+echo "Gateway port:     $THINCLAW_PORT"
 echo "Tailscale:        $([ -n "$TAILSCALE_KEY" ] && echo 'Yes' || echo 'No')"
 echo "Systemd service:  $([ "$ENABLE_SYSTEMD" = true ] && echo 'Yes' || echo 'No')"
 echo ""
@@ -180,8 +180,8 @@ if command -v ufw &> /dev/null; then
     # Allow SSH (critical — don't lock yourself out!)
     ufw allow ssh comment "SSH access"
 
-    # Allow IronClaw gateway port
-    ufw allow "$IRONCLAW_PORT/tcp" comment "IronClaw Gateway"
+    # Allow ThinClaw gateway port
+    ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
 
     # If Tailscale is being installed, allow Tailscale traffic
     if [[ -n "$TAILSCALE_KEY" ]]; then
@@ -195,7 +195,7 @@ if command -v ufw &> /dev/null; then
     ufw status numbered 2>/dev/null || ufw status
 else
     echo "    WARNING: UFW could not be installed. Configure your firewall manually."
-    echo "    Required ports: SSH (22), IronClaw ($IRONCLAW_PORT/tcp)"
+    echo "    Required ports: SSH (22), ThinClaw ($THINCLAW_PORT/tcp)"
 fi
 
 # ============================================================================
@@ -222,10 +222,6 @@ if command -v fail2ban-client &> /dev/null; then
 bantime  = 3600
 findtime = 600
 maxretry = 5
-
-# Email notifications (optional — configure sendmail if needed)
-# destemail = admin@example.com
-# action = %(action_mwl)s
 
 [sshd]
 enabled = true
@@ -272,18 +268,16 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
         echo ""
         echo "    ┌──────────────────────────────────────────────────────┐"
         echo "    │  SECURE CONNECTION:                                  │"
-        echo "    │  Use http://$TS_IP:$IRONCLAW_PORT in Scrappy       │"
+        echo "    │  Use http://$TS_IP:$THINCLAW_PORT in Scrappy        │"
         echo "    │  (encrypted via Tailscale — no public port needed)  │"
         echo "    └──────────────────────────────────────────────────────┘"
 
-        # Optionally restrict IronClaw to only Tailscale interface
-        # This prevents public access even if port 18789 is open
+        # Restrict ThinClaw to Tailscale interface only
         if command -v ufw &> /dev/null; then
-            # Remove the public rule and only allow via Tailscale
-            ufw delete allow "$IRONCLAW_PORT/tcp" 2>/dev/null || true
-            ufw allow in on tailscale0 to any port "$IRONCLAW_PORT" proto tcp \
-                comment "IronClaw via Tailscale only"
-            echo "    UFW updated: port $IRONCLAW_PORT only accessible via Tailscale."
+            ufw delete allow "$THINCLAW_PORT/tcp" 2>/dev/null || true
+            ufw allow in on tailscale0 to any port "$THINCLAW_PORT" proto tcp \
+                comment "ThinClaw via Tailscale only"
+            echo "    UFW updated: port $THINCLAW_PORT only accessible via Tailscale."
         fi
     else
         echo "    ERROR: Tailscale installation failed."
@@ -294,11 +288,11 @@ else
 fi
 
 # ============================================================================
-# 5. CONFIGURE & START IRONCLAW
+# 5. CONFIGURE & START THINCLAW
 # ============================================================================
 
 echo ""
-echo "==> [5/6] Configuring IronClaw environment..."
+echo "==> [5/6] Configuring ThinClaw environment..."
 
 cd "$DEPLOY_DIR"
 
@@ -318,7 +312,7 @@ echo "    .env configured with gateway token."
 
 # Start Docker Compose
 echo ""
-echo "==> Starting IronClaw Docker Compose stack..."
+echo "==> Starting ThinClaw Docker Compose stack..."
 
 docker compose down 2>/dev/null || true
 docker compose up -d --build
@@ -333,9 +327,9 @@ if [ "$ENABLE_SYSTEMD" = true ]; then
     echo ""
     echo "==> [6/6] Creating systemd service..."
 
-    cat > /etc/systemd/system/ironclaw.service <<SYSTEMD_UNIT
+    cat > /etc/systemd/system/thinclaw.service <<SYSTEMD_UNIT
 [Unit]
-Description=IronClaw AI Agent (Docker Compose)
+Description=ThinClaw AI Agent (Docker Compose)
 Documentation=https://github.com/RNT56/ThinClaw
 After=docker.service network-online.target
 Requires=docker.service
@@ -359,15 +353,15 @@ WantedBy=multi-user.target
 SYSTEMD_UNIT
 
     systemctl daemon-reload
-    systemctl enable ironclaw.service
+    systemctl enable thinclaw.service
     # Don't start via systemd now — Docker Compose already started it above
 
     echo "    Systemd service created and enabled."
     echo "    Commands:"
-    echo "      systemctl status ironclaw    # Check status"
-    echo "      systemctl restart ironclaw   # Restart agent"
-    echo "      systemctl stop ironclaw      # Stop agent"
-    echo "      journalctl -u ironclaw -f    # View logs"
+    echo "      systemctl status thinclaw    # Check status"
+    echo "      systemctl restart thinclaw   # Restart agent"
+    echo "      systemctl stop thinclaw      # Stop agent"
+    echo "      journalctl -u thinclaw -f    # View logs"
 else
     echo ""
     echo "==> [6/6] Systemd service: Skipped (no --systemd flag provided)"
@@ -379,7 +373,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  IronClaw Setup Complete!"
+echo "  ThinClaw Setup Complete!"
 echo "============================================================"
 echo ""
 
@@ -387,7 +381,7 @@ echo ""
 echo "  Waiting for health check..."
 sleep 5
 
-CONTAINER_STATUS=$(docker ps --filter "name=ironclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
+CONTAINER_STATUS=$(docker ps --filter "name=thinclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
 echo "  Container status: $CONTAINER_STATUS"
 
 # Determine connection URL
@@ -396,7 +390,7 @@ if [[ -n "$TAILSCALE_KEY" ]] && command -v tailscale &> /dev/null; then
     echo ""
     echo "  ┌────────────────────────────────────────────────────────┐"
     echo "  │  Connect via Tailscale (recommended, encrypted):       │"
-    echo "  │    URL:   http://$TS_IP:$IRONCLAW_PORT                │"
+    echo "  │    URL:   http://$TS_IP:$THINCLAW_PORT                │"
     echo "  │    Token: $TOKEN                                       │"
     echo "  └────────────────────────────────────────────────────────┘"
 fi
@@ -406,18 +400,18 @@ PUBLIC_IP=$(curl -s -4 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk 
 echo ""
 echo "  ┌────────────────────────────────────────────────────────┐"
 echo "  │  Connect via public IP:                                │"
-echo "  │    URL:   http://$PUBLIC_IP:$IRONCLAW_PORT             │"
+echo "  │    URL:   http://$PUBLIC_IP:$THINCLAW_PORT             │"
 echo "  │    Token: $TOKEN                                       │"
 echo "  └────────────────────────────────────────────────────────┘"
 echo ""
 echo "  Verify:"
-echo "    curl http://localhost:$IRONCLAW_PORT/api/health"
-echo "    docker logs ironclaw-remote"
+echo "    curl http://localhost:$THINCLAW_PORT/api/health"
+echo "    docker logs thinclaw-remote"
 echo ""
 if [ "$ENABLE_SYSTEMD" = true ]; then
     echo "  Systemd:"
-    echo "    systemctl status ironclaw"
-    echo "    journalctl -u ironclaw -f"
+    echo "    systemctl status thinclaw"
+    echo "    journalctl -u thinclaw -f"
     echo ""
 fi
 echo "============================================================"
