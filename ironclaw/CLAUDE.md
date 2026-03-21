@@ -23,7 +23,7 @@
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
 - **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
 - **Multi-provider LLM**: OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil, AWS Bedrock, Google Gemini, llama.cpp
-- **Setup wizard**: 9-step interactive onboarding for first-run configuration
+- **Setup wizard**: 16-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -43,16 +43,20 @@ cargo test test_name
 
 # Run with logging
 RUST_LOG=thinclaw=debug cargo run
+
+# Build with embedded WASM extensions (air-gapped deployment)
+cargo build --release --features bundled-wasm
 ```
 
 ## Project Structure
 
-> Last verified: 2026-03-13 — 375 `.rs` files across 27 modules + 19 standalone files
+> Last verified: 2026-03-21 — 376 `.rs` files across 28 modules + 21 standalone files
 
 ```
 src/
 ├── lib.rs              # Library root, module declarations
 ├── main.rs             # Entry point, CLI args, startup
+├── main_helpers.rs     # Startup helper functions extracted from main
 ├── app.rs              # AppBuilder (5-phase init), AppComponents
 ├── error.rs            # Error types (thiserror)
 │
@@ -71,8 +75,9 @@ src/
 ├── update_checker.rs   # Binary update checker
 ├── util.rs             # Shared utilities
 ├── voice_wake.rs       # Wake word detection (cpal audio)
+├── NETWORK_SECURITY.md # Network security architecture documentation
 │
-├── agent/              # Core agent logic (30 files)
+├── agent/              # Core agent logic (31 files)
 │   ├── agent_loop.rs   # Main Agent struct, message handling loop
 │   ├── agent_router.rs # Multi-agent workspace routing
 │   ├── commands.rs     # Agent command handlers
@@ -81,6 +86,7 @@ src/
 │   ├── cost_guard.rs   # Token spending limits
 │   ├── cron_stagger.rs # Cron schedule staggering
 │   ├── dispatcher.rs   # Skill-aware job dispatching
+│   ├── dispatcher_helpers.rs # Extracted dispatcher helper logic
 │   ├── global_session.rs # Global session state
 │   ├── heartbeat.rs    # Proactive periodic execution
 │   ├── job_monitor.rs  # Job monitoring
@@ -106,6 +112,7 @@ src/
 ├── api/                # Public REST API types (10 files)
 │   ├── chat.rs         # Chat API types
 │   ├── config.rs       # Config API
+│   ├── error.rs        # API error types
 │   ├── extensions.rs   # Extension API
 │   ├── memory.rs       # Memory API
 │   ├── routines.rs     # Routines API
@@ -137,15 +144,26 @@ src/
 │   ├── self_message.rs # Self-messaging
 │   ├── status_view.rs  # Channel status views
 │   ├── tool_stream.rs  # Tool streaming
-│   ├── web/            # Web gateway (browser UI)
+│   ├── web/            # Web gateway (browser UI, 8 files + 2 subdirs)
 │   │   ├── server.rs   # Axum router, 40+ API endpoints
 │   │   ├── sse.rs      # SSE broadcast manager
 │   │   ├── ws.rs       # WebSocket gateway + connection tracking
 │   │   ├── auth.rs     # Bearer token auth middleware
 │   │   ├── log_layer.rs # Tracing layer for log streaming
+│   │   ├── openai_compat.rs # OpenAI-compatible /v1/chat/completions proxy
+│   │   ├── types.rs    # Shared web gateway types
+│   │   ├── handlers/   # Extracted route handlers
+│   │   │   └── skills.rs # Skills API handlers
 │   │   └── static/     # HTML, CSS, JS (single-page app)
-│   └── wasm/           # WASM channel runtime
+│   └── wasm/           # WASM channel runtime (10 files)
 │       ├── bundled.rs  # Bundled channel discovery
+│       ├── capabilities.rs # Channel capability declarations
+│       ├── error.rs    # WASM channel errors
+│       ├── host.rs     # Host function exports to WASM channels
+│       ├── loader.rs   # WASM module loading
+│       ├── router.rs   # WASM channel webhook router + OAuth
+│       ├── runtime.rs  # WASM channel runtime manager
+│       ├── schema.rs   # WASM channel schema extraction
 │       └── wrapper.rs  # Channel trait wrapper for WASM modules
 │
 ├── cli/                # CLI subcommands (25 files)
@@ -181,7 +199,9 @@ src/
 │   ├── channels.rs     # Channel config
 │   ├── database.rs     # Database config
 │   ├── embeddings.rs   # Embeddings config
+│   ├── formats.rs      # Format configuration (output formats)
 │   ├── heartbeat.rs    # Heartbeat config
+│   ├── helpers.rs      # Config helper functions
 │   ├── hygiene.rs      # Memory hygiene config
 │   ├── llm.rs          # LLM provider config
 │   ├── mdns_discovery.rs # Bonjour/mDNS discovery
@@ -217,11 +237,13 @@ src/
 │   ├── bundled.rs      # Bundled hook implementations
 │   └── registry.rs     # Hook registry
 │
-├── llm/                # LLM integration (22 files)
-│   ├── mod.rs          # Provider factory, LlmBackend enum
+├── llm/                # LLM integration (24 files)
+│   ├── mod.rs          # LlmBackend enum, re-exports
 │   ├── provider.rs     # LlmProvider trait, message types
+│   ├── provider_factory.rs # Provider construction from config
 │   ├── rig_adapter.rs  # Rig framework adapter
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
+│   ├── reasoning_tags.rs # Reasoning tag parsing and extraction
 │   ├── circuit_breaker.rs # Circuit breaker for provider failures
 │   ├── retry.rs        # Retry with exponential backoff
 │   ├── failover.rs     # Multi-provider failover chain
@@ -260,7 +282,7 @@ src/
 │   ├── noop.rs         # No-op implementation
 │   └── traits.rs       # Observable trait
 │
-├── orchestrator/       # Internal HTTP API for sandbox containers
+├── orchestrator/       # Internal HTTP API for sandbox containers (4 files)
 │   ├── api.rs          # Axum endpoints (LLM proxy, events, prompts)
 │   ├── auth.rs         # Per-job bearer token store
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
@@ -269,8 +291,9 @@ src/
 │   ├── mod.rs          # Pairing protocol
 │   └── store.rs        # Pairing state storage
 │
-├── registry/           # Extension registry (6 files)
+├── registry/           # Extension registry (7 files)
 │   ├── artifacts.rs    # Artifact resolution
+│   ├── bundled_wasm.rs # Compile-time embedded WASM extraction
 │   ├── catalog.rs      # Catalog cache
 │   ├── embedded.rs     # Embedded registry
 │   ├── installer.rs    # Extension installer
@@ -290,24 +313,29 @@ src/
 │   ├── media_url.rs    # Media URL validation
 │   └── skill_path.rs   # Skill path traversal prevention
 │
-├── sandbox/            # Docker execution sandbox (9 files)
+├── sandbox/            # Docker/Podman execution sandbox (10 files + proxy/)
 │   ├── config.rs       # SandboxConfig, SandboxPolicy enum
 │   ├── manager.rs      # SandboxManager orchestration
 │   ├── container.rs    # ContainerRunner, Docker lifecycle
+│   ├── detect.rs       # Container runtime detection (Docker/Podman)
+│   ├── docker_chromium.rs # Chromium-in-Docker configuration
+│   ├── docker_init.rs  # Docker initialization and image management
 │   ├── error.rs        # SandboxError types
-│   └── proxy/          # Network proxy for containers
+│   ├── podman.rs       # Podman container runtime support
+│   └── proxy/          # Network proxy for containers (4 files)
 │       ├── http.rs     # HttpProxy, CredentialResolver trait
 │       ├── policy.rs   # NetworkPolicyDecider trait
 │       └── allowlist.rs # DomainAllowlist validation
 │
 ├── secrets/            # Secrets management (5 files)
 │   ├── crypto.rs       # AES-256-GCM encryption
+│   ├── keychain.rs     # macOS Keychain integration
 │   ├── store.rs        # Secret storage
 │   └── types.rs        # Credential types
 │
 ├── setup/              # Onboarding wizard (spec: src/setup/README.md)
 │   ├── mod.rs          # Entry point, check_onboard_needed()
-│   ├── wizard.rs       # 9-step interactive wizard
+│   ├── wizard.rs       # 16-step interactive wizard
 │   ├── channels.rs     # Channel setup helpers
 │   └── prompts.rs      # Terminal prompts (select, confirm, secret)
 │
@@ -319,14 +347,18 @@ src/
 │   ├── parser.rs       # SKILL.md frontmatter + markdown parser
 │   └── catalog.rs      # ClawHub registry client
 │
-├── tools/              # Extensible tool system (7 files + 4 subdirs)
+├── tools/              # Extensible tool system (8 files + 4 subdirs)
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
 │   ├── registry.rs     # ToolRegistry for discovery
-│   ├── sandbox.rs      # Process-based sandbox (stub, superseded by wasm/)
-│   ├── builtin/        # Built-in tools (25 files)
+│   ├── browser_args.rs # Browser tool argument types
+│   ├── intent_display.rs # Tool intent display formatting
+│   ├── policy.rs       # Tool execution policy enforcement
+│   ├── rate_limiter.rs # Per-tool rate limiting
+│   ├── builtin/        # Built-in tools (26 files)
 │   │   ├── echo.rs, time.rs, json.rs, http.rs
 │   │   ├── file.rs     # ReadFile, WriteFile, ListDir, ApplyPatch
 │   │   ├── shell.rs    # Shell command execution
+│   │   ├── shell_security.rs # Shell security checks (env scrubbing)
 │   │   ├── memory.rs   # Memory tools (search, write, read, tree)
 │   │   ├── job.rs      # CreateJob, ListJobs, JobStatus, CancelJob
 │   │   ├── routine.rs  # routine_create/list/update/delete/history
@@ -345,14 +377,21 @@ src/
 │   │   ├── discord_actions.rs # Discord-specific actions
 │   │   ├── slack_actions.rs # Slack-specific actions
 │   │   └── telegram_actions.rs # Telegram-specific actions
-│   ├── builder/        # Dynamic tool building
+│   ├── builder/        # Dynamic tool building (5 files)
 │   │   ├── core.rs, templates.rs, testing.rs, validation.rs
-│   ├── mcp/            # Model Context Protocol (HTTP client)
-│   │   ├── client.rs, protocol.rs
-│   └── wasm/           # Full WASM sandbox (wasmtime)
+│   ├── mcp/            # Model Context Protocol (6 files)
+│   │   ├── client.rs   # MCP HTTP client
+│   │   ├── config.rs   # MCP server configuration
+│   │   ├── protocol.rs # MCP protocol types
+│   │   ├── auth.rs     # MCP OAuth / auth flows
+│   │   └── session.rs  # MCP session management
+│   └── wasm/           # Full WASM sandbox (wasmtime, 13 files)
 │       ├── runtime.rs, wrapper.rs, host.rs, limits.rs
 │       ├── allowlist.rs, credential_injector.rs
 │       ├── loader.rs, rate_limiter.rs, storage.rs
+│       ├── capabilities.rs # WASM tool capability declarations
+│       ├── capabilities_schema.rs # Capability schema validation
+│       └── error.rs    # WASM tool errors
 │
 ├── tunnel/             # Tunnel providers (6 files)
 │   ├── tailscale.rs    # Tailscale serve + funnel
@@ -361,32 +400,58 @@ src/
 │   ├── custom.rs       # Custom tunnel
 │   └── none.rs         # No tunnel
 │
-├── tui/                # Terminal UI (1 file)
-│   └── mod.rs          # TUI framework
+├── tui/                # Terminal UI (2 files)
+│   ├── mod.rs          # TUI framework, slash commands, input handling
+│   └── rendering.rs    # TUI rendering and layout
 │
-├── db/                 # Database abstraction layer
+├── worker/             # Worker runtime for sandbox execution (5 files)
+│   ├── api.rs          # Worker HTTP API
+│   ├── claude_bridge.rs # Claude Code bridge mode
+│   ├── proxy_llm.rs    # Proxy LLM provider for workers
+│   └── runtime.rs      # Worker runtime execution
+│
+├── db/                 # Database abstraction layer (3 files + libsql/)
 │   ├── mod.rs          # Database trait (~60 async methods)
 │   ├── postgres.rs     # PostgreSQL backend (delegates to Store + Repository)
-│   └── libsql_backend.rs # libSQL/Turso backend (embedded SQLite)
+│   ├── libsql_migrations.rs # libSQL schema (consolidated, ~480 lines)
+│   └── libsql/         # libSQL backend implementation (8 files)
+│       ├── mod.rs      # LibSqlBackend struct
+│       ├── conversations.rs # Conversation persistence
+│       ├── jobs.rs     # Job persistence
+│       ├── routines.rs # Routine persistence
+│       ├── sandbox.rs  # Sandbox job persistence
+│       ├── settings.rs # Settings persistence
+│       ├── tool_failures.rs # Tool failure tracking
+│       └── workspace.rs # Workspace/memory persistence
 │
-├── workspace/          # Persistent memory system (11 files)
+├── workspace/          # Persistent memory system (13 files)
 │   ├── mod.rs          # Workspace struct, memory operations
+│   ├── workspace_core.rs # Core workspace implementation
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
 │   ├── chunker.rs      # Document chunking (800 tokens, 15% overlap)
 │   ├── embeddings.rs   # EmbeddingProvider trait
 │   ├── search.rs       # Hybrid search with RRF algorithm
-│   └── repository.rs   # PostgreSQL CRUD and search operations
+│   ├── repository.rs   # PostgreSQL CRUD and search operations
+│   ├── citations.rs    # Citation extraction and linking
+│   ├── hygiene.rs      # Memory hygiene (stale document cleanup)
+│   ├── lancedb.rs      # LanceDB vector store integration
+│   ├── qmd.rs          # QMD (query-metadata) document support
+│   └── sqlite_vec.rs   # sqlite-vec vector search backend
 │
-├── context/            # Job context isolation
-│   ├── state.rs, memory.rs, manager.rs
+├── context/            # Job context isolation (6 files)
+│   ├── state.rs        # Job state machine
+│   ├── memory.rs       # Context memory management
+│   ├── manager.rs      # Context lifecycle manager
+│   ├── post_compaction.rs # Post-compaction processing
+│   └── read_audit.rs   # Read audit tracking
 │
-├── estimation/         # Cost/time/value estimation
+├── estimation/         # Cost/time/value estimation (5 files)
 │   ├── cost.rs, time.rs, value.rs, learner.rs
 │
-├── evaluation/         # Success evaluation
+├── evaluation/         # Success evaluation (3 files)
 │   ├── success.rs, metrics.rs
 │
-└── history/            # Persistence
+└── history/            # Persistence (3 files)
     ├── store.rs        # PostgreSQL repositories
     └── analytics.rs    # Aggregation queries (JobStats, ToolStats)
 ```
@@ -738,9 +803,9 @@ Four built-in tools for managing skills at runtime:
 
 Skills configuration: see Configuration section above.
 
-## Docker Sandbox
+## Docker / Podman Sandbox
 
-The `src/sandbox/` module provides Docker-based isolation for job execution with a network proxy that controls outbound access and injects credentials.
+The `src/sandbox/` module provides Docker/Podman-based isolation for job execution with a network proxy that controls outbound access and injects credentials. The runtime is auto-detected (`src/sandbox/detect.rs`).
 
 ### Sandbox Policies
 
@@ -784,8 +849,7 @@ Key test patterns:
 3. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
 4. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
 5. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
-6. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway
-7. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
+6. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
 
 ## Tool Architecture
 
@@ -832,6 +896,7 @@ for that module's behavior. When modifying code in a module that has a spec:
 | `src/setup/` | `src/setup/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
 | `src/tools/` | `src/tools/README.md` |
+| Network security | `src/NETWORK_SECURITY.md` |
 
 ## Workspace & Memory System
 
