@@ -1,30 +1,30 @@
-//! Bootstrap helpers for IronClaw.
+//! Bootstrap helpers for ThinClaw.
 //!
 //! The only setting that truly needs disk persistence before the database is
 //! available is `DATABASE_URL` (chicken-and-egg: can't connect to DB without
 //! it). Everything else is auto-detected or read from env vars.
 //!
-//! File: `~/.ironclaw/.env` (standard dotenvy format)
+//! File: `~/.thinclaw/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
 
-/// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
+/// Path to the ThinClaw-specific `.env` file: `~/.thinclaw/.env`.
 pub fn ironclaw_env_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join(".env")
 }
 
-/// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
+/// Load env vars from `~/.thinclaw/.env` (in addition to the standard `.env`).
 ///
 /// Call this **after** `dotenvy::dotenv()` so that the standard `./.env`
-/// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
+/// takes priority over `~/.thinclaw/.env`. dotenvy never overwrites
 /// existing env vars, so the effective priority is:
 ///
-///   explicit env vars > `./.env` > `~/.ironclaw/.env`
+///   explicit env vars > `./.env` > `~/.thinclaw/.env`
 ///
-/// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
+/// If `~/.thinclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
 /// upgrade from the old config format).
 pub fn load_ironclaw_env() {
@@ -81,7 +81,7 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     }
 }
 
-/// Write database bootstrap vars to `~/.ironclaw/.env`.
+/// Write database bootstrap vars to `~/.thinclaw/.env`.
 ///
 /// These settings form the chicken-and-egg layer: they must be available
 /// from the filesystem (env vars) BEFORE any database connection, because
@@ -108,7 +108,7 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Update or add a single variable in `~/.ironclaw/.env`, preserving existing content.
+/// Update or add a single variable in `~/.thinclaw/.env`, preserving existing content.
 ///
 /// Unlike `save_bootstrap_env` (which overwrites the entire file), this
 /// reads the current `.env`, replaces the line for `key` if it exists,
@@ -166,7 +166,7 @@ fn restrict_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write `DATABASE_URL` to `~/.ironclaw/.env`.
+/// Write `DATABASE_URL` to `~/.thinclaw/.env`.
 ///
 /// Convenience wrapper around `save_bootstrap_env` for single-value migration
 /// paths. Prefer `save_bootstrap_env` for new code.
@@ -174,7 +174,7 @@ pub fn save_database_url(url: &str) -> std::io::Result<()> {
     save_bootstrap_env(&[("DATABASE_URL", url)])
 }
 
-/// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
+/// One-time migration of legacy `~/.thinclaw/settings.json` into the database.
 ///
 /// Only runs when a `settings.json` exists on disk AND the DB has no settings
 /// yet. After the wizard writes directly to the DB, this path is only hit by
@@ -187,7 +187,7 @@ pub async fn migrate_disk_to_db(
 ) -> Result<(), MigrationError> {
     let ironclaw_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+        .join(".thinclaw");
     let legacy_settings_path = ironclaw_dir.join("settings.json");
 
     if !legacy_settings_path.exists() {
@@ -221,7 +221,7 @@ pub async fn migrate_disk_to_db(
         tracing::info!("Migrated {} settings to database", db_map.len());
     }
 
-    // 2. Write DATABASE_URL to ~/.ironclaw/.env
+    // 2. Write DATABASE_URL to ~/.thinclaw/.env
     if let Some(ref url) = settings.database_url {
         save_database_url(url)
             .map_err(|e| MigrationError::Io(format!("Failed to write .env: {}", e)))?;
@@ -417,7 +417,7 @@ INJECTED="pwned"#;
     #[test]
     fn test_ironclaw_env_path() {
         let path = ironclaw_env_path();
-        assert!(path.ends_with(".ironclaw/.env"));
+        assert!(path.ends_with(".thinclaw/.env"));
     }
 
     #[test]
@@ -503,7 +503,7 @@ INJECTED="pwned"#;
 
         let vars = [
             ("DATABASE_BACKEND", "libsql"),
-            ("LIBSQL_PATH", "/home/user/.ironclaw/ironclaw.db"),
+            ("LIBSQL_PATH", "/home/user/.thinclaw/thinclaw.db"),
         ];
 
         // Write manually to the temp path (save_bootstrap_env uses the global path)
@@ -527,7 +527,7 @@ INJECTED="pwned"#;
             parsed[1],
             (
                 "LIBSQL_PATH".to_string(),
-                "/home/user/.ironclaw/ironclaw.db".to_string()
+                "/home/user/.thinclaw/thinclaw.db".to_string()
             )
         );
     }

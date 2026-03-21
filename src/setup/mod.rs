@@ -1,14 +1,22 @@
-//! Interactive setup wizard for IronClaw.
+//! Interactive setup wizard for ThinClaw.
 //!
 //! Provides a guided setup experience for:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider selection
-//! 4. Model selection
-//! 5. Embeddings
-//! 6. Channel configuration (HTTP, Telegram, etc.)
-//! 7. Extensions (tool installation from registry)
-//! 8. Heartbeat (background tasks)
+//! 3. Agent identity (name)
+//! 4. Inference provider selection
+//! 5. Model selection
+//! 6. Embeddings
+//! 7. Channel configuration (HTTP, Signal, Discord, Slack, Nostr, Gmail, iMessage, WASM)
+//! 8. Extensions (tool installation from registry)
+//! 9. Docker sandbox
+//! 10. Routines (scheduled tasks)
+//! 11. Skills
+//! 12. Claude Code sandbox
+//! 13. Smart routing (cheap model for lightweight tasks)
+//! 14. Web UI (theme, accent color, branding)
+//! 15. Observability (event recording backend)
+//! 16. Heartbeat (background tasks)
 //!
 //! # Example
 //!

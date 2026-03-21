@@ -185,7 +185,7 @@ async fn add_server(
 
     if requires_auth {
         println!();
-        println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+        println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
     }
 
     println!();
@@ -367,7 +367,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // OAuth configured but no tokens - need to authenticate
         println!();
         println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+            "  ✗ Not authenticated. Run 'thinclaw mcp auth {}' first.",
             name
         );
         println!();
@@ -430,7 +430,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");
                     println!();
-                    println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+                    println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
                 }
             } else {
                 println!("  ✗ Connection failed: {}", e);
@@ -506,7 +506,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
 
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
+            "SECRETS_MASTER_KEY not set. Run 'thinclaw onboard' first or set it in .env"
         )
     })?;
 

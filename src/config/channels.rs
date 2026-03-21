@@ -21,7 +21,7 @@ pub struct ChannelsConfig {
     pub gmail: Option<GmailChannelConfig>,
     #[cfg(target_os = "macos")]
     pub imessage: Option<IMessageChannelConfig>,
-    /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
+    /// Directory containing WASM channel modules (default: ~/.thinclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
@@ -291,11 +291,11 @@ impl ChannelsConfig {
     }
 }
 
-/// Get the default channels directory (~/.ironclaw/channels/).
+/// Get the default channels directory (~/.thinclaw/channels/).
 fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".thinclaw")
         .join("channels")
 }
 
@@ -355,7 +355,7 @@ pub struct GmailChannelConfig {
     pub subscription_id: String,
     /// Pub/Sub topic ID.
     pub topic_id: String,
-    /// OAuth2 access token (from `ironclaw auth gmail`).
+    /// OAuth2 access token (from `thinclaw auth gmail`).
     pub oauth_token: Option<String>,
     /// Email addresses allowed to interact (empty = all).
     pub allowed_senders: Vec<String>,

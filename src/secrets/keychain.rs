@@ -20,7 +20,7 @@
 use crate::secrets::SecretError;
 
 /// Service name for keychain entries.
-const SERVICE_NAME: &str = "ironclaw";
+const SERVICE_NAME: &str = "thinclaw";
 
 /// Account name for the master key.
 const MASTER_KEY_ACCOUNT: &str = "master_key";

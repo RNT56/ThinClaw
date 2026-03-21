@@ -1,6 +1,6 @@
 # Setup / Onboarding Specification
 
-This document is the authoritative specification for IronClaw's onboarding
+This document is the authoritative specification for ThinClaw's onboarding
 wizard. Any code change to `src/setup/` **must** keep this document in sync.
 If a future contributor or coding agent modifies setup behavior, update this
 file first, then adjust the code to match.
@@ -10,21 +10,21 @@ file first, then adjust the code to match.
 ## Entry Points
 
 ```
-ironclaw onboard [--skip-auth] [--channels-only]
+thinclaw onboard [--skip-auth] [--channels-only]
 ```
 
 Explicit invocation. Loads `.env` files, runs the wizard, exits.
 
 ```
-ironclaw          (first run, no database configured)
+thinclaw          (first run, no database configured)
 ```
 
 Auto-detection via `check_onboard_needed()` in `main.rs`. Skips onboarding
-when `ONBOARD_COMPLETED` env var is set (written to `~/.ironclaw/.env` by
+when `ONBOARD_COMPLETED` env var is set (written to `~/.thinclaw/.env` by
 the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
-- `~/.ironclaw/ironclaw.db` exists on disk
+- `~/.thinclaw/thinclaw.db` exists on disk
 
 The `--no-onboard` CLI flag suppresses auto-detection.
 
@@ -44,29 +44,36 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 **Critical ordering:** `.env` files must be loaded (step 3a) before
 `Config::from_env()` (step 3c) because bootstrap vars like
-`DATABASE_BACKEND` live in `~/.ironclaw/.env`.
+`DATABASE_BACKEND` live in `~/.thinclaw/.env`.
 
 ---
 
-## The 9-Step Wizard
+## The 16-Step Wizard
 
 ### Overview
 
 ```
-Step 1: Database Connection
-Step 2: Security (master key)
-Step 3: Inference Provider          ← skipped if --skip-auth
-Step 4: Model Selection
-Step 5: Embeddings
-Step 6: Channel Configuration
-Step 7: Extensions (tools)
-Step 8: Docker Sandbox
-Step 9: Background Tasks (heartbeat)
-       ↓
+Step 1:  Database Connection
+Step 2:  Security (master key)
+Step 3:  Agent Identity (name)
+Step 4:  Inference Provider          ← skipped if --skip-auth
+Step 5:  Model Selection
+Step 6:  Embeddings
+Step 7:  Channel Configuration
+Step 8:  Extensions (tools)
+Step 9:  Docker Sandbox
+Step 10: Routines (scheduled tasks)
+Step 11: Skills
+Step 12: Claude Code Sandbox
+Step 13: Smart Routing (cheap model)
+Step 14: Web UI (theme, accent)
+Step 15: Observability
+Step 16: Background Tasks (heartbeat)
+        ↓
    save_and_summarize()
 ```
 
-`--channels-only` mode runs only Step 6, skipping everything else.
+`--channels-only` mode runs only Step 7, skipping everything else.
 
 ---
 
@@ -94,7 +101,7 @@ Both features compiled?
 4. Store pool in `self.db_pool`
 
 **libSQL path** (`step_database_libsql`):
-1. Offer local path (default: `~/.ironclaw/ironclaw.db`)
+1. Offer local path (default: `~/.thinclaw/thinclaw.db`)
 2. Optional Turso cloud sync (URL + auth token)
 3. Test connection (creates `LibSqlBackend`)
 4. Always run migrations (idempotent CREATE IF NOT EXISTS)
@@ -146,7 +153,7 @@ This is OS-level behavior we cannot prevent. To minimize pain:
   Later calls to `init_secrets_context()` check this field first, avoiding
   redundant keychain probes.
 
-- **Never probe the keychain in read-only commands** (e.g., `ironclaw status`).
+- **Never probe the keychain in read-only commands** (e.g., `thinclaw status`).
   The status command reports "env not set (keychain may be configured)"
   rather than triggering system dialogs.
 
@@ -156,7 +163,7 @@ env-var mode or skipped secrets.
 
 ---
 
-### Step 3: Inference Provider
+### Step 4: Inference Provider
 
 **Module:** `wizard.rs` → `step_inference_provider()`
 
@@ -196,7 +203,7 @@ mutating environment variables.
 
 ---
 
-### Step 4: Model Selection
+### Step 5: Model Selection
 
 **Module:** `wizard.rs` → `step_model_selection()`
 
@@ -220,7 +227,7 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 5: Embeddings
+### Step 6: Embeddings
 
 **Module:** `wizard.rs` → `step_embeddings()`
 
@@ -237,7 +244,7 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 6: Channel Configuration
+### Step 7: Channel Configuration
 
 **Module:** `wizard.rs` → `step_channels()`, delegating to `channels.rs`
 
@@ -247,7 +254,7 @@ key first, then falls back to the standard env var.
 
 ```
 6a. Tunnel setup (if webhook channels needed)
-6b. Discover WASM channels from ~/.ironclaw/channels/
+6b. Discover WASM channels from ~/.thinclaw/channels/
 6c. Build channel options: discovered + bundled + registry catalog
 6d. Multi-select: CLI/TUI, HTTP, all available channels
 6e. Install missing bundled channels (copy WASM binaries)
@@ -258,7 +265,7 @@ key first, then falls back to the standard env var.
 ```
 
 **Channel sources** (priority order for installation):
-1. Already installed in `~/.ironclaw/channels/`
+1. Already installed in `~/.thinclaw/channels/`
 2. Bundled channels (pre-compiled in `channels-src/`)
 3. Registry channels (`registry/channels/*.json`, download-first with source fallback)
 
@@ -277,6 +284,35 @@ key first, then falls back to the standard env var.
 - Owner binding: polls `getUpdates` for 120s to capture sender's user ID
 - Optional webhook secret generation
 
+**Discord setup** (inline in `step_channels`):
+- Requires bot token from Discord Developer Portal
+- Checks `DISCORD_BOT_TOKEN` env var for existing token
+- Optional: guild ID (restrict to single server)
+- Optional: allowed channel IDs (comma-separated)
+- Token stored in secrets store + settings
+
+**Slack setup** (inline in `step_channels`):
+- Requires both Bot Token (`xoxb-...`) and App-Level Token (`xapp-...`)
+- Checks `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` env vars
+- Optional: allowed channel/DM IDs (comma-separated)
+- Both tokens stored in secrets store + settings
+
+**Nostr setup** (inline in `step_channels`):
+- Prompts for relay URLs (default: `wss://relay.damus.io,wss://nos.lol`)
+- Optional: allowed public keys (hex/npub format)
+- Reminds user to set `NOSTR_SECRET_KEY` before starting
+
+**Gmail setup** (inline in `step_channels`):
+- Requires GCP project ID, Pub/Sub subscription ID, and topic ID
+- Optional: allowed sender email addresses
+- Reminds user to run `thinclaw auth gmail` for OAuth2
+
+**iMessage setup** (macOS only, inline in `step_channels`):
+- Only shown on macOS builds
+- Optional: allowed contacts (phone/email)
+- Configurable polling interval (default: 5s)
+- Reminds user about Full Disk Access in System Settings
+
 **SecretsContext creation** (`init_secrets_context`):
 1. Check `self.secrets_crypto` (set in Step 2) → use if available
 2. Else try `SECRETS_MASTER_KEY` env var
@@ -285,7 +321,7 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 7: Extensions (Tools)
+### Step 8: Extensions (Tools)
 
 **Module:** `wizard.rs` → `step_extensions()`
 
@@ -295,7 +331,7 @@ key first, then falls back to the standard env var.
 1. Load `RegistryCatalog` from `registry/` directory
 2. If registry not found, print info and skip
 3. List all tool manifests from the catalog
-4. Discover already-installed tools in `~/.ironclaw/tools/`
+4. Discover already-installed tools in `~/.thinclaw/tools/`
 5. Multi-select: show all registry tools with display name, auth method,
    and description. Pre-check tools tagged `"default"` and already installed.
 6. For each selected tool not yet installed, install via
@@ -312,7 +348,7 @@ Searches for `registry/` directory in order:
 
 ---
 
-### Step 8: Docker Sandbox
+### Step 9: Docker Sandbox
 
 **Module:** `wizard.rs` → `step_sandbox()`
 
@@ -325,7 +361,83 @@ Searches for `registry/` directory in order:
 
 ---
 
-### Step 9: Heartbeat
+### Step 10: Routines (Scheduled Tasks)
+
+**Module:** `wizard.rs` → `step_routines()`
+
+**Goal:** Enable or disable the routines system for cron-style scheduled tasks.
+
+**Flow:**
+1. Ask "Enable routines?" (default: yes)
+2. Store in `self.settings.routines_enabled`
+
+---
+
+### Step 11: Skills
+
+**Module:** `wizard.rs` → `step_skills()`
+
+**Goal:** Enable or disable the skills system (composable capability plugins).
+
+**Flow:**
+1. Ask "Enable skills system?" (default: yes)
+2. Store in `self.settings.skills_enabled`
+
+---
+
+### Step 12: Claude Code Sandbox
+
+**Module:** `wizard.rs` → `step_claude_code()`
+
+**Goal:** Enable Claude Code delegation sandbox.
+
+**Flow:**
+1. Skip if Docker sandbox was disabled in Step 9
+2. Ask "Enable Claude Code sandbox?" (default: no)
+3. If yes: configure model (default: sonnet) and max turns (default: 50)
+4. Store in `self.settings.claude_code_enabled`, `.claude_code_model`, `.claude_code_max_turns`
+
+---
+
+### Step 13: Smart Routing
+
+**Module:** `wizard.rs` → `step_smart_routing()`
+
+**Goal:** Configure a cheap/fast model for lightweight tasks (routing, heartbeat, eval).
+
+**Flow:**
+1. Ask "Configure a cheap model for smart routing?" (default: no)
+2. If yes: prompt for model in `provider/model` format
+3. Store in `self.settings.providers.cheap_model`
+
+---
+
+### Step 14: Web UI
+
+**Module:** `wizard.rs` → `step_web_ui()`
+
+**Goal:** Customize the gateway web dashboard appearance.
+
+**Flow:**
+1. Ask "Customize web UI appearance?" (default: no)
+2. If yes: select theme (system/light/dark), optional accent color, branding toggle
+3. Store in `self.settings.webchat_theme`, `.webchat_accent_color`, `.webchat_show_branding`
+
+---
+
+### Step 15: Observability
+
+**Module:** `wizard.rs` → `step_observability()`
+
+**Goal:** Select the event and metric recording backend.
+
+**Flow:**
+1. Select backend: None (default), Log (structured events via tracing)
+2. Store in `self.settings.observability_backend`
+
+---
+
+### Step 16: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 
@@ -344,14 +456,14 @@ Searches for `registry/` directory in order:
 
 Settings are persisted in two places:
 
-**Layer 1: `~/.ironclaw/.env`** (bootstrap vars)
+**Layer 1: `~/.thinclaw/.env`** (bootstrap vars)
 
 Contains only the settings needed BEFORE database connection. Written by
 `save_bootstrap_env()` in `bootstrap.rs`.
 
 ```env
 DATABASE_BACKEND="libsql"
-LIBSQL_PATH="/Users/name/.ironclaw/ironclaw.db"
+LIBSQL_PATH="/Users/name/.thinclaw/thinclaw.db"
 LLM_BACKEND="openai_compatible"
 LLM_BASE_URL="http://my-vllm:8000/v1"
 ```
@@ -359,7 +471,7 @@ LLM_BASE_URL="http://my-vllm:8000/v1"
 Or for PostgreSQL:
 ```env
 DATABASE_BACKEND="postgres"
-DATABASE_URL="postgres://user:pass@localhost/ironclaw"
+DATABASE_URL="postgres://user:pass@localhost/thinclaw"
 LLM_BACKEND="openai_compatible"
 ```
 
@@ -397,7 +509,7 @@ This prevents data loss if a later step fails (e.g., the user enters an
 API key in step 3 but step 5 crashes — they won't need to re-enter it).
 
 **`persist_after_step()`** is called after each step in `run()` and:
-1. Writes bootstrap vars to `~/.ironclaw/.env` via `write_bootstrap_env()`
+1. Writes bootstrap vars to `~/.thinclaw/.env` via `write_bootstrap_env()`
 2. Writes all current settings to the database via `persist_settings()`
 3. Silently ignores errors (e.g., if called before Step 1 establishes a DB)
 
@@ -433,7 +545,7 @@ Final step of the wizard:
 4. Print configuration summary
 ```
 
-Bootstrap vars written to `~/.ironclaw/.env`:
+Bootstrap vars written to `~/.thinclaw/.env`:
 - `DATABASE_BACKEND` (always)
 - `DATABASE_URL` (if postgres)
 - `LIBSQL_PATH` (if libsql)
@@ -490,7 +602,7 @@ pub struct Settings {
     // Step 7: Heartbeat
     pub heartbeat: HeartbeatSettings,        // enabled, interval, notify
 
-    // Advanced (not in wizard, set via `ironclaw config set`)
+    // Advanced (not in wizard, set via `thinclaw config set`)
     pub agent: AgentSettings,
     pub wasm: WasmSettings,
     pub sandbox: SandboxSettings,
@@ -567,7 +679,7 @@ Must properly restore terminal state on all exit paths.
 - Two dialogs per call is normal, not a bug
 - Cache the result after first access to avoid repeat prompts
 - Never probe keychain in read-only commands (`status`, `--help`)
-- Service name: `"ironclaw"`, account: `"master_key"`
+- Service name: `"thinclaw"`, account: `"master_key"`
 
 ### Linux Secret Service
 
@@ -652,4 +764,4 @@ When changing the onboarding flow:
    cargo clippy --all --benches --tests --examples --all-features -- -D warnings
    cargo test --lib -- setup bootstrap
    ```
-7. Test a fresh onboarding: `rm -rf ~/.ironclaw && cargo run`
+7. Test a fresh onboarding: `rm -rf ~/.thinclaw && cargo run`

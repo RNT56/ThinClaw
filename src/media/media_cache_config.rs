@@ -87,7 +87,7 @@ impl Default for MediaCacheConfig {
         Self {
             default_policy: MediaCachePolicy::default(),
             channel_policies: HashMap::new(),
-            cache_dir: "~/.ironclaw/media_cache".to_string(),
+            cache_dir: "~/.thinclaw/media_cache".to_string(),
             global_max_size_bytes: 2 * 1024 * 1024 * 1024, // 2 GB
             eviction: EvictionStrategy::Lru,
         }

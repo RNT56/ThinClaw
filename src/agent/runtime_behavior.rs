@@ -18,23 +18,23 @@ pub struct RuntimeBehavior {
     pub suppress_tool_errors: bool,
 
     /// Whether to compact skill paths in prompts using `~` prefix.
-    /// E.g., `/Users/alice/.ironclaw/skills/web-search` → `~skills/web-search`
+    /// E.g., `/Users/alice/.thinclaw/skills/web-search` → `~skills/web-search`
     pub skill_path_compaction: bool,
 
-    /// Base path for skill compaction (default: `~/.ironclaw`).
-    pub ironclaw_home: PathBuf,
+    /// Base path for skill compaction (default: `~/.thinclaw`).
+    pub thinclaw_home: PathBuf,
 }
 
 impl Default for RuntimeBehavior {
     fn default() -> Self {
-        let ironclaw_home = dirs::home_dir()
+        let thinclaw_home = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw");
+            .join(".thinclaw");
 
         Self {
             suppress_tool_errors: false,
             skill_path_compaction: true,
-            ironclaw_home,
+            thinclaw_home,
         }
     }
 }
@@ -53,7 +53,7 @@ impl RuntimeBehavior {
         }
 
         if let Ok(home) = std::env::var("IRONCLAW_HOME") {
-            config.ironclaw_home = PathBuf::from(home);
+            config.thinclaw_home = PathBuf::from(home);
         }
 
         config
@@ -77,14 +77,14 @@ impl RuntimeBehavior {
     /// Compact a file path for prompt display.
     ///
     /// Replaces the IronClaw home directory with `~` to save tokens.
-    /// E.g., `/Users/alice/.ironclaw/skills/web` → `~skills/web`
+    /// E.g., `/Users/alice/.thinclaw/skills/web` → `~skills/web`
     pub fn compact_path(&self, path: &Path) -> String {
         if !self.skill_path_compaction {
             return path.display().to_string();
         }
 
         let path_str = path.display().to_string();
-        let home_str = self.ironclaw_home.display().to_string();
+        let home_str = self.thinclaw_home.display().to_string();
 
         if path_str.starts_with(&home_str) {
             format!("~{}", &path_str[home_str.len()..])
@@ -185,19 +185,19 @@ mod tests {
     #[test]
     fn test_compact_path_within_home() {
         let config = RuntimeBehavior {
-            ironclaw_home: PathBuf::from("/home/user/.ironclaw"),
+            thinclaw_home: PathBuf::from("/home/user/.thinclaw"),
             skill_path_compaction: true,
             ..Default::default()
         };
 
-        let compacted = config.compact_path(Path::new("/home/user/.ironclaw/skills/web-search"));
+        let compacted = config.compact_path(Path::new("/home/user/.thinclaw/skills/web-search"));
         assert_eq!(compacted, "~/skills/web-search");
     }
 
     #[test]
     fn test_compact_path_outside_home() {
         let config = RuntimeBehavior {
-            ironclaw_home: PathBuf::from("/home/user/.ironclaw"),
+            thinclaw_home: PathBuf::from("/home/user/.thinclaw"),
             skill_path_compaction: true,
             ..Default::default()
         };
@@ -209,13 +209,13 @@ mod tests {
     #[test]
     fn test_compact_path_disabled() {
         let config = RuntimeBehavior {
-            ironclaw_home: PathBuf::from("/home/user/.ironclaw"),
+            thinclaw_home: PathBuf::from("/home/user/.thinclaw"),
             skill_path_compaction: false,
             ..Default::default()
         };
 
-        let compacted = config.compact_path(Path::new("/home/user/.ironclaw/skills/web"));
-        assert_eq!(compacted, "/home/user/.ironclaw/skills/web");
+        let compacted = config.compact_path(Path::new("/home/user/.thinclaw/skills/web"));
+        assert_eq!(compacted, "/home/user/.thinclaw/skills/web");
     }
 
     #[test]

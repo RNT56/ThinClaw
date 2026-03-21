@@ -233,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("  {}", hint);
             eprintln!();
             eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+                "Run 'thinclaw onboard' to configure, or set the required environment variables."
             );
             std::process::exit(1);
         }

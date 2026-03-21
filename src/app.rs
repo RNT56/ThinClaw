@@ -828,7 +828,7 @@ impl AppBuilder {
         // Register TTS tool (always available — uses OpenAI TTS API)
         let tts_output_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("ironclaw")
+            .join("thinclaw")
             .join("tts");
         let tts_secrets = self.secrets_store.clone();
         tools.register_tts_tool(tts_secrets, tts_output_dir);

@@ -131,7 +131,7 @@ pub fn is_newer_version(current: &str, available: &str) -> bool {
 
 /// Path for the backup binary (used for rollback).
 fn backup_binary_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ironclaw"));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("thinclaw"));
     exe.with_extension("bak")
 }
 

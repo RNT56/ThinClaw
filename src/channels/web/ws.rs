@@ -318,7 +318,7 @@ async fn handle_client_message(
             let _ = direct_tx
                 .send(WsServerMessage::VersionInfo {
                     protocol_version: "1.0.0".to_string(),
-                    server_name: "ironclaw".to_string(),
+                    server_name: "thinclaw".to_string(),
                     server_version,
                     compatible,
                 })

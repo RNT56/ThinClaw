@@ -32,7 +32,7 @@ pub enum DistanceMetric {
 impl Default for SqliteVecConfig {
     fn default() -> Self {
         Self {
-            db_path: "~/.ironclaw/embeddings.db".to_string(),
+            db_path: "~/.thinclaw/embeddings.db".to_string(),
             dimensions: 1536,
             distance_metric: DistanceMetric::Cosine,
             max_results: 20,

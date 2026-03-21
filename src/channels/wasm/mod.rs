@@ -70,7 +70,7 @@
 //!
 //! // Load channels from directory
 //! let loader = WasmChannelLoader::new(runtime);
-//! let channels = loader.load_from_dir(Path::new("~/.ironclaw/channels/")).await?;
+//! let channels = loader.load_from_dir(Path::new("~/.thinclaw/channels/")).await?;
 //!
 //! // Add to channel manager
 //! for channel in channels {
