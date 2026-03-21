@@ -255,25 +255,25 @@ impl SidecarManager {
 
         // Handles MMProj (Vision)
         // Priority: Explicit Override > .mmproj file > Smart Discovery
-        let mut found_mmproj = false;
+        let mut _found_mmproj = false;
 
         if let Some(path) = mmproj_path_override {
              if !path.trim().is_empty() {
                  println!("[sidecar] Using explicit mmproj: {}", path);
                  args.push("--mmproj".to_string());
                  args.push(path);
-                 found_mmproj = true;
+                 _found_mmproj = true;
              }
         }
 
-        if !found_mmproj {
+        if !_found_mmproj {
             // Check for mmproj file
             let mmproj_path = format!("{}.mmproj", model_path);
             if std::path::Path::new(&mmproj_path).exists() {
                 println!("[sidecar] Found mmproj: {}", mmproj_path);
                 args.push("--mmproj".to_string());
                 args.push(mmproj_path);
-                found_mmproj = true;
+                _found_mmproj = true;
             } else {
                 // Fallback: Smart Discovery if in a subfolder
                 // If the model is in "models/UseSpecificFolder/", we scan that folder for any "mmproj"
@@ -300,7 +300,7 @@ impl SidecarManager {
                                         );
                                         args.push("--mmproj".to_string());
                                         args.push(p.to_string_lossy().to_string());
-                                        found_mmproj = true;
+                                        _found_mmproj = true;
                                         break; // Use the first one found
                                     }
                                 }
@@ -308,7 +308,7 @@ impl SidecarManager {
                         }
                     }
                 }
-                if !found_mmproj {
+                if !_found_mmproj {
                     println!("[sidecar] No mmproj found for: {}", model_path);
                 }
             }

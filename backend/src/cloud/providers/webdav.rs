@@ -209,7 +209,6 @@ impl CloudProvider for WebDavProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_display_name_nextcloud() {

@@ -5,7 +5,7 @@
 use tauri::State;
 use tracing::info;
 
-use super::super::config::*;
+
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 

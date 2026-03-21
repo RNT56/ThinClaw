@@ -5,7 +5,7 @@ use crate::rig_lib::tools::web_search::DDGSearchTool;
 use crate::rig_lib::tools::ScrapePageTool;
 use crate::rig_lib::unified_provider::{ProviderKind, UnifiedProvider};
 use rig::agent::Agent;
-use rig::completion::{Chat, Prompt};
+use rig::completion::Prompt;
 
 #[derive(Clone)]
 pub struct RigManager {
