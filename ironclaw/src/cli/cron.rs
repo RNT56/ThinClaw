@@ -197,7 +197,7 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
     if routines.is_empty() {
         println!("No routines found.");
         println!(
-            "Create one with: ironclaw cron add <name> --schedule '<cron>' --prompt '<prompt>'"
+            "Create one with: thinclaw cron add <name> --schedule '<cron>' --prompt '<prompt>'"
         );
         return Ok(());
     }

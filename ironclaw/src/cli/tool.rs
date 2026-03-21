@@ -286,7 +286,7 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
     if !tools_dir.exists() {
         println!("No tools directory found at {}", tools_dir.display());
-        println!("Install a tool with: ironclaw tool install <path>");
+        println!("Install a tool with: thinclaw tool install <path>");
         return Ok(());
     }
 

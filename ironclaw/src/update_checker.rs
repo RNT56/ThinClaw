@@ -41,7 +41,7 @@ pub struct UpdateStatus {
 /// Configuration for the auto-update checker.
 #[derive(Debug, Clone)]
 pub struct UpdateCheckerConfig {
-    /// GitHub owner/repo (e.g., "schtack/ironclaw")
+    /// GitHub owner/repo (e.g., "RNT56/ThinClaw")
     pub github_repo: String,
     /// Check interval (default: 24 hours)
     pub check_interval: Duration,
@@ -52,7 +52,7 @@ pub struct UpdateCheckerConfig {
 impl Default for UpdateCheckerConfig {
     fn default() -> Self {
         Self {
-            github_repo: "schtack/ironclaw".to_string(),
+            github_repo: "RNT56/ThinClaw".to_string(),
             check_interval: Duration::from_secs(24 * 60 * 60), // 24 hours
             include_prereleases: false,
         }
@@ -84,7 +84,7 @@ impl UpdateChecker {
             config,
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
-                .user_agent(format!("ironclaw/{}", env!("CARGO_PKG_VERSION")))
+                .user_agent(format!("thinclaw/{}", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_default(),
             status_tx,
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = UpdateCheckerConfig::default();
-        assert_eq!(config.github_repo, "schtack/ironclaw");
+        assert_eq!(config.github_repo, "RNT56/ThinClaw");
         assert_eq!(config.check_interval, Duration::from_secs(86400));
         assert!(!config.include_prereleases);
     }

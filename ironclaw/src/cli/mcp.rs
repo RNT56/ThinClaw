@@ -219,7 +219,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("  No MCP servers configured.");
         println!();
         println!("  Add a server with:");
-        println!("    ironclaw mcp add <name> <url> [--client-id <id>]");
+        println!("    thinclaw mcp add <name> <url> [--client-id <id>]");
         println!();
         return Ok(());
     }
@@ -322,9 +322,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!("  The server may require a different authentication method,");
             println!("  or you may need to configure OAuth manually:");
             println!();
-            println!("    ironclaw mcp remove {}", name);
+            println!("    thinclaw mcp remove {}", name);
             println!(
-                "    ironclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    thinclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -425,7 +425,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                     println!(
                         "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
                     );
-                    println!("    ironclaw mcp auth {}", name);
+                    println!("    thinclaw mcp auth {}", name);
                 } else {
                     // No tokens - server requires auth
                     println!("  ✗ Server requires authentication.");

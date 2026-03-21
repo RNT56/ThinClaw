@@ -243,7 +243,7 @@ mod tests {
 
     fn test_config(name: &str) -> CacheConfig {
         let dir = std::env::temp_dir().join(format!(
-            "ironclaw_cache_test_{}_{}",
+            "thinclaw_cache_test_{}_{}",
             std::process::id(),
             name
         ));

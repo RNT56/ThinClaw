@@ -25,7 +25,7 @@
 //! - `GMAIL_PROJECT_ID` — GCP project ID
 //! - `GMAIL_SUBSCRIPTION_ID` — Pub/Sub subscription name
 //! - `GMAIL_TOPIC_ID` — Pub/Sub topic name
-//! - `GMAIL_OAUTH_TOKEN` — OAuth2 access token (via `ironclaw auth gmail`)
+//! - `GMAIL_OAUTH_TOKEN` — OAuth2 access token (via `thinclaw auth gmail`)
 //! - `GMAIL_ALLOWED_SENDERS` — comma-separated email allowlist (empty = all)
 
 use std::sync::Arc;
@@ -246,7 +246,7 @@ impl GmailChannel {
         if token.is_empty() {
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: "No OAuth token configured (run `ironclaw auth gmail`)".into(),
+                reason: "No OAuth token configured (run `thinclaw auth gmail`)".into(),
             });
         }
 
@@ -796,7 +796,7 @@ impl Channel for GmailChannel {
         if token.is_empty() {
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: "No OAuth token configured. Run `ironclaw auth gmail` first.".into(),
+                reason: "No OAuth token configured. Run `thinclaw auth gmail` first.".into(),
             });
         }
 

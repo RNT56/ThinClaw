@@ -88,7 +88,7 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
 /// List all channels.
 async fn list_channels(format: &str) -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    crate::bootstrap::load_ironclaw_env();
+    crate::bootstrap::load_thinclaw_env();
 
     let mut channels: Vec<serde_json::Value> = Vec::new();
 
@@ -173,7 +173,7 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
 /// Show details for a specific channel.
 async fn channel_info(channel: &str) -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    crate::bootstrap::load_ironclaw_env();
+    crate::bootstrap::load_thinclaw_env();
 
     let known = KNOWN_CHANNELS.iter().find(|c| c.name == channel);
 

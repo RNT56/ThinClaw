@@ -56,18 +56,18 @@ const GITHUB_CLIENT_ID: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_ID") {
 };
 const GITHUB_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GITHUB_CLIENT_SECRET") {
     Some(v) => v,
-    None => "ironclaw_gh_default_secret_placeholder",
+    None => "thinclaw_gh_default_secret_placeholder",
 };
 
 /// Notion Integration credentials.
 /// Override at compile time with IRONCLAW_NOTION_CLIENT_ID / IRONCLAW_NOTION_CLIENT_SECRET.
 const NOTION_CLIENT_ID: &str = match option_env!("IRONCLAW_NOTION_CLIENT_ID") {
     Some(v) => v,
-    None => "ironclaw-notion-integration",
+    None => "thinclaw-notion-integration",
 };
 const NOTION_CLIENT_SECRET: &str = match option_env!("IRONCLAW_NOTION_CLIENT_SECRET") {
     Some(v) => v,
-    None => "ironclaw_notion_default_secret_placeholder",
+    None => "thinclaw_notion_default_secret_placeholder",
 };
 
 /// Returns built-in OAuth credentials for a provider, keyed by secret_name.

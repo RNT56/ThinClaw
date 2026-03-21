@@ -138,7 +138,7 @@ impl TailscaleDiscovery {
 
     /// Discover orchestrator instances on the tailnet.
     ///
-    /// Looks for peers with the tag "tag:ironclaw" or matching hostname pattern.
+    /// Looks for peers with the tag "tag:thinclaw" or matching hostname pattern.
     /// Falls back to listing all online peers if no specific orchestrators found.
     pub async fn discover_orchestrators(&self) -> Result<Vec<DiscoveredOrchestrator>, String> {
         let status = self.get_status().await?;
@@ -275,7 +275,7 @@ mod tests {
             "TailscaleIPs": ["100.64.1.2"],
             "Online": true,
             "OS": "linux",
-            "Tags": ["tag:ironclaw"]
+            "Tags": ["tag:thinclaw"]
         }"#;
         let peer: TailscalePeer = serde_json::from_str(json).unwrap();
         assert_eq!(peer.host_name.as_deref(), Some("my-server"));
@@ -284,7 +284,7 @@ mod tests {
             peer.tags
                 .as_ref()
                 .unwrap()
-                .contains(&"tag:ironclaw".to_string())
+                .contains(&"tag:thinclaw".to_string())
         );
     }
 

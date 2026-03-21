@@ -139,7 +139,7 @@ impl TranscriptStats {
         self.attachment_count += attachments;
     }
 
-    /// Format for display in `ironclaw status`.
+    /// Format for display in `thinclaw status`.
     pub fn display_summary(&self) -> String {
         let size_str = if self.total_chars < 1024 {
             format!("{} B", self.total_chars)

@@ -1488,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn default_toml_path_under_ironclaw() {
+    fn default_toml_path_under_thinclaw() {
         let path = Settings::default_toml_path();
         assert!(path.to_string_lossy().contains(".thinclaw"));
         assert!(path.to_string_lossy().ends_with("config.toml"));

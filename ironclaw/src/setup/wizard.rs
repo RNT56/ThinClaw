@@ -3541,7 +3541,7 @@ mod tests {
     #[tokio::test]
     async fn test_discover_wasm_channels_nonexistent_dir() {
         let channels =
-            discover_wasm_channels(std::path::Path::new("/tmp/ironclaw_nonexistent_dir")).await;
+            discover_wasm_channels(std::path::Path::new("/tmp/thinclaw_nonexistent_dir")).await;
         assert!(channels.is_empty());
     }
 

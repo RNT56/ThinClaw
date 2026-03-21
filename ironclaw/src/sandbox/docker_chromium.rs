@@ -31,7 +31,7 @@ pub struct DockerChromiumConfig {
 impl Default for DockerChromiumConfig {
     fn default() -> Self {
         Self {
-            image: "ghcr.io/ironclaw/chromium-xvfb:latest".to_string(),
+            image: "ghcr.io/thinclaw/chromium-xvfb:latest".to_string(),
             auto_pull: true,
             display: ":99".to_string(),
             resolution: "1920x1080".to_string(),

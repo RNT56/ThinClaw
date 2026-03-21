@@ -180,7 +180,7 @@ mod tests {
 
     fn test_config() -> SkillPathConfig {
         SkillPathConfig {
-            base_dir: PathBuf::from("/tmp/ironclaw_test/skills"),
+            base_dir: PathBuf::from("/tmp/thinclaw_test/skills"),
             allow_symlinks: false,
         }
     }
@@ -191,7 +191,7 @@ mod tests {
         let result = config.validate_path(Path::new("my-skill"));
         assert!(result.is_ok());
         let resolved = result.unwrap();
-        assert!(resolved.starts_with("/tmp/ironclaw_test/skills"));
+        assert!(resolved.starts_with("/tmp/thinclaw_test/skills"));
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn test_absolute_path_inside_base() {
         let config = test_config();
-        let result = config.validate_path(Path::new("/tmp/ironclaw_test/skills/safe-skill"));
+        let result = config.validate_path(Path::new("/tmp/thinclaw_test/skills/safe-skill"));
         assert!(result.is_ok());
     }
 

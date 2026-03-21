@@ -1,8 +1,8 @@
-//! OS service management for running IronClaw as a daemon.
+//! OS service management for running ThinClaw as a daemon.
 //!
 //! Generates and manages platform-native service definitions:
 //! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.thinclaw.daemon.plist`
-//! - **Linux**: systemd user unit at `~/.config/systemd/user/ironclaw.service`
+//! - **Linux**: systemd user unit at `~/.config/systemd/user/thinclaw.service`
 //!
 //! The installed service runs `thinclaw run` (the default agent mode) and is
 //! configured to restart automatically on failure.
@@ -13,7 +13,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const SERVICE_LABEL: &str = "com.thinclaw.daemon";
-const SYSTEMD_UNIT: &str = "ironclaw.service";
+const SYSTEMD_UNIT: &str = "thinclaw.service";
 
 // ── Public dispatch ─────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ fn install_macos() -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let logs_dir = ironclaw_logs_dir()?;
+    let logs_dir = thinclaw_logs_dir()?;
     std::fs::create_dir_all(&logs_dir)?;
 
     let stdout = logs_dir.join("daemon.stdout.log");
@@ -94,7 +94,7 @@ fn install_macos() -> Result<()> {
 
     std::fs::write(&file, plist)?;
     println!("Installed launchd service: {}", file.display());
-    println!("  Start with: ironclaw service start");
+    println!("  Start with: thinclaw service start");
     Ok(())
 }
 
@@ -107,7 +107,7 @@ fn install_linux() -> Result<()> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let unit = format!(
         "[Unit]\n\
-         Description=IronClaw daemon\n\
+         Description=ThinClaw daemon\n\
          After=network.target\n\
          \n\
          [Service]\n\
@@ -125,7 +125,7 @@ fn install_linux() -> Result<()> {
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
     run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
     println!("Installed systemd user service: {}", file.display());
-    println!("  Start with: ironclaw service start");
+    println!("  Start with: thinclaw service start");
     Ok(())
 }
 
@@ -135,7 +135,7 @@ fn start() -> Result<()> {
     if cfg!(target_os = "macos") {
         let plist = macos_plist_path()?;
         if !plist.exists() {
-            bail!("Service not installed. Run `ironclaw service install` first.");
+            bail!("Service not installed. Run `thinclaw service install` first.");
         }
         run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
         run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
@@ -250,7 +250,7 @@ fn linux_unit_path() -> Result<PathBuf> {
         .join(SYSTEMD_UNIT))
 }
 
-fn ironclaw_logs_dir() -> Result<PathBuf> {
+fn thinclaw_logs_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
     Ok(home.join(".thinclaw").join("logs"))
 }
@@ -343,14 +343,14 @@ mod tests {
         let path = linux_unit_path().unwrap();
         let s = path.to_string_lossy();
         assert!(
-            s.ends_with(".config/systemd/user/ironclaw.service"),
+            s.ends_with(".config/systemd/user/thinclaw.service"),
             "unexpected path: {s}"
         );
     }
 
     #[test]
-    fn logs_dir_under_ironclaw() {
-        let path = ironclaw_logs_dir().unwrap();
+    fn logs_dir_under_thinclaw() {
+        let path = thinclaw_logs_dir().unwrap();
         let s = path.to_string_lossy();
         assert!(s.ends_with(".thinclaw/logs"), "unexpected path: {s}");
     }
