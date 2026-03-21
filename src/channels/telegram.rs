@@ -499,7 +499,7 @@ impl Channel for TelegramChannel {
             .as_ref()
             .and_then(|v| v.get("first_name"))
             .and_then(|v| v.as_str())
-            .unwrap_or("IronClaw");
+            .unwrap_or("ThinClaw");
         tracing::info!("Telegram bot connected as @{}", bot_name);
 
         // Spawn polling task
