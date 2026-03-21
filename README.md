@@ -464,6 +464,12 @@ Key differences:
 
 ## License
 
+Copyright © 2026 **RNT56** (ThinClaw)
+Copyright © 2026 **NEAR AI** (IronClaw)
+
+ThinClaw is a fork of [IronClaw](https://github.com/nearai/ironclaw) by NEAR AI.
+The original IronClaw code is used under the terms of its MIT / Apache-2.0 dual license.
+
 Licensed under either of:
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
