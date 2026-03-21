@@ -208,7 +208,7 @@ impl GmailChannel {
 
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
-            .user_agent("IronClaw/1.0")
+            .user_agent("ThinClaw/1.0")
             .build()
             .map_err(|e| ChannelError::StartupFailed {
                 name: "gmail".into(),
@@ -899,7 +899,7 @@ impl Channel for GmailChannel {
         // For broadcast, send a new email (not a reply).
         self.send_reply(
             user_id,
-            "Message from IronClaw",
+            "Message from ThinClaw",
             &response.content,
             None,
             None,

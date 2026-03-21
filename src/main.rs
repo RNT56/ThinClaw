@@ -1,4 +1,4 @@
-//! IronClaw - Main entry point.
+//! ThinClaw - Main entry point.
 
 mod main_helpers;
 
@@ -249,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
     let log_level_handle =
         thinclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
-    tracing::info!("Starting IronClaw...");
+    tracing::info!("Starting ThinClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
     tracing::info!("LLM backend: {}", config.llm.backend);
 
@@ -893,7 +893,7 @@ async fn main() -> anyhow::Result<()> {
             .restart_requested
             .load(std::sync::atomic::Ordering::Relaxed)
     {
-        eprintln!("Restarting IronClaw (exit code 75)...");
+        eprintln!("Restarting ThinClaw (exit code 75)...");
         std::process::exit(75);
     }
 

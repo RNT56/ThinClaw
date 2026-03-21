@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("IronClaw Doctor");
+    println!("ThinClaw Doctor");
     println!("===============\n");
 
     let mut passed = 0u32;

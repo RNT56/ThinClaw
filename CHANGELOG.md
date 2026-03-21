@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add --version flag with clap built-in support and test ([#342](https://github.com/nearai/ironclaw/pull/342))
 - Update FEATURE_PARITY.md ([#337](https://github.com/nearai/ironclaw/pull/337))
-- add brew install ironclaw instructions ([#310](https://github.com/nearai/ironclaw/pull/310))
+- add brew install thinclaw instructions ([#310](https://github.com/nearai/ironclaw/pull/310))
 - Fix skills system: enable by default, fix registry and install ([#300](https://github.com/nearai/ironclaw/pull/300))
 
 ## [0.11.1](https://github.com/nearai/ironclaw/compare/v0.11.0...v0.11.1) - 2026-02-23
@@ -142,7 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Changed default sandbox image to `ironclaw-worker:latest` in config/settings/sandbox defaults.
+- Changed default sandbox image to `thinclaw-worker:latest` in config/settings/sandbox defaults.
 - Improved tool-message sanitization and provider compatibility handling across NEAR AI, rig adapter, and shared LLM provider code.
 
 ### Fixed
@@ -294,7 +294,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add proactivity features: memory CLI, session pruning, self-repair notifications, slash commands, status diagnostics, context warnings
 - Add hosted MCP server support with OAuth 2.1 and token refresh
 - Add interactive setup wizard and persistent settings
-- Rebrand to IronClaw with security-first mission
+- Rebrand to ThinClaw with security-first mission
 - Fix build_software tool stuck in planning mode loop
 - Enable sandbox by default
 - Fix Telegram Markdown formatting and clarify tool/memory distinctions
@@ -335,7 +335,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix TuiChannel integration and enable in main.rs
 - Integrate Codex patterns: task scheduler, TUI, sessions, compaction
 - Adding LICENSE
-- Add README with IronClaw branding
+- Add README with ThinClaw branding
 - Add WASM sandbox secure API extension
 - Wire database Store into agent loop
 - Implementing WASM runtime

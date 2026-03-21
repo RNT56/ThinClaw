@@ -1,4 +1,4 @@
-//! Internationalization (i18n) support for the IronClaw control UI.
+//! Internationalization (i18n) support for the ThinClaw control UI.
 //!
 //! Provides a simple, static translation system based on message keys.
 //! Translation files are embedded at compile time for zero-config startup.

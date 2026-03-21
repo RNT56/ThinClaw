@@ -110,7 +110,7 @@ impl Default for LogBroadcaster {
 /// Handle for changing the tracing `EnvFilter` at runtime.
 ///
 /// Wraps a `reload::Handle` so the gateway can switch between log levels
-/// (e.g. `ironclaw=debug`) without restarting the process.
+/// (e.g. `thinclaw=debug`) without restarting the process.
 pub struct LogLevelHandle {
     handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
     current_level: Mutex<String>,
@@ -130,7 +130,7 @@ impl LogLevelHandle {
         }
     }
 
-    /// Change the `ironclaw=<level>` directive at runtime.
+    /// Change the `thinclaw=<level>` directive at runtime.
     ///
     /// `level` must be one of: trace, debug, info, warn, error.
     pub fn set_level(&self, level: &str) -> Result<(), String> {
@@ -161,7 +161,7 @@ impl LogLevelHandle {
         Ok(())
     }
 
-    /// Returns the current ironclaw log level (e.g. "info", "debug").
+    /// Returns the current thinclaw log level (e.g. "info", "debug").
     pub fn current_level(&self) -> String {
         self.current_level
             .lock()
@@ -178,7 +178,7 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "thinclaw=info,tower_http=warn".to_string());
 
-    // Split into the ironclaw directive and "everything else" (base_filter).
+    // Split into the thinclaw directive and "everything else" (base_filter).
     let mut thinclaw_level = String::from("info");
     let mut base_parts: Vec<&str> = Vec::new();
 

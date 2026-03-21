@@ -1,4 +1,4 @@
-//! Unified Tauri command facade for IronClaw backend services.
+//! Unified Tauri command facade for ThinClaw backend services.
 //!
 //! Provides the adapter functions that Scrappy's Tauri command stubs
 //! should call. Each function maps directly to an `openclaw_*` command
@@ -10,7 +10,7 @@
 //! use thinclaw::tauri_commands;
 //!
 //! #[tauri::command]
-//! fn openclaw_cost_summary(state: State<IronClawState>) -> Result<CostSummary, String> {
+//! fn openclaw_cost_summary(state: State<ThinClawState>) -> Result<CostSummary, String> {
 //!     tauri_commands::cost_summary(&state.cost_tracker)
 //! }
 //! ```
@@ -658,7 +658,7 @@ pub struct RoutineCreateParams {
 
 /// Create and persist a new routine as a JSON file.
 ///
-/// Routines in IronClaw are file-backed (not database-backed).
+/// Routines in ThinClaw are file-backed (not database-backed).
 /// Each routine is saved as `{id}.json` under the routines directory.
 ///
 /// Maps to: `openclaw_routine_create`

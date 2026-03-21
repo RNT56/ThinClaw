@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Multi-provider cloud intelligence configuration.
 ///
-/// Enables IronClaw to manage multiple LLM providers with failover,
+/// Enables ThinClaw to manage multiple LLM providers with failover,
 /// smart routing, and model allowlists — whether running headless
 /// (config.toml / env vars) or inside Scrappy (UI-driven).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

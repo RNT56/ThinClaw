@@ -1,4 +1,4 @@
-//! IronClaw — Secure Personal AI Agent Framework
+//! ThinClaw — Secure Personal AI Agent Framework
 //!
 //! An LLM-powered autonomous agent with multi-channel interaction,
 //! WASM-sandboxed tools, and persistent memory.

@@ -76,7 +76,7 @@ impl RuntimeBehavior {
 
     /// Compact a file path for prompt display.
     ///
-    /// Replaces the IronClaw home directory with `~` to save tokens.
+    /// Replaces the ThinClaw home directory with `~` to save tokens.
     /// E.g., `/Users/alice/.thinclaw/skills/web` → `~skills/web`
     pub fn compact_path(&self, path: &Path) -> String {
         if !self.skill_path_compaction {

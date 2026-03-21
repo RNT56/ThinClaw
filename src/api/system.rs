@@ -80,7 +80,7 @@ pub struct SnapshotResult {
     pub path: String,
 }
 
-/// Create a portable snapshot of IronClaw's database.
+/// Create a portable snapshot of ThinClaw's database.
 ///
 /// This is used by Scrappy's cloud migration engine to include
 /// ironclaw.db in cross-device sync. The snapshot is a self-contained

@@ -1,4 +1,4 @@
-//! Framework-agnostic API surface for IronClaw.
+//! Framework-agnostic API surface for ThinClaw.
 //!
 //! These modules contain the business logic that both the web gateway
 //! and the Tauri integration call into. Each function takes explicit

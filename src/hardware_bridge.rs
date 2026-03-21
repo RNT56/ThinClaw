@@ -1,12 +1,12 @@
 //! Hardware Bridge — in-process sensor access for desktop mode.
 //!
-//! When IronClaw runs as a library inside Scrappy (Tauri), sensor access
+//! When ThinClaw runs as a library inside Scrappy (Tauri), sensor access
 //! (camera, microphone, screen) is handled by the host application rather
-//! than by IronClaw directly.
+//! than by ThinClaw directly.
 //!
 //! Instead of WebSocket RPC (the original design for remote orchestrators),
 //! the bridge uses a simple async Rust trait that Scrappy implements and
-//! injects at startup. This is simpler and faster since IronClaw is in-process.
+//! injects at startup. This is simpler and faster since ThinClaw is in-process.
 //!
 //! Architecture:
 //! ```text
@@ -15,7 +15,7 @@
 //!     → ToolBridge::request_sensor_access()
 //!       → Scrappy shows ApprovalCard (Approve/Deny/Allow Session)
 //!       → If approved: Scrappy captures via native API
-//!       → Returns SensorResponse to IronClaw
+//!       → Returns SensorResponse to ThinClaw
 //!     → BridgedTool returns result to LLM
 //! ```
 //!
@@ -125,7 +125,7 @@ impl SensorResponse {
 }
 
 /// The bridge trait that Scrappy (or any host) implements to provide
-/// hardware sensor access to IronClaw.
+/// hardware sensor access to ThinClaw.
 ///
 /// Scrappy implements this by:
 /// 1. Showing its `ApprovalCard` component
