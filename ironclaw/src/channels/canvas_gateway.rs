@@ -287,7 +287,7 @@ async fn render_panel(
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{title} — IronClaw Canvas</title>
+    <title>{title} — ThinClaw Canvas</title>
     <style>
         :root {{
             --bg: #0f0f14; --surface: #1a1a24; --border: #2a2a3a;

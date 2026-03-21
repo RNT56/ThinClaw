@@ -378,7 +378,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IronClaw - {heading}</title>
+<title>ThinClaw - {heading}</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box }}
   body {{
@@ -424,7 +424,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
     {icon}
     <h1>{heading}</h1>
     <p>{subtitle}</p>
-    <div class="brand">IronClaw</div>
+    <div class="brand">ThinClaw</div>
   </div>
 </body>
 </html>"#,
@@ -588,7 +588,7 @@ mod tests {
         let html = landing_html("Google", true);
         assert!(html.contains("Google Connected"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains("ThinClaw"));
         assert!(html.contains("#22c55e")); // green accent
         assert!(!html.contains("Failed"));
     }
@@ -605,7 +605,7 @@ mod tests {
         let html = landing_html("Notion", false);
         assert!(html.contains("Authorization Failed"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains("ThinClaw"));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
     }

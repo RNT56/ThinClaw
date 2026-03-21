@@ -257,7 +257,7 @@ mod tests {
         let mut roster = GroupRoster::new("g1", "tg");
         roster.add_member(GroupMember {
             user_id: "bot".to_string(),
-            display_name: Some("IronClaw".to_string()),
+            display_name: Some("ThinClaw".to_string()),
             username: None,
             role: None,
             is_bot: true,

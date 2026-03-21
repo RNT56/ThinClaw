@@ -1,7 +1,7 @@
 //! Plugin interfaces: auth, memory, and provider plugins.
 //!
 //! Defines the trait interfaces that WASM or native plugins can implement
-//! to extend IronClaw's auth, memory, and LLM provider capabilities.
+//! to extend ThinClaw's auth, memory, and LLM provider capabilities.
 
 use serde::{Deserialize, Serialize};
 

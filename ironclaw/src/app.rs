@@ -1,4 +1,4 @@
-//! Application builder for initializing core IronClaw components.
+//! Application builder for initializing core ThinClaw components.
 //!
 //! Extracts the mechanical initialization phases from `main.rs` into a
 //! reusable builder so that:
@@ -942,7 +942,7 @@ impl AppBuilder {
         let cost_tracker = {
             let mut tracker = CostTracker::new(BudgetConfig::default());
 
-            // Restore persisted entries from the IronClaw DB.
+            // Restore persisted entries from the ThinClaw DB.
             if let Some(ref db) = self.db {
                 match db.get_setting("default", "cost_entries").await {
                     Ok(Some(json)) => tracker.from_json(&json),

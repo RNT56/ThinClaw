@@ -31,7 +31,7 @@ impl TuiApp {
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         let header = Line::from(vec![
             Span::styled(
-                " IronClaw ",
+                " ThinClaw ",
                 Style::default()
                     .fg(Color::White)
                     .bg(Color::Rgb(80, 80, 200))

@@ -137,7 +137,7 @@ impl HookRegistrationSummary {
     }
 }
 
-/// Register bundled built-in hooks that ship with IronClaw.
+/// Register bundled built-in hooks that ship with ThinClaw.
 pub async fn register_bundled_hooks(registry: &Arc<HookRegistry>) -> HookRegistrationSummary {
     registry
         .register_with_priority(Arc::new(AuditLogHook), 25)

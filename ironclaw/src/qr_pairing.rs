@@ -31,10 +31,10 @@ pub struct PairingInfo {
 impl PairingInfo {
     /// Encode pairing info as a URL for the QR code.
     ///
-    /// Format: `ironclaw://pair?host=<host>&port=<port>&fp=<fingerprint>&token=<token>`
+    /// Format: `thinclaw://pair?host=<host>&port=<port>&fp=<fingerprint>&token=<token>`
     pub fn to_url(&self) -> String {
         format!(
-            "ironclaw://pair?host={}&port={}&proto={}&fp={}&token={}&v={}",
+            "thinclaw://pair?host={}&port={}&proto={}&fp={}&token={}&v={}",
             self.host,
             self.port,
             self.protocol,
@@ -47,7 +47,7 @@ impl PairingInfo {
     /// Parse pairing info from a URL.
     pub fn from_url(url: &str) -> Result<Self, String> {
         let url = url
-            .strip_prefix("ironclaw://pair?")
+            .strip_prefix("thinclaw://pair?")
             .ok_or_else(|| "Invalid pairing URL scheme".to_string())?;
 
         let params: std::collections::HashMap<String, String> = url
@@ -178,7 +178,7 @@ pub fn render_qr_terminal(data: &str) -> String {
 
     format!(
         "\n{qr_display}\n\n  \
-         Scan the QR code above with your IronClaw companion app.\n  \
+         Scan the QR code above with your ThinClaw companion app.\n  \
          Or manually enter this URL:\n    {data}\n"
     )
 }
@@ -252,7 +252,7 @@ mod tests {
         };
 
         let url = info.to_url();
-        assert!(url.starts_with("ironclaw://pair?"));
+        assert!(url.starts_with("thinclaw://pair?"));
         assert!(url.contains("host=192.168.1.100"));
         assert!(url.contains("port=3000"));
 
@@ -314,8 +314,8 @@ mod tests {
 
     #[test]
     fn test_render_qr_terminal() {
-        let output = render_qr_terminal("ironclaw://pair?host=10.0.0.1");
-        assert!(output.contains("ironclaw://pair"));
+        let output = render_qr_terminal("thinclaw://pair?host=10.0.0.1");
+        assert!(output.contains("thinclaw://pair"));
         assert!(output.contains("Scan the QR code"));
     }
 

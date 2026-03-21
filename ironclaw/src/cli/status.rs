@@ -11,7 +11,7 @@ use crate::settings::Settings;
 pub async fn run_status_command() -> anyhow::Result<()> {
     let settings = Settings::default();
 
-    println!("IronClaw Status");
+    println!("ThinClaw Status");
     println!("===============\n");
 
     // Version

@@ -195,7 +195,7 @@ impl TuiApp {
     ) -> io::Result<()> {
         // Add welcome message
         self.messages.push(ChatMessage::System {
-            text: "Welcome to IronClaw TUI. Type /help for commands.".to_string(),
+            text: "Welcome to ThinClaw TUI. Type /help for commands.".to_string(),
         });
 
         loop {
@@ -662,7 +662,7 @@ impl From<StatusUpdate> for TuiUpdate {
 }
 
 const HELP_TEXT: &str = "\
-━━━ IronClaw TUI Commands ━━━
+━━━ ThinClaw TUI Commands ━━━
 
   /help          Show this help
   /clear         Clear chat history
