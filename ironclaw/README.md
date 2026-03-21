@@ -185,11 +185,19 @@ cargo build --release
 # Build (desktop embedding — libSQL only, minimal footprint)
 cargo build --release --no-default-features --features desktop
 
+# Build (air-gapped — all WASM extensions embedded in binary, +6-13 MB)
+cargo build --release --features bundled-wasm
+
 # Run tests
 cargo test
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
+
+For an **air-gapped build** with all WASM extensions embedded:
+```bash
+./scripts/build-all.sh --bundled
+```
 
 </details>
 
@@ -380,6 +388,7 @@ External content passes through multiple security layers:
 | `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ |
 | `docker-sandbox` | Isolated container execution for untrusted code | ✅ |
 | `voice` | Voice wake word detection (cpal audio capture) | |
+| `bundled-wasm` | Embed all WASM extensions in binary for air-gapped deploys (+6-13 MB) | |
 
 ## Usage
 
@@ -429,6 +438,43 @@ The comprehensive deployment guide covers: Tailscale VPN setup, auto-start on bo
 
 📖 **Full guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
+### WASM Extension Deployment
+
+ThinClaw ships 14 WASM extensions (10 tools + 4 channels). Two deployment strategies are available:
+
+**Option A: Download from GitHub Releases (default)**
+
+The standard binary downloads extensions from GitHub Releases on first install. The CI pipeline (`release.yml`) automatically builds all WASM extensions, creates `.tar.gz` bundles with SHA256 checksums, and publishes them alongside the binary.
+
+```bash
+# Standard build — small binary, extensions downloaded on demand
+cargo build --release
+
+# Install an extension at runtime (downloads from GitHub Releases)
+thinclaw extension install telegram
+```
+
+This is the recommended approach for machines with internet access.
+
+**Option B: Embedded WASM (air-gapped / zero-network)**
+
+For headless deployments on machines without reliable internet (e.g., Mac Mini behind NAT), compile with the `bundled-wasm` feature to embed all WASM extensions directly into the binary:
+
+```bash
+# Air-gapped build — all extensions embedded (+6-13 MB binary size)
+cargo build --release --features bundled-wasm
+
+# Or use the convenience script:
+./scripts/build-all.sh --bundled
+```
+
+When `bundled-wasm` is active, `thinclaw extension install <name>` extracts the extension from the binary instead of downloading — zero network dependency.
+
+**Install priority chain:**
+1. Bundled WASM (if `--features bundled-wasm` was used at compile time)
+2. Download from GitHub Releases (if `artifacts.url` is set in the manifest)
+3. Build from local source tree (developer builds only)
+
 ## Development
 
 ```bash
@@ -449,6 +495,7 @@ cargo test test_name
 - **Deployment & Remote Setup**: See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for standalone, Docker, and Scrappy connection guides.
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
+- **Air-gapped builds**: Use `cargo build --release --features bundled-wasm` to embed all WASM extensions in the binary.
 
 ## OpenClaw & IronClaw Heritage
 

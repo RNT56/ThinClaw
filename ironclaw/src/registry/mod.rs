@@ -12,6 +12,7 @@
 //! ```
 
 pub mod artifacts;
+pub mod bundled_wasm;
 pub mod catalog;
 pub mod embedded;
 pub mod installer;

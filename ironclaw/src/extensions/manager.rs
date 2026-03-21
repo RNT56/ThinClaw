@@ -739,6 +739,59 @@ impl ExtensionManager {
         &self,
         entry: &RegistryEntry,
     ) -> Result<InstallResult, ExtensionError> {
+        // Priority 1: Try bundled WASM (compiled into binary via --features bundled-wasm).
+        // This is the fastest path and requires zero network access.
+        if crate::registry::bundled_wasm::is_bundled(&entry.name) {
+            let target_dir = match entry.kind {
+                ExtensionKind::WasmTool => &self.wasm_tools_dir,
+                ExtensionKind::WasmChannel => &self.wasm_channels_dir,
+                ExtensionKind::McpServer => {
+                    // MCP servers can't be bundled as WASM; fall through
+                    return self.try_standard_install(entry).await;
+                }
+            };
+
+            tracing::info!(
+                extension = %entry.name,
+                "Installing from bundled WASM (embedded in binary)"
+            );
+
+            match crate::registry::bundled_wasm::extract_bundled(&entry.name, target_dir).await {
+                Ok(()) => {
+                    let kind_label = match entry.kind {
+                        ExtensionKind::WasmTool => "WASM tool",
+                        ExtensionKind::WasmChannel => "WASM channel",
+                        ExtensionKind::McpServer => "MCP server",
+                    };
+                    return Ok(InstallResult {
+                        name: entry.name.clone(),
+                        kind: entry.kind,
+                        message: format!(
+                            "{} '{}' installed from bundled binary. Run activate to load it.",
+                            kind_label, entry.name,
+                        ),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        extension = %entry.name,
+                        error = %e,
+                        "Bundled WASM extraction failed, falling back to standard install"
+                    );
+                    // Fall through to standard install chain
+                }
+            }
+        }
+
+        // Priority 2 & 3: WasmDownload → WasmBuildable (with fallback chain)
+        self.try_standard_install(entry).await
+    }
+
+    /// Standard install chain: primary source → fallback source.
+    async fn try_standard_install(
+        &self,
+        entry: &RegistryEntry,
+    ) -> Result<InstallResult, ExtensionError> {
         let primary_result = self.try_install_from_source(entry, &entry.source).await;
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
