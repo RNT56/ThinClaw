@@ -18,7 +18,7 @@ use thinclaw::{
     },
     cli::{
         Cli, Command, run_channels_command, run_gateway_command, run_mcp_command,
-        run_pairing_command, run_service_command, run_status_command, run_tool_command,
+        run_pairing_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -77,9 +77,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
+        #[cfg(feature = "repl")]
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
-            return run_service_command(service_cmd);
+            return thinclaw::cli::run_service_command(service_cmd);
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
@@ -726,6 +727,7 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|c| c.model_name().to_string());
 
+    #[cfg(feature = "repl")]
     if config.channels.cli.enabled && cli.message.is_none() {
         let boot_info = thinclaw::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
