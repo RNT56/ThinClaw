@@ -43,7 +43,7 @@
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
 //! - API keys, session tokens, and credentials are NOT inherited
 //! - LD_PRELOAD/DYLD_INSERT_LIBRARIES injection blocked
-//! - Optional safe-bins-only mode (IRONCLAW_SAFE_BINS_ONLY=true)
+//! - Optional safe-bins-only mode (THINCLAW_SAFE_BINS_ONLY=true)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -360,7 +360,7 @@ impl ShellTool {
             )));
         }
 
-        // Check safe bins allowlist (when IRONCLAW_SAFE_BINS_ONLY=true)
+        // Check safe bins allowlist (when THINCLAW_SAFE_BINS_ONLY=true)
         if let Some(reason) = check_safe_bins(cmd) {
             return Err(ToolError::NotAuthorized(format!(
                 "Blocked by safe bins policy ({}): {}",
@@ -904,7 +904,7 @@ mod tests {
     async fn test_env_scrubbing_hides_secrets() {
         // Set a fake secret in the current process environment.
         // SAFETY: test-only, single-threaded tokio runtime, no concurrent env access.
-        let secret_var = "IRONCLAW_TEST_SECRET_KEY";
+        let secret_var = "THINCLAW_TEST_SECRET_KEY";
         unsafe { std::env::set_var(secret_var, "super_secret_value_12345") };
 
         let tool = ShellTool::new();
@@ -1142,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_safe_bins_disabled_by_default() {
-        // When IRONCLAW_SAFE_BINS_ONLY is not set, everything passes
+        // When THINCLAW_SAFE_BINS_ONLY is not set, everything passes
         assert!(check_safe_bins("rm -rf /tmp").is_none());
         assert!(check_safe_bins("ruby script.rb").is_none());
     }

@@ -314,9 +314,9 @@ impl ContainerJobManager {
         );
 
         let mut env_vec = vec![
-            format!("IRONCLAW_WORKER_TOKEN={}", token),
-            format!("IRONCLAW_JOB_ID={}", job_id),
-            format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
+            format!("THINCLAW_WORKER_TOKEN={}", token),
+            format!("THINCLAW_JOB_ID={}", job_id),
+            format!("THINCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
 
         // Build volume mounts (validate project_dir stays within ~/.thinclaw/projects/)
@@ -324,7 +324,7 @@ impl ContainerJobManager {
         if let Some(ref dir) = project_dir {
             let canonical = validate_bind_mount_path(dir, job_id)?;
             binds.push(format!("{}:/workspace:rw", canonical.display()));
-            env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
+            env_vec.push("THINCLAW_WORKSPACE=/workspace".to_string());
         }
 
         // Claude Code mode: auth + tool allowlist.
