@@ -379,12 +379,13 @@ src/
 │   │   └── telegram_actions.rs # Telegram-specific actions
 │   ├── builder/        # Dynamic tool building (5 files)
 │   │   ├── core.rs, templates.rs, testing.rs, validation.rs
-│   ├── mcp/            # Model Context Protocol (6 files)
-│   │   ├── client.rs   # MCP HTTP client
+│   ├── mcp/            # Model Context Protocol (7 files)
+│   │   ├── client.rs   # MCP client (HTTP + stdio)
 │   │   ├── config.rs   # MCP server configuration
 │   │   ├── protocol.rs # MCP protocol types
 │   │   ├── auth.rs     # MCP OAuth / auth flows
-│   │   └── session.rs  # MCP session management
+│   │   ├── session.rs  # MCP session management
+│   │   └── stdio.rs    # Stdio transport (spawn child process)
 │   └── wasm/           # Full WASM sandbox (wasmtime, 13 files)
 │       ├── runtime.rs, wrapper.rs, host.rs, limits.rs
 │       ├── allowlist.rs, credential_injector.rs
@@ -845,17 +846,16 @@ Key test patterns:
 ## Current Limitations / TODOs
 
 1. **Integration tests** - Need testcontainers setup for PostgreSQL
-2. **MCP stdio transport** - Only HTTP transport implemented
-3. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
-4. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
-5. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
-6. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
+2. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
+3. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
+4. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
+5. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
 
 ## Tool Architecture
 
 **Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare their requirements through `capabilities.json` files (API endpoints, credentials, rate limits, auth setup). Service-specific auth flows, CLI commands, and configuration do not belong in the main agent.
 
-Tools can be built as **WASM** (sandboxed, credential-injected, single binary) or **MCP servers** (ecosystem of pre-built servers, any language, but no sandbox). Both are first-class via `thinclaw tool install`. Auth is declared in capabilities files with OAuth and manual token entry support.
+Tools can be built as **WASM** (sandboxed, credential-injected, single binary) or **MCP servers** (ecosystem of pre-built servers, any language, but no sandbox). MCP servers support both **HTTP** (Streamable HTTP with OAuth 2.1) and **stdio** (spawn as child process) transports. Both are first-class via `thinclaw tool install`. Auth is declared in capabilities files with OAuth and manual token entry support.
 
 See `src/tools/README.md` for full tool architecture, adding new tools (built-in Rust and WASM), auth JSON examples, and WASM vs MCP decision guide.
 

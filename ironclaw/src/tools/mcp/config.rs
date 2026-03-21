@@ -3,13 +3,24 @@
 //! Stores configuration for connecting to hosted MCP servers.
 //! Configuration is persisted at ~/.thinclaw/mcp-servers.json.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::tools::tool::ToolError;
+
+/// Transport type for MCP servers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    /// HTTP/HTTPS transport (Streamable HTTP).
+    #[default]
+    Http,
+    /// Stdio transport — spawn a child process and communicate via stdin/stdout.
+    Stdio,
+}
 
 /// Configuration for connecting to a remote MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,7 +29,25 @@ pub struct McpServerConfig {
     pub name: String,
 
     /// Server URL (must be HTTPS for remote servers).
+    /// Required for HTTP transport, unused for stdio.
+    #[serde(default)]
     pub url: String,
+
+    /// Transport type: "http" (default) or "stdio".
+    #[serde(default)]
+    pub transport: McpTransport,
+
+    /// Command to run for stdio transport (e.g., "npx", "uvx", "python").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Arguments to pass to the command for stdio transport.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
+    /// Extra environment variables to set for the stdio child process.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 
     /// OAuth configuration (if server requires authentication).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,11 +67,34 @@ fn default_true() -> bool {
 }
 
 impl McpServerConfig {
-    /// Create a new MCP server configuration.
+    /// Create a new MCP server configuration (HTTP transport).
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             url: url.into(),
+            transport: McpTransport::Http,
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            oauth: None,
+            enabled: true,
+            description: None,
+        }
+    }
+
+    /// Create a new stdio MCP server configuration.
+    pub fn new_stdio(
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            url: String::new(),
+            transport: McpTransport::Stdio,
+            command: Some(command.into()),
+            args,
+            env: BTreeMap::new(),
             oauth: None,
             enabled: true,
             description: None,
@@ -61,6 +113,17 @@ impl McpServerConfig {
         self
     }
 
+    /// Set environment variables for stdio servers.
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Check whether this config uses stdio transport.
+    pub fn is_stdio(&self) -> bool {
+        self.transport == McpTransport::Stdio
+    }
+
     /// Validate the server configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.name.is_empty() {
@@ -69,19 +132,31 @@ impl McpServerConfig {
             });
         }
 
-        if self.url.is_empty() {
-            return Err(ConfigError::InvalidConfig {
-                reason: "Server URL cannot be empty".to_string(),
-            });
-        }
+        match self.transport {
+            McpTransport::Http => {
+                if self.url.is_empty() {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "Server URL cannot be empty for HTTP transport".to_string(),
+                    });
+                }
 
-        // Remote servers must use HTTPS (localhost is allowed for development)
-        let url_lower = self.url.to_lowercase();
-        let is_localhost = url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
-        if !is_localhost && !url_lower.starts_with("https://") {
-            return Err(ConfigError::InvalidConfig {
-                reason: "Remote MCP servers must use HTTPS".to_string(),
-            });
+                // Remote servers must use HTTPS (localhost is allowed for development)
+                let url_lower = self.url.to_lowercase();
+                let is_localhost =
+                    url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
+                if !is_localhost && !url_lower.starts_with("https://") {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "Remote MCP servers must use HTTPS".to_string(),
+                    });
+                }
+            }
+            McpTransport::Stdio => {
+                if self.command.is_none() || self.command.as_deref() == Some("") {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "Command is required for stdio transport".to_string(),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -92,6 +167,10 @@ impl McpServerConfig {
     /// Returns true if OAuth is pre-configured OR if this is a remote HTTPS server
     /// (which likely supports Dynamic Client Registration even without pre-configured OAuth).
     pub fn requires_auth(&self) -> bool {
+        // Stdio servers never use HTTP auth.
+        if self.transport == McpTransport::Stdio {
+            return false;
+        }
         if self.oauth.is_some() {
             return true;
         }
@@ -466,6 +545,41 @@ mod tests {
         // Invalid: HTTP for remote server
         let config = McpServerConfig::new("remote", "http://mcp.example.com");
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_stdio_config_validation() {
+        // Valid stdio server
+        let config = McpServerConfig::new_stdio(
+            "filesystem",
+            "npx",
+            vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+        );
+        assert!(config.validate().is_ok());
+        assert!(config.is_stdio());
+        assert!(!config.requires_auth());
+
+        // Invalid: stdio without command
+        let mut bad = McpServerConfig::new_stdio("bad", "", vec![]);
+        bad.command = None;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn test_stdio_config_serialization() {
+        let config = McpServerConfig::new_stdio(
+            "filesystem",
+            "npx",
+            vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+        );
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["transport"], "stdio");
+        assert_eq!(json["command"], "npx");
+
+        // Roundtrip
+        let restored: McpServerConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.transport, McpTransport::Stdio);
+        assert_eq!(restored.command.as_deref(), Some("npx"));
     }
 
     #[test]

@@ -644,15 +644,32 @@ impl AppBuilder {
 
                                 join_set.spawn(async move {
                                     let server_name = server.name.clone();
-                                    let has_tokens =
-                                        is_authenticated(&server, &secrets, "default").await;
 
-                                    let client = if has_tokens || server.requires_auth() {
-                                        McpClient::new_authenticated(
-                                            server, mcp_sm, secrets, "default",
-                                        )
+                                    // Use from_config for automatic transport dispatch
+                                    // (handles both stdio and HTTP)
+                                    let client = if server.is_stdio() {
+                                        match McpClient::new_stdio(&server) {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to spawn stdio MCP server '{}': {}",
+                                                    server_name,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
                                     } else {
-                                        McpClient::new_with_name(&server_name, &server.url)
+                                        let has_tokens =
+                                            is_authenticated(&server, &secrets, "default").await;
+
+                                        if has_tokens || server.requires_auth() {
+                                            McpClient::new_authenticated(
+                                                server, mcp_sm, secrets, "default",
+                                            )
+                                        } else {
+                                            McpClient::new_with_name(&server_name, &server.url)
+                                        }
                                     };
 
                                     match client.list_tools().await {
