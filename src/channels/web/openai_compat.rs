@@ -779,7 +779,7 @@ async fn handle_streaming(
     let sse = Sse::new(stream).keep_alive(KeepAlive::new().text(""));
     let mut response = sse.into_response();
     response.headers_mut().insert(
-        "x-ironclaw-streaming",
+        "x-thinclaw-streaming",
         HeaderValue::from_static(if is_native { "native" } else { "simulated" }),
     );
     Ok(response)

@@ -422,7 +422,7 @@ pub trait LlmProvider: Send + Sync {
     }
 
     /// Whether this provider supports native token-level streaming.
-    /// Used by the OpenAI-compat endpoint to set the `x-ironclaw-streaming` header.
+    /// Used by the OpenAI-compat endpoint to set the `x-thinclaw-streaming` header.
     fn supports_streaming(&self) -> bool {
         false
     }

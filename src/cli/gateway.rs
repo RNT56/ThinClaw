@@ -76,7 +76,7 @@ async fn start_gateway(
 
         if alive {
             anyhow::bail!(
-                "Gateway is already running (PID {}). Stop it first with: ironclaw gateway stop",
+                "Gateway is already running (PID {}). Stop it first with: thinclaw gateway stop",
                 pid
             );
         } else {
@@ -152,7 +152,7 @@ async fn start_gateway(
             "🌐 Gateway started on {}:{} (PID {})",
             gw_host, gw_port, pid
         );
-        println!("   Stop with: ironclaw gateway stop");
+        println!("   Stop with: thinclaw gateway stop");
     }
 
     Ok(())

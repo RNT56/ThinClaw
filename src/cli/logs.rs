@@ -356,9 +356,9 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             println!("  thinclaw::config     — Configuration loading");
             println!();
             println!("Usage:");
-            println!("  ironclaw logs tail -l error");
-            println!("  ironclaw logs search \"timeout\" --since 1h");
-            println!("  ironclaw logs show --since 30m -t thinclaw::llm");
+            println!("  thinclaw logs tail -l error");
+            println!("  thinclaw logs search \"timeout\" --since 1h");
+            println!("  thinclaw logs show --since 30m -t thinclaw::llm");
         }
     }
 
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn test_read_empty_dir() {
         // Non-existent directory should return empty
-        let entries = read_log_entries(std::path::Path::new("/tmp/nonexistent_ironclaw_logs"), 100);
+        let entries = read_log_entries(std::path::Path::new("/tmp/nonexistent_thinclaw_logs"), 100);
         assert!(entries.is_ok());
         assert!(entries.unwrap().is_empty());
     }

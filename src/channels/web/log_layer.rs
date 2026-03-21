@@ -145,9 +145,9 @@ impl LogLevelHandle {
         }
 
         let filter_str = if self.base_filter.is_empty() {
-            format!("ironclaw={}", level)
+            format!("thinclaw={}", level)
         } else {
-            format!("ironclaw={},{}", level, self.base_filter)
+            format!("thinclaw={},{}", level, self.base_filter)
         };
 
         let new_filter = EnvFilter::new(&filter_str);
@@ -176,17 +176,17 @@ impl LogLevelHandle {
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
 pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
     let raw_filter =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "thinclaw=info,tower_http=warn".to_string());
 
     // Split into the ironclaw directive and "everything else" (base_filter).
-    let mut ironclaw_level = String::from("info");
+    let mut thinclaw_level = String::from("info");
     let mut base_parts: Vec<&str> = Vec::new();
 
     for part in raw_filter.split(',') {
         let trimmed = part.trim();
-        if trimmed.starts_with("ironclaw=") {
-            if let Some(lvl) = trimmed.strip_prefix("ironclaw=") {
-                ironclaw_level = lvl.to_string();
+        if trimmed.starts_with("thinclaw=") {
+            if let Some(lvl) = trimmed.strip_prefix("thinclaw=") {
+                thinclaw_level = lvl.to_string();
             }
         } else if !trimmed.is_empty() {
             base_parts.push(trimmed);
@@ -199,7 +199,7 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
 
     let handle = Arc::new(LogLevelHandle::new(
         reload_handle,
-        ironclaw_level,
+        thinclaw_level,
         base_filter,
     ));
 

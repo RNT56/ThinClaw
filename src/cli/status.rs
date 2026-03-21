@@ -152,7 +152,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     // Config path
     println!(
         "\n  Config:      {}",
-        crate::bootstrap::ironclaw_env_path().display()
+        crate::bootstrap::thinclaw_env_path().display()
     );
 
     Ok(())

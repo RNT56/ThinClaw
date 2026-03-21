@@ -1211,7 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_workdir_escape() {
-        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/thinclaw_test_sandbox"));
         let ctx = JobContext::default();
 
         // Trying to set workdir outside sandbox
@@ -1233,7 +1233,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_path_escape_in_command() {
-        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/thinclaw_test_sandbox"));
         let ctx = JobContext::default();
 
         // Use a path that isn't in DANGEROUS_PATTERNS but IS outside the sandbox
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_blocks_unknown_binary() {
-        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/ironclaw_test_sandbox"));
+        let tool = ShellTool::new().with_base_dir(PathBuf::from("/tmp/thinclaw_test_sandbox"));
         let ctx = JobContext::default();
 
         let result = tool
@@ -1268,7 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_allows_safe_command_in_workspace() {
         // Create a temp directory for the sandbox
-        let sandbox_dir = std::env::temp_dir().join("ironclaw_test_sandbox_safe");
+        let sandbox_dir = std::env::temp_dir().join("thinclaw_test_sandbox_safe");
         let _ = std::fs::create_dir_all(&sandbox_dir);
 
         let tool = ShellTool::new().with_base_dir(sandbox_dir.clone());

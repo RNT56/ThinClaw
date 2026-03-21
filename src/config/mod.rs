@@ -72,7 +72,7 @@ static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 
 /// IC-007: Thread-safe overlay for bridge-injected configuration.
 ///
-/// The Tauri bridge (`ironclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
+/// The Tauri bridge (`thinclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
 /// UI-derived configuration (LLM backend, workspace mode, heartbeat, etc.) into
 /// ThinClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
 ///
@@ -186,7 +186,7 @@ impl Config {
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
+        crate::bootstrap::load_thinclaw_env();
 
         // Load all settings from DB into a Settings struct
         let mut db_settings = match store.get_all_settings(user_id).await {
@@ -220,7 +220,7 @@ impl Config {
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
+        crate::bootstrap::load_thinclaw_env();
         let mut settings = Settings::load();
 
         // Overlay TOML config file (values win over JSON settings)

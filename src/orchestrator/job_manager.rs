@@ -70,7 +70,7 @@ pub struct ContainerJobConfig {
 impl Default for ContainerJobConfig {
     fn default() -> Self {
         Self {
-            image: "ironclaw-worker:latest".to_string(),
+            image: "thinclaw-worker:latest".to_string(),
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             orchestrator_port: 50051,
@@ -407,8 +407,8 @@ impl ContainerJobManager {
         };
 
         let container_name = match mode {
-            JobMode::Worker => format!("ironclaw-worker-{}", job_id),
-            JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::Worker => format!("thinclaw-worker-{}", job_id),
+            JobMode::ClaudeCode => format!("thinclaw-claude-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
