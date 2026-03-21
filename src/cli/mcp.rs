@@ -22,11 +22,24 @@ use crate::tools::mcp::{
 pub enum McpCommand {
     /// Add an MCP server
     Add {
-        /// Server name (e.g., "notion", "github")
+        /// Server name (e.g., "notion", "filesystem")
         name: String,
 
-        /// Server URL (e.g., "https://mcp.notion.com")
-        url: String,
+        /// Server URL (e.g., "https://mcp.notion.com"). Required for HTTP transport.
+        #[arg(required_unless_present = "command")]
+        url: Option<String>,
+
+        /// Command to run for stdio transport (e.g., "npx", "uvx", "python")
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Arguments for the stdio command (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',')]
+        args: Option<Vec<String>>,
+
+        /// Environment variables for stdio server (KEY=VALUE, comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        env: Option<Vec<String>>,
 
         /// OAuth client ID (if authentication is required)
         #[arg(long)]
@@ -103,6 +116,9 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
         McpCommand::Add {
             name,
             url,
+            command,
+            args,
+            env,
             client_id,
             auth_url,
             token_url,
@@ -112,6 +128,9 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             add_server(
                 name,
                 url,
+                command,
+                args,
+                env,
                 client_id,
                 auth_url,
                 token_url,
@@ -133,16 +152,48 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 }
 
 /// Add a new MCP server.
+#[allow(clippy::too_many_arguments)]
 async fn add_server(
     name: String,
-    url: String,
+    url: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<Vec<String>>,
     client_id: Option<String>,
     auth_url: Option<String>,
     token_url: Option<String>,
     scopes: Option<String>,
     description: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut config = McpServerConfig::new(&name, &url);
+    use crate::tools::mcp::config::McpTransport;
+
+    let is_stdio = command.is_some();
+
+    let mut config = if is_stdio {
+        // Stdio transport: command is required, url is ignored
+        let cmd = command.unwrap();
+        let cmd_args = args.unwrap_or_default();
+        let mut cfg = McpServerConfig::new_stdio(&name, &cmd, cmd_args);
+
+        // Parse env vars: KEY=VALUE
+        if let Some(env_vars) = env {
+            let mut env_map = std::collections::BTreeMap::new();
+            for kv in env_vars {
+                if let Some((k, v)) = kv.split_once('=') {
+                    env_map.insert(k.to_string(), v.to_string());
+                } else {
+                    anyhow::bail!("Invalid env var format '{}'. Expected KEY=VALUE", kv);
+                }
+            }
+            cfg = cfg.with_env(env_map);
+        }
+
+        cfg
+    } else {
+        // HTTP transport: url is required
+        let url = url.ok_or_else(|| anyhow::anyhow!("URL is required for HTTP MCP servers"))?;
+        McpServerConfig::new(&name, &url)
+    };
 
     if let Some(desc) = description {
         config = config.with_description(desc);
@@ -151,8 +202,12 @@ async fn add_server(
     // Track if auth is required
     let requires_auth = client_id.is_some();
 
-    // Set up OAuth if client_id is provided
+    // Set up OAuth if client_id is provided (HTTP servers only)
     if let Some(client_id) = client_id {
+        if is_stdio {
+            anyhow::bail!("OAuth is not supported for stdio MCP servers");
+        }
+
         let mut oauth = OAuthConfig::new(client_id);
 
         if let (Some(auth), Some(token)) = (auth_url, token_url) {
@@ -176,12 +231,25 @@ async fn add_server(
     // Save (DB if available, else disk)
     let db = connect_db().await;
     let mut servers = load_servers(db.as_deref()).await?;
-    servers.upsert(config);
+    servers.upsert(config.clone());
     save_servers(db.as_deref(), &servers).await?;
 
     println!();
     println!("  ✓ Added MCP server '{}'", name);
-    println!("    URL: {}", url);
+    match config.transport {
+        McpTransport::Stdio => {
+            println!(
+                "    Transport: stdio ({})",
+                config.command.as_deref().unwrap_or("?")
+            );
+            if !config.args.is_empty() {
+                println!("    Args: {}", config.args.join(" "));
+            }
+        }
+        McpTransport::Http => {
+            println!("    URL: {}", config.url);
+        }
+    }
 
     if requires_auth {
         println!();
@@ -219,7 +287,12 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("  No MCP servers configured.");
         println!();
         println!("  Add a server with:");
-        println!("    thinclaw mcp add <name> <url> [--client-id <id>]");
+        println!("    thinclaw mcp add <name> <url>");
+        println!("    thinclaw mcp add <name> --command <cmd> --args <args>");
+        println!();
+        println!("  Examples:");
+        println!("    thinclaw mcp add notion https://mcp.notion.com");
+        println!("    thinclaw mcp add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'");
         println!();
         return Ok(());
     }
@@ -230,15 +303,29 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
     for server in &servers.servers {
         let status = if server.enabled { "●" } else { "○" };
-        let auth_status = if server.requires_auth() {
-            " (auth required)"
+        let transport_label = if server.is_stdio() {
+            format!(" [stdio: {}]", server.command.as_deref().unwrap_or("?"))
+        } else if server.requires_auth() {
+            " (auth required)".to_string()
         } else {
-            ""
+            String::new()
         };
 
         if verbose {
-            println!("  {} {}{}", status, server.name, auth_status);
-            println!("      URL: {}", server.url);
+            println!("  {} {}{}", status, server.name, transport_label);
+            if server.is_stdio() {
+                println!("      Command: {}", server.command.as_deref().unwrap_or("?"));
+                if !server.args.is_empty() {
+                    println!("      Args: {}", server.args.join(" "));
+                }
+                if !server.env.is_empty() {
+                    for (k, v) in &server.env {
+                        println!("      Env: {}={}", k, v);
+                    }
+                }
+            } else {
+                println!("      URL: {}", server.url);
+            }
             if let Some(ref desc) = server.description {
                 println!("      Description: {}", desc);
             }
@@ -250,9 +337,14 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             }
             println!();
         } else {
+            let desc = if server.is_stdio() {
+                format!("stdio:{}", server.command.as_deref().unwrap_or("?"))
+            } else {
+                server.url.clone()
+            };
             println!(
                 "  {} {} - {}{}",
-                status, server.name, server.url, auth_status
+                status, server.name, desc, transport_label
             );
         }
     }
@@ -276,6 +368,14 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         .get(&name)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+
+    // Stdio servers don't use OAuth
+    if server.is_stdio() {
+        println!();
+        println!("  Server '{}' uses stdio transport and does not require authentication.", name);
+        println!();
+        return Ok(());
+    }
 
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
@@ -353,87 +453,72 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     println!();
     println!("  Testing connection to '{}'...", name);
 
-    // Create client
-    let session_manager = Arc::new(McpSessionManager::new());
+    // Create client — use from_config for automatic transport dispatch
+    if server.is_stdio() {
+        // Stdio: spawn the process directly
+        let client = match McpClient::new_stdio(&server) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("  ✗ Failed to spawn stdio server: {}", e);
+                println!();
+                return Ok(());
+            }
+        };
 
-    // Always check for stored tokens (from either pre-configured OAuth or DCR)
-    let secrets = get_secrets_store().await?;
-    let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
-
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager, secrets, user_id)
-    } else if server.requires_auth() {
-        // OAuth configured but no tokens - need to authenticate
-        println!();
-        println!(
-            "  ✗ Not authenticated. Run 'thinclaw mcp auth {}' first.",
-            name
-        );
-        println!();
-        return Ok(());
-    } else {
-        // No OAuth and no tokens - try unauthenticated
-        McpClient::new_with_name(&server.name, &server.url)
-    };
-
-    // Test connection
-    match client.test_connection().await {
-        Ok(()) => {
-            println!("  ✓ Connection successful!");
-            println!();
-
-            // List tools
-            match client.list_tools().await {
-                Ok(tools) => {
-                    println!("  Available tools ({}):", tools.len());
-                    for tool in tools {
-                        let approval = if tool.requires_approval() {
-                            " [approval required]"
-                        } else {
-                            ""
-                        };
-                        println!("    • {}{}", tool.name, approval);
-                        if !tool.description.is_empty() {
-                            // Truncate long descriptions (char-safe)
-                            let desc = if tool.description.chars().count() > 60 {
-                                let byte_offset = tool
-                                    .description
-                                    .char_indices()
-                                    .nth(57)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(tool.description.len());
-                                format!("{}...", &tool.description[..byte_offset])
-                            } else {
-                                tool.description.clone()
-                            };
-                            println!("      {}", desc);
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("  ✗ Failed to list tools: {}", e);
-                }
+        // Test connection
+        match client.test_connection().await {
+            Ok(()) => {
+                println!("  ✓ Connection successful!");
+                println!();
+                print_tools(&client).await;
+            }
+            Err(e) => {
+                println!("  ✗ Connection failed: {}", e);
             }
         }
-        Err(e) => {
-            let err_str = e.to_string();
-            // Check if server requires auth but we don't have valid tokens
-            if err_str.contains("401") || err_str.contains("requires authentication") {
-                if has_tokens {
-                    // We had tokens but they failed - need to re-authenticate
-                    println!(
-                        "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
-                    );
-                    println!("    thinclaw mcp auth {}", name);
+    } else {
+        // HTTP: existing logic with auth handling
+        let session_manager = Arc::new(McpSessionManager::new());
+        let secrets = get_secrets_store().await?;
+        let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
+
+        let client = if has_tokens {
+            McpClient::new_authenticated(server.clone(), session_manager, secrets, user_id)
+        } else if server.requires_auth() {
+            println!();
+            println!(
+                "  ✗ Not authenticated. Run 'thinclaw mcp auth {}' first.",
+                name
+            );
+            println!();
+            return Ok(());
+        } else {
+            McpClient::new_with_name(&server.name, &server.url)
+        };
+
+        // Test connection
+        match client.test_connection().await {
+            Ok(()) => {
+                println!("  ✓ Connection successful!");
+                println!();
+                print_tools(&client).await;
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("401") || err_str.contains("requires authentication") {
+                    if has_tokens {
+                        println!(
+                            "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
+                        );
+                        println!("    thinclaw mcp auth {}", name);
+                    } else {
+                        println!("  ✗ Server requires authentication.");
+                        println!();
+                        println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
+                    }
                 } else {
-                    // No tokens - server requires auth
-                    println!("  ✗ Server requires authentication.");
-                    println!();
-                    println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
+                    println!("  ✗ Connection failed: {}", e);
                 }
-            } else {
-                println!("  ✗ Connection failed: {}", e);
             }
         }
     }
@@ -441,6 +526,41 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     println!();
 
     Ok(())
+}
+
+
+/// Print the list of tools from an MCP server (shared helper).
+async fn print_tools(client: &McpClient) {
+    match client.list_tools().await {
+        Ok(tools) => {
+            println!("  Available tools ({}):", tools.len());
+            for tool in tools {
+                let approval = if tool.requires_approval() {
+                    " [approval required]"
+                } else {
+                    ""
+                };
+                println!("    • {}{}", tool.name, approval);
+                if !tool.description.is_empty() {
+                    let desc = if tool.description.chars().count() > 60 {
+                        let byte_offset = tool
+                            .description
+                            .char_indices()
+                            .nth(57)
+                            .map(|(i, _)| i)
+                            .unwrap_or(tool.description.len());
+                        format!("{}...", &tool.description[..byte_offset])
+                    } else {
+                        tool.description.clone()
+                    };
+                    println!("      {}", desc);
+                }
+            }
+        }
+        Err(e) => {
+            println!("  ✗ Failed to list tools: {}", e);
+        }
+    }
 }
 
 /// Toggle server enabled/disabled state.
