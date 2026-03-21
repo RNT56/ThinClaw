@@ -411,10 +411,10 @@ pub fn wasm_artifact_path(crate_dir: &Path, binary_name: &str) -> PathBuf {
 /// Resolve the tools source directory.
 ///
 /// Checks (in order):
-/// 1. `IRONCLAW_TOOLS_SRC` env var
+/// 1. `THINCLAW_TOOLS_SRC` env var
 /// 2. `<CARGO_MANIFEST_DIR>/tools-src/` (dev builds)
 fn tools_src_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("IRONCLAW_TOOLS_SRC") {
+    if let Ok(dir) = std::env::var("THINCLAW_TOOLS_SRC") {
         return PathBuf::from(dir);
     }
     PathBuf::from(CARGO_MANIFEST_DIR).join("tools-src")
@@ -481,7 +481,7 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
 /// needing to install them to `~/.thinclaw/tools/` first. Build artifacts
 /// that are newer than installed copies take priority.
 ///
-/// Set `IRONCLAW_TOOLS_SRC` env var to override the source directory.
+/// Set `THINCLAW_TOOLS_SRC` env var to override the source directory.
 pub async fn load_dev_tools(
     loader: &WasmToolLoader,
     install_dir: &Path,

@@ -154,11 +154,11 @@ pub(super) const DANGEROUS_ENV_VARS: &[&str] = &[
     "DYLD_FALLBACK_LIBRARY_PATH",
 ];
 
-/// Safe binaries allowed when `IRONCLAW_SAFE_BINS_ONLY=true`.
+/// Safe binaries allowed when `THINCLAW_SAFE_BINS_ONLY=true`.
 ///
 /// When this mode is active, only commands whose first token (the binary name)
 /// matches one of these entries are allowed. Additional binaries can be added
-/// via the `IRONCLAW_EXTRA_BINS` env var (comma-separated).
+/// via the `THINCLAW_EXTRA_BINS` env var (comma-separated).
 pub(super) const SAFE_BINS: &[&str] = &[
     // File inspection
     "ls",
@@ -267,7 +267,7 @@ pub(super) const SAFE_BINS: &[&str] = &[
 /// Check whether safe-bins-only mode is enabled.
 pub(super) fn is_safe_bins_only() -> bool {
     // IC-007: Use optional_env to see bridge-injected vars (not just real env)
-    crate::config::helpers::optional_env("IRONCLAW_SAFE_BINS_ONLY")
+    crate::config::helpers::optional_env("THINCLAW_SAFE_BINS_ONLY")
         .ok()
         .flatten()
         .map(|v| v == "true" || v == "1")
@@ -325,7 +325,7 @@ pub(super) fn check_safe_bins(cmd: &str) -> Option<String> {
     }
 
     // Check user-extended list
-    if let Ok(extra) = std::env::var("IRONCLAW_EXTRA_BINS") {
+    if let Ok(extra) = std::env::var("THINCLAW_EXTRA_BINS") {
         let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
         if extras.contains(&binary.as_str()) {
             return None;
@@ -333,7 +333,7 @@ pub(super) fn check_safe_bins(cmd: &str) -> Option<String> {
     }
 
     Some(format!(
-        "binary '{}' not in safe bins allowlist (set IRONCLAW_EXTRA_BINS to extend)",
+        "binary '{}' not in safe bins allowlist (set THINCLAW_EXTRA_BINS to extend)",
         binary
     ))
 }
@@ -341,7 +341,7 @@ pub(super) fn check_safe_bins(cmd: &str) -> Option<String> {
 /// Same as `check_safe_bins` but always enforced (for sandbox base_dir mode).
 ///
 /// When `ShellTool::base_dir` is set, the safe bins allowlist is mandatory —
-/// the `IRONCLAW_SAFE_BINS_ONLY` env var check is skipped.
+/// the `THINCLAW_SAFE_BINS_ONLY` env var check is skipped.
 /// Returns `true` if the command should be BLOCKED.
 pub(super) fn check_safe_bins_forced(cmd: &str) -> bool {
     let binary = match extract_binary_name(cmd) {
@@ -355,7 +355,7 @@ pub(super) fn check_safe_bins_forced(cmd: &str) -> bool {
     }
 
     // Check user-extended list
-    if let Ok(extra) = std::env::var("IRONCLAW_EXTRA_BINS") {
+    if let Ok(extra) = std::env::var("THINCLAW_EXTRA_BINS") {
         let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
         if extras.contains(&binary.as_str()) {
             return false;

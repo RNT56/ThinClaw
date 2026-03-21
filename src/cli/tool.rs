@@ -770,7 +770,7 @@ async fn auth_tool_oauth(
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "OAuth client_id not configured.\n\
-                 Set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                 Set {} env var, or build with THINCLAW_GOOGLE_CLIENT_ID.",
                 oauth.client_id_env.as_deref().unwrap_or("the client_id")
             )
         })?;
