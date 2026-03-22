@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::Serialize;
+#[cfg(target_os = "macos")]
 use tokio::process::Command;
 
 use crate::context::JobContext;
