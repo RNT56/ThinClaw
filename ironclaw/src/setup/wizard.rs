@@ -3202,7 +3202,14 @@ async fn install_missing_bundled_channels(
 fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
     let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
 
-    // Add bundled channels
+    // Add channels embedded in the binary (--features bundled-wasm)
+    for embedded in crate::registry::bundled_wasm::bundled_channel_names() {
+        if !names.iter().any(|n| n == embedded) {
+            names.push(embedded.to_string());
+        }
+    }
+
+    // Add bundled channels (pre-compiled in channels-src/)
     for bundled in available_channel_names().iter().copied() {
         if !names.iter().any(|name| name == bundled) {
             names.push(bundled.to_string());
@@ -3246,12 +3253,15 @@ async fn install_selected_registry_channels(
         .unwrap_or(catalog.root())
         .to_path_buf();
 
-    let bundled: HashSet<&str> = available_channel_names().iter().copied().collect();
+    let bundled_fs: HashSet<&str> = available_channel_names().iter().copied().collect();
     let mut installed = Vec::new();
 
     for name in selected_channels {
-        // Skip if already installed or handled by bundled installer
-        if already_installed.contains(name) || bundled.contains(name.as_str()) {
+        // Skip if already installed, handled by bundled-wasm, or by filesystem bundled installer
+        if already_installed.contains(name)
+            || crate::registry::bundled_wasm::is_bundled(name)
+            || bundled_fs.contains(name.as_str())
+        {
             continue;
         }
 
@@ -3333,27 +3343,49 @@ async fn install_selected_bundled_channels(
     selected_channels: &[String],
     already_installed: &HashSet<String>,
 ) -> Result<Option<Vec<String>>, SetupError> {
-    let bundled: HashSet<&str> = available_channel_names().iter().copied().collect();
-    let selected_missing: HashSet<String> = selected_channels
-        .iter()
-        .filter(|name| bundled.contains(name.as_str()) && !already_installed.contains(*name))
-        .cloned()
-        .collect();
-
-    if selected_missing.is_empty() {
-        return Ok(None);
-    }
-
     let mut installed = Vec::new();
-    for name in selected_missing {
-        install_bundled_channel(&name, channels_dir, false)
-            .await
-            .map_err(SetupError::Channel)?;
-        installed.push(name);
+
+    for name in selected_channels {
+        if already_installed.contains(name) {
+            continue;
+        }
+
+        // Priority 1: Extract from binary-embedded WASM (--features bundled-wasm)
+        if crate::registry::bundled_wasm::is_bundled(name) {
+            match crate::registry::bundled_wasm::extract_bundled(name, channels_dir).await {
+                Ok(()) => {
+                    installed.push(name.clone());
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Bundled WASM extraction failed, trying filesystem artifacts"
+                    );
+                    // Fall through to filesystem path
+                }
+            }
+        }
+
+        // Priority 2: Copy from pre-built filesystem artifacts (channels-src/)
+        let bundled_on_disk: HashSet<&str> = available_channel_names().iter().copied().collect();
+        if bundled_on_disk.contains(name.as_str()) {
+            install_bundled_channel(name, channels_dir, false)
+                .await
+                .map_err(SetupError::Channel)?;
+            installed.push(name.clone());
+        }
+        // Channels not found via either bundled path will be tried by
+        // install_selected_registry_channels next.
     }
 
     installed.sort();
-    Ok(Some(installed))
+    if installed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(installed))
+    }
 }
 
 #[cfg(test)]
