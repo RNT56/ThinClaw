@@ -141,9 +141,11 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      - name: Patch manifests with WASM checksums
+      - name: Patch manifests with WASM artifact URLs and checksums
         if: ${{ needs.plan.outputs.publishing == 'true' }}
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
         run: |
           CHECKSUMS="target/distrib/checksums.txt"
           if [ ! -f "$CHECKSUMS" ]; then
@@ -151,15 +153,21 @@ jobs:
             exit 0
           fi
 
+          # Derive repo owner/name from GITHUB_REPOSITORY (e.g. "RNT56/ThinClaw")
+          REPO="${GITHUB_REPOSITORY}"
+
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
             name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+            download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
 
             for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
               if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256"
+                jq --arg url "$download_url" --arg sha "$sha256" \
+                  '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
+                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+                echo "Patched $manifest: url=$download_url sha256=$sha256"
               fi
             done
           done < "$CHECKSUMS"
@@ -424,8 +432,10 @@ jobs:
         with:
           name: artifacts-wasm-extensions
           path: target/wasm-bundles/
-      - name: Patch manifests with SHA256
+      - name: Patch manifests with artifact URLs and SHA256
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
         run: |
           CHECKSUMS="target/wasm-bundles/checksums.txt"
           if [ ! -f "$CHECKSUMS" ]; then
@@ -433,15 +443,20 @@ jobs:
             exit 0
           fi
 
+          REPO="${GITHUB_REPOSITORY}"
+
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
             name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+            download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
 
             for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
               if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256"
+                jq --arg url "$download_url" --arg sha "$sha256" \
+                  '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
+                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+                echo "Patched $manifest: url=$download_url sha256=$sha256"
               fi
             done
           done < "$CHECKSUMS"
@@ -453,7 +468,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No manifest changes to commit"
           else
-            git commit -m "chore: update WASM artifact SHA256 checksums [skip ci]"
+            git commit -m "chore: update WASM artifact URLs and SHA256 checksums [skip ci]"
             git push
           fi
 
