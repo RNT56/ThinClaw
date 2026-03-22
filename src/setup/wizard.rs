@@ -3412,10 +3412,20 @@ async fn install_selected_bundled_channels(
 
         // Priority 2: Copy from pre-built filesystem artifacts (channels-src/)
         if bundled_on_disk.contains(name.as_str()) {
-            install_bundled_channel(name, channels_dir, false)
-                .await
-                .map_err(SetupError::Channel)?;
-            installed.push(name.clone());
+            match install_bundled_channel(name, channels_dir, false).await {
+                Ok(()) => {
+                    installed.push(name.clone());
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Filesystem bundled install failed, will try registry"
+                    );
+                    // Fall through to registry installer
+                }
+            }
         }
         // Channels not found via either bundled path will be tried by
         // install_selected_registry_channels next.
