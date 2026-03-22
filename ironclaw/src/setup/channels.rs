@@ -755,19 +755,10 @@ fn validate_allow_from_groups_list(list: &str) -> Result<(), String> {
     if list.is_empty() {
         return Ok(());
     }
-    for (i, item) in list.split(',').enumerate() {
+    for item in list.split(',') {
         let trimmed = item.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed == "*" {
             continue;
-        }
-        if trimmed == "*" {
-            continue;
-        }
-        if trimmed.is_empty() {
-            return Err(format!(
-                "allow_from_groups[{}]: group ID cannot be empty",
-                i
-            ));
         }
     }
     Ok(())

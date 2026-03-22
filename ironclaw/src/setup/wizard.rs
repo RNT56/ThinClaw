@@ -200,6 +200,7 @@ impl SetupWizard {
             // Step 8: Extensions (tools)
             print_step(8, total_steps, "Extensions");
             self.step_extensions().await?;
+            self.persist_after_step().await;
 
             // Step 9: Docker Sandbox
             print_step(9, total_steps, "Docker Sandbox");
@@ -1419,17 +1420,22 @@ impl SetupWizard {
         let mut any_installed = false;
 
         // Try bundled channels first (pre-compiled artifacts from channels-src/)
-        if let Some(installed) = install_selected_bundled_channels(
+        let bundled_result = install_selected_bundled_channels(
             &channels_dir,
             &selected_wasm_channels,
             &installed_names,
         )
-        .await?
-            && !installed.is_empty()
-        {
+        .await?;
+
+        let bundled_installed: HashSet<String> = bundled_result
+            .as_ref()
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
+
+        if !bundled_installed.is_empty() {
             print_success(&format!(
                 "Installed bundled channels: {}",
-                installed.join(", ")
+                bundled_result.as_ref().unwrap().join(", ")
             ));
             any_installed = true;
         }
@@ -1438,6 +1444,7 @@ impl SetupWizard {
             &channels_dir,
             &selected_wasm_channels,
             &installed_names,
+            &bundled_installed,
         )
         .await;
 
@@ -3275,6 +3282,7 @@ async fn install_selected_registry_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],
     already_installed: &HashSet<String>,
+    bundled_installed: &HashSet<String>,
 ) -> Vec<String> {
     let catalog = match load_registry_catalog() {
         Some(c) => c,
@@ -3288,12 +3296,17 @@ async fn install_selected_registry_channels(
         .to_path_buf();
 
     let bundled_fs: HashSet<&str> = available_channel_names().iter().copied().collect();
+    let installer = crate::registry::installer::RegistryInstaller::new(
+        repo_root.clone(),
+        dirs::home_dir().unwrap_or_default().join(".thinclaw/tools"),
+        channels_dir.to_path_buf(),
+    );
     let mut installed = Vec::new();
 
     for name in selected_channels {
-        // Skip if already installed, handled by bundled-wasm, or by filesystem bundled installer
+        // Skip if already installed or successfully handled by bundled installer
         if already_installed.contains(name)
-            || crate::registry::bundled_wasm::is_bundled(name)
+            || bundled_installed.contains(name)
             || bundled_fs.contains(name.as_str())
         {
             continue;
@@ -3311,12 +3324,6 @@ async fn install_selected_registry_channels(
             Some(m) => m,
             None => continue,
         };
-
-        let installer = crate::registry::installer::RegistryInstaller::new(
-            repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".thinclaw/tools"),
-            channels_dir.to_path_buf(),
-        );
 
         match installer
             .install_with_source_fallback(manifest, false)
@@ -3378,6 +3385,7 @@ async fn install_selected_bundled_channels(
     already_installed: &HashSet<String>,
 ) -> Result<Option<Vec<String>>, SetupError> {
     let mut installed = Vec::new();
+    let bundled_on_disk: HashSet<&str> = available_channel_names().iter().copied().collect();
 
     for name in selected_channels {
         if already_installed.contains(name) {
@@ -3403,7 +3411,6 @@ async fn install_selected_bundled_channels(
         }
 
         // Priority 2: Copy from pre-built filesystem artifacts (channels-src/)
-        let bundled_on_disk: HashSet<&str> = available_channel_names().iter().copied().collect();
         if bundled_on_disk.contains(name.as_str()) {
             install_bundled_channel(name, channels_dir, false)
                 .await
