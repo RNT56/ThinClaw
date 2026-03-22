@@ -21,7 +21,9 @@ const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
     match err {
         // Hard failures: never retry with source build
-        RegistryError::AlreadyInstalled { .. } | RegistryError::ChecksumMismatch { .. } => false,
+        RegistryError::AlreadyInstalled { .. }
+        | RegistryError::ChecksumMismatch { .. }
+        | RegistryError::ToolchainMissing { .. } => false,
 
         // InvalidManifest is non-retryable EXCEPT when the only issue is a
         // missing sha256 (common for manifests with placeholder artifact URLs
@@ -233,6 +235,23 @@ impl RegistryInstaller {
         }
 
         // Build the WASM component
+        // Check toolchain availability first to give a clear error before printing
+        // "Building..." (which confuses users when it immediately fails)
+        let cargo_component_ok = tokio::process::Command::new("cargo")
+            .args(["component", "--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !cargo_component_ok {
+            return Err(RegistryError::ToolchainMissing {
+                name: manifest.name.clone(),
+            });
+        }
+
         println!(
             "Building {} '{}' from {}...",
             manifest.kind,
@@ -958,6 +977,12 @@ mod tests {
             reason: "sha256 is required for artifact downloads".to_string(),
         };
         assert!(should_attempt_source_fallback(&missing_sha));
+
+        // ToolchainMissing → no fallback (source build IS the problem)
+        let toolchain = RegistryError::ToolchainMissing {
+            name: "demo".to_string(),
+        };
+        assert!(!should_attempt_source_fallback(&toolchain));
     }
 
     #[test]

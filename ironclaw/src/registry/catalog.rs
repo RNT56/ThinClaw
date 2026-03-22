@@ -80,6 +80,15 @@ pub enum RegistryError {
     #[error("Failed to read bundles file: {0}")]
     BundlesRead(String),
 
+    #[error(
+        "Cannot install '{name}': no pre-built binary available and cargo-component is not installed.\n\
+         Fix options:\n\
+         \x20 1. Build with: cargo build --release --features bundled-wasm\n\
+         \x20 2. Install toolchain: cargo install cargo-component\n\
+         \x20 3. Wait for a release with pre-built artifacts"
+    )]
+    ToolchainMissing { name: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
