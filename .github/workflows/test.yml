@@ -34,6 +34,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Enable pgvector extension
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Run Tests
         run: cargo test --all-features -- --nocapture
       - name: Run Telegram Channel Tests
