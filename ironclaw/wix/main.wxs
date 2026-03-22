@@ -62,7 +62,7 @@
         Id='*'
         Name='thinclaw'
         UpgradeCode='D0156E61-BA37-451E-8AB9-1A2ECCCFA48F'
-        Manufacturer='RNT56 (ThinClaw); NEAR AI  (IronClaw)'
+        Manufacturer='RNT56 (ThinClaw)'
         Language='1033'
         Codepage='1252'
         Version='$(var.Version)'>
@@ -70,7 +70,7 @@
         <Package Id='*'
             Keywords='Installer'
             Description='Secure personal AI assistant that protects your data and expands its capabilities on the fly'
-            Manufacturer='RNT56 (ThinClaw); NEAR AI  (IronClaw)'
+            Manufacturer='RNT56 (ThinClaw)'
             InstallerVersion='450'
             Languages='1033'
             Compressed='yes'

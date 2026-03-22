@@ -110,7 +110,7 @@ async fn capture_screen(
     path: &std::path::Path,
     _interactive: bool,
     _window: bool,
-    delay_secs: Option<u32>,
+    _delay_secs: Option<u32>,
 ) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -118,14 +118,13 @@ async fn capture_screen(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create screenshot dir: {e}")))?;
     }
 
+    let path_str = path.to_string_lossy().to_string();
+
     // Try gnome-screenshot first, then scrot, then import
-    let tools = [
-        ("gnome-screenshot", vec!["-f", &path.to_string_lossy()]),
-        (
-            "scrot",
-            vec![path.to_string_lossy().as_ref().to_string().as_str()],
-        ),
-        ("import", vec!["-window", "root", &path.to_string_lossy()]),
+    let tools: [(&str, Vec<&str>); 3] = [
+        ("gnome-screenshot", vec!["-f", &path_str]),
+        ("scrot", vec![&path_str]),
+        ("import", vec!["-window", "root", &path_str]),
     ];
 
     for (tool_name, args) in &tools {
