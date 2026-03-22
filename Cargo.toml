@@ -25,8 +25,8 @@ rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 authors = ["RNT56 (ThinClaw)", "NEAR AI <support@near.ai> (IronClaw)"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nearai/ironclaw"
-repository = "https://github.com/nearai/ironclaw"
+homepage = "https://github.com/RNT56/ThinClaw"
+repository = "https://github.com/RNT56/ThinClaw"
 
 [package.metadata.wix]
 upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
