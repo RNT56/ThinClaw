@@ -19,12 +19,20 @@ const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
 ];
 
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
-    !matches!(
-        err,
-        RegistryError::AlreadyInstalled { .. }
-            | RegistryError::ChecksumMismatch { .. }
-            | RegistryError::InvalidManifest { .. }
-    )
+    match err {
+        // Hard failures: never retry with source build
+        RegistryError::AlreadyInstalled { .. } | RegistryError::ChecksumMismatch { .. } => false,
+
+        // InvalidManifest is non-retryable EXCEPT when the only issue is a
+        // missing sha256 (common for manifests with placeholder artifact URLs
+        // that haven't had a release published yet).
+        RegistryError::InvalidManifest { reason, .. } => {
+            reason.contains("sha256 is required")
+        }
+
+        // Everything else (download failures, network errors, etc.) → retry
+        _ => true,
+    }
 }
 
 fn is_allowed_artifact_host(host: &str) -> bool {
@@ -935,12 +943,21 @@ mod tests {
         };
         assert!(!should_attempt_source_fallback(&checksum));
 
+        // InvalidManifest for host not allowed → no fallback
         let invalid = RegistryError::InvalidManifest {
             name: "demo".to_string(),
             field: "artifacts.wasm32-wasip2.url",
             reason: "host not allowed".to_string(),
         };
         assert!(!should_attempt_source_fallback(&invalid));
+
+        // InvalidManifest for missing sha256 → DO fall back (placeholder artifacts)
+        let missing_sha = RegistryError::InvalidManifest {
+            name: "demo".to_string(),
+            field: "artifacts.wasm32-wasip2.sha256",
+            reason: "sha256 is required for artifact downloads".to_string(),
+        };
+        assert!(should_attempt_source_fallback(&missing_sha));
     }
 
     #[test]

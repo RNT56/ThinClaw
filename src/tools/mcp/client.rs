@@ -13,11 +13,12 @@ use tokio::sync::RwLock;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::auth::refresh_access_token;
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpServerConfig, McpTransport};
 use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
 };
 use crate::tools::mcp::session::McpSessionManager;
+use crate::tools::mcp::stdio::StdioTransport;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// MCP client for communicating with MCP servers.
@@ -32,8 +33,11 @@ pub struct McpClient {
     /// Server name (for logging and session management).
     server_name: String,
 
-    /// HTTP client.
+    /// HTTP client (used for HTTP transport only).
     http_client: reqwest::Client,
+
+    /// Stdio transport (used for stdio transport only).
+    stdio_transport: Option<Arc<StdioTransport>>,
 
     /// Request ID counter.
     next_id: AtomicU64,
@@ -69,6 +73,7 @@ impl McpClient {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
+            stdio_transport: None,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
@@ -89,12 +94,68 @@ impl McpClient {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
+            stdio_transport: None,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
+        }
+    }
+
+    /// Create a new MCP client with stdio transport.
+    ///
+    /// Spawns the child process immediately.
+    pub fn new_stdio(
+        config: &McpServerConfig,
+    ) -> Result<Self, ToolError> {
+        let command = config.command.as_deref().ok_or_else(|| {
+            ToolError::ExternalService(format!(
+                "MCP server '{}' is configured for stdio but has no command",
+                config.name
+            ))
+        })?;
+
+        let transport = StdioTransport::spawn(
+            &config.name,
+            command,
+            &config.args,
+            &config.env,
+        )?;
+
+        Ok(Self {
+            server_url: String::new(),
+            server_name: config.name.clone(),
+            http_client: reqwest::Client::new(),
+            stdio_transport: Some(Arc::new(transport)),
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "default".to_string(),
+            server_config: Some(config.clone()),
+        })
+    }
+
+    /// Create an MCP client from a server config, choosing the appropriate transport.
+    ///
+    /// This is the preferred factory method for creating clients from configuration.
+    pub fn from_config(
+        config: &McpServerConfig,
+        session_manager: Option<Arc<McpSessionManager>>,
+        secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+        user_id: &str,
+    ) -> Result<Self, ToolError> {
+        match config.transport {
+            McpTransport::Stdio => Self::new_stdio(config),
+            McpTransport::Http => {
+                if let (Some(sm), Some(sec)) = (session_manager, secrets) {
+                    Ok(Self::new_authenticated(config.clone(), sm, sec, user_id))
+                } else {
+                    Ok(Self::new_with_name(&config.name, &config.url))
+                }
+            }
         }
     }
 
@@ -114,6 +175,7 @@ impl McpClient {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
+            stdio_transport: None,
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
@@ -165,9 +227,22 @@ impl McpClient {
         }
     }
 
-    /// Send a request to the MCP server with auth and session headers.
-    /// Automatically attempts token refresh on 401 errors.
+    /// Send a request to the MCP server.
+    ///
+    /// Delegates to stdio transport or HTTP depending on the client configuration.
     async fn send_request(&self, request: McpRequest) -> Result<McpResponse, ToolError> {
+        // Stdio path: delegate to the stdio transport directly
+        if let Some(ref transport) = self.stdio_transport {
+            return transport.send_request(request).await;
+        }
+
+        // HTTP path: full auth, session, and retry logic
+        self.send_request_http(request).await
+    }
+
+    /// Send a request via HTTP transport with auth and session headers.
+    /// Automatically attempts token refresh on 401 errors.
+    async fn send_request_http(&self, request: McpRequest) -> Result<McpResponse, ToolError> {
         // Try up to 2 times: first attempt, then retry after token refresh
         for attempt in 0..2 {
             // Request both JSON and SSE as per MCP spec
@@ -468,6 +543,7 @@ impl Clone for McpClient {
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
             http_client: self.http_client.clone(),
+            stdio_transport: self.stdio_transport.clone(),
             next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
             tools_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),

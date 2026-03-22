@@ -15,12 +15,7 @@
     "capabilities": "google-calendar-tool.capabilities.json",
     "crate_name": "google-calendar-tool"
   },
-  "artifacts": {
-    "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/latest/download/google-calendar-wasm32-wasip2.tar.gz",
-      "sha256": null
-    }
-  },
+  "artifacts": {},
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",

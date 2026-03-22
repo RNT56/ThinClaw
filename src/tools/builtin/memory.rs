@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
-use crate::workspace::{Workspace, paths};
+use crate::workspace::{SearchConfig, Workspace, paths};
 
 /// Files the LLM may only APPEND to — never fully overwrite.
 ///
@@ -35,13 +35,6 @@ const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
 /// appended to. After the bootstrap ritual, the agent should use memory_write with
 /// append: false to fully restructure them into clean, well-formatted markdown.
 const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::SOUL, paths::AGENTS, paths::USER];
-
-/// Tool for searching workspace memory.
-///
-/// Performs hybrid search (FTS + semantic) across all memory documents.
-/// The agent should call this tool before answering questions about
-/// prior work, decisions, preferences, or any historical context.
-use crate::workspace::SearchConfig;
 
 /// Tool for searching workspace memory.
 ///
@@ -145,14 +138,9 @@ impl Tool for MemorySearchTool {
         let output = serde_json::json!({
             "query": query,
             "results": results.iter().map(|r| {
-                let path = r.citation
-                    .as_ref()
-                    .and_then(|c| c.path.as_deref())
-                    .unwrap_or("");
                 serde_json::json!({
                     "content": r.content,
                     "score": r.score,
-                    "path": path,
                     "document_id": r.document_id.to_string(),
                     "is_hybrid_match": r.is_hybrid(),
                 })

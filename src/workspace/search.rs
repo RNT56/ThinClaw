@@ -123,54 +123,6 @@ pub struct SearchResult {
     pub fts_rank: Option<u32>,
     /// Rank in vector results (1-based, None if not in vector results).
     pub vector_rank: Option<u32>,
-    /// Citation linking back to the source document.
-    pub citation: Option<Citation>,
-}
-
-/// Citation metadata linking a search result back to its source.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Citation {
-    /// Human-readable source title (e.g., file name, document title).
-    pub title: Option<String>,
-    /// Path to the source file, if local.
-    pub path: Option<String>,
-    /// URL of the source document, if remote.
-    pub url: Option<String>,
-    /// Timestamp when the source was ingested.
-    pub ingested_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Page or section number within the source document.
-    pub page: Option<u32>,
-    /// Line range within the source file (start, end), if applicable.
-    pub line_range: Option<(u32, u32)>,
-}
-
-impl Citation {
-    /// Format citation as a compact inline reference.
-    ///
-    /// Examples:
-    /// - `[source: README.md]`
-    /// - `[source: https://example.com/doc]`
-    /// - `[source: report.pdf, p.5]`
-    pub fn inline(&self) -> String {
-        let source = self
-            .title
-            .as_deref()
-            .or(self.path.as_deref())
-            .or(self.url.as_deref())
-            .unwrap_or("unknown");
-
-        let mut parts = vec![format!("[source: {}", source)];
-
-        if let Some(page) = self.page {
-            parts.push(format!("p.{}", page));
-        }
-
-        if let Some((start, end)) = self.line_range {
-            parts.push(format!("L{}-{}", start, end));
-        }
-
-        format!("{}]", parts.join(", "))
-    }
 }
 
 impl SearchResult {
@@ -188,45 +140,6 @@ impl SearchResult {
     pub fn is_hybrid(&self) -> bool {
         self.fts_rank.is_some() && self.vector_rank.is_some()
     }
-}
-
-/// Format a list of search results with inline citations.
-///
-/// Produces a numbered list like:
-/// ```text
-/// 1. Content excerpt... [source: README.md]
-/// 2. Another piece... [source: docs/guide.md, p.3]
-/// ```
-///
-/// Reserved for use when wiring citations into `build_appendix()` search output.
-#[allow(dead_code)]
-pub fn format_citations(results: &[SearchResult]) -> String {
-    let mut output = String::new();
-    for (i, result) in results.iter().enumerate() {
-        let citation_str = result
-            .citation
-            .as_ref()
-            .map(|c| format!(" {}", c.inline()))
-            .unwrap_or_default();
-
-        let preview = if result.content.chars().count() > 200 {
-            let byte_offset = result
-                .content
-                .char_indices()
-                .nth(200)
-                .map(|(i, _)| i)
-                .unwrap_or(result.content.len());
-            format!("{}...", &result.content[..byte_offset])
-        } else {
-            result.content.clone()
-        };
-
-        output.push_str(&format!("{}. {}{}", i + 1, preview, citation_str));
-        if i < results.len() - 1 {
-            output.push('\n');
-        }
-    }
-    output
 }
 
 /// Raw result from a single search method.
@@ -320,7 +233,6 @@ pub fn reciprocal_rank_fusion(
             score: info.score,
             fts_rank: info.fts_rank,
             vector_rank: info.vector_rank,
-            citation: None, // Citations are populated by the caller after fusion
         })
         .collect();
 
@@ -691,7 +603,6 @@ mod tests {
                 score: 1.0,
                 fts_rank: Some(1),
                 vector_rank: None,
-                citation: None,
             },
             SearchResult {
                 document_id: doc_id,
@@ -700,7 +611,6 @@ mod tests {
                 score: 0.8,
                 fts_rank: Some(2),
                 vector_rank: None,
-                citation: None,
             },
         ];
 
@@ -727,7 +637,6 @@ mod tests {
                 score: 1.0,
                 fts_rank: Some(1),
                 vector_rank: None,
-                citation: None,
             },
             SearchResult {
                 document_id: Uuid::new_v4(),
@@ -736,7 +645,6 @@ mod tests {
                 score: 0.9,
                 fts_rank: Some(2),
                 vector_rank: None,
-                citation: None,
             },
             SearchResult {
                 document_id: Uuid::new_v4(),
@@ -745,7 +653,6 @@ mod tests {
                 score: 0.8,
                 fts_rank: Some(3),
                 vector_rank: None,
-                citation: None,
             },
         ];
 
@@ -794,91 +701,4 @@ mod tests {
         assert!((sim - 1.0).abs() < 0.001);
     }
 
-    #[test]
-    fn test_citation_inline_with_title() {
-        let citation = Citation {
-            title: Some("README.md".to_string()),
-            path: Some("/repo/README.md".to_string()),
-            url: None,
-            ingested_at: None,
-            page: None,
-            line_range: None,
-        };
-        assert_eq!(citation.inline(), "[source: README.md]");
-    }
-
-    #[test]
-    fn test_citation_inline_with_page() {
-        let citation = Citation {
-            title: Some("report.pdf".to_string()),
-            path: None,
-            url: None,
-            ingested_at: None,
-            page: Some(5),
-            line_range: None,
-        };
-        assert_eq!(citation.inline(), "[source: report.pdf, p.5]");
-    }
-
-    #[test]
-    fn test_citation_inline_with_line_range() {
-        let citation = Citation {
-            title: None,
-            path: Some("src/main.rs".to_string()),
-            url: None,
-            ingested_at: None,
-            page: None,
-            line_range: Some((10, 25)),
-        };
-        assert_eq!(citation.inline(), "[source: src/main.rs, L10-25]");
-    }
-
-    #[test]
-    fn test_citation_inline_url_fallback() {
-        let citation = Citation {
-            title: None,
-            path: None,
-            url: Some("https://example.com/doc".to_string()),
-            ingested_at: None,
-            page: None,
-            line_range: None,
-        };
-        assert_eq!(citation.inline(), "[source: https://example.com/doc]");
-    }
-
-    #[test]
-    fn test_format_citations() {
-        let results = vec![
-            SearchResult {
-                document_id: Uuid::new_v4(),
-                chunk_id: Uuid::new_v4(),
-                content: "First result content".to_string(),
-                score: 0.9,
-                fts_rank: Some(1),
-                vector_rank: None,
-                citation: Some(Citation {
-                    title: Some("doc.md".to_string()),
-                    path: None,
-                    url: None,
-                    ingested_at: None,
-                    page: None,
-                    line_range: None,
-                }),
-            },
-            SearchResult {
-                document_id: Uuid::new_v4(),
-                chunk_id: Uuid::new_v4(),
-                content: "Second result content".to_string(),
-                score: 0.7,
-                fts_rank: Some(2),
-                vector_rank: None,
-                citation: None,
-            },
-        ];
-
-        let formatted = format_citations(&results);
-        assert!(formatted.contains("1. First result content [source: doc.md]"));
-        assert!(formatted.contains("2. Second result content"));
-        assert!(!formatted.contains("[source: unknown]")); // No citation = no annotation
-    }
 }
