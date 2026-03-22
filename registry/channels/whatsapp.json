@@ -15,7 +15,12 @@
     "capabilities": "whatsapp.capabilities.json",
     "crate_name": "whatsapp-channel"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/whatsapp-wasm32-wasip2.tar.gz",
+      "sha256": "bc950b4f5ace67cddf224593e3484be8208bd27606f93dc1984aff1498c5521a"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Meta",

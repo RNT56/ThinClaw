@@ -15,7 +15,12 @@
     "capabilities": "telegram-tool.capabilities.json",
     "crate_name": "telegram-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/telegram-wasm32-wasip2.tar.gz",
+      "sha256": "694f39989464cf6fcd5ac1093aba8289acb6889866e00cb54872a7a15ac9076b"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",

@@ -15,7 +15,12 @@
     "capabilities": "discord.capabilities.json",
     "crate_name": "discord-channel"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/discord-wasm32-wasip2.tar.gz",
+      "sha256": "82d0427a61036cc5cb827b46fa3296a15d7460b2b3bdc68a18c04b0c5e51f0f1"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Discord",

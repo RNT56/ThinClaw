@@ -15,7 +15,12 @@
     "capabilities": "google-drive-tool.capabilities.json",
     "crate_name": "google-drive-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/google-drive-wasm32-wasip2.tar.gz",
+      "sha256": "18b3a138c986c63225c96d715b5ff08b2f7df8555c7dd756f27a7b37405e4d7a"
+    }
+  },
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",

@@ -15,7 +15,12 @@
     "capabilities": "okta-tool.capabilities.json",
     "crate_name": "okta-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/okta-wasm32-wasip2.tar.gz",
+      "sha256": "2093abf4c618e357adf8e16243dff77413f2633db5397ce4a92d74df0c7d44d1"
+    }
+  },
   "auth_summary": {
     "method": "oauth",
     "provider": "Okta",
