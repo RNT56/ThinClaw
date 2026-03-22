@@ -1881,6 +1881,40 @@ impl SetupWizard {
                 continue; // Already installed, skip
             }
 
+            // Priority 1: Extract from binary-embedded WASM (--features bundled-wasm)
+            if crate::registry::bundled_wasm::is_bundled(&tool.name) {
+                match crate::registry::bundled_wasm::extract_bundled(&tool.name, &tools_dir).await {
+                    Ok(()) => {
+                        print_success(&format!("Installed {} (from bundled binary)", tool.display_name));
+                        installed_count += 1;
+
+                        // Track auth needs
+                        if let Some(auth) = &tool.auth_summary
+                            && auth.method.as_deref() != Some("none")
+                            && auth.method.is_some()
+                        {
+                            let provider = auth.provider.as_deref().unwrap_or(&tool.name);
+                            let hint = format!("  {} - thinclaw tool auth {}", provider, tool.name);
+                            if !auth_needed
+                                .iter()
+                                .any(|h| h.starts_with(&format!("  {} -", provider)))
+                            {
+                                auth_needed.push(hint);
+                            }
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tool.name,
+                            error = %e,
+                            "Bundled WASM extraction failed, trying registry install"
+                        );
+                    }
+                }
+            }
+
+            // Priority 2: Registry install (download artifact or build from source)
             match installer.install_with_source_fallback(tool, false).await {
                 Ok(outcome) => {
                     print_success(&format!("Installed {}", outcome.name));
