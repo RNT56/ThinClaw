@@ -812,7 +812,6 @@ impl Scheduler {
         self.jobs.read().await.keys().cloned().collect()
     }
 
-
     /// Stop all jobs.
     pub async fn stop_all(&self) {
         let job_ids: Vec<Uuid> = self.jobs.read().await.keys().cloned().collect();

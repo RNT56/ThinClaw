@@ -39,7 +39,10 @@ pub const BUNDLED_ENTRIES: &[(&str, &str, &[u8], Option<&[u8]>)] = &[];
 
 /// List names of all bundled extensions.
 pub fn bundled_names() -> Vec<&'static str> {
-    BUNDLED_ENTRIES.iter().map(|(name, _, _, _)| *name).collect()
+    BUNDLED_ENTRIES
+        .iter()
+        .map(|(name, _, _, _)| *name)
+        .collect()
 }
 
 /// List names of bundled tools only.
@@ -180,7 +183,11 @@ mod tests {
                 kind,
                 name
             );
-            assert!(!wasm.is_empty(), "WASM bytes must not be empty for '{}'", name);
+            assert!(
+                !wasm.is_empty(),
+                "WASM bytes must not be empty for '{}'",
+                name
+            );
         }
     }
 
@@ -208,7 +215,10 @@ mod tests {
             assert!(result.is_ok(), "Extract failed: {:?}", result.err());
 
             let wasm_path = dir.path().join(format!("{}.wasm", name));
-            assert!(wasm_path.exists(), "WASM file should exist after extraction");
+            assert!(
+                wasm_path.exists(),
+                "WASM file should exist after extraction"
+            );
         }
     }
 }

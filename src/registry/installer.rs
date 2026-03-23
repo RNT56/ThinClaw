@@ -28,9 +28,7 @@ fn should_attempt_source_fallback(err: &RegistryError) -> bool {
         // InvalidManifest is non-retryable EXCEPT when the only issue is a
         // missing sha256 (common for manifests with placeholder artifact URLs
         // that haven't had a release published yet).
-        RegistryError::InvalidManifest { reason, .. } => {
-            reason.contains("sha256 is required")
-        }
+        RegistryError::InvalidManifest { reason, .. } => reason.contains("sha256 is required"),
 
         // Everything else (download failures, network errors, etc.) → retry
         _ => true,

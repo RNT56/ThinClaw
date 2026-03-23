@@ -292,7 +292,9 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!();
         println!("  Examples:");
         println!("    thinclaw mcp add notion https://mcp.notion.com");
-        println!("    thinclaw mcp add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'");
+        println!(
+            "    thinclaw mcp add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'"
+        );
         println!();
         return Ok(());
     }
@@ -314,7 +316,10 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         if verbose {
             println!("  {} {}{}", status, server.name, transport_label);
             if server.is_stdio() {
-                println!("      Command: {}", server.command.as_deref().unwrap_or("?"));
+                println!(
+                    "      Command: {}",
+                    server.command.as_deref().unwrap_or("?")
+                );
                 if !server.args.is_empty() {
                     println!("      Args: {}", server.args.join(" "));
                 }
@@ -342,10 +347,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             } else {
                 server.url.clone()
             };
-            println!(
-                "  {} {} - {}{}",
-                status, server.name, desc, transport_label
-            );
+            println!("  {} {} - {}{}", status, server.name, desc, transport_label);
         }
     }
 
@@ -372,7 +374,10 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Stdio servers don't use OAuth
     if server.is_stdio() {
         println!();
-        println!("  Server '{}' uses stdio transport and does not require authentication.", name);
+        println!(
+            "  Server '{}' uses stdio transport and does not require authentication.",
+            name
+        );
         println!();
         return Ok(());
     }
@@ -527,7 +532,6 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 /// Print the list of tools from an MCP server (shared helper).
 async fn print_tools(client: &McpClient) {

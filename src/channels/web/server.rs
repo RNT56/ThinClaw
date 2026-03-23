@@ -830,7 +830,9 @@ async fn chat_history_handler(
 }
 
 /// Build TurnInfo pairs from flat DB messages (alternating user/assistant).
-pub fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]) -> Vec<TurnInfo> {
+pub fn build_turns_from_db_messages(
+    messages: &[crate::history::ConversationMessage],
+) -> Vec<TurnInfo> {
     let mut turns = Vec::new();
     let mut turn_number = 0;
     let mut iter = messages.iter().peekable();

@@ -522,9 +522,7 @@ fn split_message(text: &str) -> Vec<String> {
 
         // Safe for multi-byte UTF-8: round down to a valid char boundary
         let safe_end = crate::util::floor_char_boundary(remaining, MAX_MESSAGE_LENGTH);
-        let split_at = remaining[..safe_end]
-            .rfind('\n')
-            .unwrap_or(safe_end);
+        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start_matches('\n');

@@ -419,7 +419,8 @@ impl Workspace {
             if let Ok(agents) = self.read(paths::AGENTS).await {
                 if !agents.content.is_empty() {
                     bootstrap_prompt.push_str("\n\n---\n\n");
-                    bootstrap_prompt.push_str("## Your Workspace Guide (operational reference)\n\n");
+                    bootstrap_prompt
+                        .push_str("## Your Workspace Guide (operational reference)\n\n");
                     bootstrap_prompt.push_str(&agents.content);
                 }
             }

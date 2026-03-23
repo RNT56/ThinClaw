@@ -469,9 +469,9 @@ impl Agent {
         // is a safety net that catches leaked contexts: panicked cleanup tasks,
         // orphaned Completed/Stuck jobs, etc. Runs every 5 min.
         let job_context_pruning_handle = self.context_manager.spawn_pruner(
-            std::time::Duration::from_secs(300),          // check every 5 min
-            chrono::Duration::try_minutes(10).unwrap(),   // prune terminal/completed jobs > 10 min old
-            chrono::Duration::try_minutes(30).unwrap(),   // prune stuck jobs > 30 min old
+            std::time::Duration::from_secs(300),        // check every 5 min
+            chrono::Duration::try_minutes(10).unwrap(), // prune terminal/completed jobs > 10 min old
+            chrono::Duration::try_minutes(30).unwrap(), // prune stuck jobs > 30 min old
         );
 
         // ── Memory hygiene background task ─────────────────────────────

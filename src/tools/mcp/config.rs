@@ -553,7 +553,10 @@ mod tests {
         let config = McpServerConfig::new_stdio(
             "filesystem",
             "npx",
-            vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
         );
         assert!(config.validate().is_ok());
         assert!(config.is_stdio());
@@ -570,7 +573,10 @@ mod tests {
         let config = McpServerConfig::new_stdio(
             "filesystem",
             "npx",
-            vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
         );
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["transport"], "stdio");

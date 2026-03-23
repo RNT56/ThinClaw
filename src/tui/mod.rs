@@ -539,7 +539,10 @@ impl TuiApp {
             }
             "/status" => {
                 self.messages.push(ChatMessage::System {
-                    text: format!("Model: {} | Agent: {} | {}", self.model, self.agent_id, self.status_text),
+                    text: format!(
+                        "Model: {} | Agent: {} | {}",
+                        self.model, self.agent_id, self.status_text
+                    ),
                 });
             }
             "/interrupt" => {
@@ -605,9 +608,22 @@ impl TuiApp {
 
     fn autocomplete_command(&mut self) {
         const COMMANDS: &[&str] = &[
-            "/help", "/clear", "/new", "/reset", "/exit", "/quit", "/think",
-            "/status", "/interrupt", "/undo", "/redo", "/compact",
-            "/model", "/models", "/agent", "/agents",
+            "/help",
+            "/clear",
+            "/new",
+            "/reset",
+            "/exit",
+            "/quit",
+            "/think",
+            "/status",
+            "/interrupt",
+            "/undo",
+            "/redo",
+            "/compact",
+            "/model",
+            "/models",
+            "/agent",
+            "/agents",
         ];
 
         let matches: Vec<&&str> = COMMANDS

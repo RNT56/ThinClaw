@@ -206,8 +206,7 @@ pub async fn get_history(
 
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns =
-                crate::channels::web::server::build_turns_from_db_messages(&messages);
+            let turns = crate::channels::web::server::build_turns_from_db_messages(&messages);
             return Ok(HistoryResponse {
                 thread_id: tid,
                 turns,

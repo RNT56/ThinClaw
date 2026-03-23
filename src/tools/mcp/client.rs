@@ -107,9 +107,7 @@ impl McpClient {
     /// Create a new MCP client with stdio transport.
     ///
     /// Spawns the child process immediately.
-    pub fn new_stdio(
-        config: &McpServerConfig,
-    ) -> Result<Self, ToolError> {
+    pub fn new_stdio(config: &McpServerConfig) -> Result<Self, ToolError> {
         let command = config.command.as_deref().ok_or_else(|| {
             ToolError::ExternalService(format!(
                 "MCP server '{}' is configured for stdio but has no command",
@@ -117,12 +115,7 @@ impl McpClient {
             ))
         })?;
 
-        let transport = StdioTransport::spawn(
-            &config.name,
-            command,
-            &config.args,
-            &config.env,
-        )?;
+        let transport = StdioTransport::spawn(&config.name, command, &config.args, &config.env)?;
 
         Ok(Self {
             server_url: String::new(),
