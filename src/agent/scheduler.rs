@@ -40,8 +40,8 @@ pub struct ScheduledJob {
 
 /// Status of a scheduled sub-task.
 /// Stores only the raw `JoinHandle` needed for `is_finished()` polling during
-/// `cleanup_finished()`. The actual result is delivered via a `oneshot` channel
-/// returned from `spawn_subtask()` — no second wrapper needed.
+/// subtask cleanup. The actual result is delivered via a `oneshot` channel
+/// returned from `spawn_subtask()`.
 struct ScheduledSubtask {
     handle: JoinHandle<()>,
 }
@@ -318,10 +318,16 @@ impl Scheduler {
             jobs.insert(job_id, ScheduledJob { handle, tx });
 
             // Event-driven cleanup — wakes once on completion.
+            // Also remove from ContextManager so the completed job no longer
+            // counts against max_parallel_jobs (Completed is NOT terminal).
             let jobs_cleanup = Arc::clone(&self.jobs);
+            let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await;
                 jobs_cleanup.write().await.remove(&job_id);
+                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
+                    tracing::debug!("ContextManager cleanup for reserved job {}: {}", job_id, e);
+                }
             });
         }
 
@@ -395,10 +401,16 @@ impl Scheduler {
             jobs.insert(job_id, ScheduledJob { handle, tx });
 
             // Event-driven cleanup — wakes once on completion.
+            // Also remove from ContextManager so the completed job no longer
+            // counts against max_parallel_jobs (Completed is NOT terminal).
             let jobs_cleanup = Arc::clone(&self.jobs);
+            let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await;
                 jobs_cleanup.write().await.remove(&job_id);
+                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
+                    tracing::debug!("ContextManager cleanup for routine job {}: {}", job_id, e);
+                }
             });
         }
 
@@ -476,10 +488,16 @@ impl Scheduler {
 
             // Spawn a lightweight cleanup waiter — wakes only once on completion
             // instead of polling at 1Hz per job (Bug 1 fix).
+            // Also remove from ContextManager so the completed job no longer
+            // counts against max_parallel_jobs (Completed is NOT terminal).
             let jobs_cleanup = Arc::clone(&self.jobs);
+            let ctx_cleanup = Arc::clone(&self.context_manager);
             tokio::spawn(async move {
                 let _ = done_rx.await; // wakes exactly once when job finishes
                 jobs_cleanup.write().await.remove(&job_id);
+                if let Err(e) = ctx_cleanup.remove_job(job_id).await {
+                    tracing::debug!("ContextManager cleanup for job {}: {}", job_id, e);
+                }
             });
         }
 
@@ -545,7 +563,7 @@ impl Scheduler {
             }
         };
 
-        // Track the subtask for is_finished() polling in cleanup_finished().
+        // Track the subtask for is_finished() polling during cleanup.
         // Bug 2 fix: store the raw task handle directly — the previous double-wrap
         // always returned Err(ContextError) and was misleading. The actual result is
         // delivered via the `oneshot` channel above; we only need the handle here for
@@ -794,42 +812,6 @@ impl Scheduler {
         self.jobs.read().await.keys().cloned().collect()
     }
 
-    /// Clean up finished jobs and subtasks.
-    pub async fn cleanup_finished(&self) {
-        // Clean up jobs
-        {
-            let mut jobs = self.jobs.write().await;
-            let mut finished = Vec::new();
-
-            for (id, scheduled) in jobs.iter() {
-                if scheduled.handle.is_finished() {
-                    finished.push(*id);
-                }
-            }
-
-            for id in finished {
-                jobs.remove(&id);
-                tracing::debug!("Cleaned up finished job {}", id);
-            }
-        }
-
-        // Clean up subtasks
-        {
-            let mut subtasks = self.subtasks.write().await;
-            let mut finished = Vec::new();
-
-            for (id, scheduled) in subtasks.iter() {
-                if scheduled.handle.is_finished() {
-                    finished.push(*id);
-                }
-            }
-
-            for id in finished {
-                subtasks.remove(&id);
-                tracing::trace!("Cleaned up finished subtask {}", id);
-            }
-        }
-    }
 
     /// Stop all jobs.
     pub async fn stop_all(&self) {

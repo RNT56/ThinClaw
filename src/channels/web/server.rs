@@ -317,7 +317,8 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
-        .route("/favicon.ico", get(favicon_handler));
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/apple-touch-icon.png", get(apple_touch_icon_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -426,6 +427,16 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn apple_touch_icon_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("static/apple-touch-icon.png").as_slice(),
     )
 }
 

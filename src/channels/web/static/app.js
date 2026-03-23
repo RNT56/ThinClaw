@@ -1102,6 +1102,7 @@ function switchTab(tab) {
     stopPairingPoll();
   }
   if (tab === 'skills') loadSkills();
+  if (tab === 'settings') loadSettings();
 }
 
 // --- Memory (filesystem tree) ---
@@ -3580,4 +3581,293 @@ function formatDate(isoString) {
   if (!isoString) return '-';
   const d = new Date(isoString);
   return d.toLocaleString();
+}
+
+// --- Settings Tab ---
+
+// Settings schema: defines sections, keys, labels, types, and descriptions.
+// Only keys listed here get rendered with nice labels — everything else
+// falls into an "Other" section as raw key/value.
+const SETTINGS_SCHEMA = {
+  'Heartbeat': {
+    icon: '💓',
+    fields: [
+      { key: 'heartbeat.enabled', label: 'Enabled', type: 'bool', desc: 'Master switch for proactive heartbeats' },
+      { key: 'heartbeat.interval_secs', label: 'Interval (seconds)', type: 'number', desc: 'Time between heartbeat checks', min: 60, max: 86400 },
+      { key: 'heartbeat.light_context', label: 'Light context', type: 'bool', desc: 'Use only HEARTBEAT.md (cheaper) vs full session history' },
+      { key: 'heartbeat.include_reasoning', label: 'Include reasoning', type: 'bool', desc: 'Show LLM reasoning in heartbeat output' },
+      { key: 'heartbeat.target', label: 'Output target', type: 'text', desc: '"chat", "none", or a channel name' },
+      { key: 'heartbeat.active_start_hour', label: 'Active start hour', type: 'number', desc: '0-23, local time. Empty = always active', min: 0, max: 23, nullable: true },
+      { key: 'heartbeat.active_end_hour', label: 'Active end hour', type: 'number', desc: '0-23, local time. Empty = always active', min: 0, max: 23, nullable: true },
+      { key: 'heartbeat.notify_channel', label: 'Notify channel', type: 'text', desc: 'Channel to send findings to (e.g. telegram)', nullable: true },
+      { key: 'heartbeat.notify_user', label: 'Notify user', type: 'text', desc: 'User ID to notify', nullable: true },
+    ]
+  },
+  'Agent': {
+    icon: '🤖',
+    fields: [
+      { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
+      { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
+      { key: 'agent.job_timeout_secs', label: 'Job timeout (seconds)', type: 'number', desc: 'Max time before a job is killed', min: 60 },
+      { key: 'agent.max_tool_iterations', label: 'Max tool iterations', type: 'number', desc: 'Agentic loop iteration cap', min: 1, max: 200 },
+      { key: 'agent.max_context_messages', label: 'Max context messages', type: 'number', desc: 'Hard cap on messages sent to LLM', min: 10 },
+      { key: 'agent.use_planning', label: 'Use planning', type: 'bool', desc: 'Plan before tool execution' },
+      { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
+      { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
+      { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (⚠️ use with caution)' },
+    ]
+  },
+  'Safety': {
+    icon: '🛡️',
+    fields: [
+      { key: 'safety.max_actions_per_hour', label: 'Max actions/hour', type: 'number', desc: 'Rate limit for tool actions', min: 1, nullable: true },
+      { key: 'safety.max_daily_cost_usd', label: 'Max daily cost ($)', type: 'number', desc: 'Daily spending cap in USD', min: 0, step: 0.01, nullable: true },
+    ]
+  },
+  'Features': {
+    icon: '⚙️',
+    fields: [
+      { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
+      { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
+      { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
+    ]
+  },
+};
+
+// All known schema keys for filtering "Other"
+const SCHEMA_KEYS = new Set();
+for (const section of Object.values(SETTINGS_SCHEMA)) {
+  for (const f of section.fields) SCHEMA_KEYS.add(f.key);
+}
+
+let settingsCache = {}; // key -> { value, updated_at }
+
+function loadSettings() {
+  const container = document.getElementById('settings-sections');
+  container.innerHTML = '<div class="settings-loading">Loading settings...</div>';
+
+  apiFetch('/api/settings').then((data) => {
+    settingsCache = {};
+    for (const s of (data.settings || [])) {
+      settingsCache[s.key] = { value: s.value, updated_at: s.updated_at };
+    }
+    renderSettings();
+  }).catch((err) => {
+    container.innerHTML = '<div class="empty-state">Failed to load settings: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSettings() {
+  const container = document.getElementById('settings-sections');
+  container.innerHTML = '';
+
+  // Render known sections
+  for (const [sectionName, section] of Object.entries(SETTINGS_SCHEMA)) {
+    const sectionEl = document.createElement('div');
+    sectionEl.className = 'settings-section';
+
+    const header = document.createElement('h3');
+    header.innerHTML = section.icon + ' ' + escapeHtml(sectionName);
+    sectionEl.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'settings-grid';
+
+    for (const field of section.fields) {
+      grid.appendChild(renderSettingField(field));
+    }
+
+    sectionEl.appendChild(grid);
+    container.appendChild(sectionEl);
+  }
+
+  // Collect "other" settings not in schema
+  const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k)).sort();
+  if (otherKeys.length > 0) {
+    const sectionEl = document.createElement('div');
+    sectionEl.className = 'settings-section';
+
+    const header = document.createElement('h3');
+    header.textContent = '📋 Other';
+    sectionEl.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'settings-grid';
+
+    for (const key of otherKeys) {
+      grid.appendChild(renderSettingField({
+        key: key,
+        label: key,
+        type: guessType(settingsCache[key]?.value),
+        desc: '',
+      }));
+    }
+
+    sectionEl.appendChild(grid);
+    container.appendChild(sectionEl);
+  }
+}
+
+function guessType(value) {
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'number') return 'number';
+  return 'text';
+}
+
+function renderSettingField(field) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+  row.id = 'setting-' + field.key.replace(/\./g, '-');
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+
+  const label = document.createElement('label');
+  label.className = 'setting-label';
+  label.textContent = field.label;
+  labelWrap.appendChild(label);
+
+  if (field.desc) {
+    const desc = document.createElement('span');
+    desc.className = 'setting-desc';
+    desc.textContent = field.desc;
+    labelWrap.appendChild(desc);
+  }
+
+  row.appendChild(labelWrap);
+
+  const cached = settingsCache[field.key];
+  const currentValue = cached?.value ?? null;
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+
+  if (field.type === 'bool') {
+    const toggle = document.createElement('label');
+    toggle.className = 'toggle-switch';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = currentValue === true || currentValue === 'true';
+    input.addEventListener('change', () => saveSetting(field.key, input.checked));
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    toggle.appendChild(input);
+    toggle.appendChild(slider);
+    controlWrap.appendChild(toggle);
+  } else if (field.type === 'number') {
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'setting-input';
+    input.value = currentValue != null ? currentValue : '';
+    input.placeholder = field.nullable ? 'Not set' : '';
+    if (field.min !== undefined) input.min = field.min;
+    if (field.max !== undefined) input.max = field.max;
+    if (field.step !== undefined) input.step = field.step;
+    // Save on Enter or blur
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const val = input.value === '' ? null : Number(input.value);
+        saveSetting(field.key, val);
+        input.blur();
+      }
+    });
+    input.addEventListener('blur', () => {
+      const val = input.value === '' ? null : Number(input.value);
+      if (val !== currentValue) saveSetting(field.key, val);
+    });
+    controlWrap.appendChild(input);
+  } else {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'setting-input';
+    input.value = currentValue != null ? String(currentValue) : '';
+    input.placeholder = field.nullable ? 'Not set' : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const val = input.value === '' && field.nullable ? null : input.value;
+        saveSetting(field.key, val);
+        input.blur();
+      }
+    });
+    input.addEventListener('blur', () => {
+      const val = input.value === '' && field.nullable ? null : input.value;
+      if (val !== (currentValue ?? '')) saveSetting(field.key, val);
+    });
+    controlWrap.appendChild(input);
+  }
+
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function saveSetting(key, value) {
+  const headers = { 'Authorization': 'Bearer ' + token };
+
+  if (value === null) {
+    // Delete the setting (reset to default)
+    fetch('/api/settings/' + encodeURIComponent(key), { method: 'DELETE', headers })
+      .then((res) => {
+        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+        delete settingsCache[key];
+        showToast('Reset ' + key + ' to default', 'success');
+      })
+      .catch((err) => showToast('Failed: ' + err.message, 'error'));
+  } else {
+    headers['Content-Type'] = 'application/json';
+    fetch('/api/settings/' + encodeURIComponent(key), {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ value: value }),
+    }).then((res) => {
+      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+      settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
+      showToast('Saved ' + key, 'success');
+    }).catch((err) => showToast('Failed: ' + err.message, 'error'));
+  }
+}
+
+function exportSettings() {
+  apiFetch('/api/settings/export').then((data) => {
+    const blob = new Blob([JSON.stringify(data.settings, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'thinclaw-settings.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Settings exported', 'success');
+  }).catch((err) => showToast('Export failed: ' + err.message, 'error'));
+}
+
+function importSettings(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const settings = JSON.parse(reader.result);
+      if (typeof settings !== 'object' || Array.isArray(settings)) {
+        showToast('Invalid settings file', 'error');
+        return;
+      }
+      if (!confirm('Import ' + Object.keys(settings).length + ' settings? This will overwrite current values.')) return;
+      fetch('/api/settings/import', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ settings: settings }),
+      }).then((res) => {
+        if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+        showToast('Settings imported — reloading', 'success');
+        loadSettings();
+      }).catch((err) => showToast('Import failed: ' + err.message, 'error'));
+    } catch (e) {
+      showToast('Invalid JSON file', 'error');
+    }
+  };
+  reader.readAsText(file);
+  // Reset input so reimporting the same file works
+  event.target.value = '';
 }

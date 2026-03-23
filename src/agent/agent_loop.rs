@@ -309,7 +309,12 @@ impl Agent {
 /// handle is stored in managed state and taken on app quit.
 pub struct BackgroundTasksHandle {
     repair_handle: tokio::task::JoinHandle<()>,
-    pruning_handle: tokio::task::JoinHandle<()>,
+    /// Session pruner — prunes idle chat sessions (SessionManager).
+    session_pruning_handle: tokio::task::JoinHandle<()>,
+    /// Job context pruner — safety-net cleanup for ContextManager job slots.
+    /// Catches leaked contexts that the oneshot cleanup missed (e.g. panicked
+    /// cleanup tasks, orphaned Completed/Stuck jobs).
+    job_context_pruning_handle: tokio::task::JoinHandle<()>,
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
     routine_handle: Option<(tokio::task::JoinHandle<()>, Arc<RoutineEngine>)>,
     // IC-003: Previously leaked — notification forwarder is now tracked
@@ -449,7 +454,7 @@ impl Agent {
         // ── Session pruning ─────────────────────────────────────────────
         let session_mgr = self.session_manager.clone();
         let session_idle_timeout = self.config.session_idle_timeout;
-        let pruning_handle = tokio::spawn(async move {
+        let session_pruning_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(600)); // Every 10 min
             interval.tick().await; // Skip immediate first tick
             loop {
@@ -457,6 +462,17 @@ impl Agent {
                 session_mgr.prune_stale_sessions(session_idle_timeout).await;
             }
         });
+
+        // ── Job context pruning (safety net) ───────────────────────────
+        // The oneshot cleanup on each scheduler job handles the happy path
+        // (immediate removal from ContextManager on completion). This pruner
+        // is a safety net that catches leaked contexts: panicked cleanup tasks,
+        // orphaned Completed/Stuck jobs, etc. Runs every 5 min.
+        let job_context_pruning_handle = self.context_manager.spawn_pruner(
+            std::time::Duration::from_secs(300),          // check every 5 min
+            chrono::Duration::try_minutes(10).unwrap(),   // prune terminal/completed jobs > 10 min old
+            chrono::Duration::try_minutes(30).unwrap(),   // prune stuck jobs > 30 min old
+        );
 
         // ── Memory hygiene background task ─────────────────────────────
         // The old HeartbeatRunner included both heartbeat checks AND memory
@@ -626,7 +642,8 @@ impl Agent {
 
         BackgroundTasksHandle {
             repair_handle,
-            pruning_handle,
+            session_pruning_handle,
+            job_context_pruning_handle,
             heartbeat_handle,
             routine_handle,
             notification_forwarder_handle,
@@ -644,7 +661,8 @@ impl Agent {
     pub async fn shutdown_background(&self, handle: BackgroundTasksHandle) {
         tracing::info!("Agent shutting down...");
         handle.repair_handle.abort();
-        handle.pruning_handle.abort();
+        handle.session_pruning_handle.abort();
+        handle.job_context_pruning_handle.abort();
         if let Some(h) = handle.heartbeat_handle {
             h.abort();
         }

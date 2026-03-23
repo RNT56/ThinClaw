@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IronClaw</title>
+  <title>ThinClaw</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -43,6 +44,7 @@
       <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
       <button data-tab="skills">Skills</button>
+      <button data-tab="settings">Settings</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
@@ -257,6 +259,31 @@
             <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
             <button onclick="installSkillFromForm()">Install</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div class="tab-panel" id="tab-settings">
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2>Settings</h2>
+          <div class="settings-header-actions">
+            <button class="btn-ext" onclick="exportSettings()" title="Export as JSON">Export</button>
+            <label class="btn-ext" style="cursor:pointer">
+              Import
+              <input type="file" accept=".json" onchange="importSettings(event)" style="display:none">
+            </label>
+            <button class="btn-ext" onclick="loadSettings()" title="Reload">Refresh</button>
+          </div>
+        </div>
+
+        <div class="settings-sections" id="settings-sections">
+          <div class="settings-loading">Loading settings...</div>
+        </div>
+
+        <div class="settings-note">
+          <strong>Note:</strong> Some changes require a restart to take effect.
         </div>
       </div>
     </div>
