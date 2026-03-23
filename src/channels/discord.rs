@@ -652,10 +652,9 @@ impl Channel for DiscordChannel {
         let bot_token = self.config.bot_token.expose_secret();
         let text = if draft.accumulated.len() > MAX_MESSAGE_LENGTH {
             // Truncate to fit Discord limits (safe for multi-byte UTF-8)
-            let safe_end = crate::util::floor_char_boundary(&draft.accumulated, MAX_MESSAGE_LENGTH - 20);
-            let cutoff = draft.accumulated[..safe_end]
-                .rfind(' ')
-                .unwrap_or(safe_end);
+            let safe_end =
+                crate::util::floor_char_boundary(&draft.accumulated, MAX_MESSAGE_LENGTH - 20);
+            let cutoff = draft.accumulated[..safe_end].rfind(' ').unwrap_or(safe_end);
             format!("{}...", &draft.accumulated[..cutoff])
         } else {
             draft.display_text()
@@ -726,9 +725,7 @@ fn split_message(text: &str) -> Vec<String> {
 
         // Safe for multi-byte UTF-8: round down to a valid char boundary
         let safe_end = crate::util::floor_char_boundary(remaining, MAX_MESSAGE_LENGTH);
-        let split_at = remaining[..safe_end]
-            .rfind('\n')
-            .unwrap_or(safe_end);
+        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start_matches('\n');

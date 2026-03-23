@@ -1376,14 +1376,20 @@ impl SetupWizard {
                 self.settings.channels.http_enabled,
             ),
             ("Signal".to_string(), self.settings.channels.signal_enabled),
-            ("Discord".to_string(), self.settings.channels.discord_enabled),
+            (
+                "Discord".to_string(),
+                self.settings.channels.discord_enabled,
+            ),
             ("Slack".to_string(), self.settings.channels.slack_enabled),
             ("Nostr".to_string(), self.settings.channels.nostr_enabled),
             ("Gmail".to_string(), self.settings.channels.gmail_enabled),
         ];
 
         #[cfg(target_os = "macos")]
-        options.push(("iMessage".to_string(), self.settings.channels.imessage_enabled));
+        options.push((
+            "iMessage".to_string(),
+            self.settings.channels.imessage_enabled,
+        ));
 
         let native_count = options.len();
 
@@ -1521,26 +1527,43 @@ impl SetupWizard {
         // Discord channel
         if selected.contains(&CHANNEL_INDEX_DISCORD) {
             println!();
-            print_info("Discord requires a Bot Token from https://discord.com/developers/applications");
+            print_info(
+                "Discord requires a Bot Token from https://discord.com/developers/applications",
+            );
             println!();
 
-            let token = if let Some(existing) = std::env::var("DISCORD_BOT_TOKEN").ok().filter(|s| !s.is_empty()) {
+            let token = if let Some(existing) = std::env::var("DISCORD_BOT_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
                 let masked = mask_api_key(&existing);
-                if confirm(&format!("Use existing DISCORD_BOT_TOKEN ({})?", masked), true)
-                    .map_err(SetupError::Io)?
+                if confirm(
+                    &format!("Use existing DISCORD_BOT_TOKEN ({})?", masked),
+                    true,
+                )
+                .map_err(SetupError::Io)?
                 {
                     existing
                 } else {
-                    secret_input("Discord bot token").map_err(SetupError::Io)?.expose_secret().to_string()
+                    secret_input("Discord bot token")
+                        .map_err(SetupError::Io)?
+                        .expose_secret()
+                        .to_string()
                 }
             } else {
-                secret_input("Discord bot token").map_err(SetupError::Io)?.expose_secret().to_string()
+                secret_input("Discord bot token")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .to_string()
             };
 
             // Store via secrets if available
             if let Some(ref ctx) = secrets {
                 if let Err(e) = ctx
-                    .save_secret("discord_bot_token", &secrecy::SecretString::from(token.clone()))
+                    .save_secret(
+                        "discord_bot_token",
+                        &secrecy::SecretString::from(token.clone()),
+                    )
                     .await
                 {
                     print_info(&format!("Could not store token in secrets: {}", e));
@@ -1548,19 +1571,18 @@ impl SetupWizard {
             }
             self.settings.channels.discord_bot_token = Some(token);
 
-            let guild_id = optional_input("Guild ID (restrict to single server, blank = all)", None)
-                .map_err(SetupError::Io)?;
+            let guild_id =
+                optional_input("Guild ID (restrict to single server, blank = all)", None)
+                    .map_err(SetupError::Io)?;
             if let Some(ref gid) = guild_id {
                 if !gid.is_empty() {
                     self.settings.channels.discord_guild_id = Some(gid.clone());
                 }
             }
 
-            let allow_from = optional_input(
-                "Allowed channel IDs (comma-separated, blank = all)",
-                None,
-            )
-            .map_err(SetupError::Io)?;
+            let allow_from =
+                optional_input("Allowed channel IDs (comma-separated, blank = all)", None)
+                    .map_err(SetupError::Io)?;
             if let Some(ref af) = allow_from {
                 if !af.is_empty() {
                     self.settings.channels.discord_allow_from = Some(af.clone());
@@ -1576,46 +1598,72 @@ impl SetupWizard {
         // Slack channel
         if selected.contains(&CHANNEL_INDEX_SLACK) {
             println!();
-            print_info("Slack requires both a Bot Token (xoxb-...) and an App-Level Token (xapp-...)");
+            print_info(
+                "Slack requires both a Bot Token (xoxb-...) and an App-Level Token (xapp-...)",
+            );
             print_info("Create these at https://api.slack.com/apps");
             println!();
 
-            let bot_token = if let Some(existing) = std::env::var("SLACK_BOT_TOKEN").ok().filter(|s| !s.is_empty()) {
+            let bot_token = if let Some(existing) = std::env::var("SLACK_BOT_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
                 let masked = mask_api_key(&existing);
                 if confirm(&format!("Use existing SLACK_BOT_TOKEN ({})?", masked), true)
                     .map_err(SetupError::Io)?
                 {
                     existing
                 } else {
-                    secret_input("Slack bot token (xoxb-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                    secret_input("Slack bot token (xoxb-...)")
+                        .map_err(SetupError::Io)?
+                        .expose_secret()
+                        .to_string()
                 }
             } else {
-                secret_input("Slack bot token (xoxb-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                secret_input("Slack bot token (xoxb-...)")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .to_string()
             };
 
-            let app_token = if let Some(existing) = std::env::var("SLACK_APP_TOKEN").ok().filter(|s| !s.is_empty()) {
+            let app_token = if let Some(existing) = std::env::var("SLACK_APP_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
                 let masked = mask_api_key(&existing);
                 if confirm(&format!("Use existing SLACK_APP_TOKEN ({})?", masked), true)
                     .map_err(SetupError::Io)?
                 {
                     existing
                 } else {
-                    secret_input("Slack app-level token (xapp-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                    secret_input("Slack app-level token (xapp-...)")
+                        .map_err(SetupError::Io)?
+                        .expose_secret()
+                        .to_string()
                 }
             } else {
-                secret_input("Slack app-level token (xapp-...)").map_err(SetupError::Io)?.expose_secret().to_string()
+                secret_input("Slack app-level token (xapp-...)")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .to_string()
             };
 
             // Store via secrets if available
             if let Some(ref ctx) = secrets {
                 if let Err(e) = ctx
-                    .save_secret("slack_bot_token", &secrecy::SecretString::from(bot_token.clone()))
+                    .save_secret(
+                        "slack_bot_token",
+                        &secrecy::SecretString::from(bot_token.clone()),
+                    )
                     .await
                 {
                     print_info(&format!("Could not store bot token in secrets: {}", e));
                 }
                 if let Err(e) = ctx
-                    .save_secret("slack_app_token", &secrecy::SecretString::from(app_token.clone()))
+                    .save_secret(
+                        "slack_app_token",
+                        &secrecy::SecretString::from(app_token.clone()),
+                    )
                     .await
                 {
                     print_info(&format!("Could not store app token in secrets: {}", e));
@@ -1648,11 +1696,8 @@ impl SetupWizard {
             println!();
 
             let default_relays = "wss://relay.damus.io,wss://nos.lol";
-            let relays = optional_input(
-                "Relay URLs (comma-separated)",
-                Some(default_relays),
-            )
-            .map_err(SetupError::Io)?;
+            let relays = optional_input("Relay URLs (comma-separated)", Some(default_relays))
+                .map_err(SetupError::Io)?;
             let relay_str = relays
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| default_relays.to_string());
@@ -1671,7 +1716,9 @@ impl SetupWizard {
 
             self.settings.channels.nostr_enabled = true;
             print_success("Nostr channel configured");
-            print_info("Set NOSTR_SECRET_KEY env var with your nsec/hex private key before starting.");
+            print_info(
+                "Set NOSTR_SECRET_KEY env var with your nsec/hex private key before starting.",
+            );
         } else {
             self.settings.channels.nostr_enabled = false;
         }
@@ -1692,11 +1739,9 @@ impl SetupWizard {
             let topic_id = input("Pub/Sub topic ID").map_err(SetupError::Io)?;
             self.settings.channels.gmail_topic_id = Some(topic_id);
 
-            let allowed_senders = optional_input(
-                "Allowed sender emails (comma-separated, blank = all)",
-                None,
-            )
-            .map_err(SetupError::Io)?;
+            let allowed_senders =
+                optional_input("Allowed sender emails (comma-separated, blank = all)", None)
+                    .map_err(SetupError::Io)?;
             if let Some(ref senders) = allowed_senders {
                 if !senders.is_empty() {
                     self.settings.channels.gmail_allowed_senders = Some(senders.clone());
@@ -1705,7 +1750,9 @@ impl SetupWizard {
 
             self.settings.channels.gmail_enabled = true;
             print_success("Gmail channel configured");
-            print_info("Run `thinclaw auth gmail` to complete OAuth2 authentication before starting.");
+            print_info(
+                "Run `thinclaw auth gmail` to complete OAuth2 authentication before starting.",
+            );
         } else {
             self.settings.channels.gmail_enabled = false;
         }
@@ -1729,11 +1776,8 @@ impl SetupWizard {
                 }
             }
 
-            let poll_interval = optional_input(
-                "Polling interval in seconds",
-                Some("5"),
-            )
-            .map_err(SetupError::Io)?;
+            let poll_interval =
+                optional_input("Polling interval in seconds", Some("5")).map_err(SetupError::Io)?;
             if let Some(ref pi) = poll_interval {
                 if let Ok(n) = pi.parse::<u64>() {
                     self.settings.channels.imessage_poll_interval = Some(n);
@@ -1892,7 +1936,10 @@ impl SetupWizard {
             if crate::registry::bundled_wasm::is_bundled(&tool.name) {
                 match crate::registry::bundled_wasm::extract_bundled(&tool.name, &tools_dir).await {
                     Ok(()) => {
-                        print_success(&format!("Installed {} (from bundled binary)", tool.display_name));
+                        print_success(&format!(
+                            "Installed {} (from bundled binary)",
+                            tool.display_name
+                        ));
                         installed_count += 1;
 
                         // Track auth needs
@@ -2054,8 +2101,7 @@ impl SetupWizard {
 
         let current = &self.settings.agent.name;
         let default_label = format!("current: {}", current);
-        let name = optional_input("Agent name", Some(&default_label))
-            .map_err(SetupError::Io)?;
+        let name = optional_input("Agent name", Some(&default_label)).map_err(SetupError::Io)?;
 
         if let Some(n) = name {
             if !n.is_empty() {
@@ -2130,11 +2176,8 @@ impl SetupWizard {
         self.settings.claude_code_enabled = true;
 
         // Model
-        let model = optional_input(
-            "Claude Code model",
-            Some("default: sonnet"),
-        )
-        .map_err(SetupError::Io)?;
+        let model =
+            optional_input("Claude Code model", Some("default: sonnet")).map_err(SetupError::Io)?;
         if let Some(m) = model {
             if !m.is_empty() {
                 self.settings.claude_code_model = Some(m);
@@ -2142,18 +2185,19 @@ impl SetupWizard {
         }
 
         // Max turns
-        let turns = optional_input(
-            "Max agentic turns",
-            Some("default: 50"),
-        )
-        .map_err(SetupError::Io)?;
+        let turns =
+            optional_input("Max agentic turns", Some("default: 50")).map_err(SetupError::Io)?;
         if let Some(t) = turns {
             if let Ok(n) = t.parse::<u32>() {
                 self.settings.claude_code_max_turns = Some(n);
             }
         }
 
-        let model_display = self.settings.claude_code_model.as_deref().unwrap_or("sonnet");
+        let model_display = self
+            .settings
+            .claude_code_model
+            .as_deref()
+            .unwrap_or("sonnet");
         let turns_display = self.settings.claude_code_max_turns.unwrap_or(50);
         print_success(&format!(
             "Claude Code enabled (model: {}, max turns: {})",
@@ -2173,9 +2217,7 @@ impl SetupWizard {
         print_info("The primary model is still used for complex conversations.");
         println!();
 
-        if !confirm("Configure a cheap model for smart routing?", false)
-            .map_err(SetupError::Io)?
-        {
+        if !confirm("Configure a cheap model for smart routing?", false).map_err(SetupError::Io)? {
             print_info("Smart routing disabled — all tasks use the primary model.");
             return Ok(());
         }
@@ -2188,11 +2230,8 @@ impl SetupWizard {
         let cheap_model = if current.is_empty() {
             input("Cheap model").map_err(SetupError::Io)?
         } else {
-            let keep = confirm(
-                &format!("Keep current cheap model ({})?", current),
-                true,
-            )
-            .map_err(SetupError::Io)?;
+            let keep = confirm(&format!("Keep current cheap model ({})?", current), true)
+                .map_err(SetupError::Io)?;
             if keep {
                 current.to_string()
             } else {
@@ -2202,7 +2241,10 @@ impl SetupWizard {
 
         if !cheap_model.is_empty() {
             self.settings.providers.cheap_model = Some(cheap_model.clone());
-            print_success(&format!("Smart routing enabled — cheap model: {}", cheap_model));
+            print_success(&format!(
+                "Smart routing enabled — cheap model: {}",
+                cheap_model
+            ));
         } else {
             print_info("No cheap model set — smart routing disabled.");
         }
@@ -2227,11 +2269,7 @@ impl SetupWizard {
         println!();
 
         // Theme selection
-        let theme_options: &[&str] = &[
-            "System (follow OS preference)",
-            "Light",
-            "Dark",
-        ];
+        let theme_options: &[&str] = &["System (follow OS preference)", "Light", "Dark"];
         let theme_idx = select_one("Theme", theme_options).map_err(SetupError::Io)?;
         let theme = match theme_idx {
             1 => "light",
@@ -2253,11 +2291,8 @@ impl SetupWizard {
         }
 
         // Branding badge
-        let show_branding = confirm(
-            "Show \"Powered by ThinClaw\" badge?",
-            true,
-        )
-        .map_err(SetupError::Io)?;
+        let show_branding =
+            confirm("Show \"Powered by ThinClaw\" badge?", true).map_err(SetupError::Io)?;
         self.settings.webchat_show_branding = show_branding;
 
         let accent_display = self
@@ -2267,7 +2302,9 @@ impl SetupWizard {
             .unwrap_or("default");
         print_success(&format!(
             "Web UI configured (theme: {}, accent: {}, branding: {})",
-            theme, accent_display, if show_branding { "shown" } else { "hidden" }
+            theme,
+            accent_display,
+            if show_branding { "shown" } else { "hidden" }
         ));
 
         Ok(())
@@ -2544,7 +2581,10 @@ impl SetupWizard {
 
         // Observability env vars
         if self.settings.observability_backend != "none" {
-            env_vars.push(("OBSERVABILITY_BACKEND", self.settings.observability_backend.clone()));
+            env_vars.push((
+                "OBSERVABILITY_BACKEND",
+                self.settings.observability_backend.clone(),
+            ));
         }
 
         if !env_vars.is_empty() {
@@ -2802,13 +2842,24 @@ impl SetupWizard {
         }
 
         if self.settings.claude_code_enabled {
-            let model = self.settings.claude_code_model.as_deref().unwrap_or("sonnet");
+            let model = self
+                .settings
+                .claude_code_model
+                .as_deref()
+                .unwrap_or("sonnet");
             println!("  Claude Code: enabled (model: {})", model);
         }
 
         if self.settings.webchat_theme != "system" || self.settings.webchat_accent_color.is_some() {
-            let accent = self.settings.webchat_accent_color.as_deref().unwrap_or("default");
-            println!("  Web UI: theme={}, accent={}", self.settings.webchat_theme, accent);
+            let accent = self
+                .settings
+                .webchat_accent_color
+                .as_deref()
+                .unwrap_or("default");
+            println!(
+                "  Web UI: theme={}, accent={}",
+                self.settings.webchat_theme, accent
+            );
         }
 
         if self.settings.observability_backend != "none" {

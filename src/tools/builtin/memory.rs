@@ -22,19 +22,20 @@ use crate::workspace::{SearchConfig, Workspace, paths};
 
 /// Files the LLM may only APPEND to — never fully overwrite.
 ///
-/// `IDENTITY.md` is the only truly protected file because it records the agent's
-/// established name and creature. Nuking it completely would cause the agent to
-/// lose its identity. All other personality files (SOUL.md, USER.md, AGENTS.md)
-/// are freely rewritable so the agent can restructure and evolve them without
-/// accreting stale content.
-const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
+/// Currently empty: IDENTITY.md was moved to freely-rewritable to prevent
+/// identity accretion during repeated bootstrap runs. If a file should be
+/// strictly append-only in the future, add it here.
+const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[];
 
 /// Files the agent may FULLY REWRITE (replace entire content, append: false).
 ///
-/// These personality/preference files accumulate stale sections over time if only
-/// appended to. After the bootstrap ritual, the agent should use memory_write with
+/// These personality/identity/preference files accumulate stale sections over
+/// time if only appended to. The agent should use memory_write with
 /// append: false to fully restructure them into clean, well-formatted markdown.
-const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::SOUL, paths::AGENTS, paths::USER];
+/// IDENTITY.md is included here so the agent can clean up after bootstrap
+/// instead of accreting duplicate identity blocks.
+const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] =
+    &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
 
 /// Tool for searching workspace memory.
 ///
@@ -181,9 +182,9 @@ impl Tool for MemoryWriteTool {
         "Write to persistent memory (database-backed, NOT the local filesystem). \
          Use for facts, decisions, preferences, or lessons to remember across sessions. \
          Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
-         'heartbeat' (HEARTBEAT.md checklist), 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
+         'heartbeat' (HEARTBEAT.md checklist), 'IDENTITY.md' / 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
          (freely rewritable — use append: false to fully restructure after bootstrap), \
-         'IDENTITY.md' (append-only — preserves established name/creature), or a custom path. \
+         or a custom path. \
          ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
          and clear prose. Never dump raw unformatted text into identity files."
     }

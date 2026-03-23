@@ -9,13 +9,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tempfile::TempDir;
 use thinclaw::channels::Channel;
 use thinclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
     WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
 use thinclaw::pairing::PairingStore;
-use tempfile::TempDir;
 
 /// Create a test runtime for WASM channel operations.
 fn create_test_runtime() -> Arc<WasmChannelRuntime> {

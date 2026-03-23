@@ -393,11 +393,39 @@ impl Workspace {
         is_group_chat: bool,
     ) -> Result<String, WorkspaceError> {
         // ── Bootstrap mode: blank-slate first run ────────────────────────
+        // BOOTSTRAP.md gives the ritual instructions. We also inject SOUL.md
+        // and AGENTS.md so the LLM internalizes the agent's seed values and
+        // operational guidelines *before* rewriting them. Without this, the
+        // agent would replace SOUL.md without ever having read its content —
+        // the carefully crafted personality template would pass through its
+        // mind like nothing was there.
         if !is_group_chat
             && let Ok(doc) = self.read(paths::BOOTSTRAP).await
             && !doc.content.is_empty()
         {
-            return Ok(doc.content);
+            let mut bootstrap_prompt = doc.content;
+
+            // Append SOUL.md so the agent absorbs the seed personality
+            if let Ok(soul) = self.read(paths::SOUL).await {
+                if !soul.content.is_empty() {
+                    bootstrap_prompt.push_str("\n\n---\n\n");
+                    bootstrap_prompt.push_str("## Your Starting Soul (read this carefully — these are your seed values)\n\n");
+                    bootstrap_prompt.push_str(&soul.content);
+                    bootstrap_prompt.push_str("\n\n_Absorb these values. They're your starting point. When you rewrite SOUL.md, build on them — don't ignore them._");
+                }
+            }
+
+            // Append AGENTS.md so the agent knows its workspace conventions
+            if let Ok(agents) = self.read(paths::AGENTS).await {
+                if !agents.content.is_empty() {
+                    bootstrap_prompt.push_str("\n\n---\n\n");
+                    bootstrap_prompt
+                        .push_str("## Your Workspace Guide (operational reference)\n\n");
+                    bootstrap_prompt.push_str(&agents.content);
+                }
+            }
+
+            return Ok(bootstrap_prompt);
         }
 
         // ── Normal mode: lean identity prompt ────────────────────────────
@@ -914,12 +942,15 @@ impl Workspace {
                  Offer suggestions if they're stuck. Have fun with it.\n\n\
                  ## After You Know Who You Are\n\n\
                  Update these files with what you learned:\n\
-                 - `IDENTITY.md` — your name, creature, vibe, emoji\n\
+                 - `IDENTITY.md` — your name, creature, vibe, emoji (use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
                  - `USER.md` — their name, how to address them, timezone, notes\n\n\
-                 Then open `SOUL.md` together and talk about:\n\
-                 - What matters to them\n\
-                 - How they want you to behave\n\
-                 - Any boundaries or preferences\n\n\
+                 Then read `SOUL.md` — it already has your starting values (they're included\n\
+                 in this prompt too). Talk about them with your human:\n\
+                 - Do these values resonate? What would they change?\n\
+                 - How do they want you to behave?\n\
+                 - Any boundaries or preferences?\n\n\
+                 Then rewrite `SOUL.md` (with `memory_write`, **append: false**) — but **build\n\
+                 on the seed values**, don't start from scratch. They're your foundation.\n\n\
                  Write it down. Make it real.\n\n\
                  ## Connect (Optional)\n\n\
                  Ask how they want to reach you:\n\
@@ -928,7 +959,10 @@ impl Workspace {
                  - **Telegram** — set up a bot via BotFather\n\n\
                  Guide them through whichever they pick.\n\n\
                  ## When You're Done\n\n\
-                 Delete this file. You don't need a bootstrap script anymore — you're you now.\n\n\
+                 **IMPORTANT:** You MUST delete this file when the conversation ends.\n\
+                 Call `memory_delete` with path `BOOTSTRAP.md`.\n\
+                 If you don't delete it, you'll re-enter bootstrap mode on every session.\n\
+                 You don't need a bootstrap script anymore — you're you now.\n\n\
                  ---\n\n\
                  *Good luck out there. Make it count.*",
             ),
@@ -937,9 +971,15 @@ impl Workspace {
 
         let mut count = 0;
         for (path, content) in seed_files {
-            // Skip files that already exist (never overwrite user edits)
+            // Skip files that already exist AND have content (never overwrite user edits).
+            // Re-seed documents that exist but are empty — this can happen if a race
+            // during first boot creates an empty document via get_or_create_document_by_path
+            // before seeding runs.
             match self.read(path).await {
-                Ok(_) => continue,
+                Ok(doc) if !doc.content.is_empty() => continue,
+                Ok(_) => {
+                    tracing::info!("Re-seeding empty document: {}", path);
+                }
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
                     tracing::warn!("Failed to check {}: {}", path, e);

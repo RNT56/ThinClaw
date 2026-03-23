@@ -122,13 +122,10 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
         crate::agent::routine::Trigger::SystemEvent { message, schedule } => {
             let sched = schedule.as_deref().unwrap_or("on-demand");
-            (
-                "system_event".to_string(),
-                {
-                    let truncated: String = message.chars().take(40).collect();
-                    format!("event: {} ({})", truncated, sched)
-                },
-            )
+            ("system_event".to_string(), {
+                let truncated: String = message.chars().take(40).collect();
+                format!("event: {} ({})", truncated, sched)
+            })
         }
     };
 

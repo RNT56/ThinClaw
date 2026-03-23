@@ -700,5 +700,4 @@ mod tests {
         let sim = cosine_similarity(Some(&a), Some(&a));
         assert!((sim - 1.0).abs() < 0.001);
     }
-
 }

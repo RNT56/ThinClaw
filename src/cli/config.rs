@@ -132,7 +132,7 @@ async fn list_settings(
             (k.contains("token") || k.contains("secret") || k.contains("password") || k.contains("api_key"))
                 && !k.ends_with("_source") // e.g. secrets_master_key_source
                 && !k.ends_with("_name")   // e.g. api_key_name
-                && !k.contains("enabled")  // e.g. token_enabled
+                && !k.contains("enabled") // e.g. token_enabled
         };
 
         let display_value = if is_sensitive && !value.is_empty() && value != "null" {
