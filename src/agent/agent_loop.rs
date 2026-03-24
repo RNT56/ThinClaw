@@ -1162,6 +1162,7 @@ async fn upsert_heartbeat_routine(
         active_start_hour: hb_config.active_start_hour,
         active_end_hour: hb_config.active_end_hour,
         target: hb_config.target.clone(),
+        max_iterations: hb_config.max_iterations,
     };
 
     let existing = store.get_routine_by_name("default", "__heartbeat__").await;

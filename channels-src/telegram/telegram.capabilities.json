@@ -36,6 +36,7 @@
       "allow_polling": true,
       "min_poll_interval_ms": 30000,
       "workspace_prefix": "channels/telegram/",
+      "callback_timeout_secs": 45,
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000

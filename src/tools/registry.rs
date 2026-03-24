@@ -261,12 +261,26 @@ impl ToolRegistry {
         self.register_sync(Arc::new(DeviceInfoTool::new()));
         self.register_sync(Arc::new(CanvasTool));
 
-        // Browser tool with user-local profile dir
+        // Browser tool with user-local profile dir.
+        // Attach Docker Chromium config when the env var is set, so the tool
+        // can fall back to a containerised browser when no local Chrome exists.
         let browser_profile = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("thinclaw")
             .join("browser-profile");
-        self.register_sync(Arc::new(BrowserTool::new(browser_profile)));
+        let browser_tool = if std::env::var("BROWSER_DOCKER").is_ok() {
+            let docker_config =
+                crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
+            tracing::info!(
+                image = %docker_config.image,
+                port = docker_config.debug_port,
+                "Docker Chromium fallback enabled for browser tool"
+            );
+            BrowserTool::new_with_docker(browser_profile, docker_config)
+        } else {
+            BrowserTool::new(browser_profile)
+        };
+        self.register_sync(Arc::new(browser_tool));
 
         // Agent control tools (thinking + user messaging)
         self.register_sync(Arc::new(AgentThinkTool));

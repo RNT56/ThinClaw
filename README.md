@@ -336,6 +336,51 @@ External content passes through multiple security layers:
 - No telemetry, analytics, or data sharing
 - Full audit log of all tool executions
 
+### Docker Sandbox
+
+ThinClaw can run untrusted jobs in isolated Docker containers with a full orchestrator/worker architecture:
+
+- **Per-job auth tokens** — Each container gets a unique ephemeral token, revoked on completion
+- **Bind-mount validation** — Project directories are restricted to `~/.thinclaw/projects/` with canonicalization checks
+- **Capabilities dropped** — All Linux capabilities except `CHOWN` are removed
+- **Non-root execution** — Runs as UID 1000 (`sandbox` user) with `no-new-privileges`
+- **Resource limits** — Configurable memory (default 2 GB) and CPU shares
+- **HEALTHCHECK** — Built-in container health monitoring with automatic orphan cleanup on restart
+
+**Building the worker image:**
+
+```bash
+# Required before first use (the wizard offers to do this automatically)
+docker build -f Dockerfile.worker -t thinclaw-worker .
+```
+
+The worker image includes: Rust 1.92, Node.js, Python 3, Git, GitHub CLI, and the Claude Code CLI.
+
+### Claude Code Sandbox
+
+ThinClaw can delegate complex coding tasks to Anthropic's [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI, running inside a sandboxed Docker container.
+
+**Authentication** (checked in priority order):
+
+| Priority | Source | How to set |
+|----------|--------|------------|
+| 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
+| 2 | OS keychain | Set during `thinclaw onboard` (wizard step 12) |
+| 3 | Claude Code OAuth | Run `claude login` on the host machine |
+
+The wizard's step 12 detects which auth sources are available and offers to store an API key in the OS keychain (macOS Keychain / Linux Secret Service). This avoids putting secrets in `.env` files or the database.
+
+**Configuration:**
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| Enabled | `CLAUDE_CODE_ENABLED` | `false` | Enable Claude Code as a delegation target |
+| Model | `CLAUDE_CODE_MODEL` | `sonnet` | Claude model for code tasks |
+| Max turns | `CLAUDE_CODE_MAX_TURNS` | `50` | Maximum agentic turns per job |
+| Memory | `CLAUDE_CODE_MEMORY_LIMIT_MB` | `4096` | Container memory limit |
+
+These can also be configured in the WebUI under **Settings → Features**.
+
 ## Architecture
 
 ```

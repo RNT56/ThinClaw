@@ -232,6 +232,9 @@ pub enum RoutineAction {
         /// Output target: "chat" | "none" | channel name.
         #[serde(default = "default_heartbeat_target")]
         target: String,
+        /// Maximum tool iterations for this heartbeat run.
+        #[serde(default = "default_max_iterations")]
+        max_iterations: u32,
     },
 }
 
@@ -353,6 +356,10 @@ impl RoutineAction {
                     active_start_hour,
                     active_end_hour,
                     target,
+                    max_iterations: config
+                        .get("max_iterations")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(10) as u32,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -389,6 +396,7 @@ impl RoutineAction {
                 active_start_hour,
                 active_end_hour,
                 target,
+                max_iterations,
             } => serde_json::json!({
                 "light_context": light_context,
                 "prompt": prompt,
@@ -396,6 +404,7 @@ impl RoutineAction {
                 "active_start_hour": active_start_hour,
                 "active_end_hour": active_end_hour,
                 "target": target,
+                "max_iterations": max_iterations,
             }),
         }
     }

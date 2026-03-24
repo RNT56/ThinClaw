@@ -2,8 +2,20 @@
 //!
 //! Configuration for running a headless Chrome/Chromium browser
 //! inside a Docker container with Xvfb for rendering.
+//!
+//! This is used when no local Chrome/Chromium binary is available (e.g.
+//! headless Linux servers without a desktop environment).  The container
+//! exposes a CDP (Chrome DevTools Protocol) debugging port that the
+//! [`BrowserTool`](crate::tools::builtin::browser::BrowserTool) connects
+//! to via `chromiumoxide::Browser::connect()`.
+
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Deterministic Docker container name so we can re-attach across restarts.
+const CONTAINER_NAME: &str = "thinclaw-chromium";
 
 /// Configuration for Docker-based Chromium.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +118,164 @@ impl DockerChromiumConfig {
     pub fn debugger_url(&self) -> String {
         format!("ws://127.0.0.1:{}", self.debug_port)
     }
+
+    /// HTTP endpoint for Chrome's `/json/version` (used by `chromiumoxide` to
+    /// discover the WebSocket URL automatically).
+    pub fn http_endpoint(&self) -> String {
+        format!("http://127.0.0.1:{}", self.debug_port)
+    }
+
+    // ── Container lifecycle ─────────────────────────────────────────────
+
+    /// Check if Docker is available on this system.
+    pub fn is_docker_available() -> bool {
+        Command::new("docker")
+            .arg("version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Check if our container is already running.
+    pub fn is_container_running(&self) -> bool {
+        Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", CONTAINER_NAME])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).trim() == "true"
+            })
+            .unwrap_or(false)
+    }
+
+    /// Start the Chromium Docker container.
+    ///
+    /// If a container with the same name is already running, it is left as-is.
+    /// Returns the container ID on success.
+    pub fn start_container(&self) -> Result<String, DockerError> {
+        // If container is already running, return its ID.
+        if self.is_container_running() {
+            let id = Command::new("docker")
+                .args(["inspect", "-f", "{{.Id}}", CONTAINER_NAME])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            tracing::debug!(id = %id, "Chromium container already running");
+            return Ok(id);
+        }
+
+        // Pull image if configured.
+        if self.auto_pull {
+            tracing::info!(image = %self.image, "Pulling Chromium Docker image");
+            let _ = Command::new("docker")
+                .args(["pull", &self.image])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
+        // Remove any stopped container with the same name.
+        let _ = Command::new("docker")
+            .args(["rm", "-f", CONTAINER_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Build full docker run command.
+        let output = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-d",
+                &format!("--name={}", CONTAINER_NAME),
+                &format!("--memory={}", self.memory_limit),
+                &format!("--shm-size={}", self.shm_size),
+                &format!("-p={}:{}", self.debug_port, self.debug_port),
+            ])
+            .arg(&self.image)
+            .output()
+            .map_err(|e| DockerError::CommandFailed(format!("Failed to run docker: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(DockerError::ContainerStart(format!(
+                "docker run failed: {stderr}"
+            )));
+        }
+
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        tracing::info!(id = %container_id, "Started Chromium Docker container");
+        Ok(container_id)
+    }
+
+    /// Wait for Chrome inside the container to accept CDP connections.
+    ///
+    /// Polls the debug port via TCP until a connection succeeds or the
+    /// timeout expires.
+    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), DockerError> {
+        let start = Instant::now();
+        let addr = format!("127.0.0.1:{}", self.debug_port);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(DockerError::Timeout(format!(
+                    "Chrome in Docker not ready after {timeout:?}"
+                )));
+            }
+
+            // Try a TCP connection to the debug port.
+            match std::net::TcpStream::connect_timeout(
+                &addr
+                    .parse()
+                    .expect("valid socket addr"),
+                Duration::from_secs(1),
+            ) {
+                Ok(_) => {
+                    tracing::debug!(
+                        elapsed = ?start.elapsed(),
+                        "Chrome in Docker is ready (port {} open)",
+                        self.debug_port
+                    );
+                    return Ok(());
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    }
+
+    /// Stop and remove the Chromium Docker container.
+    pub fn stop_container(&self) -> Result<(), DockerError> {
+        let status = Command::new("docker")
+            .args(["rm", "-f", CONTAINER_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| DockerError::CommandFailed(format!("Failed to run docker rm: {e}")))?;
+
+        if status.success() {
+            tracing::info!("Stopped Chromium Docker container");
+        }
+        Ok(())
+    }
+}
+
+/// Errors related to Docker Chromium container management.
+#[derive(Debug, thiserror::Error)]
+pub enum DockerError {
+    #[error("Docker command failed: {0}")]
+    CommandFailed(String),
+
+    #[error("Container start failed: {0}")]
+    ContainerStart(String),
+
+    #[error("Timeout waiting for Chrome: {0}")]
+    Timeout(String),
 }
 
 #[cfg(test)]
@@ -154,5 +324,26 @@ mod tests {
     fn test_debugger_url() {
         let config = DockerChromiumConfig::default();
         assert_eq!(config.debugger_url(), "ws://127.0.0.1:9222");
+    }
+
+    #[test]
+    fn test_http_endpoint() {
+        let config = DockerChromiumConfig::default();
+        assert_eq!(config.http_endpoint(), "http://127.0.0.1:9222");
+    }
+
+    #[test]
+    fn test_container_name_is_deterministic() {
+        assert_eq!(CONTAINER_NAME, "thinclaw-chromium");
+    }
+
+    #[test]
+    fn test_custom_debug_port_in_endpoints() {
+        let config = DockerChromiumConfig {
+            debug_port: 9333,
+            ..Default::default()
+        };
+        assert_eq!(config.http_endpoint(), "http://127.0.0.1:9333");
+        assert_eq!(config.debugger_url(), "ws://127.0.0.1:9333");
     }
 }

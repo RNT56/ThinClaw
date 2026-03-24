@@ -5,6 +5,12 @@
 //! typing text, taking screenshots, and evaluating JavaScript.
 //!
 //! Uses `chromiumoxide` to connect to a Chrome/Chromium instance via CDP.
+//!
+//! **Chrome resolution order:**
+//! 1. Local Chrome/Chromium binary (macOS, Linux, Windows)
+//! 2. Docker container with Chromium + Xvfb (automatic fallback when no
+//!    local binary is found and Docker is available, or forced via
+//!    `BROWSER_DOCKER=always` env var)
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -23,6 +29,7 @@ use futures::StreamExt;
 use tokio::sync::RwLock;
 
 use crate::context::JobContext;
+use crate::sandbox::docker_chromium::DockerChromiumConfig;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 // ── Limits ───────────────────────────────────────────────────────────
@@ -130,6 +137,8 @@ struct BrowserInstance {
     current_page: Option<usize>,
     /// Chrome user data directory.
     _user_data_dir: PathBuf,
+    /// Whether this instance is connected to a Docker container.
+    is_docker: bool,
 }
 
 type SharedBrowser = Arc<RwLock<Option<BrowserInstance>>>;
@@ -139,16 +148,34 @@ type SharedBrowser = Arc<RwLock<Option<BrowserInstance>>>;
 /// Exposes browser actions (navigate, snapshot, click, type, screenshot, eval)
 /// as a single unified tool with an `action` parameter. The tool lazily
 /// launches Chrome on first use and reuses the instance.
+///
+/// When no local Chrome binary is found, the tool automatically falls back to
+/// running Chromium inside a Docker container (if Docker is available).
+/// Set `BROWSER_DOCKER=always` to force Docker mode even when local Chrome
+/// exists.
 pub struct BrowserTool {
     instance: SharedBrowser,
     profile_dir: PathBuf,
+    /// Docker config for Chromium fallback (or forced mode).
+    docker_config: Option<DockerChromiumConfig>,
 }
 
 impl BrowserTool {
+    /// Create a BrowserTool that uses local Chrome.
     pub fn new(profile_dir: PathBuf) -> Self {
         Self {
             instance: Arc::new(RwLock::new(None)),
             profile_dir,
+            docker_config: None,
+        }
+    }
+
+    /// Create a BrowserTool with Docker Chromium fallback (or forced mode).
+    pub fn new_with_docker(profile_dir: PathBuf, docker_config: DockerChromiumConfig) -> Self {
+        Self {
+            instance: Arc::new(RwLock::new(None)),
+            profile_dir,
+            docker_config: Some(docker_config),
         }
     }
 
@@ -187,6 +214,12 @@ impl BrowserTool {
 
     /// Get or launch the browser instance.
     ///
+    /// Resolution order:
+    /// 1. If `BROWSER_DOCKER=always`, skip local Chrome and use Docker.
+    /// 2. Try to find and launch a local Chrome/Chromium binary.
+    /// 3. If no local binary found and Docker is available with a
+    ///    `DockerChromiumConfig`, start a container and connect via CDP.
+    ///
     /// If Chrome was previously launched but has since crashed (CDP connection
     /// lost), the dead instance is dropped and a fresh one is started.
     async fn ensure_browser(&self) -> Result<(), ToolError> {
@@ -198,20 +231,58 @@ impl BrowserTool {
             // will return an error, signalling we must re-launch.
             if instance.browser.pages().await.is_err() {
                 tracing::warn!("Chrome process appears dead, re-launching");
+                // If it was a Docker instance, try to stop the dead container.
+                if instance.is_docker {
+                    if let Some(ref dc) = self.docker_config {
+                        let _ = dc.stop_container();
+                    }
+                }
                 *guard = None;
             } else {
                 return Ok(());
             }
         }
 
-        let chrome_path = Self::find_chrome().ok_or_else(|| {
-            ToolError::ExecutionFailed(
-                "Chrome/Chromium not found. Install Google Chrome from https://www.google.com/chrome \
-                 or Chromium from https://www.chromium.org. \
-                 Expected at: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
-            )
-        })?;
+        // Check if Docker mode is forced via env var.
+        let force_docker = std::env::var("BROWSER_DOCKER")
+            .map(|v| v.eq_ignore_ascii_case("always"))
+            .unwrap_or(false);
 
+        // Try local Chrome first (unless Docker is forced).
+        if !force_docker {
+            if let Some(chrome_path) = Self::find_chrome() {
+                return self
+                    .launch_local_chrome(&mut guard, chrome_path)
+                    .await;
+            }
+        }
+
+        // Fall back to Docker Chromium.
+        if let Some(ref docker_config) = self.docker_config {
+            if DockerChromiumConfig::is_docker_available() {
+                return self
+                    .connect_docker_chrome(&mut guard, docker_config)
+                    .await;
+            }
+            tracing::warn!("Docker not available for browser fallback");
+        }
+
+        // Neither local Chrome nor Docker available.
+        Err(ToolError::ExecutionFailed(
+            "Chrome/Chromium not found. Either install Google Chrome \
+             (https://www.google.com/chrome), or install Docker and set \
+             BROWSER_DOCKER=always. On macOS: brew install --cask google-chrome. \
+             On Linux: apt install chromium-browser."
+                .to_string(),
+        ))
+    }
+
+    /// Launch a local Chrome binary and store the instance.
+    async fn launch_local_chrome(
+        &self,
+        guard: &mut tokio::sync::RwLockWriteGuard<'_, Option<BrowserInstance>>,
+        chrome_path: PathBuf,
+    ) -> Result<(), ToolError> {
         std::fs::create_dir_all(&self.profile_dir).map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to create profile dir: {e}"))
         })?;
@@ -238,13 +309,65 @@ impl BrowserTool {
         // Spawn the CDP handler loop (Handler implements futures::Stream)
         tokio::spawn(async move { while handler.next().await.is_some() {} });
 
-        tracing::info!("Chrome launched for browser tool");
+        tracing::info!("Chrome launched locally for browser tool");
 
-        *guard = Some(BrowserInstance {
+        **guard = Some(BrowserInstance {
             browser,
             pages: Vec::new(),
             current_page: None,
             _user_data_dir: self.profile_dir.clone(),
+            is_docker: false,
+        });
+
+        Ok(())
+    }
+
+    /// Start a Docker container running Chromium and connect via CDP.
+    async fn connect_docker_chrome(
+        &self,
+        guard: &mut tokio::sync::RwLockWriteGuard<'_, Option<BrowserInstance>>,
+        docker_config: &DockerChromiumConfig,
+    ) -> Result<(), ToolError> {
+        // Start the container (idempotent — re-uses running container).
+        docker_config.start_container().map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to start Docker Chromium: {e}"))
+        })?;
+
+        // Wait for Chrome inside the container to be ready.
+        docker_config
+            .wait_for_ready(Duration::from_secs(30))
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Docker Chromium not ready: {e}. Is the image `{}` available?",
+                    docker_config.image
+                ))
+            })?;
+
+        // Connect to Chrome via its HTTP endpoint. `chromiumoxide` will
+        // automatically discover the WebSocket URL from /json/version.
+        let endpoint = docker_config.http_endpoint();
+        let (browser, mut handler) =
+            Browser::connect(&endpoint).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to connect to Docker Chromium at {endpoint}: {e}"
+                ))
+            })?;
+
+        // Spawn the CDP handler loop.
+        tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+        tracing::info!(
+            endpoint = %endpoint,
+            "Connected to Docker Chromium for browser tool"
+        );
+
+        **guard = Some(BrowserInstance {
+            browser,
+            pages: Vec::new(),
+            current_page: None,
+            _user_data_dir: self.profile_dir.clone(),
+            is_docker: true,
         });
 
         Ok(())
@@ -696,19 +819,37 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
 
     /// Close all open tabs and release the browser instance, reclaiming
     /// resources. The next `execute` call will re-launch Chrome as needed.
+    ///
+    /// If the browser was running in a Docker container, the container is
+    /// stopped and removed.
     async fn close_session(&self) -> Result<serde_json::Value, ToolError> {
         let mut guard = self.instance.write().await;
         if let Some(mut instance) = guard.take() {
             let tab_count = instance.pages.len();
+            let was_docker = instance.is_docker;
             for state in instance.pages.drain(..) {
                 let _ = state.page.close().await;
             }
-            // Drop the browser, which kills the Chrome process.
+            // Drop the browser, which kills the Chrome process (local) or
+            // closes the WebSocket connection (Docker).
             drop(instance);
-            tracing::info!("Browser session closed ({tab_count} tabs)");
+
+            // Stop the Docker container if applicable.
+            if was_docker {
+                if let Some(ref dc) = self.docker_config {
+                    let _ = dc.stop_container();
+                }
+            }
+
+            tracing::info!(
+                tabs = tab_count,
+                docker = was_docker,
+                "Browser session closed"
+            );
             Ok(serde_json::json!({
                 "status": "session_closed",
                 "tabs_closed": tab_count,
+                "was_docker": was_docker,
             }))
         } else {
             Ok(serde_json::json!({
@@ -952,5 +1093,26 @@ mod tests {
     fn test_execution_timeout_override() {
         let tool = BrowserTool::new(PathBuf::from("/tmp/test-browser"));
         assert_eq!(tool.execution_timeout(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_new_with_docker() {
+        let docker_config = DockerChromiumConfig::default();
+        let tool = BrowserTool::new_with_docker(
+            PathBuf::from("/tmp/test-browser"),
+            docker_config.clone(),
+        );
+        assert_eq!(tool.name(), "browser");
+        assert!(tool.docker_config.is_some());
+        assert_eq!(
+            tool.docker_config.unwrap().debug_port,
+            docker_config.debug_port
+        );
+    }
+
+    #[test]
+    fn test_new_without_docker() {
+        let tool = BrowserTool::new(PathBuf::from("/tmp/test-browser"));
+        assert!(tool.docker_config.is_none());
     }
 }

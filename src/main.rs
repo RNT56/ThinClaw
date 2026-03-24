@@ -315,12 +315,25 @@ async fn main() -> anyhow::Result<()> {
     let container_job_manager: Option<Arc<ContainerJobManager>> =
         if config.sandbox.enabled && docker_status.is_ok() {
             let token_store = TokenStore::new();
+
+            // Resolve Claude Code API key: env var > OS keychain > (OAuth fallback in config)
+            let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
+                Some(key) => Some(key),
+                None => {
+                    // Check OS keychain for API key stored by the wizard
+                    thinclaw::secrets::keychain::get_api_key(
+                        thinclaw::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                    )
+                    .await
+                }
+            };
+
             let job_config = ContainerJobConfig {
                 image: config.sandbox.image.clone(),
                 memory_limit_mb: config.sandbox.memory_limit_mb,
                 cpu_shares: config.sandbox.cpu_shares,
                 orchestrator_port: 50051,
-                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                claude_code_api_key,
                 claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
                 claude_code_model: config.claude_code.model.clone(),
                 claude_code_max_turns: config.claude_code.max_turns,
@@ -328,6 +341,15 @@ async fn main() -> anyhow::Result<()> {
                 claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
             };
             let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+            // Clean up orphan containers from a previous process crash
+            // (fire-and-forget — never blocks startup)
+            {
+                let jm_cleanup = Arc::clone(&jm);
+                tokio::spawn(async move {
+                    jm_cleanup.cleanup_orphan_containers().await;
+                });
+            }
 
             // Start the orchestrator internal API in the background
             let orchestrator_state = OrchestratorState {

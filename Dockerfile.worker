@@ -65,5 +65,18 @@ RUN useradd -m -u 1000 -s /bin/bash sandbox \
 USER sandbox
 WORKDIR /workspace
 
+# Health check: the entrypoint script touches a sentinel file on start.
+# If the main process dies, the file is stale; this is sufficient for
+# Docker to mark the container as unhealthy for the orphan reaper.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD test -f /tmp/.thinclaw-alive || exit 1
+
 # The orchestrator passes the full command via Docker cmd.
-ENTRYPOINT ["thinclaw"]
+# The wrapper script touches the sentinel before exec-ing thinclaw.
+COPY --chmod=755 <<'EOF' /usr/local/bin/entrypoint.sh
+#!/bin/bash
+touch /tmp/.thinclaw-alive
+exec thinclaw "$@"
+EOF
+
+ENTRYPOINT ["entrypoint.sh"]

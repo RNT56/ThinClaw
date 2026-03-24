@@ -84,6 +84,24 @@ mod platform {
     pub async fn has_master_key() -> bool {
         get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok()
     }
+
+    /// Store an arbitrary API key string in the keychain.
+    ///
+    /// `account` is the keychain account name (e.g., `claude_code_api_key`).
+    pub async fn store_api_key(account: &str, value: &str) -> Result<(), SecretError> {
+        set_generic_password(SERVICE_NAME, account, value.as_bytes())
+            .map_err(|e| SecretError::KeychainError(format!("Failed to store {} in keychain: {}", account, e)))
+    }
+
+    /// Retrieve an API key string from the keychain.
+    ///
+    /// Returns `None` if the key doesn't exist (rather than an error).
+    pub async fn get_api_key(account: &str) -> Option<String> {
+        match get_generic_password(SERVICE_NAME, account) {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(_) => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -223,6 +241,57 @@ mod platform {
 
         !items.unlocked.is_empty() || !items.locked.is_empty()
     }
+
+    /// Store an arbitrary API key string in the secret service.
+    pub async fn store_api_key(account: &str, value: &str) -> Result<(), SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to connect to secret service: {}", e)))?;
+
+        let collection = ss
+            .get_default_collection()
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to get collection: {}", e)))?;
+
+        if collection.is_locked().await.unwrap_or(true) {
+            collection.unlock().await.map_err(|e| {
+                SecretError::KeychainError(format!("Failed to unlock collection: {}", e))
+            })?;
+        }
+
+        collection
+            .create_item(
+                &format!("{} {}", SERVICE_NAME, account),
+                [("service", SERVICE_NAME), ("account", account)]
+                    .into_iter()
+                    .collect(),
+                value.as_bytes(),
+                true,
+                "text/plain",
+            )
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to store {}: {}", account, e)))?;
+        Ok(())
+    }
+
+    /// Retrieve an API key string from the secret service.
+    pub async fn get_api_key(account: &str) -> Option<String> {
+        let ss = SecretService::connect(EncryptionType::Dh).await.ok()?;
+        let items = ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", account)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+            .ok()?;
+        let item = items.unlocked.first().or(items.locked.first())?;
+        if item.is_locked().await.unwrap_or(true) {
+            item.unlock().await.ok()?;
+        }
+        let secret = item.get_secret().await.ok()?;
+        String::from_utf8(secret).ok()
+    }
 }
 
 // ============================================================================
@@ -254,10 +323,26 @@ mod platform {
     pub async fn has_master_key() -> bool {
         false
     }
+
+    pub async fn store_api_key(_account: &str, _value: &str) -> Result<(), SecretError> {
+        Err(SecretError::KeychainError(
+            "Keychain not supported on this platform. Use environment variables.".to_string(),
+        ))
+    }
+
+    pub async fn get_api_key(_account: &str) -> Option<String> {
+        None
+    }
 }
 
 // Re-export platform-specific functions
-pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
+pub use platform::{
+    delete_master_key, get_api_key, get_master_key, has_master_key, store_api_key,
+    store_master_key,
+};
+
+/// Keychain account name for the Claude Code API key.
+pub const CLAUDE_CODE_API_KEY_ACCOUNT: &str = "claude_code_api_key";
 
 /// Parse a hex string to bytes.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {

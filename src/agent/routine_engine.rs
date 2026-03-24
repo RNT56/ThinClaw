@@ -520,6 +520,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             active_start_hour,
             active_end_hour,
             target,
+            max_iterations,
         } => {
             execute_heartbeat(
                 &ctx,
@@ -531,6 +532,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                 *active_start_hour,
                 *active_end_hour,
                 target,
+                *max_iterations,
             )
             .await
         }
@@ -827,6 +829,7 @@ async fn execute_heartbeat(
     active_start_hour: Option<u8>,
     active_end_hour: Option<u8>,
     _target: &str,
+    max_iterations: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // 0. Active hours check
     if let (Some(s), Some(e)) = (active_start_hour, active_end_hour) {
@@ -872,6 +875,34 @@ async fn execute_heartbeat(
     // IC-013: Use shared function to build daily log context
     let daily_context = crate::agent::heartbeat::build_daily_context(&ctx.workspace).await;
 
+    // ── Self-critique feedback: inject previous run's evaluation ─────
+    // If the previous heartbeat was flagged by the post-completion
+    // evaluator, inject that feedback so the agent can learn from it.
+    let critique_context = match ctx
+        .store
+        .get_setting("system", "heartbeat.last_critique")
+        .await
+    {
+        Ok(Some(critique)) if !critique.is_null() => {
+            let reasoning = critique
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown issue");
+            let quality = critique
+                .get("quality")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!(
+                "\n\n## Previous Heartbeat Feedback (Self-Critique)\n\n\
+                 ⚠️ The previous heartbeat run scored {}/100. \
+                 Evaluator feedback: {}\n\n\
+                 Take this into account and avoid repeating the same mistake.",
+                quality, reasoning
+            )
+        }
+        _ => String::new(),
+    };
+
     // 3. Build the full prompt
     let prompt_body = custom_prompt.unwrap_or(DEFAULT_HEARTBEAT_PROMPT);
     let logs_note = if daily_context.is_empty() {
@@ -882,8 +913,8 @@ async fn execute_heartbeat(
         ""
     };
     let full_prompt = format!(
-        "{}\n\n## HEARTBEAT.md\n\n{}{}{}",
-        prompt_body, checklist, daily_context, logs_note
+        "{}\n\n## HEARTBEAT.md\n\n{}{}{}{}",
+        prompt_body, checklist, daily_context, critique_context, logs_note
     );
 
     if !light_context {
@@ -938,7 +969,7 @@ async fn execute_heartbeat(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({ "max_iterations": 5, "heartbeat": true });
+    let metadata = serde_json::json!({ "max_iterations": max_iterations, "heartbeat": true });
 
     let job_id = scheduler
         .dispatch_job_reserved_for_routine(

@@ -111,7 +111,7 @@ const HEARTBEAT_SEED: &str = "\
      Daily logs are injected below the checklist automatically. -->
 
 - [ ] Review the daily logs below for unresolved tasks, open questions, or recently finished goals — if you spot potential next steps or follow-up work, proactively message the user with a brief suggestion
-- [ ] If daily logs contain important decisions, lessons, or facts not yet in MEMORY.md, note what should be consolidated";
+- [ ] If daily logs contain important decisions, lessons, or facts not yet in MEMORY.md, consolidate them into MEMORY.md now using memory_write (target: 'memory')";
 
 /// Workspace provides database-backed memory storage for an agent.
 ///

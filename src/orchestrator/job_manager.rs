@@ -596,6 +596,116 @@ impl ContainerJobManager {
     pub fn token_store(&self) -> &TokenStore {
         &self.token_store
     }
+
+    /// Clean up orphan containers from a previous process crash.
+    ///
+    /// Lists all Docker containers matching the `thinclaw-worker-*` or
+    /// `thinclaw-claude-*` naming convention and removes any that are not
+    /// tracked in the current in-memory handle map (which is empty at startup).
+    ///
+    /// This is fire-and-forget — errors are logged but never fatal.
+    pub async fn cleanup_orphan_containers(&self) {
+        let docker = match self.docker().await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("Skipping orphan container cleanup (no Docker): {}", e);
+                return;
+            }
+        };
+
+        use bollard::container::{ListContainersOptions, RemoveContainerOptions};
+        use std::collections::HashMap;
+
+        // List all containers (including stopped) with our name prefix
+        let mut filters = HashMap::new();
+        filters.insert("name".to_string(), vec!["thinclaw-worker-".to_string()]);
+
+        let worker_containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: filters.clone(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default();
+
+        filters.insert("name".to_string(), vec!["thinclaw-claude-".to_string()]);
+        let claude_containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default();
+
+        let all_containers: Vec<_> = worker_containers
+            .into_iter()
+            .chain(claude_containers)
+            .collect();
+
+        if all_containers.is_empty() {
+            return;
+        }
+
+        let known_ids: std::collections::HashSet<_> = self
+            .containers
+            .read()
+            .await
+            .values()
+            .map(|h| h.container_id.clone())
+            .collect();
+
+        let mut removed = 0u32;
+        for container in &all_containers {
+            let cid = match &container.id {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+
+            if known_ids.contains(&cid) {
+                continue;
+            }
+
+            let name = container
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|n| n.trim_start_matches('/'))
+                .unwrap_or("unknown");
+
+            // Force remove (stops if running)
+            match docker
+                .remove_container(
+                    &cid,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+            {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::info!(
+                        container = name,
+                        "Removed orphan container from previous session"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        container = name,
+                        error = %e,
+                        "Failed to remove orphan container"
+                    );
+                }
+            }
+        }
+
+        if removed > 0 {
+            tracing::info!("Cleaned up {} orphan container(s)", removed);
+        }
+    }
 }
 
 #[cfg(test)]

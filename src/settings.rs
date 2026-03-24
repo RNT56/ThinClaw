@@ -533,6 +533,12 @@ pub struct HeartbeatSettings {
     /// OpenClaw-style prompt. The agent can modify this at runtime.
     #[serde(default)]
     pub prompt: Option<String>,
+
+    /// Maximum tool iterations per heartbeat run.
+    /// More iterations allow the agent to act on findings (e.g. consolidate
+    /// facts into MEMORY.md) rather than just report them.
+    #[serde(default = "default_heartbeat_max_iterations")]
+    pub max_iterations: u32,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -541,6 +547,10 @@ fn default_heartbeat_interval() -> u64 {
 
 fn default_heartbeat_target() -> String {
     "chat".to_string()
+}
+
+fn default_heartbeat_max_iterations() -> u32 {
+    10
 }
 
 impl Default for HeartbeatSettings {
@@ -556,6 +566,7 @@ impl Default for HeartbeatSettings {
             active_start_hour: None,
             active_end_hour: None,
             prompt: None,
+            max_iterations: default_heartbeat_max_iterations(),
         }
     }
 }

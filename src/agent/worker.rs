@@ -391,7 +391,55 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
             iteration += 1;
             if iteration > max_iterations {
-                self.mark_stuck("Maximum iterations exceeded").await?;
+                if is_heartbeat {
+                    // ── Heartbeat-specific stuck handling ─────────────────
+                    // Build a descriptive message about what the heartbeat
+                    // was trying to do when it ran out of iterations.
+                    let stuck_reason = format!(
+                        "Heartbeat ran out of iterations ({}/{}) before completing all checklist actions. \
+                         The agent may need a higher max_iterations setting, or the checklist \
+                         may contain tasks too complex for a single heartbeat run.",
+                        max_iterations, max_iterations
+                    );
+
+                    // Set last_output so the notification includes useful context.
+                    // This flows through finalize_routine_run → send_notification
+                    // with on_failure: true, so the user sees this message.
+                    self.set_last_output(&format!(
+                        "⚠️ Heartbeat incomplete — ran out of tool iterations ({}/{}). \
+                         Some checklist actions may not have been completed. \
+                         You can increase the iteration budget in Settings → Heartbeat → Max iterations, \
+                         or help me finish by prompting me directly.",
+                        max_iterations, max_iterations
+                    ));
+
+                    // Write self-critique so the next heartbeat knows what
+                    // happened and can try to finish the work.
+                    if let Some(store) = self.store() {
+                        let critique = serde_json::json!({
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "job_id": self.job_id.to_string(),
+                            "quality": 0,
+                            "reasoning": format!(
+                                "Heartbeat exhausted all {} iterations without completing. \
+                                 Partial work may have been saved. Pick up where the previous \
+                                 run left off — check MEMORY.md and daily logs for what was \
+                                 already done, then continue.",
+                                max_iterations
+                            ),
+                        });
+                        if let Err(e) = store
+                            .set_setting("system", "heartbeat.last_critique", &critique)
+                            .await
+                        {
+                            tracing::warn!("Failed to persist heartbeat stuck critique: {}", e);
+                        }
+                    }
+
+                    self.mark_stuck(&stuck_reason).await?;
+                } else {
+                    self.mark_stuck("Maximum iterations exceeded").await?;
+                }
                 return Ok(());
             }
 
@@ -1226,6 +1274,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let store = self.store().cloned();
         tokio::spawn(async move {
             use crate::evaluation::SuccessEvaluator;
+
+            // Check if this was a heartbeat job so we can persist self-critique
+            let is_heartbeat = context_manager
+                .get_context(job_id)
+                .await
+                .ok()
+                .and_then(|ctx| ctx.metadata.get("heartbeat").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
             let eval_result: Result<_, Box<dyn std::error::Error + Send + Sync>> = async {
                 let job_ctx = context_manager.get_context(job_id).await?;
                 let memory = context_manager.get_memory(job_id).await?;
@@ -1245,7 +1302,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     );
 
                     // Persist evaluation result to DB if available
-                    if let Some(store) = store {
+                    if let Some(ref store) = store {
                         let result_json = serde_json::to_value(&result).unwrap_or_default();
                         if let Err(e) = store
                             .set_setting("system", &format!("eval.job.{}", job_id), &result_json)
@@ -1256,6 +1313,40 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                                 job_id,
                                 e
                             );
+                        }
+                    }
+
+                    // ── Heartbeat self-critique feedback ──────────────────
+                    // When a heartbeat evaluation finds issues, persist the
+                    // critique so the next heartbeat run can read it and
+                    // avoid repeating the same mistake.
+                    if is_heartbeat {
+                        if let Some(ref store) = store {
+                            if !result.success || result.quality_score < 100 {
+                                let critique = serde_json::json!({
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                    "job_id": job_id.to_string(),
+                                    "quality": result.quality_score,
+                                    "reasoning": result.reasoning,
+                                });
+                                if let Err(e) = store
+                                    .set_setting("system", "heartbeat.last_critique", &critique)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to persist heartbeat self-critique: {}", e
+                                    );
+                                }
+                            } else {
+                                // Clean run — clear any stale critique
+                                let _ = store
+                                    .set_setting(
+                                        "system",
+                                        "heartbeat.last_critique",
+                                        &serde_json::Value::Null,
+                                    )
+                                    .await;
+                            }
                         }
                     }
                 }

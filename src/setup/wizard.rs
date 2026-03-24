@@ -2138,6 +2138,76 @@ impl SetupWizard {
             }
         }
 
+        // ── Part C: Build worker image if needed ─────────────────────────
+        if self.settings.sandbox.enabled {
+            println!();
+            print_info("═══ Worker Docker Image ═══");
+            println!();
+
+            // Check if the image already exists
+            let image_name = &self.settings.sandbox.image;
+            let image_exists = std::process::Command::new("docker")
+                .args(["image", "inspect", image_name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if image_exists {
+                print_success(&format!("Worker image '{}' already exists.", image_name));
+            } else {
+                print_info(&format!("Worker image '{}' not found locally.", image_name));
+                print_info("This image is required for Docker sandbox and Claude Code jobs.");
+                print_info("Building it now takes 5-15 minutes (one-time).");
+                println!();
+
+                if confirm("Build the worker image now?", true).map_err(SetupError::Io)? {
+                    print_info("Building thinclaw-worker image (this may take a while)...");
+
+                    // Find the repo root (where Dockerfile.worker lives)
+                    let repo_root = std::env::current_dir().unwrap_or_else(|_| {
+                        std::path::PathBuf::from(".")
+                    });
+
+                    let status = std::process::Command::new("docker")
+                        .args([
+                            "build",
+                            "-f", "Dockerfile.worker",
+                            "-t", image_name,
+                            ".",
+                        ])
+                        .current_dir(&repo_root)
+                        .stdin(std::process::Stdio::inherit())
+                        .stdout(std::process::Stdio::inherit())
+                        .stderr(std::process::Stdio::inherit())
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            print_success("Worker image built successfully.");
+                        }
+                        Ok(s) => {
+                            print_error(&format!(
+                                "Docker build failed (exit code {:?}).",
+                                s.code()
+                            ));
+                            print_info("You can build it later with:");
+                            print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
+                        }
+                        Err(e) => {
+                            print_error(&format!("Failed to start docker build: {}", e));
+                            print_info("You can build it later with:");
+                            print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
+                        }
+                    }
+                } else {
+                    print_info("Skipping image build. Build it later with:");
+                    print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2223,7 +2293,80 @@ impl SetupWizard {
 
         self.settings.claude_code_enabled = true;
 
-        // Model
+        // ── Auth strategy ────────────────────────────────────────────────
+        println!();
+        print_info("═══ Claude Code Authentication ═══");
+        println!();
+
+        // Check existing auth sources
+        let has_env_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
+
+        // Synchronously check keychain (block_on is acceptable in the wizard)
+        let has_keychain_key = {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                crate::secrets::keychain::get_api_key(
+                    crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                )
+                .await
+                .is_some()
+            })
+        };
+
+        if has_env_key {
+            print_success("✓ ANTHROPIC_API_KEY found in environment. This will be used.");
+        } else if has_keychain_key {
+            print_success("✓ Anthropic API key found in OS keychain. This will be used.");
+        } else if has_oauth {
+            print_success("✓ Claude Code OAuth session found. This will be used.");
+            print_info("  (Token from 'claude login' — typically valid for 8-12 hours)");
+        } else {
+            print_info("No existing auth found. Claude Code containers need one of:");
+            print_info("  1. Anthropic API key (stored securely in OS keychain)");
+            print_info("  2. OAuth session from 'claude login' on this machine");
+            println!();
+
+            if confirm(
+                "Enter an Anthropic API key to store in the OS keychain?",
+                true,
+            )
+            .map_err(SetupError::Io)?
+            {
+                let api_key =
+                    input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
+
+                if api_key.starts_with("sk-ant-") {
+                    let rt = tokio::runtime::Handle::current();
+                    match rt.block_on(async {
+                        crate::secrets::keychain::store_api_key(
+                            crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                            &api_key,
+                        )
+                        .await
+                    }) {
+                        Ok(()) => {
+                            print_success("API key stored securely in OS keychain.");
+                            print_info("It will be injected into Claude Code containers at runtime.");
+                        }
+                        Err(e) => {
+                            print_error(&format!("Failed to store in keychain: {}", e));
+                            print_info("You can set ANTHROPIC_API_KEY in your environment instead.");
+                        }
+                    }
+                } else {
+                    print_error("Key doesn't look like an Anthropic API key (expected sk-ant-...)");
+                    print_info("You can set ANTHROPIC_API_KEY in your environment later.");
+                }
+            } else {
+                print_info("No API key stored. You can:");
+                print_info("  • Run 'claude login' to set up OAuth");
+                print_info("  • Set ANTHROPIC_API_KEY in your environment");
+            }
+        }
+
+        // ── Model ────────────────────────────────────────────────────────
+        println!();
         let model =
             optional_input("Claude Code model", Some("default: sonnet")).map_err(SetupError::Io)?;
         if let Some(m) = model {

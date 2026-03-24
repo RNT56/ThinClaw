@@ -3608,6 +3608,7 @@ const SETTINGS_SCHEMA = {
       { key: 'heartbeat.active_end_hour', label: 'Active end hour', type: 'number', desc: '0-23, local time. Empty = always active', min: 0, max: 23, nullable: true },
       { key: 'heartbeat.notify_channel', label: 'Notify channel', type: 'text', desc: 'Override: channel to send findings to (uses Notifications default if empty)', nullable: true },
       { key: 'heartbeat.notify_user', label: 'Notify user', type: 'text', desc: 'Override: user ID to notify (uses Notifications default if empty)', nullable: true },
+      { key: 'heartbeat.max_iterations', label: 'Max iterations', type: 'number', desc: 'Tool iteration budget per heartbeat run. Higher = agent can act on findings (e.g. consolidate into MEMORY.md) instead of just reporting', min: 3, max: 30 },
     ]
   },
   'Agent': {

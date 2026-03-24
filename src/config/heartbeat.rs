@@ -29,6 +29,8 @@ pub struct HeartbeatConfig {
     pub active_end_hour: Option<u8>,
     /// Custom heartbeat prompt body.
     pub prompt: Option<String>,
+    /// Maximum tool iterations per heartbeat run.
+    pub max_iterations: u32,
 }
 
 impl Default for HeartbeatConfig {
@@ -45,6 +47,7 @@ impl Default for HeartbeatConfig {
             active_start_hour: None,
             active_end_hour: None,
             prompt: None,
+            max_iterations: 10,
         }
     }
 }
@@ -72,6 +75,7 @@ impl HeartbeatConfig {
             active_start_hour: settings.heartbeat.active_start_hour,
             active_end_hour: settings.heartbeat.active_end_hour,
             prompt: settings.heartbeat.prompt.clone(),
+            max_iterations: settings.heartbeat.max_iterations,
         })
     }
 
