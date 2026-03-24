@@ -1,263 +1,593 @@
 <p align="center">
-  <img src="backend/icons/128x128@2x.png" width="160" alt="Scrappy Logo">
+  <img src="Thinclaw_IC_01_nobg.png" alt="ThinClaw" width="200"/>
 </p>
 
-# Scrappy: The Open-Source AI Command Center
+<h1 align="center">ThinClaw</h1>
 
-Scrappy is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** engine (powered by IronClaw, an in-process Rust library) for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
+<p align="center">
+  <strong>Your secure personal AI assistant, always on your side</strong>
+</p>
 
-![Scrappy App Preview](assets/app-preview.png)
+<p align="center">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License: MIT OR Apache-2.0" /></a>
+</p>
+
+<p align="center">
+  <a href="#philosophy">Philosophy</a> •
+  <a href="#features">Features</a> •
+  <a href="#llm-providers">LLM Providers</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#configuration">Configuration</a> •
+  <a href="#deployment">Deployment</a> •
+  <a href="#security">Security</a> •
+  <a href="#architecture">Architecture</a>
+</p>
 
 ---
 
-## Installation & Setup
+## Philosophy
 
-For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](documentation/setup.md)**.
+ThinClaw is built on a simple principle: **your AI assistant should work for you, not against you**.
 
-### 1. Requirements
-- **macOS / Linux / Windows** (Tauri v2 compatible).
-- **Node.js 22.x+** and **npm** (for frontend tooling only).
-- **Rust (Stable)**.
+In a world where AI systems are increasingly opaque about data handling and aligned with corporate interests, ThinClaw takes a different approach:
 
-### 2. Quick Start
+- **Your data stays yours** — All information is stored locally, encrypted, and never leaves your control
+- **Transparency by design** — Open source, auditable, no hidden telemetry or data harvesting
+- **Self-expanding capabilities** — Build new tools on the fly without waiting for vendor updates
+- **Defense in depth** — Multiple security layers protect against prompt injection and data exfiltration
+- **Bring your own model** — Works with any LLM provider, no vendor lock-in
+
+ThinClaw is the AI assistant you can actually trust with your personal and professional life.
+
+## Features
+
+### 🔒 Security First
+
+- **WASM Sandbox** — Untrusted tools run in isolated WebAssembly containers with capability-based permissions
+- **Credential Protection** — Secrets are never exposed to tools; injected at the host boundary with leak detection
+- **Prompt Injection Defense** — Pattern detection, content sanitization, and policy enforcement
+- **Endpoint Allowlisting** — HTTP requests only to explicitly approved hosts and paths
+
+### 🌐 Always Available
+
+- **Multi-channel** — REPL, HTTP webhooks, WASM channels (Telegram, Slack, Discord, WhatsApp), Nostr, Signal, Gmail, iMessage, and web gateway
+- **Web Gateway** — Browser UI with real-time SSE/WebSocket streaming, chat threads, memory browser, and extension management
+- **Docker Sandbox** — Isolated container execution with per-job tokens and orchestrator/worker pattern
+- **Routines** — Cron schedules, event triggers, webhook handlers for background automation
+- **Heartbeat System** — Proactive background execution for monitoring and maintenance tasks
+- **Parallel Jobs** — Handle multiple requests concurrently with isolated contexts
+- **Self-repair** — Automatic detection and recovery of stuck operations
+
+### 🧩 Self-Expanding
+
+- **Dynamic Tool Building** — Describe what you need, and ThinClaw builds it as a WASM tool
+- **MCP Protocol** — Connect to Model Context Protocol servers for additional capabilities
+- **Plugin Architecture** — Drop in new WASM tools and channels without restarting
+- **ClawHub** — Extension marketplace to discover, install, and manage tools from a curated catalog
+- **Skills Framework** — Structured multi-step procedures with frontmatter metadata
+- **Subagent Orchestration** — Spawn parallel sub-agents with tool filtering, iteration caps, and timeout enforcement
+
+### 🧠 Persistent Memory
+
+- **Hybrid Search** — Full-text + vector (semantic) search using Reciprocal Rank Fusion
+- **Workspace Filesystem** — Flexible path-based storage for notes, logs, and context
+- **Identity Files** — Maintain consistent personality and preferences across sessions
+- **Context Management** — Automatic context window management with intelligent summarization
+
+### 🎙️ Hardware Bridge
+
+- **Sensor Access** — Camera, microphone, and screen capture via host-provided bridge (Scrappy desktop)
+- **3-Tier Approval** — Deny / Allow Once / Allow Session permission model for hardware access
+- **Voice Wake** — Wake word detection for hands-free activation (headless mode)
+- **Talk Mode** — Continuous voice conversation via STT + TTS pipeline
+
+## LLM Providers
+
+ThinClaw works with **any OpenAI-compatible endpoint** out of the box. The default backend is `OpenAiCompatible`, giving you maximum flexibility:
+
+| Provider | Backend Value | Required Env Vars |
+|----------|--------------|-------------------|
+| **OpenRouter** (300+ models) | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
+| **Anthropic** (Claude) | `anthropic` | `ANTHROPIC_API_KEY` |
+| **OpenAI** (GPT) | `openai` | `OPENAI_API_KEY` |
+| **Google Gemini** | `gemini` | `GEMINI_API_KEY` |
+| **AWS Bedrock** | `bedrock` | `BEDROCK_PROXY_URL`, AWS credentials |
+| **Ollama** (local) | `ollama` | `OLLAMA_BASE_URL` (optional) |
+| **llama.cpp** (local) | `llama_cpp` | `LLAMA_CPP_SERVER_URL` |
+| **Tinfoil** (private inference) | `tinfoil` | `TINFOIL_API_KEY` |
+| **Groq** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
+| **Together AI** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
+| **Fireworks AI** | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` |
+| **vLLM / LiteLLM** (self-hosted) | `openai_compatible` | `LLM_BASE_URL` |
+
+**Quick start with OpenRouter:**
+
+```env
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-...
+LLM_MODEL=anthropic/claude-sonnet-4
+```
+
+### Reliability Features
+
+All backends support these optional reliability settings:
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| Retries | `LLM_MAX_RETRIES` | 3 | Retry transient failures with backoff |
+| Circuit breaker | `CIRCUIT_BREAKER_THRESHOLD` | disabled | Open circuit after N consecutive failures |
+| Multi-provider failover | `LLM_FALLBACK_MODEL` | none | Automatic failover across enabled providers with cooldown |
+| Smart routing | `LLM_CHEAP_MODEL` | none | Route lightweight tasks (heartbeat, evaluation) to a cheap model |
+| Response cache | `RESPONSE_CACHE_ENABLED` | false | Cache repeated prompts to save tokens |
+
+See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
+
+## Installation
+
+### Prerequisites
+
+**Pre-built binary** (via installer script or Releases page): No prerequisites — the binary is self-contained.
+
+**Compile from source:**
+
+| Prerequisite | Purpose | Install |
+|---|---|---|
+| Xcode CLI Tools (macOS) | C compiler, linker | `xcode-select --install` |
+| build-essential + libssl-dev (Linux) | C compiler, OpenSSL | `sudo apt install build-essential pkg-config libssl-dev` |
+| **Rust 1.92+** | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **wasm32-wasip2 target** | WASM compilation | `rustup target add wasm32-wasip2` |
+| **wasm-tools** | WASM component model | `cargo install wasm-tools --locked` |
+| **cargo-component** | Build WASM extensions | `cargo install cargo-component --locked` |
+| Git | Clone the repo | Pre-installed on macOS; `apt install git` (Linux) |
+
+**One-click setup** (installs all prerequisites automatically):
+
 ```bash
-# 1. Install project dependencies
-npm install
+# macOS — full deploy (installs everything, builds, launches):
+./scripts/mac-deploy.sh
 
-# 2. Automated sidecar initialization (Chromium, AI binaries)
-npm run setup:all
-
-# 3. Launch in Developer Mode (default engine: llama.cpp)
-npm run tauri dev
-
-# Or with a different inference engine:
-# npm run tauri dev -- -- --no-default-features --features mlx
-# npm run tauri dev -- -- --no-default-features --features ollama
+# Developer setup (any OS — installs WASM toolchain, runs tests):
+./scripts/dev-setup.sh
 ```
 
-### 3. Setup Advice
-- **Secrets**: Go to **Settings > Secrets** to add your API keys. Scrappy now supports **Anthropic**, **OpenAI**, **Google Gemini**, **Groq**, **OpenRouter**, and **Brave Search**. Remember to toggle "Grant Access" for each key to enable them for the agent.
-- **Custom Secrets**: You can now add arbitrary custom secrets for specialized agent workflows.
-- **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models. You can add this in **Settings > Secrets**.
-- **Models**: Download models via the in-app **Model Browser** (Settings → Models). Use the **Library** tab for bundled models or the **Discover** tab to search HuggingFace Hub. The Discover tab auto-filters by your active engine (GGUF for llama.cpp/Ollama, MLX safetensors for MLX, AWQ for vLLM).
+**Database** (choose one):
+- **libSQL** (embedded, zero dependencies) — recommended for single-server / Mac Mini
+- **PostgreSQL 15+** with [pgvector](https://github.com/pgvector/pgvector) — production multi-server
 
----
+## Download or Build
 
-## Vision & Key Capabilities
+Visit the [Releases page](https://github.com/RNT56/ThinClaw/releases/) to see the latest updates.
 
-*   **OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
-*   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
-*   **Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
-*   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
-*   **Multi-Engine Inference**: Supports **llama.cpp** (Metal/CUDA), **MLX** (Apple Silicon), **vLLM** (CUDA), and **Ollama** as swappable local inference backends — selected at compile time via Cargo feature flags. Each engine exposes a unified OpenAI-compatible HTTP API.
-*   **HuggingFace Hub Discovery**: Live search of HuggingFace models filtered by the active engine, with GGUF quantization picker, auto-mmproj detection, and streamed downloads.
-*   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
-*   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
-*   **MCP Server Integration**: Connect a custom FastAPI MCP server to extend the agent with remote tools — finance APIs, news feeds, domain-specific capabilities — via the Rhai script sandbox.
-*   **Voice I/O (TTS & STT)**: Native Text-to-Speech (Piper) and Speech-to-Text (Whisper) sidecars for fully voice-enabled conversations.
-*   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
-*   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`), ONNX reranking, and citation-backed generation.
-*   **Web Intelligence**: Deep web scraping via bundled Chromium and real-time news search via Brave Search.
-*   **Spotlight Command Bar**: An ultra-fast, system-wide AI overlay for quick queries, neural lookups, and rapid brain access (`Cmd+Shift+K`).
+<details>
+  <summary>Install via Windows Installer (Windows)</summary>
 
----
+Download the [Windows Installer](https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-x86_64-pc-windows-msvc.msi) and run it.
 
-## Spotlight: Global AI Access
+</details>
 
-Scrappy includes a premium **Spotlight Bar**—a glassmorphic, system-wide interface that brings the power of your neural engine to any application.
+<details>
+  <summary>Install via PowerShell script (Windows)</summary>
 
--   **Instant Summon**: Press `Cmd + Shift + K` (macOS) to toggle the Spotlight bar from anywhere.
--   **Neural Status**: A biological status indicator shows your brain state in real-time (Green = Active/Local Brain Online, Gray = Inactive).
--   **Transient Intelligence**: Optimized for "quick-tap" queries. By default, Spotlight sessions are purged upon closing to keep your primary history clean and focused.
--   **Hotkeys**:
-    -   `Cmd + L`: Purge the current spotlight session and start fresh.
-    -   `Esc`: Hide the bar instantly.
-    -   `Enter`: Send prompt.
-    -   `Shift + Enter`: Multi-line input.
-
----
-
-## Technical Architecture
-
-Scrappy uses a **Modular Sidecar Architecture**. The Rust core orchestrates several specialized processes to keep the main application lightweight and responsive.
-
-```mermaid
-graph TD
-    subgraph Frontend [React 19 Frontend - frontend/src/]
-        UI[User Interface / Glassmorphism]
-        State[State Mgmt / Hooks]
-        Stream[OpenClaw Stream Hook]
-    end
-    
-    subgraph Backend [Rust Core - backend/src/]
-        Tauri[Tauri v2 Main]
-        Manager[Sidecar Manager]
-        Gateway[Gateway Controller]
-        RigAgent[Native Rig Agent]
-        McpSandbox[MCP Rhai Sandbox]
-    end
-    
-    subgraph Sidecars [Sidecar Processes]
-        EngineManager[/EngineManager\]
-        Llama[llama.cpp / MLX / vLLM / Ollama]
-        OpenClaw[OpenClaw / IronClaw Agent \n In-Process Rust Library]
-        Chromium[Chromium Web Scraper]
-        Whisper[Whisper STT]
-        TTS[Piper TTS]
-        SD[Stable Diffusion]
-    end
-    
-    subgraph Storage [Persistence]
-        SQLite[(SQLite DB)]
-        Vectors[(USearch Index)]
-        Identity[(macOS Keychain + Identity.json)]
-    end
-
-    UI <-->|IPC Events| Tauri
-    Tauri -->|Spawns/Monitors| Sidecars
-    Tauri <-->|Reads/Writes| Storage
-    EngineManager -->|Manages| Llama
-    OpenClaw <-->|ACP WebSockets| UI
-    Gateway <-->|Remote/Local| OpenClaw
-    RigAgent -->|Tools| Sidecars
-    McpSandbox -->|HTTP/JWT| MCP[(External MCP Server)]
+```sh
+irm https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.ps1 | iex
 ```
 
-### 1. The OpenClaw Engine (Powered by IronClaw)
-The heart of Scrappy's autonomous agency. Built on the **IronClaw** Rust agent runtime, running **in-process** as a library crate — no Node.js sidecar, no WebSocket bridge:
--   **Session Management**: Each conversation has a dedicated thread with persistent history.
--   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools**.
--   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking" via `TauriChannel`.
+</details>
 
-### 2. The Native Rust Agent (`backend/src/rig_lib`)
-A specialized agent engine built using **Rig**. It focuses on performance and reliability for core features:
--   **RAG Integration**: Direct access to the `usearch` vector store for context injection.
--   **Deep Search**: Utilizes `DDGSearchTool` and `ScrapePageTool` for gathering real-time information.
--   **Image Generation**: Native integration with image generation sidecars via `ImageGenTool`, featuring a premium studio interface with real-time progress tracking, style presets, and multi-resolution support (512px to 2K).
+<details>
+  <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
 
----
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
+```
+</details>
 
-## OpenClaw Configuration & Lifecycle
+<details>
+  <summary>Install via Homebrew (macOS/Linux)</summary>
 
-OpenClaw is highly configurable through a combination of system files and workspace-level markdown instructions.
+```sh
+brew install thinclaw
+```
 
-### 1. System Infrastructure
-These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`$APP_DATA/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
-- **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
+</details>
 
-### 2. Workspace Markdown (The Agent's "Brain")
-The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
-- **`AGENTS.md`**: Core operational manual. Covers memory usage, group chat etiquette, and interaction rules (e.g., avoiding multiple responses to the same input).
-- **`SOUL.md`**: Defines your agent's persona, values, and fundamental behavior.
-- **`IDENTITY.md`**: High-level identity markers like name, "creature type," and signature emoji.
-- **`USER.md`**: Stores what the agent knows about *you* (name, preferences, context).
-- **`TOOLS.md`**: Practical conventions for tool usage (camera names, SSH details, shell preferences).
+<details>
+  <summary>Compile from source (Cargo on Windows, Linux, macOS)</summary>
 
-### 3. Lifecycle & Automation
-- **`BOOTSTRAP.md`**: A one-time setup ritual performed by the agent in a new workspace.
-- **`BOOT.md`**: Startup checklist executed every time the gateway/agent restarts.
-- **`HEARTBEAT.md`**: A proactive, periodic checklist for automated tasks (e.g., checking weather, emails, or project status every 30 minutes).
+Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) installed on your computer.
 
-### 4. Management & Visibility
-- **Settings Tab**: Manage API keys, model selection, gateway connection modes, and customize your **Spotlight Global Shortcut**.
-- **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `backend/src/personas.rs`.
-- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
+```bash
+# Clone the repository
+git clone https://github.com/RNT56/ThinClaw.git
+cd ThinClaw
 
-### 5. Cloud Inference Providers
-Scrappy 2026 features native integration with the world's most powerful inference engines:
-- **Anthropic**: Support for **Claude 4.5 Sonnet** and **Opus** with native Tool Use.
-- **OpenAI**: First-class support for **GPT-5.2** (with specialized reasoning) and **GPT-4o** variants.
-- **Google Gemini**: Integrated **Gemini 2.0/3.0 Flash/Pro** with support for massive 1M+ token contexts and **Imagen 3** image generation.
-- **Groq**: Ultra-fast cloud inference for open models like **Llama 3.3 70B** and **Mixtral**.
-- **OpenRouter**: Gateway access to 100+ specialized models via a single API key.
-- **Custom Secrets**: Define and grant access to any external API key for use in custom agent tools.
+# Build (full features — PostgreSQL + libSQL + all runtime modules)
+cargo build --release
 
-Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key to control agent access at runtime.
+# Build (desktop embedding — libSQL only, minimal footprint)
+cargo build --release --no-default-features --features desktop
 
----
+# Build (air-gapped — all WASM extensions embedded in binary, +6-13 MB)
+cargo build --release --features bundled-wasm
 
-## Project Structure
+# Run tests
+cargo test
+```
 
-### Backend (`backend/`)
--   `src/openclaw/`: OpenClaw / IronClaw integration layer.
-    -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
-    -   `ironclaw_bridge.rs`: IronClaw agent lifecycle — init, config, Agent construction, shutdown.
-    -   `ironclaw_channel.rs`: `TauriChannel` bridging IronClaw events to Tauri `emit()`.
-    -   `ironclaw_secrets.rs`: Keychain ↔ IronClaw secrets adapter.
-    -   `tool_bridge.rs`: MCP tool bridge for IronClaw agent tool calls.
-    -   `sanitizer.rs`: LLM token stripping (ChatML, Llama, Jinja markers).
-    -   `ui_types.rs`: `UiEvent` enum — stable UI contract (16+ variants).
--   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
-    -   `tools/`: `web_search.rs` (29KB), `calculator_tool.rs` (37KB), `scrape_page.rs`, `image_gen_tool.rs`, `rag_tool.rs`.
-    -   `orchestrator.rs`: Multi-turn web search and synthesis pipeline.
-    -   `unified_provider.rs`: Unified inference provider abstraction.
--   `src/engine/`: Multi-engine inference system (`InferenceEngine` trait, engine implementations for llama.cpp, MLX, vLLM, Ollama).
--   `src/inference/`: InferenceRouter — 5-modality routing (Chat, Embedding, TTS, STT, Diffusion) with local and cloud backends.
--   `src/cloud/`: Cloud storage system — 7 providers (S3, GDrive, iCloud, OneDrive, Dropbox, WebDAV, SFTP) + encryption + sync.
--   `src/sidecar.rs`: The manager for all background binaries (Llama, Chromium, Whisper, TTS, SD).
--   `src/hf_hub.rs`: HuggingFace Hub model discovery, file parsing, and download.
--   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral, **Gemma**, **Qwen**) used for model formatting.
--   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
--   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
--   `scrappy-mcp-tools/`: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
--   `documentation/openclaw/`: Historical architectural deep-dives (pre-IronClaw era).
+For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
 
-### Frontend (`frontend/src/`)
--   `components/chat/`: The high-performance chat interface.
--   `components/openclaw/`: Visualizations for agent status and tool execution.
--   `components/imagine/`: Imagine Studio UI (gallery, prompt, style presets).
--   `components/settings/`: Settings pages including `McpTab.tsx`, `SettingsSidebar.tsx`, `SettingsPages.tsx`.
--   `hooks/use-openclaw-stream.ts`: Real-time agent event processing.
--   `hooks/use-chat.ts`: Core chat state management.
+For an **air-gapped build** with all WASM extensions embedded:
+```bash
+./scripts/build-all.sh --bundled
+```
 
----
+</details>
 
-## Developer Guide: Extending Scrappy
+### Database Setup
 
-### Adding a New Prompt Template
-Templates are defined in `backend/src/templates.rs`. To add one:
-1.  Define a new `pub const` with your Jinja-like template (ChatML, Llama3, Mistral, Gemma, and Qwen formats already exist).
-2.  Add it to the renderer logic in the model manager (`src/model_manager.rs`).
+**Option A: PostgreSQL** (production, requires running server)
 
-### Adding a New OpenClaw Skill
-Skills extend the **OpenClaw** agent (powered by IronClaw):
-1.  Create a skill definition with a JSON schema in the OpenClaw skill directory.
-2.  Implement the `execute` logic.
-3.  The UI will automatically handle rendering based on the tool metadata.
+```bash
+createdb thinclaw
+psql thinclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
 
-### Adding a Native Rust Tool (Rig)
-1.  Implement the `Tool` trait in `backend/src/rig_lib/tools/`.
-2.  Register the tool in `RigManager::new` within `backend/src/rig_lib/agent.rs`.
-3.  Ensure the tool emits progress events to the UI if long-running.
+**Option B: libSQL** (embedded, zero dependencies)
 
-### Adding an MCP Remote Tool
-1.  Expose a new endpoint on your FastAPI MCP server.
-2.  Connect the server URL and token in **Settings > MCP Server**.
-3.  The Rhai sandbox (`scrappy-mcp-tools/`) will auto-discover and expose the tool to the agent.
+No setup needed — the database file is created automatically at `~/.thinclaw/thinclaw.db` on first run.
 
----
+For Turso cloud sync, set `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`.
 
-## Security & Safety Philosophy
+## Configuration
 
-1.  **Strict Local-First**: Your data and AI transcripts stay on your machine.
-2.  **Keychain-Secured Secrets**: API keys are stored in the **macOS Keychain** (AES-256 encrypted at rest), never in plaintext config files. `identity.json` stores only non-sensitive metadata (grant flags, enabled providers).
-3.  **Explicit Grant Enforcement**: Saving an API key does **not** automatically expose it to the agent. You must toggle "Grant Access" per key in Settings › Secrets. Only granted keys are injected into the IronClaw engine as environment variables.
-4.  **Environment Variable Gating**: Sensitive credentials (Custom LLM keys, AWS Bedrock) are only injected into the engine process when their corresponding feature is explicitly enabled.
-5.  **Human Governance**: Every dangerous command triggers a UI approval request (HITL).
-6.  **Sandbox Ready**: Tool execution can be configured to run in Docker containers.
+Run the setup wizard to configure ThinClaw:
 
----
+```bash
+thinclaw onboard
+```
 
-## Contributing & Community
+The wizard guides you through:
 
-Scrappy is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
+1. **Database** — PostgreSQL or libSQL connection
+2. **Security** — Secrets master key (OS keychain or environment variable)
+3. **Inference provider** — Anthropic, OpenAI, Ollama, OpenRouter, or any OpenAI-compatible endpoint
+4. **Model selection** — Pick from available models or enter a custom model ID
+5. **Embeddings** — Semantic search via OpenAI or Ollama embeddings
+6. **Channels** — CLI, HTTP, Signal, Nostr, Telegram, and web gateway
+7. **Extensions** — Install tools from the registry
+8. **Docker sandbox** — Isolated container execution
+9. **Background tasks** — Heartbeat and routine scheduling
 
-1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check `backend/src/openclaw/commands/` and `backend/src/rig_lib/agent.rs` for backend extension points.
+Settings are persisted in the connected database. Bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`)
+are written to `~/.thinclaw/.env` so they are available before the database connects.
 
----
+### Environment Variables
+
+You can also configure ThinClaw directly via environment variables or a `.env` file:
+
+```env
+# Database (choose one)
+DATABASE_BACKEND=postgres          # or: libsql
+DATABASE_URL=postgres://user:pass@localhost/thinclaw
+
+# LLM Provider
+LLM_BACKEND=openai_compatible     # or: anthropic, openai, ollama, tinfoil
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-...
+LLM_MODEL=anthropic/claude-sonnet-4
+
+# Embeddings
+EMBEDDING_ENABLED=true
+EMBEDDING_PROVIDER=openai          # or: ollama, gemini
+OPENAI_API_KEY=sk-...
+
+# Google Gemini (native backend)
+GEMINI_API_KEY=...
+
+# llama.cpp (local server)
+LLAMA_CPP_SERVER_URL=http://localhost:8080
+
+# Web Gateway
+GATEWAY_ENABLED=true
+GATEWAY_PORT=3000
+```
+
+## Security
+
+ThinClaw implements defense in depth to protect your data and prevent misuse.
+
+### WASM Sandbox
+
+All untrusted tools run in isolated WebAssembly containers:
+
+- **Capability-based permissions** — Explicit opt-in for HTTP, secrets, tool invocation
+- **Endpoint allowlisting** — HTTP requests only to approved hosts/paths
+- **Credential injection** — Secrets injected at host boundary, never exposed to WASM code
+- **Leak detection** — Scans requests and responses for secret exfiltration attempts
+- **Key rotation** — Automated credential rotation management with configurable policies
+- **Rate limiting** — Per-tool request limits to prevent abuse
+- **Resource limits** — Memory, CPU, and execution time constraints
+
+```
+WASM ──► Allowlist ──► Leak Scan ──► Credential ──► Execute ──► Leak Scan ──► WASM
+         Validator     (request)     Injector       Request     (response)
+```
+
+### Prompt Injection Defense
+
+External content passes through multiple security layers:
+
+- Pattern-based detection of injection attempts
+- Content sanitization and escaping
+- Policy rules with severity levels (Block/Warn/Review/Sanitize)
+- Tool output wrapping for safe LLM context injection
+
+### Device Pairing
+
+- Secure device authentication for multi-device access
+- Approval-based pairing flow with cryptographic verification
+- Per-device session isolation
+
+### Data Protection
+
+- All data stored locally in your database (PostgreSQL or libSQL)
+- Secrets encrypted with AES-256-GCM (or OS keychain on macOS/Linux)
+- No telemetry, analytics, or data sharing
+- Full audit log of all tool executions
+
+### Docker Sandbox
+
+ThinClaw can run untrusted jobs in isolated Docker containers with a full orchestrator/worker architecture:
+
+- **Per-job auth tokens** — Each container gets a unique ephemeral token, revoked on completion
+- **Bind-mount validation** — Project directories are restricted to `~/.thinclaw/projects/` with canonicalization checks
+- **Capabilities dropped** — All Linux capabilities except `CHOWN` are removed
+- **Non-root execution** — Runs as UID 1000 (`sandbox` user) with `no-new-privileges`
+- **Resource limits** — Configurable memory (default 2 GB) and CPU shares
+- **HEALTHCHECK** — Built-in container health monitoring with automatic orphan cleanup on restart
+
+**Building the worker image:**
+
+```bash
+# Required before first use (the wizard offers to do this automatically)
+docker build -f Dockerfile.worker -t thinclaw-worker .
+```
+
+The worker image includes: Rust 1.92, Node.js, Python 3, Git, GitHub CLI, and the Claude Code CLI.
+
+### Claude Code Sandbox
+
+ThinClaw can delegate complex coding tasks to Anthropic's [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI, running inside a sandboxed Docker container.
+
+**Authentication** (checked in priority order):
+
+| Priority | Source | How to set |
+|----------|--------|------------|
+| 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
+| 2 | OS keychain | Set during `thinclaw onboard` (wizard step 12) |
+| 3 | Claude Code OAuth | Run `claude login` on the host machine |
+
+The wizard's step 12 detects which auth sources are available and offers to store an API key in the OS keychain (macOS Keychain / Linux Secret Service). This avoids putting secrets in `.env` files or the database.
+
+**Configuration:**
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| Enabled | `CLAUDE_CODE_ENABLED` | `false` | Enable Claude Code as a delegation target |
+| Model | `CLAUDE_CODE_MODEL` | `sonnet` | Claude model for code tasks |
+| Max turns | `CLAUDE_CODE_MAX_TURNS` | `50` | Maximum agentic turns per job |
+| Memory | `CLAUDE_CODE_MEMORY_LIMIT_MB` | `4096` | Container memory limit |
+
+These can also be configured in the WebUI under **Settings → Features**.
+
+## Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                          Channels                              │
+│  ┌──────┐  ┌──────┐   ┌─────────────┐  ┌─────────────┐         │
+│  │ REPL │  │ HTTP │   │WASM Channels│  │ Web Gateway │         │
+│  └──┬───┘  └──┬───┘   │  Telegram   │  │ (SSE + WS)  │         │
+│     │         │        │  Slack      │  └──────┬──────┘         │
+│     │         │        │  Discord    │         │                │
+│     │         │        └──────┬──────┘         │                │
+│     └─────────┴──────────────┴─────────────────┘                │
+│                              │                                 │
+│                    ┌─────────▼─────────┐                       │
+│                    │    Agent Loop     │  Intent routing       │
+│                    └────┬──────────┬───┘                       │
+│                         │          │                           │
+│              ┌──────────▼────┐  ┌──▼───────────────┐           │
+│              │  Scheduler    │  │ Routines Engine  │           │
+│              │(parallel jobs)│  │(cron, event, wh) │           │
+│              └──────┬────────┘  └────────┬─────────┘           │
+│                     │                    │                     │
+│       ┌─────────────┼────────────────────┘                     │
+│       │             │                                          │
+│   ┌───▼─────┐  ┌────▼────────────────┐                         │
+│   │ Local   │  │    Orchestrator     │                         │
+│   │Workers  │  │  ┌───────────────┐  │                         │
+│   │(in-proc)│  │  │ Docker Sandbox│  │                         │
+│   └───┬─────┘  │  │   Containers  │  │                         │
+│       │        │  └───────────────┘  │                         │
+│       │        └─────────┬───────────┘                         │
+│       └──────────────────┤                                     │
+│                          │                                     │
+│              ┌───────────▼──────────┐                          │
+│              │    Tool Registry     │                          │
+│              │  Built-in, MCP, WASM │                          │
+│              └──────────────────────┘                          │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Core Components
+
+| Component | Purpose |
+|-----------|---------|
+| **Agent Loop** | Main message handling and job coordination |
+| **Router** | Classifies user intent (command, query, task) |
+| **Scheduler** | Manages parallel job execution with priorities |
+| **Worker** | Executes jobs with LLM reasoning and tool calls |
+| **Subagent Executor** | Parallel sub-agent orchestration with tool filtering and sandboxing |
+| **Orchestrator** | Container lifecycle, LLM proxying, per-job auth |
+| **Web Gateway** | Browser UI with chat, memory, jobs, logs, extensions, routines |
+| **Canvas Gateway** | Rich interactive UI canvas for agent-generated content |
+| **Routines Engine** | Scheduled (cron) and reactive (event, webhook) background tasks |
+| **Workspace** | Persistent memory with hybrid full-text + vector search |
+| **Safety Layer** | Prompt injection defense, leak detection, key rotation, and content sanitization |
+| **ClawHub** | Extension marketplace — discover, install, and manage tools from a curated catalog |
+| **Skill Registry** | Structured multi-step procedures with discovery and execution |
+| **Hardware Bridge** | Sensor access (camera, mic, screen) with per-request approval |
+| **Health Monitor** | Channel health checking and automatic recovery |
+| **Cost Guard** | Token usage tracking and configurable spending limits |
+
+### Feature Flags
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `full` | Everything (PostgreSQL + libSQL + all modules) | ✅ |
+| `desktop` | Tauri embedding (libSQL only, minimal footprint) | |
+| `postgres` | PostgreSQL + pgvector support | ✅ |
+| `libsql` | Embedded libSQL/Turso support | ✅ |
+| `html-to-markdown` | Web page → markdown conversion | ✅ |
+| `repl` | Interactive terminal REPL + boot screen | ✅ |
+| `web-gateway` | Browser UI with SSE/WebSocket streaming | ✅ |
+| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ |
+| `docker-sandbox` | Isolated container execution for untrusted code | ✅ |
+| `voice` | Voice wake word detection (cpal audio capture) | |
+| `bundled-wasm` | Embed all WASM extensions in binary for air-gapped deploys (+6-13 MB) | |
+
+## Usage
+
+```bash
+# First-time setup (configures database, providers, channels)
+thinclaw onboard
+
+# Start interactive REPL
+thinclaw
+
+# Single message mode
+thinclaw --message "What's the weather in Berlin?"
+
+# With debug logging
+RUST_LOG=thinclaw=debug thinclaw
+
+# Run diagnostics
+thinclaw doctor
+
+# Check system status
+thinclaw status
+```
+
+## Deployment
+
+ThinClaw can be deployed as a **standalone headless agent** on a dedicated server (Mac Mini, VPS, etc.) and connected to the [Scrappy](https://github.com/RNT56/scrappy) desktop app for remote control.
+
+**Quick Start (Mac Mini / macOS):**
+
+```bash
+git clone https://github.com/RNT56/ThinClaw.git && cd ThinClaw
+cargo build --release --features libsql
+./target/release/thinclaw   # Runs the onboarding wizard on first launch
+```
+
+Enable the **Gateway** channel during setup, then connect Scrappy via **Settings → Gateway → Connect Existing**.
+
+**Deployment options:**
+
+| Method | Best For | Guide |
+|--------|----------|-------|
+| Direct binary | Mac Mini, macOS/Linux servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-1-direct-binary-recommended-for-mac-mini) |
+| Docker Compose | Linux VPS, cloud servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-2-docker-compose-any-os) |
+| Scrappy one-click | Linux servers (automated SSH) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-3-automated-deploy-from-scrappy-linux-targets) |
+
+The comprehensive deployment guide covers: Tailscale VPN setup, auto-start on boot (launchd/systemd), macOS-specific features (Keychain, iMessage, Metal GPU), environment variable reference, and troubleshooting.
+
+📖 **Full guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+### WASM Extension Deployment
+
+ThinClaw ships 14 WASM extensions (10 tools + 4 channels). Two deployment strategies are available:
+
+**Option A: Download from GitHub Releases (default)**
+
+The standard binary downloads extensions from GitHub Releases on first install. The CI pipeline (`release.yml`) automatically builds all WASM extensions, creates `.tar.gz` bundles with SHA256 checksums, and publishes them alongside the binary.
+
+```bash
+# Standard build — small binary, extensions downloaded on demand
+cargo build --release
+
+# Install an extension at runtime (downloads from GitHub Releases)
+thinclaw extension install telegram
+```
+
+This is the recommended approach for machines with internet access.
+
+**Option B: Embedded WASM (air-gapped / zero-network)**
+
+For headless deployments on machines without reliable internet (e.g., Mac Mini behind NAT), compile with the `bundled-wasm` feature to embed all WASM extensions directly into the binary:
+
+```bash
+# Air-gapped build — all extensions embedded (+6-13 MB binary size)
+cargo build --release --features bundled-wasm
+
+# Or use the convenience script:
+./scripts/build-all.sh --bundled
+```
+
+When `bundled-wasm` is active, `thinclaw extension install <name>` extracts the extension from the binary instead of downloading — zero network dependency.
+
+**Install priority chain:**
+1. Bundled WASM (if `--features bundled-wasm` was used at compile time)
+2. Download from GitHub Releases (if `artifacts.url` is set in the manifest)
+3. Build from local source tree (developer builds only)
+
+## Development
+
+```bash
+# Format code
+cargo fmt
+
+# Lint
+cargo clippy --all --benches --tests --examples --all-features
+
+# Run tests
+createdb thinclaw_test
+cargo test
+
+# Run specific test
+cargo test test_name
+```
+
+- **Deployment & Remote Setup**: See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for standalone, Docker, and Scrappy connection guides.
+- **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
+- **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
+- **Air-gapped builds**: Use `cargo build --release --features bundled-wasm` to embed all WASM extensions in the binary.
+
+## OpenClaw & IronClaw Heritage
+
+ThinClaw is an evolved Rust reimplementation of the legacy projects [OpenClaw](https://github.com/openclaw/openclaw) and IronClaw. See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
+
+Key differences:
+
+- **Rust vs TypeScript** — Native performance, memory safety, single binary
+- **WASM sandbox vs Docker** — Lightweight, capability-based security
+- **PostgreSQL + libSQL** — Flexible storage from embedded to production
+- **Security-first design** — Multiple defense layers, credential protection
+- **Provider agnostic** — Works with any OpenAI-compatible endpoint
 
 ## License
 
-Distributed under the **GNU General Public License v3.0** (Strong Copyleft). See `License.md` for more information and attribution requirements.
+Copyright © 2026 **RNT56** (ThinClaw)
+Copyright © 2026 **NEAR AI** (IronClaw)
+
+ThinClaw is a fork of [IronClaw](https://github.com/nearai/ironclaw) by NEAR AI.
+The original IronClaw code is used under the terms of its MIT / Apache-2.0 dual license.
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.

@@ -1,0 +1,38 @@
+{
+  "name": "github",
+  "display_name": "GitHub",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "GitHub integration for issues, PRs, repos, and code search",
+  "keywords": [
+    "git",
+    "code",
+    "issues",
+    "pull-requests",
+    "repositories"
+  ],
+  "source": {
+    "dir": "tools-src/github",
+    "capabilities": "github-tool.capabilities.json",
+    "crate_name": "github-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/github-wasm32-wasip2.tar.gz",
+      "sha256": "12d9b4a97a16f78f322e4a985f0693097a83f871f8e46bb220336599c9019bc0"
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "GitHub",
+    "secrets": [
+      "github_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://github.com/settings/tokens"
+  },
+  "tags": [
+    "default",
+    "development"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "name": "slack",
+  "display_name": "Slack",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Slack Events API channel for receiving and responding to Slack messages",
+  "keywords": [
+    "messaging",
+    "chat",
+    "workspace",
+    "slack"
+  ],
+  "source": {
+    "dir": "channels-src/slack",
+    "capabilities": "slack.capabilities.json",
+    "crate_name": "slack-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/slack-wasm32-wasip2.tar.gz",
+      "sha256": "8f5514bd18971f0ba13dd79db698114bf9c1a4548098d4294fa9557bbdc04f3f"
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Slack",
+    "secrets": [
+      "slack_bot_token",
+      "slack_signing_secret"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://api.slack.com/apps"
+  },
+  "tags": [
+    "default",
+    "messaging"
+  ]
+}

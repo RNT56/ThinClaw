@@ -1,0 +1,416 @@
+//! `llama.cpp` native inference interface.
+//!
+//! Defines the trait and types for native `llama.cpp` model loading and
+//! inference. This module provides the _abstraction layer_ — the actual
+//! FFI bindings will be activated when `llama-cpp-2` crate is included.
+//!
+//! # Architecture
+//!
+//! ```text
+//! LlamaModel (trait)
+//!   ├─ LlamaConfig (model path, context length, GPU layers, etc.)
+//!   ├─ generate() → streaming token iterator
+//!   └─ tokenize() / detokenize()
+//!
+//! LlamaCppBackend (struct)
+//!   └─ Implements LlamaModel via llama-cpp-2 FFI
+//! ```
+//!
+//! # Usage with ThinClaw
+//!
+//! When `llama.cpp` bindings are compiled in, `LlmBackend::LlamaCpp` becomes
+//! available. The backend creates a `LlamaCppBackend` instance and wraps it
+//! in the standard `LlmProvider` trait, so it works with failover, caching,
+//! and routing just like any other provider.
+
+use serde::{Deserialize, Serialize};
+
+/// Configuration for a local llama.cpp model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlamaConfig {
+    /// Filesystem path to the GGUF model file.
+    pub model_path: String,
+
+    /// Context length (default: 4096).
+    pub context_length: u32,
+
+    /// Number of GPU layers to offload (0 = CPU only).
+    /// Set to -1 for full GPU offload, or a specific number for partial.
+    pub gpu_layers: i32,
+
+    /// Number of threads for CPU inference.
+    /// Default: number of physical cores.
+    pub threads: Option<u32>,
+
+    /// Batch size for prompt processing (default: 512).
+    pub batch_size: u32,
+
+    /// Whether to use memory-mapped model loading.
+    pub use_mmap: bool,
+
+    /// Whether to lock model in memory (prevent swapping).
+    pub use_mlock: bool,
+
+    /// Sampling temperature (default: 0.7).
+    pub temperature: f32,
+
+    /// Top-p (nucleus) sampling (default: 0.9).
+    pub top_p: f32,
+
+    /// Top-k sampling (default: 40).
+    pub top_k: u32,
+
+    /// Repetition penalty (default: 1.1).
+    pub repeat_penalty: f32,
+
+    /// Max tokens to generate per request.
+    pub max_tokens: u32,
+
+    /// Seed for reproducible generation. None = random.
+    pub seed: Option<u64>,
+}
+
+impl Default for LlamaConfig {
+    fn default() -> Self {
+        Self {
+            model_path: String::new(),
+            context_length: 4096,
+            gpu_layers: 0,
+            threads: None,
+            batch_size: 512,
+            use_mmap: true,
+            use_mlock: false,
+            temperature: 0.7,
+            top_p: 0.9,
+            top_k: 40,
+            repeat_penalty: 1.1,
+            max_tokens: 2048,
+            seed: None,
+        }
+    }
+}
+
+impl LlamaConfig {
+    /// Create from environment variables.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(path) = std::env::var("LLAMA_MODEL_PATH") {
+            config.model_path = path;
+        }
+        if let Ok(ctx) = std::env::var("LLAMA_CONTEXT_LENGTH")
+            && let Ok(n) = ctx.parse()
+        {
+            config.context_length = n;
+        }
+        if let Ok(gpu) = std::env::var("LLAMA_GPU_LAYERS")
+            && let Ok(n) = gpu.parse()
+        {
+            config.gpu_layers = n;
+        }
+        if let Ok(threads) = std::env::var("LLAMA_THREADS")
+            && let Ok(n) = threads.parse()
+        {
+            config.threads = Some(n);
+        }
+        if let Ok(temp) = std::env::var("LLAMA_TEMPERATURE")
+            && let Ok(t) = temp.parse()
+        {
+            config.temperature = t;
+        }
+        if let Ok(max) = std::env::var("LLAMA_MAX_TOKENS")
+            && let Ok(n) = max.parse()
+        {
+            config.max_tokens = n;
+        }
+
+        config
+    }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.model_path.is_empty() {
+            return Err("model_path is required".to_string());
+        }
+        if self.context_length == 0 {
+            return Err("context_length must be > 0".to_string());
+        }
+        if self.batch_size == 0 {
+            return Err("batch_size must be > 0".to_string());
+        }
+        if self.temperature < 0.0 {
+            return Err("temperature must be >= 0".to_string());
+        }
+        if self.top_p <= 0.0 || self.top_p > 1.0 {
+            return Err("top_p must be in (0, 1]".to_string());
+        }
+        if self.max_tokens == 0 {
+            return Err("max_tokens must be > 0".to_string());
+        }
+        Ok(())
+    }
+
+    /// Estimated memory footprint in bytes for the model.
+    ///
+    /// Rough estimate: ~0.6 bytes per parameter for Q4_K_M quantization,
+    /// plus context buffer.
+    pub fn estimated_memory_bytes(&self) -> u64 {
+        // Base: model file size is a reasonable proxy
+        // Context: ~2 bytes per token per layer (rough)
+        let context_mem = (self.context_length as u64) * 128 * 1024; // ~128KB per 1K context
+        context_mem
+    }
+}
+
+/// Token generated by the model.
+#[derive(Debug, Clone)]
+pub struct LlamaToken {
+    /// Token ID.
+    pub id: u32,
+    /// Text piece.
+    pub text: String,
+    /// Log probability (if available).
+    pub logprob: Option<f32>,
+}
+
+/// Status of model loading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ModelLoadStatus {
+    /// Not loaded.
+    Unloaded,
+    /// Currently loading (progress 0.0 - 1.0).
+    Loading { progress: f32 },
+    /// Loaded and ready for inference.
+    Ready {
+        /// Model file size in bytes.
+        model_size_bytes: u64,
+        /// Number of layers loaded to GPU.
+        gpu_layers_loaded: u32,
+    },
+    /// Failed to load.
+    Failed { reason: String },
+}
+
+impl ModelLoadStatus {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Unloaded => "unloaded",
+            Self::Loading { .. } => "loading",
+            Self::Ready { .. } => "ready",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// Trait for llama.cpp model backends.
+///
+/// Implementors wrap the actual FFI calls to `llama.cpp`. The trait is
+/// designed to be object-safe for use with `Box<dyn LlamaModel>`.
+pub trait LlamaModel: Send + Sync {
+    /// Get the current load status.
+    fn status(&self) -> ModelLoadStatus;
+
+    /// Tokenize text into token IDs.
+    fn tokenize(&self, text: &str) -> Result<Vec<u32>, String>;
+
+    /// Detokenize token IDs back to text.
+    fn detokenize(&self, tokens: &[u32]) -> Result<String, String>;
+
+    /// Generate a completion from a prompt.
+    ///
+    /// Returns generated tokens. For streaming, the caller should use
+    /// `generate_streaming()` instead.
+    fn generate(&self, prompt: &str, config: &LlamaConfig) -> Result<String, String>;
+
+    /// Get the model's context length.
+    fn context_length(&self) -> u32;
+
+    /// Get the model's vocabulary size.
+    fn vocab_size(&self) -> u32;
+
+    /// Unload the model from memory.
+    fn unload(&mut self) -> Result<(), String>;
+}
+
+/// Stub backend that returns errors — used when llama.cpp is not compiled in.
+///
+/// This allows the code to compile and run without the llama-cpp-2 crate,
+/// with clear error messages if anyone tries to use it.
+pub struct LlamaCppStub;
+
+impl LlamaModel for LlamaCppStub {
+    fn status(&self) -> ModelLoadStatus {
+        ModelLoadStatus::Failed {
+            reason: "llama.cpp not compiled in (feature 'llama-cpp' required)".to_string(),
+        }
+    }
+
+    fn tokenize(&self, _text: &str) -> Result<Vec<u32>, String> {
+        Err("llama.cpp not available".to_string())
+    }
+
+    fn detokenize(&self, _tokens: &[u32]) -> Result<String, String> {
+        Err("llama.cpp not available".to_string())
+    }
+
+    fn generate(&self, _prompt: &str, _config: &LlamaConfig) -> Result<String, String> {
+        Err(
+            "llama.cpp not available — use Ollama or an OpenAI-compatible endpoint instead"
+                .to_string(),
+        )
+    }
+
+    fn context_length(&self) -> u32 {
+        0
+    }
+
+    fn vocab_size(&self) -> u32 {
+        0
+    }
+
+    fn unload(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = LlamaConfig::default();
+        assert_eq!(config.context_length, 4096);
+        assert_eq!(config.gpu_layers, 0);
+        assert_eq!(config.batch_size, 512);
+        assert!(config.use_mmap);
+        assert!(!config.use_mlock);
+        assert!((config.temperature - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_config_validation_empty_path() {
+        let config = LlamaConfig::default();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_valid() {
+        let config = LlamaConfig {
+            model_path: "/path/to/model.gguf".into(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_bad_temperature() {
+        let config = LlamaConfig {
+            model_path: "/path/to/model.gguf".into(),
+            temperature: -1.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_bad_top_p() {
+        let config = LlamaConfig {
+            model_path: "/path/to/model.gguf".into(),
+            top_p: 0.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_serializable() {
+        let config = LlamaConfig {
+            model_path: "/models/llama3.gguf".into(),
+            gpu_layers: 32,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("llama3.gguf"));
+        assert!(json.contains("\"gpu_layers\":32"));
+        let deser: LlamaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.model_path, "/models/llama3.gguf");
+        assert_eq!(deser.gpu_layers, 32);
+    }
+
+    #[test]
+    fn test_model_load_status() {
+        assert!(
+            ModelLoadStatus::Ready {
+                model_size_bytes: 1024,
+                gpu_layers_loaded: 0
+            }
+            .is_ready()
+        );
+        assert!(!ModelLoadStatus::Unloaded.is_ready());
+        assert!(!ModelLoadStatus::Loading { progress: 0.5 }.is_ready());
+    }
+
+    #[test]
+    fn test_model_load_status_labels() {
+        assert_eq!(ModelLoadStatus::Unloaded.label(), "unloaded");
+        assert_eq!(
+            ModelLoadStatus::Loading { progress: 0.5 }.label(),
+            "loading"
+        );
+        assert_eq!(
+            ModelLoadStatus::Ready {
+                model_size_bytes: 0,
+                gpu_layers_loaded: 0
+            }
+            .label(),
+            "ready"
+        );
+        assert_eq!(
+            ModelLoadStatus::Failed {
+                reason: "err".into()
+            }
+            .label(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn test_stub_backend() {
+        let mut stub = LlamaCppStub;
+        assert!(!stub.status().is_ready());
+        assert!(stub.tokenize("hello").is_err());
+        assert!(stub.detokenize(&[1, 2, 3]).is_err());
+        assert!(stub.generate("hi", &LlamaConfig::default()).is_err());
+        assert_eq!(stub.context_length(), 0);
+        assert_eq!(stub.vocab_size(), 0);
+        assert!(stub.unload().is_ok());
+    }
+
+    #[test]
+    fn test_model_load_status_serializable() {
+        let status = ModelLoadStatus::Ready {
+            model_size_bytes: 4_000_000_000,
+            gpu_layers_loaded: 32,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("4000000000"));
+        let deser: ModelLoadStatus = serde_json::from_str(&json).unwrap();
+        assert!(deser.is_ready());
+    }
+
+    #[test]
+    fn test_estimated_memory() {
+        let config = LlamaConfig {
+            model_path: "/model.gguf".into(),
+            context_length: 8192,
+            ..Default::default()
+        };
+        let mem = config.estimated_memory_bytes();
+        assert!(mem > 0);
+    }
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=ThinClaw AI Assistant
+After=cloud-sql-proxy.service docker.service
+Requires=cloud-sql-proxy.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/docker pull us-central1-docker.pkg.dev/thinclaw-prod/thinclaw/agent:latest
+ExecStart=/usr/bin/docker run --rm \
+  --name thinclaw \
+  --env-file /opt/thinclaw/.env \
+  --network=host \
+  us-central1-docker.pkg.dev/thinclaw-prod/thinclaw/agent:latest \
+  --no-onboard
+ExecStop=/usr/bin/docker stop thinclaw
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

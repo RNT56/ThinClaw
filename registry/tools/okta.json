@@ -1,0 +1,36 @@
+{
+  "name": "okta",
+  "display_name": "Okta",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Okta SSO for user profile, app catalog, and SSO launch links",
+  "keywords": [
+    "sso",
+    "identity",
+    "authentication",
+    "okta"
+  ],
+  "source": {
+    "dir": "tools-src/okta",
+    "capabilities": "okta-tool.capabilities.json",
+    "crate_name": "okta-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/okta-wasm32-wasip2.tar.gz",
+      "sha256": "2093abf4c618e357adf8e16243dff77413f2633db5397ce4a92d74df0c7d44d1"
+    }
+  },
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Okta",
+    "secrets": [
+      "okta_oauth_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/"
+  },
+  "tags": [
+    "identity"
+  ]
+}

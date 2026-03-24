@@ -1,9 +1,0 @@
-<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <!-- Monochrome S Shape for Tray - Stretched vertically and expanded for max presence -->
-    <g transform="translate(1, 0.5)">
-        <!-- Top Segment - Taller hook, more vertical reach -->
-        <path d="M16 4.5H6.5C4.5 4.5 3 6 3 8C3 10 4.5 11.5 6.5 11.5H13" stroke="white" stroke-width="3.2" stroke-linecap="round"/>
-        <!-- Bottom Segment - Taller hook, reaches lower -->
-        <path d="M6 16.5H15.5C17.5 16.5 19 15 19 13C19 11 17.5 9.5 15.5 9.5H9" stroke="white" stroke-width="3.2" stroke-linecap="round"/>
-    </g>
-</svg>

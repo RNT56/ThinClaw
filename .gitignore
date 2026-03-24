@@ -1,62 +1,21 @@
-# Documentation
-# documentation/
-# Node & Dependencies
-node_modules/
-dist/
-dist-ssr/
-*.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-# Rust / Tauri
-backend/target/
-backend/scrappy-mcp-tools/target/
-ironclaw/target/
-backend/gen/
-backend/bin/
-backend/resources/chromium/
-backend/tauri.override.json
-
-# Generated Binaries & Heavy Assets
-binaries/
-bin/
-
-# Logs & Diagnostics
-logs/
-*.log
-websearch_log.md
-new_sd_help.txt
-
-# Database & Persistence
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.usearch
-*.mv.db
-*.trace.db
-
-# Security & Secrets
-identity.json
-*.pem
-*.key
 .env
+.env.local
 .env.*
-! .env.example
+!.env.example
 
-# IDE & OS
-.vscode/*
-!.vscode/extensions.json
-!.vscode/launch.json
-.idea/
-.DS_Store
-.cursor/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-Thumbs.db
+# Claude Code worktrees
+.claude/worktrees/
+
+# Sidecar tool data
+.sidecar/
+.todos/
+
+target/
+
+# Benchmark results (local runs, not committed)
+bench-results/
+
+# WASM build artifacts (loaded from disk, not bundled)
+*.wasm
+

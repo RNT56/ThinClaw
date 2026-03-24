@@ -1,28 +1,54 @@
-# Contributing to Scrappy
+# Contributing to IronClaw
 
-We welcome contributions from the community! Whether you are fixing a bug, adding a new feature, or improving documentation, your help is appreciated.
+## Quick Start
 
-## How to Contribute
+```bash
+# Run the full CI pipeline locally:
+npm run ci
 
-1.  **Fork the Repository**: Create your own copy of the project.
-2.  **Create a Branch**: `git checkout -b feature/amazing-feature`.
-3.  **Make Changes**: Ensure your code follows the existing style and pass all type checks (`npx tsc --noEmit`).
-4.  **Commit Changes**: `git commit -m 'Add amazing feature'`.
-5.  **Push to Branch**: `git push origin feature/amazing-feature`.
-6.  **Open a Pull Request**: Describe your changes in detail.
+# Or individual checks:
+npm run lint:ironclaw    # cargo clippy (warnings = errors)
+npm run lint:fmt         # cargo fmt --check
+npm run lint:ts          # TypeScript type-check
+npm run test:ironclaw    # cargo test
+```
 
-## Development Workflow
+## Before Opening a PR
 
-- **Type Safety**: We use TypeScript strictly. Run `npx tsc --noEmit` locally before submitting.
-- **Backend**: Rust code in `backend/` should follow standard idioms. Use `cargo check` to verify.
-- **Aesthetics**: Scrappy is designed to be premium and professional. Ensure new UI components follow the "Glassmorphism" and "Rich Dark Mode" aesthetic guidelines.
+1. **Run `npm run ci`** — must pass cleanly (no clippy warnings, no fmt diffs, all tests green).
+2. **Review the relevant parity rows in `FEATURE_PARITY.md`** if your change affects a tracked capability.
+3. **Update `CHANGELOG.md`** for user-facing changes.
 
-## Bug Reports
+## Code Quality
 
-Please use the GitHub Issue tracker to report bugs. Include:
-- A clear description of the bug.
-- Steps to reproduce.
-- Your OS and hardware details (especially for AI/Metal related issues).
+- **Zero clippy warnings** — CI runs `cargo clippy --all-targets -- -D warnings`.
+  Intentionally allowed lints are configured in `Cargo.toml` under `[lints.clippy]`.
+- **Zero production `.unwrap()` calls** — use `.expect("descriptive reason")` or proper error handling.
+- **Formatting** — `cargo fmt` with the project's `rustfmt.toml` rules.
 
-## License
-By contributing, you agree that your contributions will be licensed under the project's **GNU General Public License v3.0**.
+### Fixing Lint Issues
+
+```bash
+npm run lint:ironclaw:fix   # Auto-fix clippy suggestions
+npm run lint:fmt:fix        # Auto-format code
+```
+
+## Feature Parity Requirement
+
+When your change affects a tracked capability, update `FEATURE_PARITY.md` in the same branch.
+
+1. Review the relevant parity rows in `FEATURE_PARITY.md`.
+2. Update status/notes if behavior changed.
+3. Include the `FEATURE_PARITY.md` diff in your commit when applicable.
+
+## CI Workflows
+
+| Workflow | Trigger | Duration | Purpose |
+|----------|---------|----------|---------|
+| `ci.yml` | Push/PR to `main`, `develop` | ~3 min | Lint + test quality gate |
+| `build-release.yml` | Tags / manual | ~20 min | Multi-platform build + release |
+
+## Dependency Security
+
+Run `cargo audit` periodically to check for known vulnerabilities.
+Known advisories are tracked in the project audit report.
