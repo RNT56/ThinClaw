@@ -450,8 +450,8 @@ async fn main() -> anyhow::Result<()> {
                 channels.add(Box::new(nostr_channel)).await;
                 tracing::info!(relays = nostr_config.relays.len(), "Nostr channel enabled");
                 if nostr_config.allow_from.is_empty() {
-                    tracing::warn!(
-                        "Nostr channel has empty allow_from list - ALL messages will be DENIED."
+                    tracing::info!(
+                        "Nostr channel allow_from is empty — accepting messages from all senders."
                     );
                 }
             }

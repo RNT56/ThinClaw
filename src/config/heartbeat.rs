@@ -58,9 +58,11 @@ impl HeartbeatConfig {
                 settings.heartbeat.interval_secs,
             )?,
             notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?
-                .or_else(|| settings.heartbeat.notify_channel.clone()),
+                .or_else(|| settings.heartbeat.notify_channel.clone())
+                .or_else(|| settings.notifications.preferred_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
-                .or_else(|| settings.heartbeat.notify_user.clone()),
+                .or_else(|| settings.heartbeat.notify_user.clone())
+                .or_else(|| settings.notifications.recipient.clone()),
             notify_topic_id: optional_env("HEARTBEAT_NOTIFY_TOPIC_ID")?
                 .and_then(|s| s.parse::<i64>().ok()),
             // Phase 3 fields — read from settings (no env var override needed)

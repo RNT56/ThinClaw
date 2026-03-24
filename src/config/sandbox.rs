@@ -1,5 +1,6 @@
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
 use crate::error::ConfigError;
+use crate::settings::Settings;
 
 /// Docker sandbox configuration.
 #[derive(Debug, Clone)]
@@ -38,19 +39,21 @@ impl Default for SandboxModeConfig {
 }
 
 impl SandboxModeConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let db = &settings.sandbox;
+
         let extra_domains = optional_env("SANDBOX_EXTRA_DOMAINS")?
             .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
-            .unwrap_or_default();
+            .unwrap_or_else(|| db.extra_allowed_domains.clone());
 
         Ok(Self {
-            enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
-            policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
-            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
-            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
-            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
-            image: parse_string_env("SANDBOX_IMAGE", "thinclaw-worker:latest")?,
-            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
+            enabled: parse_bool_env("SANDBOX_ENABLED", db.enabled)?,
+            policy: parse_string_env("SANDBOX_POLICY", db.policy.clone())?,
+            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", db.timeout_secs)?,
+            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", db.memory_limit_mb)?,
+            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", db.cpu_shares)?,
+            image: parse_string_env("SANDBOX_IMAGE", db.image.clone())?,
+            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", db.auto_pull_image)?,
             extra_allowed_domains: extra_domains,
         })
     }
@@ -150,7 +153,8 @@ impl ClaudeCodeConfig {
     /// Load from environment variables only (used inside containers where
     /// there is no database or full config).
     pub fn from_env() -> Self {
-        match Self::resolve() {
+        let defaults = Settings::default();
+        match Self::resolve(&defaults) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to resolve ClaudeCodeConfig: {e}, using defaults");
@@ -203,15 +207,22 @@ impl ClaudeCodeConfig {
         None
     }
 
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let defaults = Self::default();
+        let db_enabled = settings.claude_code_enabled;
+        let db_model = settings
+            .claude_code_model
+            .as_deref()
+            .unwrap_or(&defaults.model);
+        let db_max_turns = settings.claude_code_max_turns.unwrap_or(defaults.max_turns);
+
         Ok(Self {
-            enabled: parse_bool_env("CLAUDE_CODE_ENABLED", defaults.enabled)?,
+            enabled: parse_bool_env("CLAUDE_CODE_ENABLED", db_enabled)?,
             config_dir: optional_env("CLAUDE_CONFIG_DIR")?
                 .map(std::path::PathBuf::from)
                 .unwrap_or(defaults.config_dir),
-            model: parse_string_env("CLAUDE_CODE_MODEL", defaults.model)?,
-            max_turns: parse_optional_env("CLAUDE_CODE_MAX_TURNS", defaults.max_turns)?,
+            model: parse_string_env("CLAUDE_CODE_MODEL", db_model.to_string())?,
+            max_turns: parse_optional_env("CLAUDE_CODE_MAX_TURNS", db_max_turns)?,
             memory_limit_mb: parse_optional_env(
                 "CLAUDE_CODE_MEMORY_LIMIT_MB",
                 defaults.memory_limit_mb,

@@ -914,7 +914,7 @@ impl AppBuilder {
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
-            match ws.seed_if_empty().await {
+            match ws.seed_if_empty(Some(&self.config.agent.name)).await {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Failed to seed workspace: {}", e);

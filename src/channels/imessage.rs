@@ -506,6 +506,16 @@ impl Channel for IMessageChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // Only send to valid phone numbers or email addresses.
+        // Proactive notifications use broadcast() with user_id set to
+        // something like "default" — that's not a real iMessage contact.
+        if !Self::is_phone_number(user_id) && !Self::is_email(user_id) {
+            tracing::debug!(
+                recipient = user_id,
+                "iMessage: skipping broadcast — recipient is not a phone number or email"
+            );
+            return Ok(());
+        }
         Self::send_via_osascript(user_id, &response.content).await
     }
 

@@ -635,6 +635,15 @@ impl Channel for DiscordChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // Discord channel/user IDs are snowflakes (large integers).
+        // Skip gracefully if not numeric (e.g. "default").
+        if user_id.parse::<u64>().is_err() {
+            tracing::debug!(
+                recipient = user_id,
+                "Discord: skipping broadcast — recipient is not a valid snowflake ID"
+            );
+            return Ok(());
+        }
         let bot_token = self.config.bot_token.expose_secret();
         Self::send_message(&self.client, bot_token, user_id, &response.content).await
     }

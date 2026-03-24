@@ -450,6 +450,20 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
 }
 
 fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if ngrok is installed
+    if !is_binary_installed("ngrok") {
+        println!();
+        print_error("'ngrok' binary not found in PATH.");
+        print_info("Install ngrok before starting the agent:");
+        print_info("  macOS:   brew install ngrok");
+        print_info("  Linux:   snap install ngrok  (or download from https://ngrok.com/download)");
+        print_info("  Windows: choco install ngrok");
+        println!();
+        if !confirm("Continue configuring ngrok anyway? (you can install it before starting the agent)", false)? {
+            return Ok(TunnelSettings::default());
+        }
+    }
+
     print_info("Get your auth token from: https://dashboard.ngrok.com/get-started/your-authtoken");
     println!();
 
@@ -457,6 +471,9 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
     let domain = optional_input("Custom domain", Some("leave empty for auto-assigned"))?;
 
     print_success("ngrok configured. Tunnel will start automatically at boot.");
+    if !is_binary_installed("ngrok") {
+        print_info("⚠ Remember to install 'ngrok' before running 'thinclaw run'.");
+    }
 
     Ok(TunnelSettings {
         provider: Some("ngrok".to_string()),
@@ -467,6 +484,20 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 }
 
 fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if cloudflared is installed
+    if !is_binary_installed("cloudflared") {
+        println!();
+        print_error("'cloudflared' binary not found in PATH.");
+        print_info("Install cloudflared before starting the agent:");
+        print_info("  macOS:   brew install cloudflare/cloudflare/cloudflared");
+        print_info("  Linux:   See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/");
+        print_info("  Windows: winget install Cloudflare.cloudflared");
+        println!();
+        if !confirm("Continue configuring cloudflared anyway? (you can install it before starting the agent)", false)? {
+            return Ok(TunnelSettings::default());
+        }
+    }
+
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
     println!();
@@ -474,6 +505,9 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     let token = secret_input("Cloudflare tunnel token")?;
 
     print_success("Cloudflare tunnel configured. Tunnel will start automatically at boot.");
+    if !is_binary_installed("cloudflared") {
+        print_info("⚠ Remember to install 'cloudflared' before running 'thinclaw run'.");
+    }
 
     Ok(TunnelSettings {
         provider: Some("cloudflare".to_string()),
@@ -483,6 +517,21 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
 }
 
 fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if tailscale is installed
+    if !is_binary_installed("tailscale") {
+        println!();
+        print_error("'tailscale' binary not found in PATH.");
+        print_info("Install Tailscale before starting the agent:");
+        print_info("  macOS:   Download from https://tailscale.com/download/mac");
+        print_info("           or: brew install tailscale");
+        print_info("  Linux:   curl -fsSL https://tailscale.com/install.sh | sh");
+        print_info("  Windows: Download from https://tailscale.com/download/windows");
+        println!();
+        if !confirm("Continue configuring Tailscale anyway? (you can install it before starting the agent)", false)? {
+            return Ok(TunnelSettings::default());
+        }
+    }
+
     let funnel = confirm("Use Tailscale Funnel (public internet)?", true)?;
     let hostname = optional_input("Hostname override", Some("leave empty for auto-detect"))?;
 
@@ -492,6 +541,9 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
         "Serve (tailnet-only)"
     };
     print_success(&format!("Tailscale {} configured.", mode));
+    if !is_binary_installed("tailscale") {
+        print_info("⚠ Remember to install 'tailscale' before running 'thinclaw run'.");
+    }
 
     Ok(TunnelSettings {
         provider: Some("tailscale".to_string()),
@@ -553,6 +605,17 @@ fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
         public_url: Some(tunnel_url),
         ..Default::default()
     })
+}
+
+/// Check if a binary is available in PATH.
+fn is_binary_installed(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Set up Telegram webhook secret for signature validation.

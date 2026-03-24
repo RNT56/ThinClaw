@@ -3589,6 +3589,13 @@ function formatDate(isoString) {
 // Only keys listed here get rendered with nice labels — everything else
 // falls into an "Other" section as raw key/value.
 const SETTINGS_SCHEMA = {
+  'Notifications': {
+    icon: '🔔',
+    fields: [
+      { key: 'notifications.preferred_channel', label: 'Preferred channel', type: 'text', desc: 'Channel for proactive messages (heartbeats, alerts). e.g. "telegram", "signal", "web"', nullable: true },
+      { key: 'notifications.recipient', label: 'Recipient', type: 'text', desc: 'Your ID on the preferred channel (chat ID, phone number, pubkey)', nullable: true },
+    ]
+  },
   'Heartbeat': {
     icon: '💓',
     fields: [
@@ -3599,8 +3606,8 @@ const SETTINGS_SCHEMA = {
       { key: 'heartbeat.target', label: 'Output target', type: 'text', desc: '"chat", "none", or a channel name' },
       { key: 'heartbeat.active_start_hour', label: 'Active start hour', type: 'number', desc: '0-23, local time. Empty = always active', min: 0, max: 23, nullable: true },
       { key: 'heartbeat.active_end_hour', label: 'Active end hour', type: 'number', desc: '0-23, local time. Empty = always active', min: 0, max: 23, nullable: true },
-      { key: 'heartbeat.notify_channel', label: 'Notify channel', type: 'text', desc: 'Channel to send findings to (e.g. telegram)', nullable: true },
-      { key: 'heartbeat.notify_user', label: 'Notify user', type: 'text', desc: 'User ID to notify', nullable: true },
+      { key: 'heartbeat.notify_channel', label: 'Notify channel', type: 'text', desc: 'Override: channel to send findings to (uses Notifications default if empty)', nullable: true },
+      { key: 'heartbeat.notify_user', label: 'Notify user', type: 'text', desc: 'Override: user ID to notify (uses Notifications default if empty)', nullable: true },
     ]
   },
   'Agent': {
@@ -3615,6 +3622,70 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
       { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
       { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (⚠️ use with caution)' },
+    ]
+  },
+  'Channels — Telegram': {
+    icon: '📱',
+    fields: [
+      { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
+    ]
+  },
+  'Channels — Signal': {
+    icon: '🔒',
+    fields: [
+      { key: 'channels.signal_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Signal channel' },
+      { key: 'channels.signal_http_url', label: 'HTTP URL', type: 'text', desc: 'signal-cli daemon endpoint (e.g. http://127.0.0.1:8080)', nullable: true },
+      { key: 'channels.signal_account', label: 'Account', type: 'text', desc: 'Signal account E.164 number (e.g. +1234567890)', nullable: true },
+      { key: 'channels.signal_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone numbers or * (default: account)', nullable: true },
+      { key: 'channels.signal_dm_policy', label: 'DM policy', type: 'text', desc: '"open", "allowlist", or "pairing"', nullable: true },
+      { key: 'channels.signal_group_policy', label: 'Group policy', type: 'text', desc: '"allowlist", "open", or "disabled"', nullable: true },
+    ]
+  },
+  'Channels — Discord': {
+    icon: '🎮',
+    fields: [
+      { key: 'channels.discord_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Discord channel' },
+      { key: 'channels.discord_guild_id', label: 'Guild ID', type: 'text', desc: 'Restrict to single server (optional)', nullable: true },
+      { key: 'channels.discord_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated channel IDs (empty = all)', nullable: true },
+    ]
+  },
+  'Channels — Slack': {
+    icon: '💬',
+    fields: [
+      { key: 'channels.slack_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Slack channel' },
+      { key: 'channels.slack_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated channel/DM IDs (empty = all)', nullable: true },
+    ]
+  },
+  'Channels — Nostr': {
+    icon: '🟣',
+    fields: [
+      { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Nostr channel' },
+      { key: 'channels.nostr_relays', label: 'Relays', type: 'text', desc: 'Comma-separated relay URLs (wss://...)', nullable: true },
+      { key: 'channels.nostr_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated pubkeys (hex/npub) or * (empty = all)', nullable: true },
+    ]
+  },
+  'Channels — iMessage': {
+    icon: '🍎',
+    fields: [
+      { key: 'channels.imessage_enabled', label: 'Enabled', type: 'bool', desc: 'Enable iMessage channel (macOS only)' },
+      { key: 'channels.imessage_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone/email (empty = all)', nullable: true },
+      { key: 'channels.imessage_poll_interval', label: 'Poll interval (s)', type: 'number', desc: 'Seconds between chat.db checks', min: 1, max: 60, nullable: true },
+    ]
+  },
+  'Channels — Gmail': {
+    icon: '📧',
+    fields: [
+      { key: 'channels.gmail_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Gmail channel' },
+      { key: 'channels.gmail_project_id', label: 'GCP Project ID', type: 'text', desc: 'Google Cloud project', nullable: true },
+      { key: 'channels.gmail_subscription_id', label: 'Pub/Sub Subscription', type: 'text', desc: 'Pub/Sub subscription ID', nullable: true },
+      { key: 'channels.gmail_topic_id', label: 'Pub/Sub Topic', type: 'text', desc: 'Pub/Sub topic ID', nullable: true },
+      { key: 'channels.gmail_allowed_senders', label: 'Allowed senders', type: 'text', desc: 'Comma-separated emails (empty = all)', nullable: true },
+    ]
+  },
+  'Channels — Web Gateway': {
+    icon: '🌐',
+    fields: [
+      { key: 'channels.gateway_port', label: 'Port', type: 'number', desc: 'Web gateway port (default: 3000)', min: 1, max: 65535, nullable: true },
     ]
   },
   'Safety': {

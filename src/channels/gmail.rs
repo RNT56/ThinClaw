@@ -896,6 +896,15 @@ impl Channel for GmailChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // Only send to valid email addresses.
+        // Proactive notifications may arrive with user_id="default".
+        if !user_id.contains('@') {
+            tracing::debug!(
+                recipient = user_id,
+                "Gmail: skipping broadcast — recipient is not an email address"
+            );
+            return Ok(());
+        }
         // For broadcast, send a new email (not a reply).
         self.send_reply(
             user_id,

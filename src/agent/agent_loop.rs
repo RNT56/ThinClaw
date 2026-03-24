@@ -414,7 +414,7 @@ impl Agent {
 
                     if let Some(msg) = notification {
                         let response = OutgoingResponse::text(format!("Self-Repair: {}", msg));
-                        let _ = repair_channels.broadcast_all("default", response).await;
+                        let _ = repair_channels.broadcast("web", "default", response).await;
                     }
                 }
 
@@ -428,7 +428,7 @@ impl Agent {
                                 "Self-Repair: Tool '{}' repaired: {}",
                                 tool.name, message
                             ));
-                            let _ = repair_channels.broadcast_all("default", response).await;
+                            let _ = repair_channels.broadcast("web", "default", response).await;
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!(
@@ -582,16 +582,37 @@ impl Agent {
                                 .metadata
                                 .get("notify_user")
                                 .and_then(|v| v.as_str())
+                                .filter(|v| !v.is_empty())
                                 .unwrap_or("default")
                                 .to_string();
-                            let results = channels.broadcast_all(&user, response).await;
-                            for (ch, result) in results {
-                                if let Err(e) = result {
-                                    tracing::warn!(
-                                        "Failed to broadcast routine notification to {}: {}",
-                                        ch,
-                                        e
-                                    );
+                            let target_channel = response
+                                .metadata
+                                .get("notify_channel")
+                                .and_then(|v| v.as_str())
+                                .filter(|v| !v.is_empty());
+
+                            if let Some(ch) = target_channel {
+                                // Route to the specific target channel
+                                if let Err(e) =
+                                    channels.broadcast(ch, &user, response.clone()).await
+                                {
+                                    tracing::warn!("Failed to notify on channel {}: {}", ch, e);
+                                }
+                                // Also send to web channel for UI visibility (if it's not already web)
+                                if ch != "web" {
+                                    let _ = channels.broadcast("web", "default", response).await;
+                                }
+                            } else {
+                                // No target channel — broadcast to all (legacy/web-only behavior)
+                                let results = channels.broadcast_all(&user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
+                                        tracing::warn!(
+                                            "Failed to broadcast routine notification to {}: {}",
+                                            ch,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1147,26 +1168,48 @@ async fn upsert_heartbeat_routine(
 
     match existing {
         Ok(Some(mut routine)) => {
-            // Update trigger if interval changed
-            let needs_update = match &routine.trigger {
+            // Check if trigger, notify config, or enabled state changed
+            let trigger_changed = match &routine.trigger {
                 Trigger::Cron { schedule: s } => *s != schedule,
                 _ => true,
             };
+            let notify_changed = routine.notify.channel != hb_config.notify_channel
+                || routine.notify.user
+                    != hb_config
+                        .notify_user
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
 
-            if needs_update || !routine.enabled {
+            if trigger_changed || notify_changed || !routine.enabled {
                 routine.trigger = Trigger::Cron {
                     schedule: schedule.clone(),
                 };
                 routine.next_fire_at = next_cron_fire(&schedule).unwrap_or(None);
                 routine.enabled = true;
                 routine.action = action;
+                routine.notify = NotifyConfig {
+                    channel: hb_config.notify_channel.clone(),
+                    user: hb_config
+                        .notify_user
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string()),
+                    on_attention: true,
+                    on_failure: true,
+                    on_success: false,
+                };
+                routine.guardrails = RoutineGuardrails {
+                    cooldown: std::time::Duration::from_secs(hb_config.interval_secs / 2),
+                    max_concurrent: 1,
+                    dedup_window: None,
+                };
                 routine.updated_at = chrono::Utc::now();
                 store.update_routine(&routine).await.map_err(|e| {
                     Error::Database(crate::error::DatabaseError::Query(e.to_string()))
                 })?;
                 tracing::info!(
-                    "Updated heartbeat routine: schedule='{}', next_fire={:?}",
+                    "Updated heartbeat routine: schedule='{}', notify_channel={:?}, next_fire={:?}",
                     schedule,
+                    routine.notify.channel,
                     routine.next_fire_at
                 );
             } else {
@@ -1190,10 +1233,12 @@ async fn upsert_heartbeat_routine(
                     dedup_window: None,
                 },
                 notify: NotifyConfig {
+                    channel: hb_config.notify_channel.clone(),
+                    user: hb_config.notify_user.clone()
+                        .unwrap_or_else(|| "default".to_string()),
                     on_attention: true,
                     on_failure: true,
                     on_success: false, // HEARTBEAT_OK = silent
-                    ..Default::default()
                 },
                 last_run_at: None,
                 next_fire_at: next_fire,

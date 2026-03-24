@@ -83,7 +83,10 @@ impl AgentConfig {
                 "SESSION_IDLE_TIMEOUT_SECS",
                 settings.agent.session_idle_timeout_secs,
             )?),
-            allow_local_tools: parse_bool_env("ALLOW_LOCAL_TOOLS", false)?,
+            allow_local_tools: parse_bool_env(
+                "ALLOW_LOCAL_TOOLS",
+                settings.agent.allow_local_tools,
+            )?,
             max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
             max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
             max_tool_iterations: parse_optional_env(

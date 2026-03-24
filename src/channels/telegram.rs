@@ -725,11 +725,18 @@ impl Channel for TelegramChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        // Parse user_id as chat_id for direct messages
-        let chat_id: i64 = user_id.parse().map_err(|_| ChannelError::SendFailed {
-            name: NAME.to_string(),
-            reason: "Invalid user_id for broadcast".to_string(),
-        })?;
+        // Parse user_id as chat_id for direct messages.
+        // Skip gracefully if not a valid numeric ID (e.g. "default").
+        let chat_id: i64 = match user_id.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                tracing::debug!(
+                    recipient = user_id,
+                    "Telegram: skipping broadcast — recipient is not a numeric chat ID"
+                );
+                return Ok(());
+            }
+        };
 
         // Support forum topic targeting: heartbeat/cron messages can specify
         // a message_thread_id in metadata to land in the correct topic.

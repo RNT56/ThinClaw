@@ -986,6 +986,16 @@ impl Channel for SignalChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // Only send to valid E.164 phone numbers or UUIDs.
+        // Proactive notifications may arrive with user_id="default" which
+        // is not a valid Signal recipient.
+        if !Self::is_e164(user_id) && !Self::is_uuid(user_id) {
+            tracing::debug!(
+                recipient = user_id,
+                "Signal: skipping broadcast — recipient is not an E.164 number or UUID"
+            );
+            return Ok(());
+        }
         let target = Self::parse_recipient_target(user_id);
         let params = self.build_rpc_params(&target, Some(&response.content));
         self.rpc_request("send", params).await?;

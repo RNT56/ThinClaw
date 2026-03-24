@@ -471,6 +471,16 @@ impl Channel for SlackChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // Slack channel/DM IDs start with C, D, or G (e.g. "C1234", "D5678").
+        // Skip gracefully if the ID doesn't look valid (e.g. "default").
+        let first = user_id.chars().next().unwrap_or('_');
+        if !matches!(first, 'C' | 'D' | 'G' | 'U' | 'W') {
+            tracing::debug!(
+                recipient = user_id,
+                "Slack: skipping broadcast — recipient is not a valid Slack ID"
+            );
+            return Ok(());
+        }
         let bot_token = self.config.bot_token.expose_secret();
         Self::post_message(&self.client, bot_token, user_id, &response.content, None).await
     }

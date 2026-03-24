@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
+use crate::settings::Settings;
 
 /// WASM sandbox configuration.
 #[derive(Debug, Clone)]
@@ -46,20 +47,30 @@ fn default_tools_dir() -> PathBuf {
 }
 
 impl WasmConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let db = &settings.wasm;
         Ok(Self {
-            enabled: parse_bool_env("WASM_ENABLED", true)?,
+            enabled: parse_bool_env("WASM_ENABLED", db.enabled)?,
             tools_dir: optional_env("WASM_TOOLS_DIR")?
                 .map(PathBuf::from)
+                .or_else(|| db.tools_dir.clone())
                 .unwrap_or_else(default_tools_dir),
             default_memory_limit: parse_optional_env(
                 "WASM_DEFAULT_MEMORY_LIMIT",
-                10 * 1024 * 1024,
+                db.default_memory_limit,
             )?,
-            default_timeout_secs: parse_optional_env("WASM_DEFAULT_TIMEOUT_SECS", 60)?,
-            default_fuel_limit: parse_optional_env("WASM_DEFAULT_FUEL_LIMIT", 10_000_000)?,
-            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", true)?,
-            cache_dir: optional_env("WASM_CACHE_DIR")?.map(PathBuf::from),
+            default_timeout_secs: parse_optional_env(
+                "WASM_DEFAULT_TIMEOUT_SECS",
+                db.default_timeout_secs,
+            )?,
+            default_fuel_limit: parse_optional_env(
+                "WASM_DEFAULT_FUEL_LIMIT",
+                db.default_fuel_limit,
+            )?,
+            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", db.cache_compiled)?,
+            cache_dir: optional_env("WASM_CACHE_DIR")?
+                .map(PathBuf::from)
+                .or_else(|| db.cache_dir.clone()),
         })
     }
 

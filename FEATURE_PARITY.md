@@ -86,7 +86,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Twitch | ✅ | ❌ | P3 | |
 | Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
 | Gmail | ✅ | ✅ | - | `GmailChannel` (700+ LOC) — Pub/Sub pull + Gmail API read/reply + sender allowlist ([`src/channels/gmail.rs`](src/channels/gmail.rs)) |
-| Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`) |
+| Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`), broadcast() with pubkey validation, empty allowlist = accept all |
 
 ### Telegram-Specific Features (since Feb 2025)
 
@@ -420,7 +420,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Channel status view | ✅ | ✅ | P2 | `ChannelStatusView` with per-channel state machine, table/JSON format ([`src/channels/status_view.rs`](src/channels/status_view.rs)) |
 | Agent management | ✅ | ✅ | P3 | CLI: `agents list/add/remove/show/set-default`; `AgentRouter` dispatch pipeline |
 | Model selection | ✅ | ✅ | - | TUI only |
-| Config editing | ✅ | ✅ | P3 | `Settings.set()/.get()/.list()/.reset()` with typed path-based access ([`src/settings.rs`](src/settings.rs)). Web gateway Settings tab with grouped sections (Heartbeat, Agent, Safety, Features), toggle switches, import/export |
+| Config editing | ✅ | ✅ | P3 | `Settings.set()/.get()/.list()/.reset()` with typed path-based access ([`src/settings.rs`](src/settings.rs)). Web gateway Settings tab with grouped sections (Notifications, Heartbeat, Agent, Channels [Telegram/Signal/Discord/Slack/Nostr/iMessage/Gmail/Gateway], Safety, Features), toggle switches, import/export |
 | Debug/logs viewer | ✅ | ✅ | - | Real-time log streaming with level/target filters |
 | WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket |
 | Canvas system (A2UI) | ✅ | ✅ | P3 | `CanvasTool` + `CanvasStore` + canvas gateway routes for HTML/JSON rendering ([`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs)) |
@@ -458,6 +458,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
 | Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget lifecycle event delivery |
 | Heartbeat system | ✅ | ✅ | - | Periodic execution |
+| Notification routing | ✅ | ✅ | P1 | `NotificationSettings` (preferred_channel + recipient) in `Settings`. Per-channel broadcast validation guards. Wizard step 17 collects preferences. Heartbeat/routine notifications route to user-chosen channel. WebUI Settings tab exposes notification preferences. |
+| Wizard notification preferences | ❌ | ✅ | P1 | `step_notification_preferences` in wizard: auto-selects single channel, prompts for multi-channel, collects recipient (phone/chat ID/email). |
 | Gmail pub/sub | ✅ | ✅ | P3 | `GmailConfig` + `parse_pubsub_push()` + sender filtering ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) |
 
 ### Owner: IronClaw Agent

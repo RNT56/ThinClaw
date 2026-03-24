@@ -156,9 +156,9 @@ impl Channel for NostrChannel {
                             let sender_pubkey = event.pubkey;
                             let sender_hex = sender_pubkey.to_hex();
 
-                            // Check allowlist
+                            // Check allowlist (empty = accept all, matching other channels)
                             let allowed = if allow_from.is_empty() {
-                                false
+                                true
                             } else {
                                 let bech32 = sender_pubkey.to_bech32().unwrap_or_default();
                                 allow_from
@@ -264,6 +264,34 @@ impl Channel for NostrChannel {
     ) -> Result<(), ChannelError> {
         // Nostr doesn't support typing indicators
         Ok(())
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        // Validate recipient: must be a valid Nostr public key (hex or npub).
+        // Skip gracefully for non-pubkey identifiers like "default".
+        let recipient_pubkey = if let Ok(pk) = PublicKey::from_hex(user_id) {
+            pk
+        } else if let Ok(pk) = PublicKey::parse(user_id) {
+            pk
+        } else {
+            tracing::debug!(
+                recipient = user_id,
+                "Nostr: skipping broadcast — recipient is not a valid pubkey"
+            );
+            return Ok(());
+        };
+
+        let client_guard = self.client.read().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| ChannelError::NotConnected("Nostr client not connected".to_string()))?;
+
+        let keys = Self::parse_keys(&self.config)?;
+        Self::send_nip04_dm(client, &keys, &recipient_pubkey, &response.content).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {

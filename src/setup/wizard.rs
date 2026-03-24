@@ -145,7 +145,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 16;
+            let total_steps = 17;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -202,8 +202,8 @@ impl SetupWizard {
             self.step_extensions().await?;
             self.persist_after_step().await;
 
-            // Step 9: Docker Sandbox
-            print_step(9, total_steps, "Docker Sandbox");
+            // Step 9: Local Tools & Docker Sandbox
+            print_step(9, total_steps, "Local Tools & Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
@@ -240,6 +240,11 @@ impl SetupWizard {
             // Step 16: Heartbeat
             print_step(16, total_steps, "Background Tasks");
             self.step_heartbeat()?;
+            self.persist_after_step().await;
+
+            // Step 17: Notification Preferences
+            print_step(17, total_steps, "Notification Preferences");
+            self.step_notification_preferences()?;
             self.persist_after_step().await;
         }
 
@@ -426,6 +431,8 @@ impl SetupWizard {
                     print_info("Let's configure a new database URL.");
                 } else {
                     print_success("Database connection successful");
+                    // Run migrations to ensure new tables exist on older schemas
+                    self.run_migrations_postgres().await?;
                     self.settings.database_url = Some(url.clone());
                     return Ok(());
                 }
@@ -500,6 +507,12 @@ impl SetupWizard {
                 {
                     Ok(()) => {
                         print_success("Database connection successful");
+
+                        // Always run migrations — they're idempotent (IF NOT EXISTS)
+                        // and ensure new tables (e.g. secrets, routines) exist on
+                        // databases created with older schema versions.
+                        self.run_migrations_libsql().await?;
+
                         self.settings.libsql_path = Some(path.clone());
                         if let Some(url) = turso_url {
                             self.settings.libsql_url = Some(url);
@@ -2017,18 +2030,53 @@ impl SetupWizard {
 
     /// Step 9: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("ThinClaw can execute code, run builds, and use tools inside Docker");
-        print_info("containers. This keeps your system safe -- commands from the LLM run");
-        print_info("in an isolated sandbox with no access to your credentials, limited");
-        print_info("filesystem access, and network traffic restricted to an allowlist.");
+        // ── Part A: Local tools for the main agent ───────────────────────
         println!();
-        print_info("Without Docker, code execution tools (shell, file write) run directly");
-        print_info("on your machine with no isolation.");
+        print_info("═══ Main Agent: Local Tools ═══");
+        println!();
+        print_info("ThinClaw's main agent always runs natively on your machine.");
+        print_info("Enabling local tools gives the agent full access to:");
+        print_info("  • Shell commands (run scripts, install packages, etc.)");
+        print_info("  • File read/write anywhere on disk");
+        print_info("  • Screen capture (if enabled separately)");
+        println!();
+        print_info("Without local tools, the agent can only use web search, memory,");
+        print_info("and WASM-sandboxed extensions. No direct host access.");
         println!();
 
-        if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {
+        let allow_local = confirm(
+            "Allow ThinClaw to use local tools on your machine?",
+            false,
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.agent.allow_local_tools = allow_local;
+
+        if allow_local {
+            print_success("Local tools enabled. The agent can run commands and access files.");
+            print_info("You can disable this later with ALLOW_LOCAL_TOOLS=false.");
+        } else {
+            print_info("Local tools disabled. The agent will use sandboxed tools only.");
+            print_info("Enable later with ALLOW_LOCAL_TOOLS=true.");
+        }
+
+        // ── Part B: Docker sandbox for worker processes ──────────────────
+        println!();
+        print_info("═══ Docker Sandbox (Worker Processes) ═══");
+        println!();
+        print_info("Docker sandboxing is separate from local tools above.");
+        print_info("It isolates *worker processes* like Claude Code — they run inside");
+        print_info("Docker containers with no access to your credentials or full filesystem.");
+        println!();
+        print_info("This does NOT affect ThinClaw's main agent. The main agent always");
+        print_info("runs natively, governed by the 'local tools' setting above.");
+        println!();
+        print_info("Docker is required for: Claude Code sandbox, container-based builds.");
+        println!();
+
+        if !confirm("Enable Docker sandbox for worker processes?", false).map_err(SetupError::Io)? {
             self.settings.sandbox.enabled = false;
-            print_info("Sandbox disabled. You can enable it later with SANDBOX_ENABLED=true.");
+            print_info("Docker sandbox disabled. Worker processes will not use containers.");
+            print_info("You can enable it later with SANDBOX_ENABLED=true.");
             return Ok(());
         }
 
@@ -2038,7 +2086,7 @@ impl SetupWizard {
         match detection.status {
             crate::sandbox::detect::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
-                print_success("Docker is installed and running. Sandbox enabled.");
+                print_success("Docker is installed and running. Worker sandbox enabled.");
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -2064,24 +2112,24 @@ impl SetupWizard {
                     if retry.status.is_ok() {
                         self.settings.sandbox.enabled = true;
                         print_success(if not_installed {
-                            "Docker is now available. Sandbox enabled."
+                            "Docker is now available. Worker sandbox enabled."
                         } else {
-                            "Docker is now running. Sandbox enabled."
+                            "Docker is now running. Worker sandbox enabled."
                         });
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
-                            "Docker still not available. Sandbox disabled for now."
+                            "Docker still not available. Worker sandbox disabled for now."
                         } else {
-                            "Docker still not responding. Sandbox disabled for now."
+                            "Docker still not responding. Worker sandbox disabled for now."
                         });
                     }
                 } else {
                     self.settings.sandbox.enabled = false;
                     print_info(if not_installed {
-                        "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
+                        "Worker sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
                     } else {
-                        "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
+                        "Worker sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
                     });
                 }
             }
@@ -2156,7 +2204,7 @@ impl SetupWizard {
     fn step_claude_code(&mut self) -> Result<(), SetupError> {
         // Claude Code requires the Docker sandbox to be enabled
         if !self.settings.sandbox.enabled {
-            print_info("Claude Code requires Docker sandbox (disabled in step 9).");
+            print_info("Claude Code requires Docker sandbox (not enabled in step 9).");
             print_info("Skipping Claude Code configuration.");
             self.settings.claude_code_enabled = false;
             return Ok(());
@@ -2338,6 +2386,160 @@ impl SetupWizard {
     }
 
     /// Step 16: Heartbeat configuration.
+    /// Configure which channel receives proactive notifications.
+    ///
+    /// Auto-selects if only one channel is configured.
+    /// For Telegram, auto-populates with the owner's chat ID.
+    /// For iMessage/Signal, prompts for phone number.
+    fn step_notification_preferences(&mut self) -> Result<(), SetupError> {
+        print_info("ThinClaw sends proactive notifications (heartbeat alerts, routine results,");
+        print_info("self-repair messages) to a channel of your choice.");
+        println!();
+
+        // Collect configured channels
+        let mut channels: Vec<String> = Vec::new();
+        channels.push("web".to_string()); // Always available
+        // Telegram is a WASM channel — detected by owner binding or wasm_channels list
+        if self.settings.channels.telegram_owner_id.is_some()
+            || self
+                .settings
+                .channels
+                .wasm_channels
+                .iter()
+                .any(|c| c == "telegram")
+        {
+            channels.push("telegram".to_string());
+        }
+        if self.settings.channels.imessage_enabled {
+            channels.push("imessage".to_string());
+        }
+        if self.settings.channels.signal_enabled {
+            channels.push("signal".to_string());
+        }
+        if self.settings.channels.discord_enabled {
+            channels.push("discord".to_string());
+        }
+        if self.settings.channels.slack_enabled {
+            channels.push("slack".to_string());
+        }
+        if self.settings.channels.nostr_enabled {
+            channels.push("nostr".to_string());
+        }
+
+        if channels.len() == 1 {
+            // Only web — no external channels configured
+            print_info("Only the web channel is configured.");
+            print_info("Notifications will appear in the Web UI.");
+            self.settings.notifications.preferred_channel = Some("web".to_string());
+            self.settings.notifications.recipient = Some("default".to_string());
+            return Ok(());
+        }
+
+        if channels.len() == 2 {
+            // Exactly one external channel — auto-select it
+            let ch = channels[1].clone(); // Skip "web"
+            print_info(&format!(
+                "Auto-selecting '{}' as your notification channel (only external channel configured).",
+                ch
+            ));
+            self.settings.notifications.preferred_channel = Some(ch.clone());
+            self.collect_notification_recipient(&ch)?;
+            return Ok(());
+        }
+
+        // Multiple channels — ask user to pick
+        let options: Vec<String> = channels
+            .iter()
+            .map(|ch| match ch.as_str() {
+                "web" => "web       — Web UI only (always available)".to_string(),
+                "telegram" => "telegram  — Telegram bot messages".to_string(),
+                "imessage" => "imessage  — iMessage (macOS)".to_string(),
+                "signal" => "signal    — Signal messenger".to_string(),
+                "discord" => "discord   — Discord bot".to_string(),
+                "slack" => "slack     — Slack workspace".to_string(),
+                "nostr" => "nostr     — Nostr relay".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+
+        let option_strs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+        let choice = select_one("Which channel for proactive notifications?", &option_strs)
+            .map_err(SetupError::Io)?;
+
+        let selected = channels[choice].clone();
+        self.settings.notifications.preferred_channel = Some(selected.clone());
+
+        if selected != "web" {
+            self.collect_notification_recipient(&selected)?;
+        } else {
+            self.settings.notifications.recipient = Some("default".to_string());
+        }
+
+        print_success(&format!("Notifications will be sent via '{}'", selected));
+        print_info("You can change this later in Settings > Notifications.");
+
+        Ok(())
+    }
+
+    /// Collect the recipient identifier for a given notification channel.
+    fn collect_notification_recipient(&mut self, channel: &str) -> Result<(), SetupError> {
+        match channel {
+            "telegram" => {
+                // Auto-populate from Telegram owner binding
+                if let Some(owner_id) = self.settings.channels.telegram_owner_id {
+                    print_info(&format!("Telegram owner detected (ID: {}).", owner_id));
+                    if confirm("Use this account for notifications?", true)
+                        .map_err(SetupError::Io)?
+                    {
+                        self.settings.notifications.recipient = Some(owner_id.to_string());
+                        return Ok(());
+                    }
+                }
+                let id = input("Telegram chat ID (numeric)").map_err(SetupError::Io)?;
+                if !id.is_empty() {
+                    self.settings.notifications.recipient = Some(id);
+                }
+            }
+            "imessage" => {
+                print_info("Enter your phone number or Apple ID for iMessage notifications.");
+                let contact = input("Phone number or Apple ID (e.g., +4917612345678)")
+                    .map_err(SetupError::Io)?;
+                if !contact.is_empty() {
+                    self.settings.notifications.recipient = Some(contact);
+                } else {
+                    print_info("No recipient set — iMessage notifications disabled.");
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            "signal" => {
+                print_info("Enter your phone number for Signal notifications.");
+                let number = input("Phone number (E.164 format, e.g., +4917612345678)")
+                    .map_err(SetupError::Io)?;
+                if !number.is_empty() {
+                    self.settings.notifications.recipient = Some(number);
+                } else {
+                    print_info("No recipient set — Signal notifications disabled.");
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            "discord" => {
+                print_info("Enter your Discord user ID for notifications.");
+                let id = input("Discord user ID").map_err(SetupError::Io)?;
+                if !id.is_empty() {
+                    self.settings.notifications.recipient = Some(id);
+                } else {
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            _ => {
+                self.settings.notifications.recipient = Some("default".to_string());
+            }
+        }
+        Ok(())
+    }
+
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -2585,6 +2787,11 @@ impl SetupWizard {
                 "OBSERVABILITY_BACKEND",
                 self.settings.observability_backend.clone(),
             ));
+        }
+
+        // Agent local tools
+        if self.settings.agent.allow_local_tools {
+            env_vars.push(("ALLOW_LOCAL_TOOLS", "true".to_string()));
         }
 
         if !env_vars.is_empty() {

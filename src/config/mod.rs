@@ -278,16 +278,16 @@ impl Config {
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
-            safety: SafetyConfig::resolve()?,
-            wasm: WasmConfig::resolve()?,
+            safety: SafetyConfig::resolve(settings)?,
+            wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve()?,
-            routines: RoutineConfig::resolve()?,
-            sandbox: SandboxModeConfig::resolve()?,
-            claude_code: ClaudeCodeConfig::resolve()?,
-            skills: SkillsConfig::resolve()?,
+            routines: RoutineConfig::resolve(settings)?,
+            sandbox: SandboxModeConfig::resolve(settings)?,
+            claude_code: ClaudeCodeConfig::resolve(settings)?,
+            skills: SkillsConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: helpers::optional_env("OBSERVABILITY_BACKEND")
                     .ok()
