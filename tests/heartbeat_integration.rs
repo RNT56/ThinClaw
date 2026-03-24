@@ -21,7 +21,7 @@ async fn test_heartbeat_end_to_end() {
     // Load .env and set up logging
     let _ = dotenvy::dotenv();
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("ironclaw=debug")
+        .with_env_filter("thinclaw=debug")
         .try_init();
 
     println!("=== Heartbeat Integration Test ===\n");

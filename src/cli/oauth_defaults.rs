@@ -167,7 +167,7 @@ pub fn callback_url() -> String {
 ///
 /// ```bash
 /// export OAUTH_CALLBACK_HOST=203.0.113.10
-/// ironclaw login
+/// thinclaw login
 /// # Opens: http://203.0.113.10:9876/auth/callback
 /// ```
 pub fn callback_host() -> String {

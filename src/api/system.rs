@@ -83,7 +83,7 @@ pub struct SnapshotResult {
 /// Create a portable snapshot of ThinClaw's database.
 ///
 /// This is used by Scrappy's cloud migration engine to include
-/// ironclaw.db in cross-device sync. The snapshot is a self-contained
+/// thinclaw.db in cross-device sync. The snapshot is a self-contained
 /// SQLite file (WAL is flushed before copy).
 ///
 /// # Arguments

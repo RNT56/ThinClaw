@@ -1,4 +1,4 @@
-//! `ironclaw doctor` - active health diagnostics.
+//! `thinclaw doctor` - active health diagnostics.
 //!
 //! Probes external dependencies and validates configuration to surface
 //! problems before they bite during normal operation. Each check reports

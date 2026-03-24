@@ -1,4 +1,4 @@
-/* IronClaw Web Gateway */
+/* ThinClaw Web Gateway */
 
 :root {
   --bg: #09090b;
@@ -1099,6 +1099,7 @@ body {
 
 .tree-children {
   /* Rendered inline, indentation handled by padding-left on tree-row */
+  display: block;
 }
 
 /* Legacy tree-item (search results) */

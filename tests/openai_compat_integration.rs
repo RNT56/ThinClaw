@@ -367,10 +367,10 @@ async fn test_chat_completions_streaming() {
     // Check simulated streaming header
     assert_eq!(
         resp.headers()
-            .get("x-ironclaw-streaming")
+            .get("x-thinclaw-streaming")
             .and_then(|v| v.to_str().ok()),
         Some("simulated"),
-        "Expected x-ironclaw-streaming: simulated header"
+        "Expected x-thinclaw-streaming: simulated header"
     );
 
     let text = resp.text().await.unwrap();

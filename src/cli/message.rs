@@ -2,7 +2,7 @@
 //!
 //! Allows injecting a message into the agent via the gateway HTTP API.
 //!
-//! Usage: `ironclaw message send --text "hello world"`
+//! Usage: `thinclaw message send --text "hello world"`
 
 use clap::Subcommand;
 

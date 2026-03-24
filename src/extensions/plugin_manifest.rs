@@ -84,7 +84,7 @@ pub enum PluginSource {
         /// Download URL.
         url: String,
     },
-    /// Builtin extension (ships with ironclaw).
+    /// Builtin extension (ships with thinclaw).
     Builtin,
 }
 

@@ -154,7 +154,7 @@ impl TailscaleDiscovery {
 
             let hostname = peer.host_name.as_deref().unwrap_or("unknown").to_string();
 
-            // Check for ironclaw tag or hostname pattern
+            // Check for thinclaw tag or hostname pattern
             let is_orchestrator = peer
                 .tags
                 .as_ref()
