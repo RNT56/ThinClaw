@@ -262,6 +262,8 @@ The wizard guides you through:
 Settings are persisted in the connected database. Bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`)
 are written to `~/.thinclaw/.env` so they are available before the database connects.
 
+> **Upgrading & Reset:** Rebuilding with `cargo build --release` only updates the binary — all data in `~/.thinclaw/` is untouched. To fully reset, remove `~/.thinclaw/` and re-run. See [Data Directory, Upgrades & Reset](docs/DEPLOYMENT.md#data-directory-upgrades--reset) for the full directory layout and partial reset options.
+
 ### Environment Variables
 
 You can also configure ThinClaw directly via environment variables or a `.env` file:

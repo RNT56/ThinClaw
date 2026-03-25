@@ -22,6 +22,7 @@ This guide covers every way to deploy ThinClaw as a standalone agent and connect
   - [Linux: systemd](#linux-systemd)
 - [macOS-Specific Features](#macos-specific-features)
 - [Environment Reference](#environment-reference)
+- [Data Directory, Upgrades & Reset](#data-directory-upgrades--reset)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -799,6 +800,81 @@ Comprehensive list of all environment variables. Set these in `~/.thinclaw/.env`
 | `ROUTINES_ENABLED` | `true` | Cron/event/webhook routines |
 
 See `CLAUDE.md` for the complete configuration reference.
+
+---
+
+## Data Directory, Upgrades & Reset
+
+### Data Directory Layout
+
+All persistent state lives in `~/.thinclaw/`, completely separate from the source code and compiled binary:
+
+| Path | Purpose | Created By |
+|------|---------|------------|
+| `~/.thinclaw/.env` | Bootstrap config (DATABASE_URL, LLM_BACKEND, API keys) | Onboarding wizard |
+| `~/.thinclaw/thinclaw.db` | libSQL database (settings, memory, threads, conversations, routines) | First run (libSQL mode) |
+| `~/.thinclaw/tools/` | Installed WASM tool extensions (`.wasm` + `.capabilities.json`) | `thinclaw extension install` |
+| `~/.thinclaw/channels/` | Installed WASM channel extensions (Telegram, Discord, etc.) | `thinclaw extension install` |
+| `~/.thinclaw/skills/` | User-placed skills (trusted) | Manual |
+| `~/.thinclaw/installed_skills/` | Registry-installed skills | `thinclaw skill install` |
+| `~/.thinclaw/projects/` | Docker sandbox project bind-mounts | Docker orchestrator |
+| `~/.thinclaw/logs/` | Service logs (`daemon.stdout.log`, `daemon.stderr.log`) | `thinclaw service start` |
+| `~/.thinclaw/audio/` | Voice/audio capture temp files | Voice features |
+| `~/.thinclaw/telegram-*.json` | Telegram pairing and allowlist state | Telegram channel |
+| `~/.thinclaw/memory_hygiene_state.json` | Memory cleanup scheduler state | Hygiene system |
+
+> **Key insight:** `cargo build --release` only recompiles the binary at `target/release/thinclaw`. It does **not** touch `~/.thinclaw/` — your database, settings, memory, extensions, and all agent state are completely safe across rebuilds.
+
+### Upgrading (Safe Rebuild)
+
+To upgrade ThinClaw after pulling new code:
+
+```bash
+# 1. Pull latest code
+cd /path/to/ThinClaw
+git pull
+
+# 2. Rebuild the binary (does NOT affect your data)
+cargo build --release
+
+# 3. Restart the service (picks up the new binary)
+thinclaw service stop
+thinclaw service start
+
+# Or if running in a terminal, just Ctrl+C and re-run:
+./target/release/thinclaw
+```
+
+If the agent is running as a launchd/systemd service, you can also use the `/restart` command from any connected channel (chat, Telegram, web UI) — the service manager will automatically restart with the new binary.
+
+### Reset Procedures
+
+**Full reset** (wipe everything, start fresh):
+
+```bash
+# Stop the service first
+thinclaw service stop 2>/dev/null
+
+# Remove all persistent state
+rm -rf ~/.thinclaw
+
+# Re-run — the wizard will launch automatically
+./target/release/thinclaw
+```
+
+**Partial resets** (target specific components):
+
+| Goal | Command | Effect |
+|------|---------|--------|
+| Re-run onboarding wizard | `thinclaw onboard` | Walks through setup again, overwrites settings |
+| Reset database (conversations, memory, settings) | `rm ~/.thinclaw/thinclaw.db` | DB is re-created on next launch; wizard re-runs |
+| Reset bootstrap config | `rm ~/.thinclaw/.env` | Wizard re-runs to reconfigure LLM, database, etc. |
+| Reset extensions only | `rm -rf ~/.thinclaw/tools/ ~/.thinclaw/channels/` | Re-install via wizard or `thinclaw extension install` |
+| Reset skills only | `rm -rf ~/.thinclaw/skills/ ~/.thinclaw/installed_skills/` | Re-install manually or via registry |
+| Reset service logs | `rm -rf ~/.thinclaw/logs/` | Logs directory is re-created on next service start |
+| Reset Telegram pairing | `rm ~/.thinclaw/telegram-*.json` | Must re-pair Telegram users |
+
+> **Note:** If you're using PostgreSQL instead of libSQL, the database lives in your PostgreSQL server — `rm ~/.thinclaw/thinclaw.db` won't apply. Use `DROP DATABASE thinclaw;` and `CREATE DATABASE thinclaw;` to reset a PostgreSQL database.
 
 ---
 
