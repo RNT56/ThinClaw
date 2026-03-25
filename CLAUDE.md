@@ -23,7 +23,7 @@
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
 - **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
 - **Multi-provider LLM**: OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil, AWS Bedrock, Google Gemini, llama.cpp
-- **Setup wizard**: 16-step interactive onboarding for first-run configuration
+- **Setup wizard**: 18-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -335,7 +335,7 @@ src/
 │
 ├── setup/              # Onboarding wizard (spec: src/setup/README.md)
 │   ├── mod.rs          # Entry point, check_onboard_needed()
-│   ├── wizard.rs       # 16-step interactive wizard
+│   ├── wizard.rs       # 18-step interactive wizard
 │   ├── channels.rs     # Channel setup helpers
 │   └── prompts.rs      # Terminal prompts (select, confirm, secret)
 │

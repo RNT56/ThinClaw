@@ -48,7 +48,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 16-Step Wizard
+## The 18-Step Wizard
 
 ### Overview
 
@@ -61,14 +61,16 @@ Step 5:  Model Selection
 Step 6:  Embeddings
 Step 7:  Channel Configuration
 Step 8:  Extensions (tools)
-Step 9:  Docker Sandbox
-Step 10: Routines (scheduled tasks)
-Step 11: Skills
-Step 12: Claude Code Sandbox
-Step 13: Smart Routing (cheap model)
-Step 14: Web UI (theme, accent)
-Step 15: Observability
-Step 16: Background Tasks (heartbeat)
+Step 9:  Local Tools & Docker Sandbox
+Step 10: Tool Approval Mode
+Step 11: Routines (scheduled tasks)
+Step 12: Skills
+Step 13: Claude Code Sandbox
+Step 14: Smart Routing (cheap model)
+Step 15: Web UI (theme, accent)
+Step 16: Observability
+Step 17: Background Tasks (heartbeat)
+Step 18: Notification Preferences
         ↓
    save_and_summarize()
 ```
