@@ -390,6 +390,7 @@ impl Agent {
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
                 "\n",
+                "  /restart          Restart agent (for updates)\n",
                 "  /quit             Exit",
             ))),
 

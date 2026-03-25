@@ -13,7 +13,7 @@ version: '3.9'
 services:
   thinclaw:
     build:
-      context: ..  # ironclaw/ directory (one level up from deploy/)
+      context: ..  # ThinClaw/ directory (one level up from deploy/)
       dockerfile: Dockerfile
     container_name: thinclaw-remote
     restart: unless-stopped

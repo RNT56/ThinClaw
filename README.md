@@ -501,6 +501,17 @@ Enable the **Gateway** channel during setup, then connect Scrappy via **Settings
 | Direct binary | Mac Mini, macOS/Linux servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-1-direct-binary-recommended-for-mac-mini) |
 | Docker Compose | Linux VPS, cloud servers | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-2-docker-compose-any-os) |
 | Scrappy one-click | Linux servers (automated SSH) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-3-automated-deploy-from-scrappy-linux-targets) |
+| Linux server setup | Fresh VPS (Docker + UFW + Fail2ban + Tailscale) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#path-4-automated-linux-server-setup) |
+
+**Auto-start on boot (Mac Mini / Linux):**
+
+```bash
+thinclaw                   # Complete the onboarding wizard first (interactive)
+thinclaw service install   # Creates launchd plist (macOS) or systemd unit (Linux)
+thinclaw service start     # Starts the agent in the background
+```
+
+The service runs `thinclaw run --no-onboard` with **all configured channels** (Telegram, iMessage, Discord, Gateway, etc.) — not just Scrappy. launchd/systemd automatically restarts ThinClaw if it crashes or exits.
 
 The comprehensive deployment guide covers: Tailscale VPN setup, auto-start on boot (launchd/systemd), macOS-specific features (Keychain, iMessage, Metal GPU), environment variable reference, and troubleshooting.
 

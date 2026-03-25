@@ -996,18 +996,27 @@ impl Agent {
                         }
 
                         // Check if tool requires approval on the final (post-hook)
-                        // parameters. Skipped when auto_approve_tools is set.
-                        if !self.config.auto_approve_tools
-                            && let Some(tool) = self.tools().get(&tc.name).await
-                        {
+                        // parameters. When auto_approve_tools is set, auto-approve
+                        // everything EXCEPT ApprovalRequirement::Always (destructive
+                        // commands from NEVER_AUTO_APPROVE_PATTERNS like rm -rf,
+                        // DROP DATABASE, etc.) which always require human approval.
+                        if let Some(tool) = self.tools().get(&tc.name).await {
                             use crate::tools::ApprovalRequirement;
-                            let needs_approval = match tool.requires_approval(&tc.arguments) {
-                                ApprovalRequirement::Never => false,
-                                ApprovalRequirement::UnlessAutoApproved => {
-                                    let sess = session.lock().await;
-                                    !sess.is_tool_auto_approved(&tc.name)
+                            let approval = tool.requires_approval(&tc.arguments);
+                            let needs_approval = if self.config.auto_approve_tools {
+                                // Auto-approve mode: only block Always-approval
+                                // tools (destructive shell commands, hardware access).
+                                matches!(approval, ApprovalRequirement::Always)
+                            } else {
+                                // Normal mode: full approval check.
+                                match approval {
+                                    ApprovalRequirement::Never => false,
+                                    ApprovalRequirement::UnlessAutoApproved => {
+                                        let sess = session.lock().await;
+                                        !sess.is_tool_auto_approved(&tc.name)
+                                    }
+                                    ApprovalRequirement::Always => true,
                                 }
-                                ApprovalRequirement::Always => true,
                             };
 
                             if needs_approval {

@@ -52,6 +52,9 @@ pub struct AgentConfig {
     pub workspace_mode: String,
     /// Root directory for sandboxed/project modes. None = user home.
     pub workspace_root: Option<std::path::PathBuf>,
+    /// Preferred notification channel for proactive agent messages (boot, bootstrap).
+    /// Resolved from: NOTIFY_CHANNEL env var > settings.notifications.preferred_channel.
+    pub notify_channel: Option<String>,
 }
 
 impl AgentConfig {
@@ -113,6 +116,8 @@ impl AgentConfig {
             workspace_mode: optional_env("WORKSPACE_MODE")?
                 .unwrap_or_else(|| "sandboxed".to_string()),
             workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
+            notify_channel: optional_env("NOTIFY_CHANNEL")?
+                .or_else(|| settings.notifications.preferred_channel.clone()),
         })
     }
 

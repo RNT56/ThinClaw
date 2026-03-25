@@ -124,6 +124,9 @@ impl SubmissionParser {
         if lower == "/quit" || lower == "/exit" || lower == "/shutdown" {
             return Submission::Quit;
         }
+        if lower == "/restart" {
+            return Submission::Restart;
+        }
 
         // /thread <uuid> - switch thread
         if let Some(rest) = lower.strip_prefix("/thread ") {
@@ -249,6 +252,11 @@ pub enum Submission {
 
     /// Quit the agent. Bypasses thread-state checks.
     Quit,
+
+    /// Restart the agent. Orderly shutdown followed by OS service restart.
+    /// The service manager (launchd/systemd) will automatically restart the
+    /// process, picking up any binary updates applied before the restart.
+    Restart,
 
     /// System command (help, model, version, tools, ping, debug).
     /// Bypasses thread-state checks and safety validation.
@@ -768,5 +776,21 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
+    }
+
+    #[test]
+    fn test_parser_restart() {
+        assert!(matches!(
+            SubmissionParser::parse("/restart"),
+            Submission::Restart
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/RESTART"),
+            Submission::Restart
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/Restart"),
+            Submission::Restart
+        ));
     }
 }

@@ -339,6 +339,7 @@ mod tests {
                 model_thinking_overrides: std::collections::HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
                 workspace_root: None,
+                notify_channel: None,
             },
             deps,
             Arc::new(ChannelManager::new()),

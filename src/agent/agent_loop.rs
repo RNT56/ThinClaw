@@ -767,6 +767,12 @@ impl Agent {
 
         tracing::info!("Agent {} ready and listening", self.config.name);
 
+        // ── Proactive startup hooks ────────────────────────────────────
+        // Execute BOOT.md (every startup) and BOOTSTRAP.md (first run only)
+        // before entering the main message loop. Responses are routed to the
+        // user's preferred notification channel (e.g., Telegram).
+        self.run_startup_hooks().await;
+
         loop {
             let message = tokio::select! {
                 biased;
@@ -902,6 +908,179 @@ impl Agent {
         Ok(())
     }
 
+    // ── Proactive startup hooks ────────────────────────────────────────
+
+    /// Execute startup hooks: BOOT.md (every boot) and BOOTSTRAP.md (first run).
+    ///
+    /// Each hook is read from the workspace, processed as a synthetic user
+    /// message, and the response is sent to the user's preferred notification
+    /// channel. Errors are logged but never prevent the agent from starting.
+    async fn run_startup_hooks(&self) {
+        let workspace = match self.workspace() {
+            Some(ws) => ws,
+            None => {
+                tracing::debug!("No workspace configured — skipping startup hooks");
+                return;
+            }
+        };
+
+        let target_channel = self
+            .config
+            .notify_channel
+            .as_deref()
+            .unwrap_or("web");
+
+        // ── 1. BOOT.md — runs on every startup ────────────────────────
+        match workspace
+            .read(crate::workspace::paths::BOOT)
+            .await
+        {
+            Ok(doc) => {
+                if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
+                    tracing::info!(
+                        "Executing BOOT.md startup hook (target channel: {})",
+                        target_channel,
+                    );
+                    self.run_startup_hook(
+                        "boot",
+                        &doc.content,
+                        target_channel,
+                    )
+                    .await;
+                } else {
+                    tracing::debug!("BOOT.md is empty/template-only — skipping");
+                }
+            }
+            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                tracing::debug!("No BOOT.md found — skipping boot hook");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read BOOT.md: {} — skipping boot hook", e);
+            }
+        }
+
+        // ── 2. BOOTSTRAP.md — runs only on first run ──────────────────
+        match workspace
+            .read(crate::workspace::paths::BOOTSTRAP)
+            .await
+        {
+            Ok(doc) => {
+                if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
+                    tracing::info!(
+                        "Executing BOOTSTRAP.md first-run hook (target channel: {})",
+                        target_channel,
+                    );
+                    self.run_startup_hook(
+                        "bootstrap",
+                        &doc.content,
+                        target_channel,
+                    )
+                    .await;
+
+                    // Delete BOOTSTRAP.md after successful execution so it
+                    // only runs once (matches the existing convention where
+                    // the agent deletes it after completing the identity ritual).
+                    match workspace
+                        .delete(crate::workspace::paths::BOOTSTRAP)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                "Deleted BOOTSTRAP.md — first-run hook complete"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to delete BOOTSTRAP.md (may re-run next startup): {}",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!("BOOTSTRAP.md is empty/template-only — skipping");
+                }
+            }
+            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                tracing::debug!(
+                    "No BOOTSTRAP.md found — first-run hook already executed or not configured"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read BOOTSTRAP.md: {} — skipping first-run hook", e);
+            }
+        }
+    }
+
+    /// Execute a single startup hook by creating a synthetic message and
+    /// routing the response to the target channel.
+    async fn run_startup_hook(
+        &self,
+        hook_name: &str,
+        content: &str,
+        target_channel: &str,
+    ) {
+        // Build a synthetic IncomingMessage from the hook content.
+        // The channel is set to the hook name (e.g. "boot", "bootstrap")
+        // so handle_message can identify the source.
+        let message = IncomingMessage::new(
+            hook_name,
+            "default",
+            content,
+        );
+
+        match self.handle_message(&message).await {
+            Ok(Some(response)) if !response.is_empty() => {
+                // Send the response to the user's preferred notification channel.
+                let out = OutgoingResponse::text(&response);
+                if let Err(e) = self
+                    .channels
+                    .broadcast(target_channel, "default", out.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to send {} hook response to '{}': {} — falling back to web",
+                        hook_name,
+                        target_channel,
+                        e
+                    );
+                    // Fallback: try web channel so the user at least sees it somewhere.
+                    if target_channel != "web" {
+                        let _ = self
+                            .channels
+                            .broadcast("web", "default", out)
+                            .await;
+                    }
+                } else {
+                    tracing::info!(
+                        "Sent {} hook response to '{}'",
+                        hook_name,
+                        target_channel,
+                    );
+                }
+                // Also mirror to web if the primary channel is not web.
+                if target_channel != "web" {
+                    let _ = self
+                        .channels
+                        .broadcast("web", "default", OutgoingResponse::text(&response))
+                        .await;
+                }
+            }
+            Ok(Some(_empty)) => {
+                tracing::debug!("{} hook returned empty response — nothing to send", hook_name);
+            }
+            Ok(None) => {
+                tracing::debug!("{} hook returned None — nothing to send", hook_name);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Error executing {} startup hook: {} — agent will continue normally",
+                    hook_name,
+                    e
+                );
+            }
+        }
+    }
+
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
@@ -1020,6 +1199,32 @@ impl Agent {
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
             Submission::Quit => return Ok(None),
+            Submission::Restart => {
+                // Notify the user that the agent is restarting, then trigger
+                // orderly shutdown. The OS service manager (launchd KeepAlive /
+                // systemd Restart=always) will automatically relaunch the process.
+                let target_channel = self
+                    .config
+                    .notify_channel
+                    .as_deref()
+                    .unwrap_or("web");
+                let restart_msg = OutgoingResponse::text(
+                    "🔄 Restarting ThinClaw agent… The service manager will relaunch me shortly.",
+                );
+                // Best-effort: send to preferred channel + web
+                let _ = self
+                    .channels
+                    .broadcast(target_channel, &message.user_id, restart_msg.clone())
+                    .await;
+                if target_channel != "web" {
+                    let _ = self
+                        .channels
+                        .broadcast("web", &message.user_id, restart_msg)
+                        .await;
+                }
+                tracing::info!("Restart requested — performing orderly shutdown");
+                return Ok(None);
+            }
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await
             }
