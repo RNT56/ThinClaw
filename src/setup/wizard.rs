@@ -145,7 +145,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 17;
+            let total_steps = 18;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -207,43 +207,48 @@ impl SetupWizard {
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 10: Routines
-            print_step(10, total_steps, "Routines (Scheduled Tasks)");
+            // Step 10: Tool Approval Mode
+            print_step(10, total_steps, "Tool Approval Mode");
+            self.step_tool_approval()?;
+            self.persist_after_step().await;
+
+            // Step 11: Routines
+            print_step(11, total_steps, "Routines (Scheduled Tasks)");
             self.step_routines()?;
             self.persist_after_step().await;
 
-            // Step 11: Skills
-            print_step(11, total_steps, "Skills");
+            // Step 12: Skills
+            print_step(12, total_steps, "Skills");
             self.step_skills()?;
             self.persist_after_step().await;
 
-            // Step 12: Claude Code
-            print_step(12, total_steps, "Claude Code Sandbox");
+            // Step 13: Claude Code
+            print_step(13, total_steps, "Claude Code Sandbox");
             self.step_claude_code()?;
             self.persist_after_step().await;
 
-            // Step 13: Smart Routing
-            print_step(13, total_steps, "Smart Routing");
-            self.step_smart_routing()?;
+            // Step 14: Smart Routing
+            print_step(14, total_steps, "Smart Routing");
+            self.step_smart_routing().await?;
             self.persist_after_step().await;
 
-            // Step 14: Web UI
-            print_step(14, total_steps, "Web UI");
+            // Step 15: Web UI
+            print_step(15, total_steps, "Web UI");
             self.step_web_ui()?;
             self.persist_after_step().await;
 
-            // Step 15: Observability
-            print_step(15, total_steps, "Observability");
+            // Step 16: Observability
+            print_step(16, total_steps, "Observability");
             self.step_observability()?;
             self.persist_after_step().await;
 
-            // Step 16: Heartbeat
-            print_step(16, total_steps, "Background Tasks");
+            // Step 17: Heartbeat
+            print_step(17, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
 
-            // Step 17: Notification Preferences
-            print_step(17, total_steps, "Notification Preferences");
+            // Step 18: Notification Preferences
+            print_step(18, total_steps, "Notification Preferences");
             self.step_notification_preferences()?;
             self.persist_after_step().await;
         }
@@ -2402,7 +2407,9 @@ impl SetupWizard {
     ///
     /// Allows setting a cheap/fast model for lightweight tasks like
     /// routing decisions, heartbeat checks, and prompt evaluation.
-    fn step_smart_routing(&mut self) -> Result<(), SetupError> {
+    /// If the cheap model uses a different provider than the primary,
+    /// prompts for that provider's API key (unless already configured).
+    async fn step_smart_routing(&mut self) -> Result<(), SetupError> {
         print_info("Smart Routing can use a cheaper/faster model for lightweight tasks");
         print_info("(e.g., routing decisions, heartbeat checks, prompt evaluation).");
         print_info("The primary model is still used for complex conversations.");
@@ -2430,14 +2437,93 @@ impl SetupWizard {
             }
         };
 
-        if !cheap_model.is_empty() {
-            self.settings.providers.cheap_model = Some(cheap_model.clone());
-            print_success(&format!(
-                "Smart routing enabled — cheap model: {}",
-                cheap_model
-            ));
-        } else {
+        if cheap_model.is_empty() {
             print_info("No cheap model set — smart routing disabled.");
+            return Ok(());
+        }
+
+        self.settings.providers.cheap_model = Some(cheap_model.clone());
+        print_success(&format!(
+            "Smart routing enabled — cheap model: {}",
+            cheap_model
+        ));
+
+        // ── Check if the cheap model's provider needs a separate API key ──
+        // Parse provider slug from "provider/model" format.
+        if let Some(cheap_provider_slug) = cheap_model.split('/').next() {
+            // Determine the primary provider slug for comparison.
+            let primary_slug = self
+                .settings
+                .llm_backend
+                .as_deref()
+                .unwrap_or("");
+
+            // Only prompt for a key if the cheap provider differs from the primary.
+            if !cheap_provider_slug.is_empty()
+                && cheap_provider_slug != primary_slug
+                && cheap_provider_slug != "ollama"
+            {
+                // Look up the cheap provider in the catalog.
+                if let Some(endpoint) =
+                    crate::config::provider_catalog::endpoint_for(cheap_provider_slug)
+                {
+                    // Check if the API key is already available (env var, keychain, or secrets).
+                    let has_env_key = std::env::var(endpoint.env_key_name).is_ok();
+                    let has_keychain_key = crate::secrets::keychain::get_api_key(
+                        endpoint.secret_name,
+                    )
+                    .await
+                    .is_some();
+
+                    if has_env_key {
+                        println!();
+                        print_success(&format!(
+                            "✓ {} API key found in environment ({}).",
+                            endpoint.display_name, endpoint.env_key_name
+                        ));
+                    } else if has_keychain_key {
+                        println!();
+                        print_success(&format!(
+                            "✓ {} API key found in OS keychain.",
+                            endpoint.display_name
+                        ));
+                    } else {
+                        // API key is missing — prompt the user.
+                        println!();
+                        print_info(&format!(
+                            "The cheap model uses {} — a different provider than your primary.",
+                            endpoint.display_name
+                        ));
+                        print_info(&format!(
+                            "An API key for {} is required.",
+                            endpoint.display_name
+                        ));
+
+                        self.setup_api_key_provider(
+                            cheap_provider_slug,
+                            endpoint.env_key_name,
+                            endpoint.secret_name,
+                            &format!("{} API key", endpoint.display_name),
+                            &format!(
+                                "https://console.{}",
+                                cheap_provider_slug
+                            ),
+                            Some(endpoint.display_name),
+                        )
+                        .await?;
+                    }
+                } else {
+                    // Provider not in catalog — warn but continue.
+                    println!();
+                    print_info(&format!(
+                        "Provider '{}' is not in the built-in catalog.",
+                        cheap_provider_slug
+                    ));
+                    print_info(&format!(
+                        "Make sure the API key is set via the appropriate environment variable."
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -2678,6 +2764,47 @@ impl SetupWizard {
             }
             _ => {
                 self.settings.notifications.recipient = Some("default".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn step_tool_approval(&mut self) -> Result<(), SetupError> {
+        print_info("ThinClaw can execute tools (shell commands, file operations, etc.) on your behalf.");
+        print_info("Choose how much autonomy to grant the agent:");
+        println!();
+
+        let options = [
+            "Standard  — Ask before running destructive operations (recommended)",
+            "Autonomous — Auto-approve safe operations, still block destructive commands\n               (rm -rf, DROP TABLE, git push --force, etc.)",
+            "Full Auto  — Skip ALL approval checks (for benchmarks/CI only)\n               ⚠️  WARNING: The agent can execute ANY command without asking!",
+        ];
+        let option_refs: Vec<&str> = options.iter().map(|s| *s).collect();
+        let choice = select_one("Tool approval mode", &option_refs)
+            .map_err(SetupError::Io)?;
+
+        match choice {
+            0 => {
+                self.settings.agent.auto_approve_tools = false;
+                print_success("Standard approval mode — agent will ask before destructive operations.");
+            }
+            1 => {
+                self.settings.agent.auto_approve_tools = true;
+                print_success(
+                    "Autonomous mode — safe operations auto-approved, destructive commands still blocked.",
+                );
+                print_info(
+                    "Note: Commands matching NEVER_AUTO_APPROVE_PATTERNS (rm -rf, DROP TABLE, etc.)",
+                );
+                print_info("will still require your approval even in this mode.");
+            }
+            2 => {
+                self.settings.agent.auto_approve_tools = true;
+                print_success("Full auto-approve mode — ALL tool executions will run without asking.");
+                print_info("⚠️  Use with extreme caution. This is intended for benchmarks/CI environments.");
+            }
+            _ => {
+                self.settings.agent.auto_approve_tools = false;
             }
         }
         Ok(())
@@ -3217,6 +3344,12 @@ impl SetupWizard {
         }
 
         println!();
+
+        // ── PATH check & symlink offer ──────────────────────────
+        // If the current binary isn't on PATH, offer to create a symlink so
+        // the user can just type `thinclaw` from any terminal.
+        self.offer_path_setup();
+
         println!("To start the agent, run:");
         println!("  thinclaw");
         println!();
@@ -3227,12 +3360,171 @@ impl SetupWizard {
 
         Ok(())
     }
+
+    /// Check if `thinclaw` is accessible on PATH and offer to create a
+    /// symlink if it isn't.
+    fn offer_path_setup(&self) {
+        use std::path::Path;
+
+        // Check if `thinclaw` is already findable on PATH
+        if which_thinclaw().is_some() {
+            return; // Already on PATH, nothing to do
+        }
+
+        let current_exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return, // Can't determine our own path
+        };
+
+        // Choose symlink target based on platform
+        let symlink_dir = if cfg!(target_os = "macos") {
+            Path::new("/usr/local/bin")
+        } else {
+            // Linux: ~/.local/bin is in PATH for most distros
+            let home = match dirs::home_dir() {
+                Some(h) => h,
+                None => return,
+            };
+            // We need a 'static-ish path, so use a leak-safe approach
+            let local_bin = home.join(".local").join("bin");
+            if !local_bin.exists() {
+                let _ = std::fs::create_dir_all(&local_bin);
+            }
+            // Can't return a reference to a local, so handle inline below
+            let target = local_bin.join("thinclaw");
+            if try_symlink(&current_exe, &target) {
+                print_success(&format!(
+                    "Symlinked: {} → {}",
+                    target.display(),
+                    current_exe.display()
+                ));
+                println!("  You can now use 'thinclaw' from any terminal.");
+                if !path_contains(&local_bin) {
+                    println!(
+                        "  Note: add {} to your PATH if it isn't already:",
+                        local_bin.display()
+                    );
+                    println!(
+                        "    echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc",
+                        local_bin.display()
+                    );
+                }
+            } else {
+                println!();
+                print_info(&format!(
+                    "Tip: add thinclaw to your PATH:\n  \
+                     sudo ln -sf {} /usr/local/bin/thinclaw\n  \
+                     Or: export PATH=\"{}:$PATH\"",
+                    current_exe.display(),
+                    current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                ));
+            }
+            return;
+        };
+
+        let target = symlink_dir.join("thinclaw");
+
+        if !symlink_dir.exists() {
+            // /usr/local/bin doesn't exist (rare on macOS), just print a tip
+            print_info(&format!(
+                "Tip: add thinclaw to your PATH:\n  \
+                 export PATH=\"{}:$PATH\"",
+                current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            ));
+            return;
+        }
+
+        // Try without sudo first (works if user owns /usr/local/bin, e.g. Homebrew)
+        if try_symlink(&current_exe, &target) {
+            print_success(&format!(
+                "Symlinked: {} → {}",
+                target.display(),
+                current_exe.display()
+            ));
+            println!("  You can now use 'thinclaw' from any terminal.");
+            return;
+        }
+
+        // Need elevated permissions — ask
+        println!();
+        print_info("thinclaw is not on your PATH. Create a symlink so you can run it from anywhere?");
+        match confirm("Create /usr/local/bin/thinclaw symlink (requires sudo)?", true) {
+            Ok(true) => {
+                let status = std::process::Command::new("sudo")
+                    .args(["ln", "-sf"])
+                    .arg(current_exe.display().to_string())
+                    .arg(target.display().to_string())
+                    .status();
+
+                match status {
+                    Ok(s) if s.success() => {
+                        print_success(&format!(
+                            "Symlinked: {} → {}",
+                            target.display(),
+                            current_exe.display()
+                        ));
+                        println!("  You can now use 'thinclaw' from any terminal.");
+                    }
+                    _ => {
+                        print_info(&format!(
+                            "Symlink failed. Add manually:\n  \
+                             sudo ln -sf {} {}",
+                            current_exe.display(),
+                            target.display()
+                        ));
+                    }
+                }
+            }
+            _ => {
+                print_info(&format!(
+                    "Skipped. To add later:\n  \
+                     sudo ln -sf {} {}",
+                    current_exe.display(),
+                    target.display()
+                ));
+            }
+        }
+    }
 }
 
 impl Default for SetupWizard {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Check if `thinclaw` is findable on PATH by scanning PATH directories.
+fn which_thinclaw() -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("thinclaw");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Try to create a symlink, removing any existing file/link at the target.
+/// Returns true on success.
+#[cfg(unix)]
+fn try_symlink(source: &std::path::Path, target: &std::path::Path) -> bool {
+    // Remove existing symlink/file if present (ignore errors)
+    let _ = std::fs::remove_file(target);
+    std::os::unix::fs::symlink(source, target).is_ok()
+}
+
+#[cfg(not(unix))]
+fn try_symlink(_source: &std::path::Path, _target: &std::path::Path) -> bool {
+    false
+}
+
+/// Check if a directory is present in the current PATH.
+fn path_contains(dir: &std::path::Path) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|p| p == dir)
 }
 
 /// Mask password in a database URL for display.

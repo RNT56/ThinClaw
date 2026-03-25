@@ -1,4 +1,4 @@
-# IronClaw formatting configuration.
+# ThinClaw formatting configuration.
 # Applied by `cargo fmt` and checked in CI via `cargo fmt --check`.
 
 edition = "2024"

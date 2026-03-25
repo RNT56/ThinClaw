@@ -11,6 +11,9 @@ This guide covers every way to deploy ThinClaw as a standalone agent and connect
   - [Path 1: Direct Binary (Mac Mini / macOS / Linux)](#path-1-direct-binary-recommended-for-mac-mini)
   - [Path 2: Docker Compose (Any OS)](#path-2-docker-compose-any-os)
   - [Path 3: Automated Deploy from Scrappy](#path-3-automated-deploy-from-scrappy-linux-targets)
+  - [Path 4: Automated Linux Server Setup](#path-4-automated-linux-server-setup)
+- [Development Docker Compose](#development-docker-compose)
+- [Docker Images Reference](#docker-images-reference)
 - [WASM Extension Deployment](#wasm-extension-deployment)
 - [Connecting Scrappy to ThinClaw](#connecting-scrappy-to-thinclaw)
 - [Securing the Connection (Tailscale)](#securing-the-connection-tailscale)
@@ -19,6 +22,7 @@ This guide covers every way to deploy ThinClaw as a standalone agent and connect
   - [Linux: systemd](#linux-systemd)
 - [macOS-Specific Features](#macos-specific-features)
 - [Environment Reference](#environment-reference)
+- [Data Directory, Upgrades & Reset](#data-directory-upgrades--reset)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -300,6 +304,77 @@ Scrappy will SCP the deploy bundle, install Docker, generate an auth token, and 
 
 ---
 
+### Path 4: Automated Linux Server Setup
+
+Best for: **Fresh Linux VPS / cloud servers** where you want Docker + firewall + optional Tailscale set up automatically.
+
+The `deploy/setup.sh` script bootstraps a Linux server from scratch:
+
+```bash
+# Minimal — installs Docker, UFW firewall, Fail2ban, starts ThinClaw
+sudo bash deploy/setup.sh --token <gateway_auth_token>
+
+# Full production — adds Tailscale VPN + systemd auto-start
+sudo bash deploy/setup.sh --token <token> --tailscale <ts-authkey> --systemd
+```
+
+**What it installs and configures (6 steps):**
+
+| Step | What | Details |
+|------|------|---------|
+| 1 | Docker Engine + Compose V2 | Adds official Docker repo, installs `docker-ce`, enables on boot |
+| 2 | UFW Firewall | Denies incoming by default, allows SSH + port 18789 |
+| 3 | Fail2ban | SSH brute-force protection — 3 retries, 1 hour ban |
+| 4 | Tailscale VPN *(optional)* | Installs Tailscale, joins network with auth key, restricts gateway to Tailscale-only |
+| 5 | ThinClaw Container | Copies `.env.template` → `.env`, injects token, runs `docker compose up -d --build` |
+| 6 | systemd service *(optional)* | Creates a systemd unit so `docker compose up` runs on boot |
+
+**Supported package managers:** apt (Ubuntu/Debian), yum/dnf (RHEL/CentOS/Fedora).
+
+---
+
+## Development Docker Compose
+
+The root `docker-compose.yml` provides a **local PostgreSQL** instance for development:
+
+```bash
+# Start a pgvector-enabled Postgres for development
+docker compose up -d
+```
+
+This starts `pgvector/pgvector:pg16` on port 5432 with dev-only credentials (`ironclaw`/`ironclaw`). Use this when developing with the `postgres` feature flag instead of libSQL.
+
+> **Note:** This is for local development only. For production, use the `deploy/docker-compose.yml` stack or Path 4's automated setup.
+
+---
+
+## Docker Images Reference
+
+ThinClaw ships three Dockerfiles for different purposes:
+
+| Image | Dockerfile | Purpose | Key Contents |
+|-------|-----------|---------|-------------|
+| `thinclaw` | `Dockerfile` | Cloud/remote headless agent | Minimal runtime — thinclaw binary + ca-certs + curl |
+| `thinclaw-worker` | `Dockerfile.worker` | Sandboxed job execution | Full dev toolchain — Rust, Node.js, Python, Git, GitHub CLI, Claude Code |
+| `thinclaw-sandbox` | `docker/sandbox.Dockerfile` | WASM compilation sandbox | Rust + WASM targets + wasm-tools (no dev tools) |
+
+Build commands:
+
+```bash
+# Cloud agent
+docker build --platform linux/amd64 -t thinclaw:latest .
+
+# Worker (used by the orchestrator for Docker sandbox jobs)
+docker build -f Dockerfile.worker -t thinclaw-worker .
+
+# WASM sandbox (lightweight)
+docker build -f docker/sandbox.Dockerfile -t thinclaw-sandbox .
+```
+
+All images run as non-root users and use Rust 1.92 / Debian bookworm.
+
+---
+
 ## WASM Extension Deployment
 
 ThinClaw ships 14 WASM extensions (10 tools + 4 channels). Two strategies are available depending on your deployment environment:
@@ -482,23 +557,74 @@ Then connect Scrappy to `https://thinclaw.yourdomain.com`.
 
 ### macOS: launchd
 
-Create a launch agent so ThinClaw starts automatically when the Mac Mini boots:
+ThinClaw has a built-in service manager that generates a macOS launchd plist and manages it for you. This is the **recommended** approach.
+
+> **Important: Complete onboarding first.** The service runs headless with `--no-onboard` — the interactive setup wizard cannot run in a background process. You **must** run `thinclaw` (or `thinclaw onboard`) in a terminal first to complete the setup wizard before installing the service.
+
+**Step 1: Complete onboarding (interactive terminal required)**
 
 ```bash
-cat > ~/Library/LaunchAgents/com.thinclaw.agent.plist << 'EOF'
+# First run — the setup wizard configures database, LLM, channels, etc.
+thinclaw
+# (or: thinclaw onboard)
+```
+
+**Step 2: Install and start the service**
+
+```bash
+# Install the launchd service (creates ~/Library/LaunchAgents/com.thinclaw.daemon.plist)
+thinclaw service install
+
+# Start the service (loads the plist and starts ThinClaw in the background)
+thinclaw service start
+
+# Check if it's running
+thinclaw service status
+
+# Stop the service
+thinclaw service stop
+
+# Remove the service entirely
+thinclaw service uninstall
+```
+
+**What this does:**
+
+- Creates `~/Library/LaunchAgents/com.thinclaw.daemon.plist` pointing to the current `thinclaw` binary
+- Runs `thinclaw run --no-onboard` — starts the agent with your existing configuration, skipping the wizard
+- Sets `RunAtLoad=true` — ThinClaw starts automatically when you log in (or on boot if auto-login is enabled)
+- Sets `KeepAlive=true` — macOS automatically restarts ThinClaw if it crashes or exits
+- Logs go to `~/.thinclaw/logs/daemon.stdout.log` and `~/.thinclaw/logs/daemon.stderr.log`
+- Starts **all configured channels** (Telegram, iMessage, Discord, Gateway, etc.)
+
+> **Note:** The service runs the exact same binary with the exact same channels as `thinclaw run` in a terminal. The only difference is that launchd manages the process lifecycle (auto-start on boot, auto-restart on crash) instead of your terminal session.
+
+**View logs:**
+
+```bash
+tail -f ~/.thinclaw/logs/daemon.stdout.log
+tail -f ~/.thinclaw/logs/daemon.stderr.log
+```
+
+<details>
+<summary>Manual plist (advanced — only if you need custom configuration)</summary>
+
+If you need to customize the plist beyond what `thinclaw service install` provides (e.g., environment variables, working directory), you can create it manually:
+
+```bash
+cat > ~/Library/LaunchAgents/com.thinclaw.daemon.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.thinclaw.agent</string>
+    <string>com.thinclaw.daemon</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/Users/yourname/ThinClaw/target/release/thinclaw</string>
         <string>run</string>
-        <string>--no-onboard</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -511,10 +637,10 @@ cat > ~/Library/LaunchAgents/com.thinclaw.agent.plist << 'EOF'
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/yourname/.thinclaw/thinclaw.log</string>
+    <string>/Users/yourname/.thinclaw/logs/daemon.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/yourname/.thinclaw/thinclaw.err</string>
+    <string>/Users/yourname/.thinclaw/logs/daemon.stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -528,33 +654,18 @@ EOF
 
 **Replace `/Users/yourname` with your actual home directory.**
 
-Manage the service:
+Manage manually:
 
 ```bash
-# Load (start on boot)
-launchctl load ~/Library/LaunchAgents/com.thinclaw.agent.plist
-
-# Unload (stop auto-start)
-launchctl unload ~/Library/LaunchAgents/com.thinclaw.agent.plist
-
-# Check status
-launchctl list | grep thinclaw
-
-# View logs
-tail -f ~/.thinclaw/thinclaw.log
+launchctl load -w ~/Library/LaunchAgents/com.thinclaw.daemon.plist
+launchctl start com.thinclaw.daemon
+launchctl stop com.thinclaw.daemon
+launchctl unload -w ~/Library/LaunchAgents/com.thinclaw.daemon.plist
 ```
 
-You can also use the built-in service command:
+> **Important:** Use the label `com.thinclaw.daemon` to match `thinclaw service` commands. Using a different label will result in two conflicting service entries.
 
-```bash
-# Install as a service (auto-detects launchd on macOS)
-thinclaw service install
-
-# Start / stop / status
-thinclaw service start
-thinclaw service stop
-thinclaw service status
-```
+</details>
 
 ### Linux: systemd
 
@@ -689,6 +800,81 @@ Comprehensive list of all environment variables. Set these in `~/.thinclaw/.env`
 | `ROUTINES_ENABLED` | `true` | Cron/event/webhook routines |
 
 See `CLAUDE.md` for the complete configuration reference.
+
+---
+
+## Data Directory, Upgrades & Reset
+
+### Data Directory Layout
+
+All persistent state lives in `~/.thinclaw/`, completely separate from the source code and compiled binary:
+
+| Path | Purpose | Created By |
+|------|---------|------------|
+| `~/.thinclaw/.env` | Bootstrap config (DATABASE_URL, LLM_BACKEND, API keys) | Onboarding wizard |
+| `~/.thinclaw/thinclaw.db` | libSQL database (settings, memory, threads, conversations, routines) | First run (libSQL mode) |
+| `~/.thinclaw/tools/` | Installed WASM tool extensions (`.wasm` + `.capabilities.json`) | `thinclaw extension install` |
+| `~/.thinclaw/channels/` | Installed WASM channel extensions (Telegram, Discord, etc.) | `thinclaw extension install` |
+| `~/.thinclaw/skills/` | User-placed skills (trusted) | Manual |
+| `~/.thinclaw/installed_skills/` | Registry-installed skills | `thinclaw skill install` |
+| `~/.thinclaw/projects/` | Docker sandbox project bind-mounts | Docker orchestrator |
+| `~/.thinclaw/logs/` | Service logs (`daemon.stdout.log`, `daemon.stderr.log`) | `thinclaw service start` |
+| `~/.thinclaw/audio/` | Voice/audio capture temp files | Voice features |
+| `~/.thinclaw/telegram-*.json` | Telegram pairing and allowlist state | Telegram channel |
+| `~/.thinclaw/memory_hygiene_state.json` | Memory cleanup scheduler state | Hygiene system |
+
+> **Key insight:** `cargo build --release` only recompiles the binary at `target/release/thinclaw`. It does **not** touch `~/.thinclaw/` — your database, settings, memory, extensions, and all agent state are completely safe across rebuilds.
+
+### Upgrading (Safe Rebuild)
+
+To upgrade ThinClaw after pulling new code:
+
+```bash
+# 1. Pull latest code
+cd /path/to/ThinClaw
+git pull
+
+# 2. Rebuild the binary (does NOT affect your data)
+cargo build --release
+
+# 3. Restart the service (picks up the new binary)
+thinclaw service stop
+thinclaw service start
+
+# Or if running in a terminal, just Ctrl+C and re-run:
+./target/release/thinclaw
+```
+
+If the agent is running as a launchd/systemd service, you can also use the `/restart` command from any connected channel (chat, Telegram, web UI) — the service manager will automatically restart with the new binary.
+
+### Reset Procedures
+
+**Full reset** (wipe everything, start fresh):
+
+```bash
+# Stop the service first
+thinclaw service stop 2>/dev/null
+
+# Remove all persistent state
+rm -rf ~/.thinclaw
+
+# Re-run — the wizard will launch automatically
+./target/release/thinclaw
+```
+
+**Partial resets** (target specific components):
+
+| Goal | Command | Effect |
+|------|---------|--------|
+| Re-run onboarding wizard | `thinclaw onboard` | Walks through setup again, overwrites settings |
+| Reset database (conversations, memory, settings) | `rm ~/.thinclaw/thinclaw.db` | DB is re-created on next launch; wizard re-runs |
+| Reset bootstrap config | `rm ~/.thinclaw/.env` | Wizard re-runs to reconfigure LLM, database, etc. |
+| Reset extensions only | `rm -rf ~/.thinclaw/tools/ ~/.thinclaw/channels/` | Re-install via wizard or `thinclaw extension install` |
+| Reset skills only | `rm -rf ~/.thinclaw/skills/ ~/.thinclaw/installed_skills/` | Re-install manually or via registry |
+| Reset service logs | `rm -rf ~/.thinclaw/logs/` | Logs directory is re-created on next service start |
+| Reset Telegram pairing | `rm ~/.thinclaw/telegram-*.json` | Must re-pair Telegram users |
+
+> **Note:** If you're using PostgreSQL instead of libSQL, the database lives in your PostgreSQL server — `rm ~/.thinclaw/thinclaw.db` won't apply. Use `DROP DATABASE thinclaw;` and `CREATE DATABASE thinclaw;` to reset a PostgreSQL database.
 
 ---
 

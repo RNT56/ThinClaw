@@ -41,6 +41,15 @@ pub enum ServiceAction {
 // ── Install ─────────────────────────────────────────────────────
 
 fn install() -> Result<()> {
+    // Warn if onboarding hasn't been completed — the service runs with
+    // --no-onboard so it will fail to start without a valid config.
+    if !onboarding_completed() {
+        println!("⚠  WARNING: Onboarding has not been completed.");
+        println!("   The service runs headless and cannot show the setup wizard.");
+        println!("   Please run 'thinclaw onboard' first, then re-run 'thinclaw service install'.");
+        println!();
+    }
+
     if cfg!(target_os = "macos") {
         install_macos()
     } else if cfg!(target_os = "linux") {
@@ -48,6 +57,23 @@ fn install() -> Result<()> {
     } else {
         bail!("Service management is only supported on macOS and Linux");
     }
+}
+
+/// Check whether onboarding has been completed by looking for 
+/// the `ONBOARD_COMPLETED=true` env var (set by the wizard in `~/.thinclaw/.env`).
+fn onboarding_completed() -> bool {
+    // Load thinclaw .env so we can check ONBOARD_COMPLETED even if it's not
+    // exported in the current shell session.
+    let _ = dotenvy::dotenv();
+    let home = dirs::home_dir();
+    if let Some(home) = home {
+        let env_file = home.join(".thinclaw").join(".env");
+        let _ = dotenvy::from_path(&env_file);
+    }
+
+    std::env::var("ONBOARD_COMPLETED")
+        .map(|v| v == "true")
+        .unwrap_or(false)
 }
 
 fn install_macos() -> Result<()> {
@@ -74,11 +100,23 @@ fn install_macos() -> Result<()> {
   <array>
     <string>{exe}</string>
     <string>run</string>
+    <string>--no-onboard</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>15</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{home}</string>
+    <key>PATH</key>
+    <string>{path}</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>{stdout}</string>
   <key>StandardErrorPath</key>
@@ -88,6 +126,12 @@ fn install_macos() -> Result<()> {
 "#,
         label = SERVICE_LABEL,
         exe = xml_escape(&exe.display().to_string()),
+        home = xml_escape(
+            &dirs::home_dir()
+                .map(|h| h.display().to_string())
+                .unwrap_or_default()
+        ),
+        path = xml_escape(&std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/usr/local/bin".to_string())),
         stdout = xml_escape(&stdout.display().to_string()),
         stderr = xml_escape(&stderr.display().to_string()),
     );
@@ -112,7 +156,7 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart=\"{exe}\" run\n\
+         ExecStart=\"{exe}\" run --no-onboard\n\
          Restart=always\n\
          RestartSec=3\n\
          \n\

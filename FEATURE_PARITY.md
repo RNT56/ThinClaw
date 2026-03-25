@@ -196,6 +196,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
+| Autonomous approval mode | ❌ | ✅ | `auto_approve_tools` with NEVER_AUTO_APPROVE_PATTERNS safety preserved; wizard step 10 ([`src/agent/dispatcher.rs`](src/agent/dispatcher.rs), [`src/setup/wizard.rs`](src/setup/wizard.rs)) |
+| Self-update & restart | ❌ | ✅ | `thinclaw update install` + `/restart` command for orderly shutdown; OS service manager auto-relaunches with new binary ([`src/cli/update.rs`](src/cli/update.rs), [`src/agent/submission.rs`](src/agent/submission.rs)) |
 | Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Subagent system | ✅ | ✅ | Full `SubagentExecutor` ([`src/agent/subagent_executor.rs`](src/agent/subagent_executor.rs)): in-process agentic loops with isolated context, filtered tools, configurable timeouts, cancellation via watch channels |
 | `spawn_subagent` tool | ✅ | ✅ | Declarative tool → dispatcher interception → `SubagentExecutor::spawn()`. Sync (wait=true) and async (wait=false) modes ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
@@ -250,6 +252,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 | Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
 | 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
+| Smart routing WebUI config | ❌ | ✅ | Settings tab: cheap model, cascade mode, enable/disable, failover chain ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for API key, stores in OS keychain ([`src/setup/wizard.rs`](src/setup/wizard.rs)) |
 
 ### Owner: IronClaw Agent
 
@@ -343,6 +347,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Memory CLI commands | ✅ | ✅ | `memory search/read/write/tree/status` CLI subcommands |
 | Flexible path structure | ✅ | ✅ | Filesystem-like API |
 | Identity files (AGENTS.md, etc.) | ✅ | ✅ | |
+| Proactive BOOT.md execution | ❌ | ✅ | Executes BOOT.md on every startup; routes response to preferred notification channel ([`src/agent/agent_loop.rs`](src/agent/agent_loop.rs)) |
+| Proactive BOOTSTRAP.md execution | ❌ | ✅ | Executes BOOTSTRAP.md on first run only; auto-deletes after completion; routes response to preferred channel ([`src/agent/agent_loop.rs`](src/agent/agent_loop.rs)) |
 | Daily logs | ✅ | ✅ | |
 | Heartbeat checklist | ✅ | ✅ | HEARTBEAT.md |
 
