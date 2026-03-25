@@ -3625,6 +3625,15 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (⚠️ use with caution)' },
     ]
   },
+  'Smart Routing': {
+    icon: '🔀',
+    fields: [
+      { key: 'providers.cheap_model', label: 'Cheap model', type: 'text', desc: 'Provider/model for lightweight tasks (e.g. "groq/llama-3.1-8b-instant", "openai/gpt-4o-mini"). Empty = disabled', nullable: true },
+      { key: 'providers.smart_routing_cascade', label: 'Cascade mode', type: 'bool', desc: 'When enabled, moderate-complexity messages try the cheap model first and escalate to primary if uncertain' },
+      { key: 'providers.smart_routing_enabled', label: 'Smart routing enabled', type: 'bool', desc: 'Master toggle for the smart routing system' },
+      { key: 'providers.fallback_chain', label: 'Failover chain', type: 'text', desc: 'Comma-separated fallback models (e.g. "openai/gpt-4o,groq/llama-3.3-70b"). Used when the primary provider fails', nullable: true },
+    ]
+  },
   'Channels — Telegram': {
     icon: '📱',
     fields: [

@@ -252,6 +252,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 | Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
 | 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
+| Smart routing WebUI config | ❌ | ✅ | Settings tab: cheap model, cascade mode, enable/disable, failover chain ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for API key, stores in OS keychain ([`src/setup/wizard.rs`](src/setup/wizard.rs)) |
 
 ### Owner: IronClaw Agent
 

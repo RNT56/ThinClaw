@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Enables ThinClaw to manage multiple LLM providers with failover,
 /// smart routing, and model allowlists — whether running headless
 /// (config.toml / env vars) or inside Scrappy (UI-driven).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersSettings {
     /// Enabled cloud provider IDs (e.g., ["anthropic", "openai", "groq"]).
     /// Only providers listed here will be used for failover.
@@ -36,6 +36,17 @@ pub struct ProvidersSettings {
     #[serde(default)]
     pub cheap_model: Option<String>,
 
+    /// Master toggle for the smart routing system.
+    /// When false, all requests go to the primary model even if cheap_model is set.
+    #[serde(default = "default_true")]
+    pub smart_routing_enabled: bool,
+
+    /// Enable cascade mode for moderate-complexity messages.
+    /// When true, moderate messages try the cheap model first and escalate
+    /// to the primary model if the response is uncertain.
+    #[serde(default = "default_true")]
+    pub smart_routing_cascade: bool,
+
     /// Per-provider model allowlists.
     /// Key: provider ID, Value: list of allowed model IDs.
     /// If a provider is enabled but not listed here, ALL its models are allowed.
@@ -46,6 +57,21 @@ pub struct ProvidersSettings {
     /// If empty, auto-generated from enabled providers.
     #[serde(default)]
     pub fallback_chain: Vec<String>,
+}
+
+impl Default for ProvidersSettings {
+    fn default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            primary: None,
+            primary_model: None,
+            cheap_model: None,
+            smart_routing_enabled: true,
+            smart_routing_cascade: true,
+            allowed_models: HashMap::new(),
+            fallback_chain: Vec::new(),
+        }
+    }
 }
 
 /// User settings persisted to disk.

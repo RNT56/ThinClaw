@@ -229,7 +229,7 @@ impl SetupWizard {
 
             // Step 14: Smart Routing
             print_step(14, total_steps, "Smart Routing");
-            self.step_smart_routing()?;
+            self.step_smart_routing().await?;
             self.persist_after_step().await;
 
             // Step 15: Web UI
@@ -2407,7 +2407,9 @@ impl SetupWizard {
     ///
     /// Allows setting a cheap/fast model for lightweight tasks like
     /// routing decisions, heartbeat checks, and prompt evaluation.
-    fn step_smart_routing(&mut self) -> Result<(), SetupError> {
+    /// If the cheap model uses a different provider than the primary,
+    /// prompts for that provider's API key (unless already configured).
+    async fn step_smart_routing(&mut self) -> Result<(), SetupError> {
         print_info("Smart Routing can use a cheaper/faster model for lightweight tasks");
         print_info("(e.g., routing decisions, heartbeat checks, prompt evaluation).");
         print_info("The primary model is still used for complex conversations.");
@@ -2435,14 +2437,93 @@ impl SetupWizard {
             }
         };
 
-        if !cheap_model.is_empty() {
-            self.settings.providers.cheap_model = Some(cheap_model.clone());
-            print_success(&format!(
-                "Smart routing enabled — cheap model: {}",
-                cheap_model
-            ));
-        } else {
+        if cheap_model.is_empty() {
             print_info("No cheap model set — smart routing disabled.");
+            return Ok(());
+        }
+
+        self.settings.providers.cheap_model = Some(cheap_model.clone());
+        print_success(&format!(
+            "Smart routing enabled — cheap model: {}",
+            cheap_model
+        ));
+
+        // ── Check if the cheap model's provider needs a separate API key ──
+        // Parse provider slug from "provider/model" format.
+        if let Some(cheap_provider_slug) = cheap_model.split('/').next() {
+            // Determine the primary provider slug for comparison.
+            let primary_slug = self
+                .settings
+                .llm_backend
+                .as_deref()
+                .unwrap_or("");
+
+            // Only prompt for a key if the cheap provider differs from the primary.
+            if !cheap_provider_slug.is_empty()
+                && cheap_provider_slug != primary_slug
+                && cheap_provider_slug != "ollama"
+            {
+                // Look up the cheap provider in the catalog.
+                if let Some(endpoint) =
+                    crate::config::provider_catalog::endpoint_for(cheap_provider_slug)
+                {
+                    // Check if the API key is already available (env var, keychain, or secrets).
+                    let has_env_key = std::env::var(endpoint.env_key_name).is_ok();
+                    let has_keychain_key = crate::secrets::keychain::get_api_key(
+                        endpoint.secret_name,
+                    )
+                    .await
+                    .is_some();
+
+                    if has_env_key {
+                        println!();
+                        print_success(&format!(
+                            "✓ {} API key found in environment ({}).",
+                            endpoint.display_name, endpoint.env_key_name
+                        ));
+                    } else if has_keychain_key {
+                        println!();
+                        print_success(&format!(
+                            "✓ {} API key found in OS keychain.",
+                            endpoint.display_name
+                        ));
+                    } else {
+                        // API key is missing — prompt the user.
+                        println!();
+                        print_info(&format!(
+                            "The cheap model uses {} — a different provider than your primary.",
+                            endpoint.display_name
+                        ));
+                        print_info(&format!(
+                            "An API key for {} is required.",
+                            endpoint.display_name
+                        ));
+
+                        self.setup_api_key_provider(
+                            cheap_provider_slug,
+                            endpoint.env_key_name,
+                            endpoint.secret_name,
+                            &format!("{} API key", endpoint.display_name),
+                            &format!(
+                                "https://console.{}",
+                                cheap_provider_slug
+                            ),
+                            Some(endpoint.display_name),
+                        )
+                        .await?;
+                    }
+                } else {
+                    // Provider not in catalog — warn but continue.
+                    println!();
+                    print_info(&format!(
+                        "Provider '{}' is not in the built-in catalog.",
+                        cheap_provider_slug
+                    ));
+                    print_info(&format!(
+                        "Make sure the API key is set via the appropriate environment variable."
+                    ));
+                }
+            }
         }
 
         Ok(())
