@@ -162,12 +162,15 @@ jobs:
             name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
             download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
+            # Search all manifests by their internal .name field, not filename
+            for manifest in registry/tools/*.json registry/channels/*.json; do
+              [ -f "$manifest" ] || continue
+              manifest_name=$(jq -r '.name' "$manifest")
+              if [ "$manifest_name" = "$name" ]; then
                 jq --arg url "$download_url" --arg sha "$sha256" \
                   '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
                   "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest: url=$download_url sha256=$sha256"
+                echo "Patched $manifest (name=$manifest_name): url=$download_url sha256=$sha256"
               fi
             done
           done < "$CHECKSUMS"
@@ -451,12 +454,15 @@ jobs:
             name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
             download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
+            # Search all manifests by their internal .name field, not filename
+            for manifest in registry/tools/*.json registry/channels/*.json; do
+              [ -f "$manifest" ] || continue
+              manifest_name=$(jq -r '.name' "$manifest")
+              if [ "$manifest_name" = "$name" ]; then
                 jq --arg url "$download_url" --arg sha "$sha256" \
                   '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
                   "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest: url=$download_url sha256=$sha256"
+                echo "Patched $manifest (name=$manifest_name): url=$download_url sha256=$sha256"
               fi
             done
           done < "$CHECKSUMS"
