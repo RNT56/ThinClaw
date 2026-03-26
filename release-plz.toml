@@ -1,2 +1,6 @@
 [workspace]
 git_release_enable = false
+
+[[package]]
+name = "thinclaw"
+publish = false
