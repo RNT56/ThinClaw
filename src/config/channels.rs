@@ -21,6 +21,8 @@ pub struct ChannelsConfig {
     pub gmail: Option<GmailChannelConfig>,
     #[cfg(target_os = "macos")]
     pub imessage: Option<IMessageChannelConfig>,
+    #[cfg(target_os = "macos")]
+    pub apple_mail: Option<AppleMailChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.thinclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -214,6 +216,8 @@ impl ChannelsConfig {
             gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
             imessage: Self::resolve_imessage()?,
+            #[cfg(target_os = "macos")]
+            apple_mail: Self::resolve_apple_mail()?,
         })
     }
 
@@ -346,6 +350,20 @@ pub struct IMessageChannelConfig {
     pub poll_interval_secs: u64,
 }
 
+/// Apple Mail channel configuration (macOS only).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct AppleMailChannelConfig {
+    /// Allowed sender email addresses (empty = allow all).
+    pub allow_from: Vec<String>,
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Only process unread messages.
+    pub unread_only: bool,
+    /// Mark messages as read after processing.
+    pub mark_as_read: bool,
+}
+
 /// Gmail channel configuration.
 #[derive(Debug, Clone)]
 pub struct GmailChannelConfig {
@@ -455,6 +473,42 @@ impl ChannelsConfig {
         Ok(Some(IMessageChannelConfig {
             allow_from,
             poll_interval_secs,
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn resolve_apple_mail() -> Result<Option<AppleMailChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("APPLE_MAIL_ENABLED", false)?;
+        if !enabled {
+            return Ok(None);
+        }
+
+        let allow_from = optional_env("APPLE_MAIL_ALLOW_FROM")?
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let poll_interval_secs: u64 = optional_env("APPLE_MAIL_POLL_INTERVAL")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "APPLE_MAIL_POLL_INTERVAL".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .unwrap_or(10);
+
+        let unread_only = parse_bool_env("APPLE_MAIL_UNREAD_ONLY", true)?;
+        let mark_as_read = parse_bool_env("APPLE_MAIL_MARK_AS_READ", true)?;
+
+        Ok(Some(AppleMailChannelConfig {
+            allow_from,
+            poll_interval_secs,
+            unread_only,
+            mark_as_read,
         }))
     }
 

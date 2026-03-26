@@ -514,6 +514,9 @@ async fn main() -> anyhow::Result<()> {
     {
         use thinclaw::channels::IMessageConfig;
 
+        // Auto-start Messages.app if not running
+        thinclaw::channels::ensure_app_running("Messages").await;
+
         let channel_config = IMessageConfig {
             allow_from: imessage_config.allow_from.clone(),
             poll_interval_secs: imessage_config.poll_interval_secs,
@@ -535,6 +538,41 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Add Apple Mail channel if configured (macOS only) and not CLI-only mode.
+    #[cfg(target_os = "macos")]
+    if !cli.cli_only
+        && let Some(ref mail_config) = config.channels.apple_mail
+    {
+        use thinclaw::channels::{AppleMailChannel, AppleMailConfig};
+
+        // Auto-start Mail.app if not running
+        thinclaw::channels::ensure_app_running("Mail").await;
+
+        let channel_config = AppleMailConfig {
+            allow_from: mail_config.allow_from.clone(),
+            poll_interval_secs: mail_config.poll_interval_secs,
+            unread_only: mail_config.unread_only,
+            mark_as_read: mail_config.mark_as_read,
+            ..AppleMailConfig::default()
+        };
+        match AppleMailChannel::new(channel_config) {
+            Ok(mail_channel) => {
+                channel_names.push("apple_mail".to_string());
+                channels.add(Box::new(mail_channel)).await;
+                tracing::info!("Apple Mail channel enabled (Envelope Index polling)");
+                if mail_config.allow_from.is_empty() {
+                    tracing::warn!(
+                        "Apple Mail channel has empty allow_from list — ALL emails will be accepted."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Apple Mail channel");
+            }
+        }
+    }
+
 
     // Add Gmail channel if configured and not CLI-only mode.
     if !cli.cli_only

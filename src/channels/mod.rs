@@ -38,6 +38,8 @@ pub mod group_priming;
 pub mod health_monitor;
 mod http;
 #[cfg(target_os = "macos")]
+mod apple_mail;
+#[cfg(target_os = "macos")]
 mod imessage;
 pub mod imessage_wiring;
 mod manager;
@@ -62,6 +64,10 @@ pub use discord::DiscordChannel;
 pub use gmail::GmailChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
+#[cfg(target_os = "macos")]
+pub use apple_mail::{
+    AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running,
+};
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::ChannelManager;
