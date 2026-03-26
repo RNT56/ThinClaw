@@ -1,15 +1,38 @@
 //! Main setup wizard orchestration.
 //!
-//! The wizard guides users through:
+//! The wizard guides users through 18 steps, grouped by concern:
+//!
+//! **Infrastructure**
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//!
+//! **LLM Configuration**
+//! 3. Inference provider (Anthropic, OpenAI, Ollama, OpenRouter, OpenAI-compatible)
 //! 4. Model selection
-//! 5. Embeddings
-//! 6. Channel configuration
-//! 7. Extensions (tool installation from registry)
-//! 8. Docker sandbox
-//! 9. Heartbeat (background tasks)
+//! 5. Smart routing (cheap/fast secondary model)
+//! 6. Embeddings (semantic search)
+//!
+//! **Agent Personality**
+//! 7. Agent identity (name)
+//!
+//! **Communication Channels**
+//! 8. Channel configuration (Telegram, Discord, Slack, Signal, etc.)
+//!
+//! **Capabilities & Execution**
+//! 9. Extensions (tool installation from registry)
+//! 10. Local tools & Docker sandbox
+//! 11. Claude Code sandbox
+//! 12. Tool approval mode
+//!
+//! **Automation**
+//! 13. Routines (scheduled tasks)
+//! 14. Skills (capability plugins)
+//! 15. Heartbeat (background tasks)
+//!
+//! **Presentation & Operations**
+//! 16. Notification preferences
+//! 17. Web UI (theme, accent, branding)
+//! 18. Observability (event/metric recording)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -147,6 +170,8 @@ impl SetupWizard {
         } else {
             let total_steps = 18;
 
+            // ── Infrastructure ───────────────────────────────────────────
+
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
             self.step_database().await?;
@@ -168,23 +193,25 @@ impl SetupWizard {
             self.step_security().await?;
             self.persist_after_step().await;
 
-            // Step 3: Agent Identity
-            print_step(3, total_steps, "Agent Identity");
-            self.step_agent_identity()?;
-            self.persist_after_step().await;
+            // ── LLM Configuration ────────────────────────────────────────
 
-            // Step 4: Inference provider selection (unless skipped)
+            // Step 3: Inference provider selection (unless skipped)
             if !self.config.skip_auth {
-                print_step(4, total_steps, "Inference Provider");
+                print_step(3, total_steps, "Inference Provider");
                 self.step_inference_provider().await?;
             } else {
                 print_info("Skipping inference provider setup (using existing config)");
             }
             self.persist_after_step().await;
 
-            // Step 5: Model selection
-            print_step(5, total_steps, "Model Selection");
+            // Step 4: Model selection
+            print_step(4, total_steps, "Model Selection");
             self.step_model_selection().await?;
+            self.persist_after_step().await;
+
+            // Step 5: Smart Routing (cheap/fast secondary model)
+            print_step(5, total_steps, "Smart Routing");
+            self.step_smart_routing().await?;
             self.persist_after_step().await;
 
             // Step 6: Embeddings
@@ -192,64 +219,74 @@ impl SetupWizard {
             self.step_embeddings()?;
             self.persist_after_step().await;
 
-            // Step 7: Channel configuration
-            print_step(7, total_steps, "Channel Configuration");
+            // ── Agent Personality ─────────────────────────────────────────
+
+            // Step 7: Agent Identity
+            print_step(7, total_steps, "Agent Identity");
+            self.step_agent_identity()?;
+            self.persist_after_step().await;
+
+            // ── Communication Channels ───────────────────────────────────
+
+            // Step 8: Channel configuration
+            print_step(8, total_steps, "Channel Configuration");
             self.step_channels().await?;
             self.persist_after_step().await;
 
-            // Step 8: Extensions (tools)
-            print_step(8, total_steps, "Extensions");
+            // ── Capabilities & Execution ─────────────────────────────────
+
+            // Step 9: Extensions (tools)
+            print_step(9, total_steps, "Extensions");
             self.step_extensions().await?;
             self.persist_after_step().await;
 
-            // Step 9: Local Tools & Docker Sandbox
-            print_step(9, total_steps, "Local Tools & Docker Sandbox");
+            // Step 10: Local Tools & Docker Sandbox
+            print_step(10, total_steps, "Local Tools & Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 10: Tool Approval Mode
-            print_step(10, total_steps, "Tool Approval Mode");
+            // Step 11: Claude Code Sandbox
+            print_step(11, total_steps, "Claude Code Sandbox");
+            self.step_claude_code().await?;
+            self.persist_after_step().await;
+
+            // Step 12: Tool Approval Mode
+            print_step(12, total_steps, "Tool Approval Mode");
             self.step_tool_approval()?;
             self.persist_after_step().await;
 
-            // Step 11: Routines
-            print_step(11, total_steps, "Routines (Scheduled Tasks)");
+            // ── Automation ───────────────────────────────────────────────
+
+            // Step 13: Routines
+            print_step(13, total_steps, "Routines (Scheduled Tasks)");
             self.step_routines()?;
             self.persist_after_step().await;
 
-            // Step 12: Skills
-            print_step(12, total_steps, "Skills");
+            // Step 14: Skills
+            print_step(14, total_steps, "Skills");
             self.step_skills()?;
             self.persist_after_step().await;
 
-            // Step 13: Claude Code
-            print_step(13, total_steps, "Claude Code Sandbox");
-            self.step_claude_code()?;
-            self.persist_after_step().await;
-
-            // Step 14: Smart Routing
-            print_step(14, total_steps, "Smart Routing");
-            self.step_smart_routing().await?;
-            self.persist_after_step().await;
-
-            // Step 15: Web UI
-            print_step(15, total_steps, "Web UI");
-            self.step_web_ui()?;
-            self.persist_after_step().await;
-
-            // Step 16: Observability
-            print_step(16, total_steps, "Observability");
-            self.step_observability()?;
-            self.persist_after_step().await;
-
-            // Step 17: Heartbeat
-            print_step(17, total_steps, "Background Tasks");
+            // Step 15: Heartbeat
+            print_step(15, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
 
-            // Step 18: Notification Preferences
-            print_step(18, total_steps, "Notification Preferences");
+            // ── Presentation & Operations ────────────────────────────────
+
+            // Step 16: Notification Preferences
+            print_step(16, total_steps, "Notification Preferences");
             self.step_notification_preferences()?;
+            self.persist_after_step().await;
+
+            // Step 17: Web UI
+            print_step(17, total_steps, "Web UI");
+            self.step_web_ui()?;
+            self.persist_after_step().await;
+
+            // Step 18: Observability
+            print_step(18, total_steps, "Observability");
+            self.step_observability()?;
             self.persist_after_step().await;
         }
 
@@ -1167,7 +1204,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 5: Embeddings configuration.
+    /// Step 6: Embeddings configuration.
     fn step_embeddings(&mut self) -> Result<(), SetupError> {
         print_info("Embeddings enable semantic search in your workspace memory.");
         println!();
@@ -1359,7 +1396,7 @@ impl SetupWizard {
         }
     }
 
-    /// Step 6: Channel configuration.
+    /// Step 8: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
         match setup_tunnel(&self.settings) {
@@ -1866,7 +1903,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Extensions (tools) installation from registry.
+    /// Step 9: Extensions (tools) installation from registry.
     async fn step_extensions(&mut self) -> Result<(), SetupError> {
         let catalog = match load_registry_catalog() {
             Some(c) => c,
@@ -2033,7 +2070,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 9: Docker Sandbox -- check Docker installation and availability.
+    /// Step 10: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
         // ── Part A: Local tools for the main agent ───────────────────────
         println!();
@@ -2216,7 +2253,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 3: Agent identity (name).
+    /// Step 7: Agent identity (name).
     fn step_agent_identity(&mut self) -> Result<(), SetupError> {
         print_info("Give your ThinClaw agent a name. This is used in greetings,");
         print_info("the boot screen, and session metadata.");
@@ -2240,7 +2277,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 10: Routines (scheduled tasks).
+    /// Step 13: Routines (scheduled tasks).
     fn step_routines(&mut self) -> Result<(), SetupError> {
         print_info("Routines let ThinClaw execute scheduled tasks automatically.");
         print_info("Examples: periodic file backups, daily summaries, cron-style jobs.");
@@ -2257,7 +2294,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 11: Skills.
+    /// Step 14: Skills.
     fn step_skills(&mut self) -> Result<(), SetupError> {
         print_info("Skills are composable capability plugins that give ThinClaw");
         print_info("domain-specific knowledge (e.g., coding standards, deployment");
@@ -2275,11 +2312,11 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 12: Claude Code sandbox.
-    fn step_claude_code(&mut self) -> Result<(), SetupError> {
+    /// Step 11: Claude Code sandbox.
+    async fn step_claude_code(&mut self) -> Result<(), SetupError> {
         // Claude Code requires the Docker sandbox to be enabled
         if !self.settings.sandbox.enabled {
-            print_info("Claude Code requires Docker sandbox (not enabled in step 9).");
+            print_info("Claude Code requires Docker sandbox (not enabled in step 10).");
             print_info("Skipping Claude Code configuration.");
             self.settings.claude_code_enabled = false;
             return Ok(());
@@ -2307,17 +2344,11 @@ impl SetupWizard {
         let has_env_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
         let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
 
-        // Synchronously check keychain (block_on is acceptable in the wizard)
-        let has_keychain_key = {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                crate::secrets::keychain::get_api_key(
-                    crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
-                )
-                .await
-                .is_some()
-            })
-        };
+        let has_keychain_key = crate::secrets::keychain::get_api_key(
+            crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+        )
+        .await
+        .is_some();
 
         if has_env_key {
             print_success("✓ ANTHROPIC_API_KEY found in environment. This will be used.");
@@ -2342,14 +2373,12 @@ impl SetupWizard {
                     input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
 
                 if api_key.starts_with("sk-ant-") {
-                    let rt = tokio::runtime::Handle::current();
-                    match rt.block_on(async {
-                        crate::secrets::keychain::store_api_key(
-                            crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
-                            &api_key,
-                        )
-                        .await
-                    }) {
+                    match crate::secrets::keychain::store_api_key(
+                        crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                        &api_key,
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             print_success("API key stored securely in OS keychain.");
                             print_info("It will be injected into Claude Code containers at runtime.");
@@ -2403,7 +2432,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 13: Smart Routing configuration.
+    /// Step 5: Smart Routing configuration.
     ///
     /// Allows setting a cheap/fast model for lightweight tasks like
     /// routing decisions, heartbeat checks, and prompt evaluation.
@@ -2529,7 +2558,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 14: Web UI (WebChat) configuration.
+    /// Step 17: Web UI (WebChat) configuration.
     ///
     /// Configures the gateway dashboard appearance: theme, accent color,
     /// and branding badge visibility.
@@ -2587,7 +2616,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 15: Observability configuration.
+    /// Step 18: Observability configuration.
     ///
     /// Selects the event and metric recording backend.
     fn step_observability(&mut self) -> Result<(), SetupError> {
@@ -2614,7 +2643,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 16: Heartbeat configuration.
+    /// Step 16: Notification preferences.
     /// Configure which channel receives proactive notifications.
     ///
     /// Auto-selects if only one channel is configured.
@@ -2769,6 +2798,7 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Step 12: Tool approval mode.
     fn step_tool_approval(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw can execute tools (shell commands, file operations, etc.) on your behalf.");
         print_info("Choose how much autonomy to grant the agent:");
@@ -2810,6 +2840,7 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Step 15: Heartbeat (background tasks) configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -2835,10 +2866,8 @@ impl SetupWizard {
             self.settings.heartbeat.interval_secs = 1800; // 30 minutes
         }
 
-        // Notify channel
-        let notify_channel = optional_input("Notify channel on findings", Some("e.g., telegram"))
-            .map_err(SetupError::Io)?;
-        self.settings.heartbeat.notify_channel = notify_channel;
+        // Notification channel is configured in step 16 (Notification Preferences)
+        // which handles recipient selection for all proactive messages.
 
         print_success(&format!(
             "Heartbeat enabled (every {} minutes)",
