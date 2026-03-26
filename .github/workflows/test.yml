@@ -19,7 +19,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U thinclaw"
+          --health-cmd "pg_isready -U thinclaw -d thinclaw_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -34,6 +34,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Enable pgvector extension
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Run database migrations
+        run: |
+          for f in migrations/V*.sql; do
+            echo "Applying $f..."
+            PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -f "$f"
+          done
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Run Tests
