@@ -378,16 +378,26 @@ async fn test_workspace_system_prompt() {
 
     let workspace = Workspace::new(user_id, pool.clone());
 
-    // Write identity files
+    // Write identity files using structured markdown that matches
+    // compact_identity()'s extraction patterns.
     workspace
-        .write(paths::AGENTS, "You are a helpful assistant.")
+        .write(
+            paths::AGENTS,
+            "## Session Startup\n\nYou are a helpful assistant.",
+        )
         .await
         .unwrap();
     workspace
-        .write(paths::SOUL, "Be kind and thorough.")
+        .write(
+            paths::SOUL,
+            "# SOUL.md\n\n- **Vibe:** Be kind and thorough",
+        )
         .await
         .unwrap();
-    workspace.write(paths::USER, "Name: Alice").await.unwrap();
+    workspace
+        .write(paths::USER, "# USER.md\n\n- **Name:** Alice")
+        .await
+        .unwrap();
 
     // Get system prompt
     let prompt = workspace
@@ -397,13 +407,16 @@ async fn test_workspace_system_prompt() {
 
     assert!(
         prompt.contains("helpful assistant"),
-        "Should include AGENTS.md"
+        "Should include AGENTS.md content, got: {prompt}"
     );
     assert!(
         prompt.contains("kind and thorough"),
-        "Should include SOUL.md"
+        "Should include SOUL.md content, got: {prompt}"
     );
-    assert!(prompt.contains("Alice"), "Should include USER.md");
+    assert!(
+        prompt.contains("Alice"),
+        "Should include USER.md content, got: {prompt}"
+    );
 
     cleanup_user(&pool, user_id).await;
 }

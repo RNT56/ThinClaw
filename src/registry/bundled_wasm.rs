@@ -23,13 +23,13 @@ pub fn is_available() -> bool {
     cfg!(feature = "bundled-wasm")
 }
 
-/// Auto-generated entries from `build.rs` when `bundled-wasm` feature is active.
-///
-/// Each entry is `(name, kind, wasm_bytes, caps_bytes)` where:
-/// - `name`: extension name (e.g. "telegram", "github")
-/// - `kind`: "tool" or "channel"
-/// - `wasm_bytes`: the compiled WASM binary
-/// - `caps_bytes`: optional capabilities JSON sidecar
+// Auto-generated entries from `build.rs` when `bundled-wasm` feature is active.
+//
+// Each entry is `(name, kind, wasm_bytes, caps_bytes)` where:
+// - `name`: extension name (e.g. "telegram", "github")
+// - `kind`: "tool" or "channel"
+// - `wasm_bytes`: the compiled WASM binary
+// - `caps_bytes`: optional capabilities JSON sidecar
 #[cfg(feature = "bundled-wasm")]
 include!(concat!(env!("OUT_DIR"), "/bundled_wasm_entries.rs"));
 
