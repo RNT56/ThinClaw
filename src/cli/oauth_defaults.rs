@@ -48,26 +48,38 @@ const GOOGLE_CLIENT_SECRET: &str = match option_env!("THINCLAW_GOOGLE_CLIENT_SEC
 };
 
 /// GitHub OAuth App credentials.
-/// For "installed app" pattern (non-web), client_secret is semi-public.
-/// Override at compile time with THINCLAW_GITHUB_CLIENT_ID / THINCLAW_GITHUB_CLIENT_SECRET.
+///
+/// **Note:** The GitHub WASM tool uses a Personal Access Token (PAT), not OAuth.
+/// Set it with: `thinclaw secret set github_token <token>`
+/// This OAuth config only applies if you register a GitHub OAuth App for
+/// a future OAuth-based integration.
+///
+/// Override at compile time with THINCLAW_GITHUB_CLIENT_ID / THINCLAW_GITHUB_CLIENT_SECRET,
+/// or at runtime via GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET env vars.
 const GITHUB_CLIENT_ID: &str = match option_env!("THINCLAW_GITHUB_CLIENT_ID") {
     Some(v) => v,
     None => "Ov23liIronClawGHApp01",
 };
 const GITHUB_CLIENT_SECRET: &str = match option_env!("THINCLAW_GITHUB_CLIENT_SECRET") {
     Some(v) => v,
-    None => "thinclaw_gh_default_secret_placeholder",
+    // No built-in secret: users must register their own GitHub OAuth App
+    // and provide credentials via env var or compile-time override.
+    // The GitHub WASM tool uses PAT auth, not OAuth.
+    None => "",
 };
 
 /// Notion Integration credentials.
-/// Override at compile time with THINCLAW_NOTION_CLIENT_ID / THINCLAW_NOTION_CLIENT_SECRET.
+///
+/// **Note:** No Notion WASM tool exists yet. These credentials are reserved
+/// for a future Notion integration. Users must register their own Notion
+/// integration and provide credentials via env var or compile-time override.
 const NOTION_CLIENT_ID: &str = match option_env!("THINCLAW_NOTION_CLIENT_ID") {
     Some(v) => v,
-    None => "thinclaw-notion-integration",
+    None => "",
 };
 const NOTION_CLIENT_SECRET: &str = match option_env!("THINCLAW_NOTION_CLIENT_SECRET") {
     Some(v) => v,
-    None => "thinclaw_notion_default_secret_placeholder",
+    None => "",
 };
 
 /// Returns built-in OAuth credentials for a provider, keyed by secret_name.
@@ -80,14 +92,18 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
         }),
-        "github_oauth_token" => Some(OAuthCredentials {
-            client_id: GITHUB_CLIENT_ID,
-            client_secret: GITHUB_CLIENT_SECRET,
-        }),
-        "notion_oauth_token" => Some(OAuthCredentials {
-            client_id: NOTION_CLIENT_ID,
-            client_secret: NOTION_CLIENT_SECRET,
-        }),
+        "github_oauth_token" if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() => {
+            Some(OAuthCredentials {
+                client_id: GITHUB_CLIENT_ID,
+                client_secret: GITHUB_CLIENT_SECRET,
+            })
+        }
+        "notion_oauth_token" if !NOTION_CLIENT_ID.is_empty() && !NOTION_CLIENT_SECRET.is_empty() => {
+            Some(OAuthCredentials {
+                client_id: NOTION_CLIENT_ID,
+                client_secret: NOTION_CLIENT_SECRET,
+            })
+        }
         _ => None,
     }
 }
@@ -566,21 +582,29 @@ mod tests {
     }
 
     #[test]
-    fn test_github_returns_credentials() {
+    fn test_github_returns_none_without_env_credentials() {
+        // GitHub uses PAT auth (not OAuth), so builtin_credentials returns None
+        // unless real OAuth App credentials are provided via env vars.
         let creds = builtin_credentials("github_oauth_token");
-        assert!(creds.is_some());
-        let creds = creds.unwrap();
-        assert!(!creds.client_id.is_empty());
-        assert!(!creds.client_secret.is_empty());
+        // Without THINCLAW_GITHUB_CLIENT_SECRET set, this should be None.
+        // If someone compiles with the env var set, it would be Some.
+        if GITHUB_CLIENT_SECRET.is_empty() {
+            assert!(creds.is_none());
+        } else {
+            assert!(creds.is_some());
+        }
     }
 
     #[test]
-    fn test_notion_returns_credentials() {
+    fn test_notion_returns_none_without_env_credentials() {
+        // No Notion tool exists yet. Credentials are only available if
+        // provided via env vars at compile time.
         let creds = builtin_credentials("notion_oauth_token");
-        assert!(creds.is_some());
-        let creds = creds.unwrap();
-        assert!(!creds.client_id.is_empty());
-        assert!(!creds.client_secret.is_empty());
+        if NOTION_CLIENT_SECRET.is_empty() {
+            assert!(creds.is_none());
+        } else {
+            assert!(creds.is_some());
+        }
     }
 
     #[test]
