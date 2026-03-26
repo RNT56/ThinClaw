@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.0) - 2026-03-26
+
+### Added
+
+- add Apple Mail channel + auto-start for macOS apps
+- add Notion WASM tool with full API coverage
+- WebUI model routing settings + wizard cross-provider API key collection
+- add /restart command, harden auto-approve, improve deployment docs
+- DB-backed config resolvers, wizard local tools/sandbox clarity, bootstrap identity injection
+- WebUI Settings tab, agent bootstrap/cleanup fixes, favicon update
+- *(mcp)* implement stdio transport for MCP servers
+- *(ironclaw)* implement dual WASM extension deployment options
+- *(ironclaw)* compilation fixes, wasmtime 36 upgrade, sysinfo API migration, and module restructuring
+- ironclaw agent engine integration + codebase audit
+
+### Fixed
+
+- add super:: prefix to test references to private constants
+- remove placeholder OAuth secrets, correctly document auth models
+- correct registry URLs and CI manifest lookup for slack-tool and telegram-mtproto
+- complete IronClaw → ThinClaw rebrand + fix failing streaming test
+- strip NEAR AI author, fix Linux build errors
+- *(ci)* update cargo-dist version to 0.31.0 in release.yml
+- *(wix)* correct manufacturer whitespace to match cargo-dist expectation
+- *(wix)* update installer manifest from ironclaw to thinclaw
+- *(ci)* install libasound2-dev for voice feature in test.yml
+- *(release)* patch artifact download URLs into manifests, update repo URLs
+- *(installer)* clear error when cargo-component missing, soft-fail bundled channels
+- *(wizard)* 3 bugs — missing persist, silent fallback skip, loop allocations
+- *(wizard)* add bundled-wasm extraction for tool install step
+- *(wizard)* use bundled-wasm extraction as top-priority install path
+- *(registry)* remove placeholder artifacts, allow sha256-null fallback
+- deployment bugs — desktop feature, repl guards, registry artifacts
+- rebrand Telegram/Discord channels and docs to ThinClaw
+
+### Other
+
+- bump version to 0.13.0
+- add channels-docs/ with documentation for all 12 channels
+- add tools-docs/ with documentation for all 11 WASM tools
+- add Gmail setup guide and fix stale libSQL limitation claims
+- update FEATURE_PARITY, CLAUDE.md, and setup README
+- add consolidated External Dependencies guide
+- add data directory layout, upgrade workflow, and reset procedures
+- Docker worker & Claude Code infrastructure
+- apply cargo fmt to entire codebase
+- update WASM artifact URLs and SHA256 checksums [skip ci]
+- *(search)* remove dead code, wire full pipeline into libsql
+- comprehensive CLAUDE.md update against actual codebase
+- complete IronClaw → ThinClaw rebranding across entire codebase
+- comprehensive deployment prerequisites and IronClaw → ThinClaw rebrand
+- rename all IRONCLAW_* env vars to THINCLAW_*
+- rebrand all extension sources from IronClaw to ThinClaw
+- complete ThinClaw rebranding - service, CLI hints, all remaining refs
+- comprehensive ThinClaw rebranding across all source files
+- fix failing GitHub Actions workflows
+- rename package to thinclaw for correct release artifact naming
+- allow release-plz to run in any repo, not just nearai
+- fully rebrand ironclaw README to ThinClaw
+- use Thinclaw_IC_01_nobg.png as readme logo
+- use Thinclaw_IC.png as readme logo
+- replace IronClaw mascot with ThinClaw circuit-crab logo
+- add comprehensive deployment guide, fix repo URLs, update env.example
+
 ## [0.12.0](https://github.com/nearai/ironclaw/compare/v0.11.1...v0.12.0) - 2026-02-26
 
 ### Added
