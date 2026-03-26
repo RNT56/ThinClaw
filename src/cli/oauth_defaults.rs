@@ -588,7 +588,7 @@ mod tests {
         let creds = builtin_credentials("github_oauth_token");
         // Without THINCLAW_GITHUB_CLIENT_SECRET set, this should be None.
         // If someone compiles with the env var set, it would be Some.
-        if GITHUB_CLIENT_SECRET.is_empty() {
+        if super::GITHUB_CLIENT_SECRET.is_empty() {
             assert!(creds.is_none());
         } else {
             assert!(creds.is_some());
@@ -600,7 +600,7 @@ mod tests {
         // No Notion tool exists yet. Credentials are only available if
         // provided via env vars at compile time.
         let creds = builtin_credentials("notion_oauth_token");
-        if NOTION_CLIENT_SECRET.is_empty() {
+        if super::NOTION_CLIENT_SECRET.is_empty() {
             assert!(creds.is_none());
         } else {
             assert!(creds.is_some());
