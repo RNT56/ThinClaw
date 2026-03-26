@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.0/google-calendar-wasm32-wasip2.tar.gz",
-      "sha256": "56443d5decb8f0cb0a412773ca6dab2274c0b82a3a3498398e5624d8ad1561eb"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/google-calendar-wasm32-wasip2.tar.gz",
+      "sha256": "5166791b51ce3bdb00b5cf8e2b6141dec2ad0a4d10840a354e0dd4af124b6238"
     }
   },
   "auth_summary": {

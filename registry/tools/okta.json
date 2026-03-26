@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.0/okta-wasm32-wasip2.tar.gz",
-      "sha256": "ac6cd965f6ee8cb5ce4bbee7141c58453005c2e35fb9bee7622b2b10cb422465"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/okta-wasm32-wasip2.tar.gz",
+      "sha256": "604b19bc30beca9ef6b8c747951be34bf37889e15420f9f900699ef9ba0f1ac1"
     }
   },
   "auth_summary": {
