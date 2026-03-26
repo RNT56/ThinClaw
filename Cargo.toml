@@ -35,6 +35,9 @@ path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
 license = false
 eula = false
 
+[package.metadata.dist]
+dist = true
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
