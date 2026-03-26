@@ -1,0 +1,45 @@
+{
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.notion.com",
+          "path_prefix": "/v1/",
+          "methods": [
+            "GET",
+            "POST",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      ],
+      "credentials": {
+        "notion_token": {
+          "secret_name": "notion_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "api.notion.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      },
+      "timeout_secs": 30
+    },
+    "secrets": {
+      "allowed_names": [
+        "notion_token",
+        "notion_*"
+      ]
+    }
+  },
+  "config": {
+    "api_version": "2022-06-28",
+    "default_page_size": 25,
+    "max_page_size": 100
+  }
+}

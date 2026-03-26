@@ -1,0 +1,38 @@
+{
+  "name": "notion",
+  "display_name": "Notion",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Notion workspace integration for pages, databases, blocks, search, and comments",
+  "keywords": [
+    "notion",
+    "wiki",
+    "knowledge-base",
+    "documentation",
+    "project-management"
+  ],
+  "source": {
+    "dir": "tools-src/notion",
+    "capabilities": "notion-tool.capabilities.json",
+    "crate_name": "notion-tool"
+  },
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.12.0/notion-wasm32-wasip2.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Notion",
+    "secrets": [
+      "notion_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://www.notion.so/my-integrations"
+  },
+  "tags": [
+    "default",
+    "productivity"
+  ]
+}
