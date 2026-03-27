@@ -153,10 +153,13 @@ impl Agent {
                 self.llm().clone()
             };
 
+        let active_channel_names = self.channels.channel_names().await;
+
         let mut reasoning = Reasoning::new(routed_llm, self.safety().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat)
+            .with_active_channels(active_channel_names)
             .with_workspace_mode(
                 &self.config.workspace_mode,
                 self.config

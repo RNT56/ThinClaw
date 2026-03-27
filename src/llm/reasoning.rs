@@ -209,6 +209,10 @@ pub struct Reasoning {
     workspace_mode: Option<String>,
     /// Workspace root directory (for sandboxed/project modes).
     workspace_root: Option<String>,
+    /// Names of all active channels (e.g. ["repl", "apple_mail", "telegram"]).
+    /// Injected into the system prompt so the LLM knows what communication
+    /// channels are connected and can use them instead of reaching for API tools.
+    active_channels: Vec<String>,
     /// Shared cost tracker — records every LLM call for the Cost Dashboard.
     cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
     /// Shared response cache — records hits/misses for the Cache Dashboard.
@@ -229,6 +233,7 @@ impl Reasoning {
             is_group_chat: false,
             workspace_mode: None,
             workspace_root: None,
+            active_channels: Vec::new(),
             cost_tracker: None,
             response_cache: None,
         }
@@ -320,6 +325,17 @@ impl Reasoning {
                 self.workspace_root = Some(r);
             }
         }
+        self
+    }
+
+    /// Set the list of active channel names.
+    ///
+    /// These are injected into the system prompt so the LLM knows which
+    /// communication channels are connected (e.g. apple_mail, telegram,
+    /// imessage). This prevents the agent from reaching for API-based tools
+    /// when a native channel already provides the same capability.
+    pub fn with_active_channels(mut self, channels: Vec<String>) -> Self {
+        self.active_channels = channels;
         self
     }
 
@@ -1108,33 +1124,57 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
     }
 
     fn build_channel_section(&self) -> String {
-        let channel = match self.channel.as_deref() {
-            Some(c) => c,
-            None => return String::new(),
-        };
-        let hints = match channel {
-            "discord" => {
-                "\
+        let mut sections = Vec::new();
+
+        // Active channels awareness — tell the LLM what's connected
+        if !self.active_channels.is_empty() {
+            let channel_list: Vec<String> = self.active_channels.iter().map(|c| {
+                match c.as_str() {
+                    "apple_mail" => format!("- **apple_mail**: Apple Mail.app (reads inbox via Envelope Index, sends via AppleScript — no API key needed)"),
+                    "imessage" => format!("- **imessage**: iMessage via Messages.app (reads chat.db, sends via AppleScript)"),
+                    "gmail" => format!("- **gmail**: Gmail channel (receives emails via Pub/Sub push)"),
+                    "telegram" => format!("- **telegram**: Telegram bot (receives messages via webhook/polling)"),
+                    "discord" => format!("- **discord**: Discord bot (receives messages via gateway)"),
+                    "slack" => format!("- **slack**: Slack bot (receives messages via events API)"),
+                    "signal" => format!("- **signal**: Signal messenger (receives messages via signal-cli)"),
+                    "nostr" => format!("- **nostr**: Nostr protocol (NIP-04 encrypted DMs)"),
+                    "gateway" => format!("- **gateway**: Web UI chat interface"),
+                    "repl" => format!("- **repl**: CLI/TUI terminal interface"),
+                    "http" => format!("- **http**: HTTP webhook endpoint"),
+                    other => format!("- **{}**: active channel", other),
+                }
+            }).collect();
+            sections.push(format!(
+                "\n\n## Connected Channels\nYou are connected to these messaging channels. \
+                 Incoming messages arrive automatically — you do NOT need API tools to read them.\n\
+                 To check recent messages, they appear in your conversation as they arrive.\n\
+                 To send to a specific channel, use the `broadcast` capability via notification routing.\n{}",
+                channel_list.join("\n")
+            ));
+        }
+
+        // Channel-specific formatting hints for the current channel
+        if let Some(ref channel) = self.channel {
+            let hints = match channel.as_str() {
+                "discord" => Some("\
 - No markdown tables (Discord renders them as plaintext). Use bullet lists instead.\n\
-- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."
-            }
-            "whatsapp" => {
-                "\
+- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."),
+                "whatsapp" => Some("\
 - No markdown headers or tables (WhatsApp ignores them). Use **bold** for emphasis.\n\
-- Keep messages concise; long replies get truncated on mobile."
-            }
-            "telegram" => {
-                "\
-- No markdown tables (Telegram strips them). Bullet lists and bold work well."
-            }
-            "slack" => {
-                "\
+- Keep messages concise; long replies get truncated on mobile."),
+                "telegram" => Some("\
+- No markdown tables (Telegram strips them). Bullet lists and bold work well."),
+                "slack" => Some("\
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
-- Prefer threaded replies when responding to older messages."
+- Prefer threaded replies when responding to older messages."),
+                _ => None,
+            };
+            if let Some(hints) = hints {
+                sections.push(format!("\n\n## Channel Formatting ({})\n{}", channel, hints));
             }
-            _ => return String::new(),
-        };
-        format!("\n\n## Channel Formatting ({})\n{}", channel, hints)
+        }
+
+        sections.join("")
     }
 
     fn build_runtime_section(&self) -> String {

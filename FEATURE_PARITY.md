@@ -69,7 +69,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
-| WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
+| WhatsApp | ✅ | 🚧 | P1 | WASM channel compiled, needs Baileys bridge for Web mode |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST (`channels/discord.rs`) + WASM webhook channel |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
