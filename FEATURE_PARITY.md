@@ -256,6 +256,10 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Smart routing WebUI config | ❌ | ✅ | Settings tab: cheap model, cascade mode, enable/disable, failover chain ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for API key, stores in OS keychain ([`src/setup/wizard.rs`](src/setup/wizard.rs)) |
 | Claude Code runtime model config | ❌ | ✅ | WebUI Settings: change model/max-turns without restart, hot-reloaded into `ContainerJobManager` ([`src/orchestrator/job_manager.rs`](src/orchestrator/job_manager.rs)) |
+| Provider Vault (WebUI key mgmt) | ❌ | ✅ | Settings → Provider Vault: list 17 providers, add/remove API keys with encrypted storage, hot-reload [`src/channels/web/server.rs`](src/channels/web/server.rs) |
+| Agent-initiated model switching | ❌ | ✅ | `llm_select` + `llm_list_models` tools: agent can switch LLM mid-conversation via `SharedModelOverride` [`src/tools/builtin/llm_tools.rs`](src/tools/builtin/llm_tools.rs) |
+| Wizard fallback providers step | ❌ | ✅ | `step_fallback_providers` (Step 6): interactive secondary provider + API key setup, configures `fallback_chain` [`src/setup/wizard.rs`](src/setup/wizard.rs) |
+| RoutingPolicy in dispatcher | ❌ | ✅ | Automatic policy-driven routing (vision, large context, latency) wired into dispatcher pre-Reasoning [`src/agent/dispatcher.rs`](src/agent/dispatcher.rs) |
 
 ### Owner: ThinClaw Agent
 

@@ -316,6 +316,7 @@ mod tests {
             cost_tracker: None,
             response_cache: None,
             routing_policy: None,
+            model_override: None,
         };
 
         Agent::new(

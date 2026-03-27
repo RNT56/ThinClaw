@@ -162,6 +162,8 @@ pub struct GatewayState {
     pub startup_time: std::time::Instant,
     /// Flag set when a restart has been requested via the API.
     pub restart_requested: std::sync::atomic::AtomicBool,
+    /// Secrets store for Provider Vault API (key management).
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
 }
 
 /// Start the gateway HTTP server.
@@ -285,6 +287,13 @@ pub async fn start_server(
         .route(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
+        )
+        // Provider Vault (API key management)
+        .route("/api/providers", get(providers_list_handler))
+        .route("/api/providers/{slug}/key", post(providers_save_key_handler))
+        .route(
+            "/api/providers/{slug}/key",
+            axum::routing::delete(providers_delete_key_handler),
         )
         // Settings
         .route("/api/settings", get(settings_list_handler))
@@ -2693,6 +2702,157 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         consecutive_failures: r.consecutive_failures,
         status: status.to_string(),
     }
+}
+
+// --- Provider Vault handlers ---
+
+/// Response for GET /api/providers — lists all catalog providers with key status.
+#[derive(serde::Serialize)]
+struct ProviderInfo {
+    slug: String,
+    display_name: String,
+    api_style: String,
+    default_model: String,
+    default_context_size: u32,
+    has_key: bool,
+    env_key_name: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProvidersListResponse {
+    providers: Vec<ProviderInfo>,
+}
+
+async fn providers_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<ProvidersListResponse>, StatusCode> {
+    let catalog = crate::config::provider_catalog::catalog();
+    let secrets = state.secrets_store.as_ref();
+
+    let mut providers = Vec::new();
+    // Collect into a sorted list for deterministic ordering.
+    let mut entries: Vec<_> = catalog.iter().collect();
+    entries.sort_by_key(|(slug, _)| *slug);
+
+    for (slug, endpoint) in entries {
+        // Check if an API key is available (env var or secrets store).
+        let has_env =
+            crate::config::helpers::optional_env(endpoint.env_key_name)
+                .ok()
+                .flatten()
+                .is_some();
+        let has_secret = if let Some(ss) = secrets {
+            ss.exists(&state.user_id, endpoint.secret_name)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let api_style_str = match endpoint.api_style {
+            crate::config::provider_catalog::ApiStyle::OpenAi => "openai",
+            crate::config::provider_catalog::ApiStyle::Anthropic => "anthropic",
+            crate::config::provider_catalog::ApiStyle::OpenAiCompatible => "openai_compatible",
+            crate::config::provider_catalog::ApiStyle::Ollama => "ollama",
+        };
+
+        providers.push(ProviderInfo {
+            slug: slug.to_string(),
+            display_name: endpoint.display_name.to_string(),
+            api_style: api_style_str.to_string(),
+            default_model: endpoint.default_model.to_string(),
+            default_context_size: endpoint.default_context_size,
+            has_key: has_env || has_secret,
+            env_key_name: endpoint.env_key_name.to_string(),
+        });
+    }
+
+    Ok(Json(ProvidersListResponse { providers }))
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderKeyRequest {
+    api_key: String,
+}
+
+async fn providers_save_key_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(slug): Path<String>,
+    Json(body): Json<ProviderKeyRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Validate provider exists in catalog.
+    let endpoint = crate::config::provider_catalog::endpoint_for(&slug)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let secrets = state
+        .secrets_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    if body.api_key.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Delete existing secret if present, then create a new one.
+    let _ = secrets.delete(&state.user_id, endpoint.secret_name).await;
+
+    let params = crate::secrets::CreateSecretParams::new(
+        endpoint.secret_name,
+        body.api_key.clone(),
+    )
+    .with_provider(slug.clone());
+    secrets
+        .create(&state.user_id, params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to save API key for '{}': {}", slug, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Hot-reload secrets into the env overlay so the new key is immediately usable.
+    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    tracing::info!(
+        provider = %slug,
+        refreshed = count,
+        "Provider Vault: API key saved and secrets refreshed"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": format!("API key saved for {}", endpoint.display_name),
+    })))
+}
+
+async fn providers_delete_key_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let endpoint = crate::config::provider_catalog::endpoint_for(&slug)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let secrets = state
+        .secrets_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    secrets
+        .delete(&state.user_id, endpoint.secret_name)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete API key for '{}': {}", slug, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Refresh overlay to remove the deleted key.
+    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    tracing::info!(
+        provider = %slug,
+        refreshed = count,
+        "Provider Vault: API key removed and secrets refreshed"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": format!("API key removed for {}", endpoint.display_name),
+    })))
 }
 
 // --- Settings handlers ---

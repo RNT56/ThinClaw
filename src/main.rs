@@ -745,6 +745,9 @@ async fn main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        if let Some(ref ss) = components.secrets_store {
+            gw = gw.with_secrets_store(Arc::clone(ss));
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -897,6 +900,11 @@ async fn main() -> anyhow::Result<()> {
         executor
     };
 
+    // Register LLM management tools (llm_select, llm_list_models).
+    // The shared model override connects the tool output to the dispatcher.
+    let model_override = thinclaw::tools::builtin::new_shared_model_override();
+    components.tools.register_llm_tools(model_override.clone());
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -917,6 +925,7 @@ async fn main() -> anyhow::Result<()> {
         cost_tracker: Some(components.cost_tracker),
         response_cache: Some(components.response_cache),
         routing_policy: Some(components.routing_policy),
+        model_override: Some(model_override),
     };
 
     let agent = Agent::new(

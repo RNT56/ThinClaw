@@ -1,5 +1,7 @@
 //! Built-in tools that come with the agent.
 
+pub mod llm_tools;
+
 mod agent_control;
 mod apple_mail;
 mod browser;
@@ -39,6 +41,7 @@ pub use extension_tools::{
 };
 pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
+pub use llm_tools::{LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue,

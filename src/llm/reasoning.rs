@@ -239,6 +239,16 @@ impl Reasoning {
         }
     }
 
+    /// Swap the underlying LLM provider at runtime.
+    ///
+    /// Used by the dispatcher when the agent calls `llm_select` to switch
+    /// to a different model/provider mid-conversation. The swap takes effect
+    /// on the next `respond_with_tools` call.
+    pub fn swap_llm(&mut self, new_llm: Arc<dyn LlmProvider>) {
+        self.llm = new_llm;
+    }
+
+
     /// Wire a shared cost tracker so every LLM call is recorded.
     ///
     /// The tracker is read by `tauri_commands::cost_summary()` / `cost_export_csv()`.

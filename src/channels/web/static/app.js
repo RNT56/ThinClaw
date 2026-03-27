@@ -3733,9 +3733,73 @@ for (const section of Object.values(SETTINGS_SCHEMA)) {
   for (const f of section.fields) SCHEMA_KEYS.add(f.key);
 }
 
+// --- Provider Vault ---
+
+function loadProviderVault() {
+  const container = document.getElementById('provider-vault');
+  apiFetch('/api/providers').then((data) => {
+    container.style.display = '';
+    renderProviderVault(data.providers || []);
+  }).catch(() => {
+    container.style.display = 'none';
+  });
+}
+
+function renderProviderVault(providers) {
+  const container = document.getElementById('provider-vault');
+  const configured = providers.filter(p => p.has_key).length;
+  let html = `<div class="settings-section"><h3>🔑 Provider Vault <span class="vault-badge">${configured} / ${providers.length} configured</span></h3>`;
+  html += '<p class="vault-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>';
+  html += '<div class="vault-grid">';
+  for (const p of providers) {
+    const statusIcon = p.has_key ? '✅' : '⬚';
+    const statusClass = p.has_key ? 'vault-configured' : 'vault-unconfigured';
+    html += `<div class="vault-row ${statusClass}" id="vault-row-${p.slug}">`;
+    html += `<div class="vault-provider"><span class="vault-status-icon">${statusIcon}</span>`;
+    html += `<strong>${escapeHtml(p.display_name)}</strong>`;
+    html += `<span class="vault-model-hint">${escapeHtml(p.default_model)}</span></div>`;
+    html += `<div class="vault-actions">`;
+    if (p.has_key) {
+      html += `<span class="vault-key-label">Key configured</span>`;
+      html += `<button class="btn-vault-remove" onclick="removeProviderKey('${p.slug}', '${escapeHtml(p.display_name)}')">Remove</button>`;
+    } else {
+      html += `<input type="password" id="vault-key-${p.slug}" class="vault-key-input" placeholder="${escapeHtml(p.env_key_name)}">`;
+      html += `<button class="btn-vault-save" onclick="saveProviderKey('${p.slug}')">Save</button>`;
+    }
+    html += `</div></div>`;
+  }
+  html += '</div></div>';
+  container.innerHTML = html;
+}
+
+function saveProviderKey(slug) {
+  const input = document.getElementById('vault-key-' + slug);
+  if (!input || !input.value.trim()) { showToast('Please enter an API key', 'error'); return; }
+  const headers = { 'Content-Type': 'application/json' };
+  if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
+    method: 'POST', headers,
+    body: JSON.stringify({ api_key: input.value.trim() }),
+  }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => { showToast(d.message || 'Key saved', 'success'); loadProviderVault(); })
+    .catch(e => showToast('Failed to save key: ' + e.message, 'error'));
+}
+
+function removeProviderKey(slug, displayName) {
+  if (!confirm('Remove API key for ' + displayName + '?')) return;
+  const headers = {};
+  if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
+    method: 'DELETE', headers,
+  }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => { showToast(d.message || 'Key removed', 'success'); loadProviderVault(); })
+    .catch(e => showToast('Failed to remove key: ' + e.message, 'error'));
+}
+
 let settingsCache = {}; // key -> { value, updated_at }
 
 function loadSettings() {
+  loadProviderVault();
   const container = document.getElementById('settings-sections');
   container.innerHTML = '<div class="settings-loading">Loading settings...</div>';
 

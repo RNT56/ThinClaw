@@ -1,6 +1,6 @@
 //! Main setup wizard orchestration.
 //!
-//! The wizard guides users through 18 steps, grouped by concern:
+//! The wizard guides users through 19 steps, grouped by concern:
 //!
 //! **Infrastructure**
 //! 1. Database connection
@@ -10,29 +10,30 @@
 //! 3. Inference provider (Anthropic, OpenAI, Ollama, OpenRouter, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Smart routing (cheap/fast secondary model)
-//! 6. Embeddings (semantic search)
+//! 6. Fallback providers (secondary providers for failover)
+//! 7. Embeddings (semantic search)
 //!
 //! **Agent Personality**
-//! 7. Agent identity (name)
+//! 8. Agent identity (name)
 //!
 //! **Communication Channels**
-//! 8. Channel configuration (Telegram, Discord, Slack, Signal, etc.)
+//! 9. Channel configuration (Telegram, Discord, Slack, Signal, etc.)
 //!
 //! **Capabilities & Execution**
-//! 9. Extensions (tool installation from registry)
-//! 10. Local tools & Docker sandbox
-//! 11. Claude Code sandbox
-//! 12. Tool approval mode
+//! 10. Extensions (tool installation from registry)
+//! 11. Local tools & Docker sandbox
+//! 12. Claude Code sandbox
+//! 13. Tool approval mode
 //!
 //! **Automation**
-//! 13. Routines (scheduled tasks)
-//! 14. Skills (capability plugins)
-//! 15. Heartbeat (background tasks)
+//! 14. Routines (scheduled tasks)
+//! 15. Skills (capability plugins)
+//! 16. Heartbeat (background tasks)
 //!
 //! **Presentation & Operations**
-//! 16. Notification preferences
-//! 17. Web UI (theme, accent, branding)
-//! 18. Observability (event/metric recording)
+//! 17. Notification preferences
+//! 18. Web UI (theme, accent, branding)
+//! 19. Observability (event/metric recording)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -170,7 +171,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 18;
+            let total_steps = 19;
 
             // ── Infrastructure ───────────────────────────────────────────
 
@@ -216,78 +217,83 @@ impl SetupWizard {
             self.step_smart_routing().await?;
             self.persist_after_step().await;
 
-            // Step 6: Embeddings
-            print_step(6, total_steps, "Embeddings (Semantic Search)");
+            // Step 6: Fallback Providers (optional secondary providers)
+            print_step(6, total_steps, "Fallback Providers");
+            self.step_fallback_providers().await?;
+            self.persist_after_step().await;
+
+            // Step 7: Embeddings
+            print_step(7, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
             self.persist_after_step().await;
 
             // ── Agent Personality ─────────────────────────────────────────
 
-            // Step 7: Agent Identity
-            print_step(7, total_steps, "Agent Identity");
+            // Step 8: Agent Identity
+            print_step(8, total_steps, "Agent Identity");
             self.step_agent_identity()?;
             self.persist_after_step().await;
 
             // ── Communication Channels ───────────────────────────────────
 
-            // Step 8: Channel configuration
-            print_step(8, total_steps, "Channel Configuration");
+            // Step 9: Channel configuration
+            print_step(9, total_steps, "Channel Configuration");
             self.step_channels().await?;
             self.persist_after_step().await;
 
             // ── Capabilities & Execution ─────────────────────────────────
 
-            // Step 9: Extensions (tools)
-            print_step(9, total_steps, "Extensions");
+            // Step 10: Extensions (tools)
+            print_step(10, total_steps, "Extensions");
             self.step_extensions().await?;
             self.persist_after_step().await;
 
-            // Step 10: Local Tools & Docker Sandbox
-            print_step(10, total_steps, "Local Tools & Docker Sandbox");
+            // Step 11: Local Tools & Docker Sandbox
+            print_step(11, total_steps, "Local Tools & Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 11: Claude Code Sandbox
-            print_step(11, total_steps, "Claude Code Sandbox");
+            // Step 12: Claude Code Sandbox
+            print_step(12, total_steps, "Claude Code Sandbox");
             self.step_claude_code().await?;
             self.persist_after_step().await;
 
-            // Step 12: Tool Approval Mode
-            print_step(12, total_steps, "Tool Approval Mode");
+            // Step 13: Tool Approval Mode
+            print_step(13, total_steps, "Tool Approval Mode");
             self.step_tool_approval()?;
             self.persist_after_step().await;
 
             // ── Automation ───────────────────────────────────────────────
 
-            // Step 13: Routines
-            print_step(13, total_steps, "Routines (Scheduled Tasks)");
+            // Step 14: Routines
+            print_step(14, total_steps, "Routines (Scheduled Tasks)");
             self.step_routines()?;
             self.persist_after_step().await;
 
-            // Step 14: Skills
-            print_step(14, total_steps, "Skills");
+            // Step 15: Skills
+            print_step(15, total_steps, "Skills");
             self.step_skills()?;
             self.persist_after_step().await;
 
-            // Step 15: Heartbeat
-            print_step(15, total_steps, "Background Tasks");
+            // Step 16: Heartbeat
+            print_step(16, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
 
             // ── Presentation & Operations ────────────────────────────────
 
-            // Step 16: Notification Preferences
-            print_step(16, total_steps, "Notification Preferences");
+            // Step 17: Notification Preferences
+            print_step(17, total_steps, "Notification Preferences");
             self.step_notification_preferences()?;
             self.persist_after_step().await;
 
-            // Step 17: Web UI
-            print_step(17, total_steps, "Web UI");
+            // Step 18: Web UI
+            print_step(18, total_steps, "Web UI");
             self.step_web_ui()?;
             self.persist_after_step().await;
 
-            // Step 18: Observability
-            print_step(18, total_steps, "Observability");
+            // Step 19: Observability
+            print_step(19, total_steps, "Observability");
             self.step_observability()?;
             self.persist_after_step().await;
         }
@@ -2612,7 +2618,164 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 17: Web UI (WebChat) configuration.
+    /// Step 6: Fallback Providers (optional secondary providers for failover).
+    ///
+    /// Allows the user to add API keys for additional LLM providers so that
+    /// the failover chain and agent-initiated model switching actually work.
+    async fn step_fallback_providers(&mut self) -> Result<(), SetupError> {
+        print_info("ThinClaw can use multiple LLM providers for failover and cost optimization.");
+        print_info("If your primary provider is down, it will automatically try fallbacks.");
+        println!();
+
+        if !confirm("Add a fallback provider?", false).map_err(SetupError::Io)? {
+            print_info("No fallback providers configured — primary-only mode.");
+            return Ok(());
+        }
+
+        let primary_slug = self
+            .settings
+            .llm_backend
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+
+        let catalog = crate::config::provider_catalog::catalog();
+        // Build a list of providers excluding the primary and ollama (local).
+        let mut available: Vec<(&str, &crate::config::provider_catalog::ProviderEndpoint)> =
+            catalog
+                .iter()
+                .filter(|(slug, ep)| {
+                    **slug != primary_slug
+                        && !matches!(
+                            ep.api_style,
+                            crate::config::provider_catalog::ApiStyle::Ollama
+                        )
+                })
+                .map(|(slug, ep)| (*slug, ep))
+                .collect();
+        available.sort_by_key(|(slug, _)| *slug);
+
+        let mut fallback_slugs: Vec<String> = Vec::new();
+
+        loop {
+            println!();
+            print_info("Available providers:");
+            for (i, (slug, ep)) in available.iter().enumerate() {
+                // Check if key already exists
+                let has_env =
+                    std::env::var(ep.env_key_name).is_ok();
+                let has_keychain =
+                    crate::secrets::keychain::get_api_key(ep.secret_name)
+                        .await
+                        .is_some();
+                let status = if has_env || has_keychain {
+                    " ✅"
+                } else {
+                    ""
+                };
+                println!(
+                    "  {}. {} ({}){status}",
+                    i + 1,
+                    ep.display_name,
+                    slug
+                );
+            }
+
+            let choice = input("Select provider (number, or 'done')").map_err(SetupError::Io)?;
+            if choice.trim().eq_ignore_ascii_case("done") || choice.trim().is_empty() {
+                break;
+            }
+
+            let idx: usize = match choice.trim().parse::<usize>() {
+                Ok(n) if n >= 1 && n <= available.len() => n - 1,
+                _ => {
+                    print_error("Invalid selection. Enter a number or 'done'.");
+                    continue;
+                }
+            };
+
+            let (slug, endpoint) = available[idx];
+
+            // Check if key is already available
+            let has_env = std::env::var(endpoint.env_key_name).is_ok();
+            let has_keychain = crate::secrets::keychain::get_api_key(endpoint.secret_name)
+                .await
+                .is_some();
+
+            if has_env {
+                print_success(&format!(
+                    "✓ {} API key found in environment ({})",
+                    endpoint.display_name, endpoint.env_key_name
+                ));
+                fallback_slugs.push(format!("{}/{}", slug, endpoint.default_model));
+            } else if has_keychain {
+                print_success(&format!(
+                    "✓ {} API key found in OS keychain",
+                    endpoint.display_name
+                ));
+                fallback_slugs.push(format!("{}/{}", slug, endpoint.default_model));
+            } else {
+                // Prompt for API key
+                println!();
+                print_info(&format!(
+                    "Enter your {} API key:",
+                    endpoint.display_name
+                ));
+
+                let key = secret_input(&format!("{} API key", endpoint.display_name))
+                    .map_err(SetupError::Io)?;
+
+                if key.expose_secret().is_empty() {
+                    print_info("Skipped — no key entered.");
+                    continue;
+                }
+
+                // Save to secrets store
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    match ctx.save_secret(endpoint.secret_name, &key).await {
+                        Ok(()) => {
+                            print_success(&format!(
+                                "{} key encrypted and saved",
+                                endpoint.display_name
+                            ));
+                        }
+                        Err(e) => {
+                            print_error(&format!("Failed to save key: {e}"));
+                            continue;
+                        }
+                    }
+                } else {
+                    // No secrets store — fall back to env var hint
+                    print_info(&format!(
+                        "Set {} in your environment to use {}.",
+                        endpoint.env_key_name, endpoint.display_name
+                    ));
+                    continue;
+                }
+
+                fallback_slugs.push(format!("{}/{}", slug, endpoint.default_model));
+            }
+
+            print_success(&format!("Added {} to fallback chain.", endpoint.display_name));
+
+            if !confirm("Add another fallback provider?", false).map_err(SetupError::Io)? {
+                break;
+            }
+        }
+
+        if !fallback_slugs.is_empty() {
+            let chain = fallback_slugs.join(",");
+            self.settings.providers.fallback_chain = fallback_slugs;
+            println!();
+            print_success(&format!("Fallback chain: {}", chain));
+        } else {
+            print_info("No fallback providers added.");
+        }
+
+        Ok(())
+    }
+
+    /// Step 18: Web UI (WebChat) configuration.
     ///
     /// Configures the gateway dashboard appearance: theme, accent color,
     /// and branding badge visibility.

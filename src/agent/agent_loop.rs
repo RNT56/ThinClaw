@@ -94,6 +94,10 @@ pub struct AgentDeps {
     /// Smart routing policy — selects provider/model based on request context.
     /// Read/written by `openclaw_routing_*` Tauri commands, consulted before each LLM call.
     pub routing_policy: Option<Arc<tokio::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>>,
+    /// Agent-driven model override state, written by the `llm_select` tool.
+    /// When set, the dispatcher creates a new provider from the catalog and
+    /// uses it instead of the default routing. Resets per conversation.
+    pub model_override: Option<crate::tools::builtin::SharedModelOverride>,
 }
 
 /// The main agent that coordinates all components.

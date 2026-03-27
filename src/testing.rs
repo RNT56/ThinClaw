@@ -302,6 +302,7 @@ impl TestHarnessBuilder {
             cost_tracker: None,
             response_cache: None,
             routing_policy: None,
+            model_override: None,
         };
 
         TestHarness {

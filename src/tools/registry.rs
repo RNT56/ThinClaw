@@ -20,6 +20,7 @@ use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
     CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    LlmListModelsTool, LlmSelectTool, SharedModelOverride,
     MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
     PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillReadTool,
     SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
@@ -82,6 +83,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "list_subagents",
     "cancel_subagent",
     "apple_mail",
+    "llm_select",
+    "llm_list_models",
 ];
 
 /// Registry of available tools.
@@ -559,6 +562,16 @@ impl ToolRegistry {
         };
         self.register_sync(Arc::new(tool));
         tracing::info!("Registered Apple Mail tool (search + send)");
+    }
+
+    /// Register LLM model management tools.
+    ///
+    /// These allow the agent to discover available models (`llm_list_models`)
+    /// and switch the active model mid-conversation (`llm_select`).
+    pub fn register_llm_tools(&self, model_override: SharedModelOverride) {
+        self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
+        self.register_sync(Arc::new(LlmListModelsTool));
+        tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
     }
 
     /// Register the software builder tool.

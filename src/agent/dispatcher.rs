@@ -206,6 +206,8 @@ impl Agent {
         // Track whether we've already fired the pre-compaction memory flush this cycle.
         // Reset to false each time the hard history cap fires (a new compaction cycle begins).
         let mut memory_flush_fired = false;
+        // Track the last applied model override to avoid recreating the provider each iteration.
+        let mut last_applied_model_override: Option<String> = None;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -216,6 +218,50 @@ impl Agent {
                     reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
                 }
                 .into());
+            }
+
+            // ── Agent-driven model override (llm_select tool) ────────────
+            // If the agent called `llm_select` on a previous iteration, the
+            // shared model_override will be Some. Create a new provider from
+            // the catalog and swap it into Reasoning so subsequent LLM calls
+            // use the agent's chosen model. We track the last applied spec to
+            // avoid recreating the provider on every iteration.
+            if let Some(ref override_lock) = self.deps.model_override {
+                let current_override = override_lock.read().await.clone();
+                let current_spec = current_override.as_ref().map(|mo| mo.model_spec.clone());
+                if current_spec != last_applied_model_override {
+                    if let Some(ref mo) = current_override {
+                        let new_model = &mo.model_spec;
+                        if let Some((provider_slug, model_name)) = new_model.split_once('/') {
+                            match crate::llm::provider_factory::create_provider_for_catalog_entry(
+                                provider_slug,
+                                model_name,
+                            ) {
+                                Ok(new_provider) => {
+                                    tracing::info!(
+                                        to = %new_model,
+                                        reason = mo.reason.as_deref().unwrap_or("agent decision"),
+                                        "Agent-driven model switch via llm_select"
+                                    );
+                                    reasoning.swap_llm(new_provider);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        model = %new_model,
+                                        error = %e,
+                                        "Failed to create provider for agent model override, keeping current"
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Override was reset — swap back to primary. We don't
+                        // store the original LLM, so we just keep the current one.
+                        // The agent would start a new conversation for a clean reset.
+                        tracing::info!("Agent model override reset to primary");
+                    }
+                    last_applied_model_override = current_spec;
+                }
             }
 
             // Check if interrupted — preserve partial output

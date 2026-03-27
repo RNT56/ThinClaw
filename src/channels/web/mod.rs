@@ -95,6 +95,7 @@ impl GatewayChannel {
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: None,
         });
 
         Self {
@@ -130,6 +131,7 @@ impl GatewayChannel {
             routine_engine: self.state.routine_engine.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: self.state.secrets_store.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -235,6 +237,15 @@ impl GatewayChannel {
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) -> Self {
         self.rebuild_state(|s| s.routine_engine = Some(engine));
+        self
+    }
+
+    /// Inject the secrets store for API key management (Provider Vault).
+    pub fn with_secrets_store(
+        mut self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.rebuild_state(|s| s.secrets_store = Some(store));
         self
     }
 

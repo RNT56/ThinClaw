@@ -20,7 +20,7 @@ pub mod llama_cpp;
 pub mod llm_hooks;
 pub mod llms_txt;
 mod provider;
-mod provider_factory;
+pub(crate) mod provider_factory;
 pub mod provider_presets;
 mod reasoning;
 mod reasoning_tags;

@@ -226,9 +226,10 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
 
 /// Create an LLM provider from a catalog entry.
 ///
-/// Used to instantiate fallback providers for the FailoverProvider chain.
+/// Used to instantiate fallback providers for the FailoverProvider chain,
+/// and by the dispatcher for agent-driven model switching (`llm_select` tool).
 /// The provider is identified by its catalog slug and model name.
-fn create_provider_for_catalog_entry(
+pub fn create_provider_for_catalog_entry(
     provider_slug: &str,
     model: &str,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
