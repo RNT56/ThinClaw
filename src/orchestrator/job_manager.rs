@@ -209,16 +209,50 @@ pub struct ContainerJobManager {
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
     /// Cached Docker connection (created on first use).
     docker: Arc<RwLock<Option<bollard::Docker>>>,
+    /// Runtime-override for Claude Code model (updated via settings API).
+    cc_model: RwLock<String>,
+    /// Runtime-override for Claude Code max turns.
+    cc_max_turns: RwLock<u32>,
 }
 
 impl ContainerJobManager {
     pub fn new(config: ContainerJobConfig, token_store: TokenStore) -> Self {
+        let model = config.claude_code_model.clone();
+        let turns = config.claude_code_max_turns;
         Self {
             config,
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             docker: Arc::new(RwLock::new(None)),
+            cc_model: RwLock::new(model),
+            cc_max_turns: RwLock::new(turns),
         }
+    }
+
+    /// Update Claude Code settings at runtime (called by the settings API).
+    ///
+    /// The next Claude Code container spawned will use the updated values.
+    /// Already-running containers keep their current settings.
+    pub async fn update_claude_code_settings(
+        &self,
+        model: Option<String>,
+        max_turns: Option<u32>,
+    ) {
+        if let Some(m) = model {
+            *self.cc_model.write().await = m;
+        }
+        if let Some(t) = max_turns {
+            *self.cc_max_turns.write().await = t;
+        }
+        // Read into locals to avoid holding RwLock guards across the
+        // tracing::info! macro (format_args! temporaries are !Send).
+        let current_model = self.cc_model.read().await.clone();
+        let current_turns = *self.cc_max_turns.read().await;
+        tracing::info!(
+            model = %current_model,
+            max_turns = current_turns,
+            "Claude Code settings updated at runtime"
+        );
     }
 
     /// Get or create a Docker connection.
@@ -390,9 +424,9 @@ impl ContainerJobManager {
                 "--orchestrator-url".to_string(),
                 orchestrator_url,
                 "--max-turns".to_string(),
-                self.config.claude_code_max_turns.to_string(),
+                self.cc_max_turns.read().await.to_string(),
                 "--model".to_string(),
-                self.config.claude_code_model.clone(),
+                self.cc_model.read().await.clone(),
             ],
         };
 

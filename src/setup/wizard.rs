@@ -67,6 +67,8 @@ const CHANNEL_INDEX_NOSTR: usize = 5;
 const CHANNEL_INDEX_GMAIL: usize = 6;
 #[cfg(target_os = "macos")]
 const CHANNEL_INDEX_IMESSAGE: usize = 7;
+#[cfg(target_os = "macos")]
+const CHANNEL_INDEX_APPLE_MAIL: usize = 8;
 // WASM channels start after the native channels (dynamically computed as `native_count`)
 
 /// Setup wizard error.
@@ -1446,6 +1448,12 @@ impl SetupWizard {
             self.settings.channels.imessage_enabled,
         ));
 
+        #[cfg(target_os = "macos")]
+        options.push((
+            "Apple Mail".to_string(),
+            self.settings.channels.apple_mail_enabled,
+        ));
+
         let native_count = options.len();
 
         // Add available WASM channels (installed + bundled + registry)
@@ -1845,6 +1853,50 @@ impl SetupWizard {
         #[cfg(target_os = "macos")]
         if !selected.contains(&CHANNEL_INDEX_IMESSAGE) {
             self.settings.channels.imessage_enabled = false;
+        }
+
+        // Apple Mail channel (macOS only)
+        #[cfg(target_os = "macos")]
+        if selected.contains(&CHANNEL_INDEX_APPLE_MAIL) {
+            println!();
+            print_info("Apple Mail uses the native macOS Mail.app Envelope Index database.");
+            print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
+            print_info("Make sure Mail.app is configured and signed into your account.");
+            println!();
+
+            let allow_from = optional_input(
+                "Allowed sender emails (comma-separated, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from {
+                if !af.is_empty() {
+                    self.settings.channels.apple_mail_allow_from = Some(af.clone());
+                }
+            }
+
+            let poll_interval =
+                optional_input("Polling interval in seconds", Some("10")).map_err(SetupError::Io)?;
+            if let Some(ref pi) = poll_interval {
+                if let Ok(n) = pi.parse::<u64>() {
+                    self.settings.channels.apple_mail_poll_interval = Some(n);
+                }
+            }
+
+            let unread_only = confirm("Only process unread messages?", true)
+                .map_err(SetupError::Io)?;
+            self.settings.channels.apple_mail_unread_only = unread_only;
+
+            let mark_as_read = confirm("Mark messages as read after processing?", true)
+                .map_err(SetupError::Io)?;
+            self.settings.channels.apple_mail_mark_as_read = mark_as_read;
+
+            self.settings.channels.apple_mail_enabled = true;
+            print_success("Apple Mail channel configured");
+        }
+        #[cfg(target_os = "macos")]
+        if !selected.contains(&CHANNEL_INDEX_APPLE_MAIL) {
+            self.settings.channels.apple_mail_enabled = false;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -2671,6 +2723,9 @@ impl SetupWizard {
         if self.settings.channels.imessage_enabled {
             channels.push("imessage".to_string());
         }
+        if self.settings.channels.apple_mail_enabled {
+            channels.push("apple_mail".to_string());
+        }
         if self.settings.channels.signal_enabled {
             channels.push("signal".to_string());
         }
@@ -2711,7 +2766,8 @@ impl SetupWizard {
             .map(|ch| match ch.as_str() {
                 "web" => "web       — Web UI only (always available)".to_string(),
                 "telegram" => "telegram  — Telegram bot messages".to_string(),
-                "imessage" => "imessage  — iMessage (macOS)".to_string(),
+                "imessage" => "imessage    — iMessage (macOS)".to_string(),
+                "apple_mail" => "apple_mail  — Apple Mail (macOS)".to_string(),
                 "signal" => "signal    — Signal messenger".to_string(),
                 "discord" => "discord   — Discord bot".to_string(),
                 "slack" => "slack     — Slack workspace".to_string(),
@@ -2766,6 +2822,17 @@ impl SetupWizard {
                     self.settings.notifications.recipient = Some(contact);
                 } else {
                     print_info("No recipient set — iMessage notifications disabled.");
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            "apple_mail" => {
+                print_info("Enter your email address for Apple Mail notifications.");
+                let email = input("Email address").map_err(SetupError::Io)?;
+                if !email.is_empty() {
+                    self.settings.notifications.recipient = Some(email);
+                } else {
+                    print_info("No recipient set — Apple Mail notifications disabled.");
                     self.settings.notifications.preferred_channel = Some("web".to_string());
                     self.settings.notifications.recipient = Some("default".to_string());
                 }
@@ -3056,6 +3123,23 @@ impl SetupWizard {
             env_vars.push(("IMESSAGE_POLL_INTERVAL", interval.to_string()));
         }
 
+        // Apple Mail channel env vars
+        if self.settings.channels.apple_mail_enabled {
+            env_vars.push(("APPLE_MAIL_ENABLED", "true".to_string()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.apple_mail_allow_from {
+            env_vars.push(("APPLE_MAIL_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(ref interval) = self.settings.channels.apple_mail_poll_interval {
+            env_vars.push(("APPLE_MAIL_POLL_INTERVAL", interval.to_string()));
+        }
+        if !self.settings.channels.apple_mail_unread_only {
+            env_vars.push(("APPLE_MAIL_UNREAD_ONLY", "false".to_string()));
+        }
+        if !self.settings.channels.apple_mail_mark_as_read {
+            env_vars.push(("APPLE_MAIL_MARK_AS_READ", "false".to_string()));
+        }
+
         // Web Gateway env vars
         if let Some(ref port) = self.settings.channels.gateway_port {
             env_vars.push(("GATEWAY_PORT", port.to_string()));
@@ -3315,6 +3399,11 @@ impl SetupWizard {
         #[cfg(target_os = "macos")]
         if self.settings.channels.imessage_enabled {
             println!("    - iMessage: enabled");
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.settings.channels.apple_mail_enabled {
+            println!("    - Apple Mail: enabled");
         }
 
         for channel_name in &self.settings.channels.wasm_channels {

@@ -2754,6 +2754,14 @@ async fn settings_set_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Extract values for hot-reload before any .await.
+    let cc_update: Option<(Option<String>, Option<u32>)> = match key.as_str() {
+        "claude_code_model" => body.value.as_str().map(|v| (Some(v.to_string()), None)),
+        "claude_code_max_turns" => body.value.as_u64().map(|n| (None, Some(n as u32))),
+        _ => None,
+    };
+
     store
         .set_setting(&state.user_id, &key, &body.value)
         .await
@@ -2761,6 +2769,14 @@ async fn settings_set_handler(
             tracing::error!("Failed to set setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // Hot-reload Claude Code settings into the job manager so the next
+    // container spawn picks up the new value without requiring a restart.
+    if let (Some(jm), Some((model, max_turns))) = (state.job_manager.clone(), cc_update) {
+        tokio::spawn(async move {
+            jm.update_claude_code_settings(model, max_turns).await;
+        });
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -86,6 +86,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Twitch | ✅ | ❌ | P3 | |
 | Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
 | Gmail | ✅ | ✅ | - | `GmailChannel` (700+ LOC) — Pub/Sub pull + Gmail API read/reply + sender allowlist ([`src/channels/gmail.rs`](src/channels/gmail.rs)) |
+| Apple Mail | ❌ | ✅ | P3 | `AppleMailChannel` — Envelope Index polling, sender allowlist, unread-only, mark-as-read. Wizard onboarding + WebUI settings ([`src/channels/apple_mail.rs`](src/channels/apple_mail.rs)) |
 | Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`), broadcast() with pubkey validation, empty allowlist = accept all |
 
 ### Telegram-Specific Features (since Feb 2025)
@@ -196,7 +197,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
-| Autonomous approval mode | ❌ | ✅ | `auto_approve_tools` with NEVER_AUTO_APPROVE_PATTERNS safety preserved; wizard step 10 ([`src/agent/dispatcher.rs`](src/agent/dispatcher.rs), [`src/setup/wizard.rs`](src/setup/wizard.rs)) |
+| Autonomous approval mode | ❌ | ✅ | `auto_approve_tools` with NEVER_AUTO_APPROVE_PATTERNS safety preserved; wizard step 12 ([`src/agent/dispatcher.rs`](src/agent/dispatcher.rs), [`src/setup/wizard.rs`](src/setup/wizard.rs)) |
 | Self-update & restart | ❌ | ✅ | `thinclaw update install` + `/restart` command for orderly shutdown; OS service manager auto-relaunches with new binary ([`src/cli/update.rs`](src/cli/update.rs), [`src/agent/submission.rs`](src/agent/submission.rs)) |
 | Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Subagent system | ✅ | ✅ | Full `SubagentExecutor` ([`src/agent/subagent_executor.rs`](src/agent/subagent_executor.rs)): in-process agentic loops with isolated context, filtered tools, configurable timeouts, cancellation via watch channels |
@@ -254,6 +255,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
 | Smart routing WebUI config | ❌ | ✅ | Settings tab: cheap model, cascade mode, enable/disable, failover chain ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for API key, stores in OS keychain ([`src/setup/wizard.rs`](src/setup/wizard.rs)) |
+| Claude Code runtime model config | ❌ | ✅ | WebUI Settings: change model/max-turns without restart, hot-reloaded into `ContainerJobManager` ([`src/orchestrator/job_manager.rs`](src/orchestrator/job_manager.rs)) |
 
 ### Owner: ThinClaw Agent
 
@@ -464,7 +466,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
 | Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget lifecycle event delivery |
 | Heartbeat system | ✅ | ✅ | - | Periodic execution with self-critique feedback loop: post-completion evaluator persists critique to `heartbeat.last_critique`, next heartbeat reads and avoids repeating mistakes. Configurable `max_iterations` (WebUI Settings → Heartbeat, default 10). Stuck heartbeats write targeted self-critique and notify the user via preferred channel. |
-| Notification routing | ✅ | ✅ | P1 | `NotificationSettings` (preferred_channel + recipient) in `Settings`. Per-channel broadcast validation guards. Wizard step 17 collects preferences. Heartbeat/routine notifications route to user-chosen channel. WebUI Settings tab exposes notification preferences. |
+| Notification routing | ✅ | ✅ | P1 | `NotificationSettings` (preferred_channel + recipient) in `Settings`. Per-channel broadcast validation guards. Wizard step 16 collects preferences. Heartbeat/routine notifications route to user-chosen channel. WebUI Settings tab exposes notification preferences. |
 | Wizard notification preferences | ❌ | ✅ | P1 | `step_notification_preferences` in wizard: auto-selects single channel, prompts for multi-channel, collects recipient (phone/chat ID/email). |
 | Gmail pub/sub | ✅ | ✅ | P3 | `GmailConfig` + `parse_pubsub_push()` + sender filtering ([`src/channels/gmail_wiring.rs`](src/channels/gmail_wiring.rs)) |
 

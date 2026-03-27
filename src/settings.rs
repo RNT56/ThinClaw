@@ -487,6 +487,27 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub imessage_poll_interval: Option<u64>,
 
+    // === Apple Mail (macOS only) ===
+    /// Whether Apple Mail channel is enabled.
+    #[serde(default)]
+    pub apple_mail_enabled: bool,
+
+    /// Apple Mail allowed sender addresses (comma-separated email, empty = all).
+    #[serde(default)]
+    pub apple_mail_allow_from: Option<String>,
+
+    /// Apple Mail polling interval in seconds.
+    #[serde(default)]
+    pub apple_mail_poll_interval: Option<u64>,
+
+    /// Only process unread messages.
+    #[serde(default = "default_true")]
+    pub apple_mail_unread_only: bool,
+
+    /// Mark messages as read after processing.
+    #[serde(default = "default_true")]
+    pub apple_mail_mark_as_read: bool,
+
     // === Web Gateway ===
     /// Web Gateway port (default: 3000).
     #[serde(default)]

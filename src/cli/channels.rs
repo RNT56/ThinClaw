@@ -83,6 +83,11 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
         env_key: "IMESSAGE_ENABLED",
         description: "iMessage (macOS only, chat.db polling)",
     },
+    ChannelCheck {
+        name: "apple_mail",
+        env_key: "APPLE_MAIL_ENABLED",
+        description: "Apple Mail (macOS only, Envelope Index polling)",
+    },
 ];
 
 /// List all channels.

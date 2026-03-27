@@ -3682,6 +3682,16 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.imessage_poll_interval', label: 'Poll interval (s)', type: 'number', desc: 'Seconds between chat.db checks', min: 1, max: 60, nullable: true },
     ]
   },
+  'Channels — Apple Mail': {
+    icon: '📬',
+    fields: [
+      { key: 'channels.apple_mail_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Apple Mail channel (macOS only)' },
+      { key: 'channels.apple_mail_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated sender emails (empty = all)', nullable: true },
+      { key: 'channels.apple_mail_poll_interval', label: 'Poll interval (s)', type: 'number', desc: 'Seconds between Envelope Index checks', min: 5, max: 120, nullable: true },
+      { key: 'channels.apple_mail_unread_only', label: 'Unread only', type: 'bool', desc: 'Only process unread messages' },
+      { key: 'channels.apple_mail_mark_as_read', label: 'Mark as read', type: 'bool', desc: 'Mark messages as read after processing' },
+    ]
+  },
   'Channels — Gmail': {
     icon: '📧',
     fields: [
@@ -3711,6 +3721,8 @@ const SETTINGS_SCHEMA = {
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
       { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
+      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "sonnet", "opus", "claude-sonnet-4-20250514")', nullable: true },
+      { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
     ]
   },
 };
