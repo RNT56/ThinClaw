@@ -17,13 +17,13 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    AgentThinkTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool, CreateJobTool,
-    DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool, JobEventsTool,
-    JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryDeleteTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
-    ToolSearchTool, TtsTool, WriteFileTool,
+    AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
+    CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillReadTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -81,6 +81,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "spawn_subagent",
     "list_subagents",
     "cancel_subagent",
+    "apple_mail",
 ];
 
 /// Registry of available tools.
@@ -541,6 +542,23 @@ impl ToolRegistry {
     ) {
         self.register_sync(Arc::new(TtsTool::new(secrets, output_dir)));
         tracing::info!("Registered TTS tool");
+    }
+
+    /// Register the Apple Mail tool (macOS only).
+    ///
+    /// Provides search and send capabilities for the local Mail.app.
+    /// If `db_path` is None, auto-detects the Envelope Index from ~/Library/Mail/.
+    pub fn register_apple_mail_tool(&self, db_path: Option<std::path::PathBuf>) {
+        let tool = if let Some(path) = db_path {
+            AppleMailTool::new(path)
+        } else if let Some(tool) = AppleMailTool::auto_detect() {
+            tool
+        } else {
+            tracing::warn!("Apple Mail tool: could not auto-detect Envelope Index");
+            return;
+        };
+        self.register_sync(Arc::new(tool));
+        tracing::info!("Registered Apple Mail tool (search + send)");
     }
 
     /// Register the software builder tool.

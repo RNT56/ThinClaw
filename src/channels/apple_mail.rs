@@ -260,13 +260,15 @@ impl AppleMailChannel {
 
         let query = format!(
             "SELECT m.ROWID, \
-                    REPLACE(COALESCE(m.subject, '(no subject)'), '|', ' '), \
+                    REPLACE(COALESCE(sub.subject, '(no subject)'), '|', ' '), \
                     COALESCE(a.address, 'unknown'), \
-                    COALESCE(m.snippet, ''), \
+                    COALESCE(summ.summary, ''), \
                     COALESCE(m.date_received, 0), \
                     COALESCE(m.read, 0), \
-                    COALESCE(m.message_id, '') \
+                    COALESCE(m.message_id, 0) \
              FROM messages m \
+             LEFT JOIN subjects sub ON m.subject = sub.ROWID \
+             LEFT JOIN summaries summ ON m.summary = summ.ROWID \
              LEFT JOIN addresses a ON m.sender = a.ROWID \
              WHERE m.ROWID > {since_rowid} \
                {} \

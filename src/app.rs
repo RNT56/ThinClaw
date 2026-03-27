@@ -850,6 +850,12 @@ impl AppBuilder {
         let tts_secrets = self.secrets_store.clone();
         tools.register_tts_tool(tts_secrets, tts_output_dir);
 
+        // Register Apple Mail tool if on macOS and Apple Mail channel is configured
+        #[cfg(target_os = "macos")]
+        if self.config.channels.apple_mail.is_some() {
+            tools.register_apple_mail_tool(None); // auto-detect Envelope Index path
+        }
+
         Ok((
             mcp_session_manager,
             wasm_tool_runtime,

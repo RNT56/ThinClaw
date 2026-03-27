@@ -1,6 +1,7 @@
 //! Built-in tools that come with the agent.
 
 mod agent_control;
+mod apple_mail;
 mod browser;
 mod camera_capture;
 mod canvas;
@@ -26,6 +27,7 @@ mod time;
 mod tts;
 
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
+pub use apple_mail::AppleMailTool;
 pub use browser::BrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
