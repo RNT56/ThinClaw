@@ -1862,10 +1862,12 @@ impl SetupWizard {
             print_info("Apple Mail uses the native macOS Mail.app Envelope Index database.");
             print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
             print_info("Make sure Mail.app is configured and signed into your account.");
+            print_info("⚠️  IMPORTANT: If you leave this blank, ANY email sender can give instructions to your agent.");
+            print_info("   For security, specify your email address(es) so only you can control it via email.");
             println!();
 
             let allow_from = optional_input(
-                "Allowed sender emails (comma-separated, blank = all)",
+                "Your email address(es) to allow (comma-separated, ⚠️ blank = ANYONE can control agent)",
                 None,
             )
             .map_err(SetupError::Io)?;

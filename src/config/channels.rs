@@ -217,7 +217,7 @@ impl ChannelsConfig {
             #[cfg(target_os = "macos")]
             imessage: Self::resolve_imessage()?,
             #[cfg(target_os = "macos")]
-            apple_mail: Self::resolve_apple_mail()?,
+            apple_mail: Self::resolve_apple_mail(settings)?,
         })
     }
 
@@ -477,32 +477,61 @@ impl ChannelsConfig {
     }
 
     #[cfg(target_os = "macos")]
-    fn resolve_apple_mail() -> Result<Option<AppleMailChannelConfig>, ConfigError> {
-        let enabled = parse_bool_env("APPLE_MAIL_ENABLED", false)?;
+    fn resolve_apple_mail(settings: &Settings) -> Result<Option<AppleMailChannelConfig>, ConfigError> {
+        // DB setting takes priority (from WebUI), env var as fallback
+        let enabled = if settings.channels.apple_mail_enabled {
+            true
+        } else {
+            parse_bool_env("APPLE_MAIL_ENABLED", false)?
+        };
         if !enabled {
             return Ok(None);
         }
 
-        let allow_from = optional_env("APPLE_MAIL_ALLOW_FROM")?
-            .map(|s| {
-                s.split(',')
+        // allow_from: DB setting > env var > empty (all)
+        let allow_from = settings
+            .channels
+            .apple_mail_allow_from
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| optional_env("APPLE_MAIL_ALLOW_FROM").ok().flatten().as_deref().map(|_| ""))
+            .map(|_| {
+                // Re-read from whichever source had the value
+                let raw = settings
+                    .channels
+                    .apple_mail_allow_from
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| optional_env("APPLE_MAIL_ALLOW_FROM").ok().flatten())
+                    .unwrap_or_default();
+                raw.split(',')
                     .map(|e| e.trim().to_string())
                     .filter(|s| !s.is_empty())
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
-        let poll_interval_secs: u64 = optional_env("APPLE_MAIL_POLL_INTERVAL")?
-            .map(|s| s.parse())
-            .transpose()
-            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
-                key: "APPLE_MAIL_POLL_INTERVAL".to_string(),
-                message: format!("must be an integer: {e}"),
-            })?
+        let poll_interval_secs: u64 = settings
+            .channels
+            .apple_mail_poll_interval
+            .or_else(|| {
+                optional_env("APPLE_MAIL_POLL_INTERVAL")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(10);
 
-        let unread_only = parse_bool_env("APPLE_MAIL_UNREAD_ONLY", true)?;
-        let mark_as_read = parse_bool_env("APPLE_MAIL_MARK_AS_READ", true)?;
+        let unread_only = if settings.channels.apple_mail_unread_only {
+            true
+        } else {
+            parse_bool_env("APPLE_MAIL_UNREAD_ONLY", true)?
+        };
+        let mark_as_read = if settings.channels.apple_mail_mark_as_read {
+            true
+        } else {
+            parse_bool_env("APPLE_MAIL_MARK_AS_READ", true)?
+        };
 
         Ok(Some(AppleMailChannelConfig {
             allow_from,
