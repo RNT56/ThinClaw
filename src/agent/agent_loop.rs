@@ -977,23 +977,39 @@ impl Agent {
                     )
                     .await;
 
-                    // Delete BOOTSTRAP.md after successful execution so it
-                    // only runs once (matches the existing convention where
-                    // the agent deletes it after completing the identity ritual).
+                    // Replace BOOTSTRAP.md content with a sentinel so it
+                    // only runs once. We write a marker instead of deleting
+                    // because the workspace seeder re-creates deleted files
+                    // on every startup (DocumentNotFound → re-seed).
+                    // The marker is non-empty (seeder skips it) but
+                    // is_effectively_empty() returns true (execution skips it).
                     match workspace
-                        .delete(crate::workspace::paths::BOOTSTRAP)
+                        .write(
+                            crate::workspace::paths::BOOTSTRAP,
+                            "<!-- bootstrap completed -->",
+                        )
                         .await
                     {
-                        Ok(()) => {
+                        Ok(_) => {
                             tracing::info!(
-                                "Deleted BOOTSTRAP.md — first-run hook complete"
+                                "BOOTSTRAP.md marked as completed — first-run hook complete"
                             );
                         }
                         Err(e) => {
+                            // Fall back to delete if write fails
                             tracing::warn!(
-                                "Failed to delete BOOTSTRAP.md (may re-run next startup): {}",
+                                "Failed to mark BOOTSTRAP.md as completed, attempting delete: {}",
                                 e
                             );
+                            if let Err(del_err) = workspace
+                                .delete(crate::workspace::paths::BOOTSTRAP)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to delete BOOTSTRAP.md (may re-run next startup): {}",
+                                    del_err
+                                );
+                            }
                         }
                     }
                 } else {
