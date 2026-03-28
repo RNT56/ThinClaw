@@ -17,6 +17,12 @@ const MAX_EMITS_PER_EXECUTION: usize = 100;
 /// Maximum message content size (64 KB).
 const MAX_MESSAGE_CONTENT_SIZE: usize = 64 * 1024;
 
+/// Maximum single attachment size (20 MB).
+const MAX_ATTACHMENT_SIZE: usize = 20 * 1024 * 1024;
+
+/// Maximum total attachment payload per message (50 MB).
+const MAX_TOTAL_ATTACHMENT_SIZE: usize = 50 * 1024 * 1024;
+
 /// A message emitted by a WASM channel to be sent to the agent.
 #[derive(Debug, Clone)]
 pub struct EmittedMessage {
@@ -37,6 +43,32 @@ pub struct EmittedMessage {
 
     /// Timestamp when the message was emitted.
     pub emitted_at_millis: u64,
+
+    /// Binary media attachments (images, documents, etc.).
+    pub attachments: Vec<MediaAttachment>,
+}
+
+/// A binary media attachment from a WASM channel.
+#[derive(Debug, Clone)]
+pub struct MediaAttachment {
+    /// MIME type (e.g., "image/jpeg").
+    pub mime_type: String,
+    /// Raw binary data.
+    pub data: Vec<u8>,
+    /// Optional filename.
+    pub filename: Option<String>,
+}
+
+impl MediaAttachment {
+    /// Convert to the agent's MediaContent type.
+    pub fn to_media_content(&self) -> crate::media::MediaContent {
+        let mc = crate::media::MediaContent::new(self.data.clone(), &self.mime_type);
+        if let Some(ref filename) = self.filename {
+            mc.with_filename(filename.clone())
+        } else {
+            mc
+        }
+    }
 }
 
 impl EmittedMessage {
@@ -52,6 +84,7 @@ impl EmittedMessage {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+            attachments: Vec::new(),
         }
     }
 
@@ -168,7 +201,7 @@ impl ChannelHostState {
     ///
     /// Messages are queued and delivered after callback execution completes.
     /// Rate limiting is enforced per-execution and globally.
-    pub fn emit_message(&mut self, msg: EmittedMessage) -> Result<(), WasmChannelError> {
+    pub fn emit_message(&mut self, mut msg: EmittedMessage) -> Result<(), WasmChannelError> {
         // Check per-execution limit
         if !self.emit_enabled {
             self.emits_dropped += 1;
@@ -184,6 +217,41 @@ impl ChannelHostState {
                 "Channel emit limit reached, further messages dropped"
             );
             return Ok(());
+        }
+
+        // Validate attachment sizes — drop oversized attachments individually
+        let original_count = msg.attachments.len();
+        let mut total_size: usize = 0;
+        msg.attachments.retain(|att| {
+            if att.data.len() > MAX_ATTACHMENT_SIZE {
+                tracing::warn!(
+                    channel = %self.channel_name,
+                    size = att.data.len(),
+                    max = MAX_ATTACHMENT_SIZE,
+                    mime = %att.mime_type,
+                    "Dropping oversized attachment"
+                );
+                return false;
+            }
+            total_size += att.data.len();
+            if total_size > MAX_TOTAL_ATTACHMENT_SIZE {
+                tracing::warn!(
+                    channel = %self.channel_name,
+                    total = total_size,
+                    max = MAX_TOTAL_ATTACHMENT_SIZE,
+                    "Dropping attachment: total payload exceeds limit"
+                );
+                return false;
+            }
+            true
+        });
+        if msg.attachments.len() < original_count {
+            tracing::info!(
+                channel = %self.channel_name,
+                kept = msg.attachments.len(),
+                dropped = original_count - msg.attachments.len(),
+                "Some attachments dropped due to size limits"
+            );
         }
 
         // Validate message content size

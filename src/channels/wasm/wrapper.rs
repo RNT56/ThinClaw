@@ -434,6 +434,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             user_id = %msg.user_id,
             user_name = ?msg.user_name,
             content_len = msg.content.len(),
+            attachment_count = msg.attachments.len(),
             "WASM emit_message called"
         );
 
@@ -445,6 +446,15 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             emitted = emitted.with_thread_id(tid);
         }
         emitted = emitted.with_metadata(msg.metadata_json);
+
+        // Convert WIT media-attachment records to MediaAttachment
+        for att in msg.attachments {
+            emitted.attachments.push(crate::channels::wasm::host::MediaAttachment {
+                mime_type: att.mime_type,
+                data: att.data,
+                filename: att.filename,
+            });
+        }
 
         match self.host_state.emit_message(emitted) {
             Ok(()) => {
@@ -1615,6 +1625,11 @@ impl WasmChannel {
                 msg = msg.with_metadata(metadata);
             }
 
+            // Convert media attachments
+            for att in &emitted.attachments {
+                msg.attachments.push(att.to_media_content());
+            }
+
             // Send to stream
             tracing::info!(
                 channel = %self.name,
@@ -1858,6 +1873,11 @@ impl WasmChannel {
             // Parse metadata JSON
             if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
                 msg = msg.with_metadata(metadata);
+            }
+
+            // Convert media attachments
+            for att in &emitted.attachments {
+                msg.attachments.push(att.to_media_content());
             }
 
             // Send to stream

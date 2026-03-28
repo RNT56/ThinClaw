@@ -20,6 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::media::MediaContent;
 
 /// Channel name constant.
 const NAME: &str = "imessage";
@@ -29,6 +30,9 @@ const POLL_INTERVAL_SECS: u64 = 3;
 
 /// Maximum message length for a single iMessage bubble.
 const MAX_MESSAGE_LENGTH: usize = 20_000;
+
+/// Maximum single attachment size we'll read from disk (20 MB).
+const MAX_IMESSAGE_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -246,8 +250,7 @@ impl IMessageChannel {
              LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id \
              LEFT JOIN chat c ON cmj.chat_id = c.ROWID \
              WHERE m.ROWID > {since_rowid} \
-               AND m.text IS NOT NULL \
-               AND m.text != '' \
+               AND (m.text IS NOT NULL OR (SELECT COUNT(*) FROM message_attachment_join maj2 WHERE maj2.message_id = m.ROWID) > 0) \
              ORDER BY m.ROWID ASC \
              LIMIT 50;"
         );
@@ -292,7 +295,8 @@ impl IMessageChannel {
             let attachment_count: i64 = parts[5].parse().unwrap_or(0);
             let is_group = parts[6] == "1";
 
-            if text.is_empty() {
+            // Allow empty text messages if they have attachments
+            if text.is_empty() && attachment_count == 0 {
                 continue;
             }
 
@@ -442,7 +446,20 @@ impl Channel for IMessageChannel {
 
                             let recipient = Self::extract_recipient(&msg.chat_id);
 
-                            let incoming = IncomingMessage::new(NAME, &msg.sender, &msg.text)
+                            // Fetch and download media attachments from chat.db
+                            let attachments = if msg.attachment_count > 0 {
+                                fetch_imessage_attachments(&db_path, msg.rowid).await
+                            } else {
+                                Vec::new()
+                            };
+
+                            let content = if msg.text.is_empty() && !attachments.is_empty() {
+                                "[Media received — please analyze the attached content]".to_string()
+                            } else {
+                                msg.text.clone()
+                            };
+
+                            let incoming = IncomingMessage::new(NAME, &msg.sender, &content)
                                 .with_metadata(serde_json::json!({
                                     "chat_id": msg.chat_id,
                                     "rowid": msg.rowid,
@@ -456,7 +473,8 @@ impl Channel for IMessageChannel {
                                     } else {
                                         "unknown"
                                     },
-                                }));
+                                }))
+                                .with_attachments(attachments);
 
                             last_rowid.store(msg.rowid, Ordering::Relaxed);
 
@@ -536,6 +554,120 @@ impl Channel for IMessageChannel {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Fetch media attachments for an iMessage by querying chat.db.
+///
+/// Reads the `attachment` and `message_attachment_join` tables to find
+/// file paths, then reads the binary data from disk.
+async fn fetch_imessage_attachments(
+    db_path: &std::path::Path,
+    message_rowid: i64,
+) -> Vec<MediaContent> {
+    // Query: get attachment filename and MIME type for this message
+    let query = format!(
+        "SELECT a.filename, COALESCE(a.mime_type, 'application/octet-stream'), a.total_bytes \
+         FROM attachment a \
+         INNER JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id \
+         WHERE maj.message_id = {} \
+         ORDER BY a.ROWID ASC;",
+        message_rowid
+    );
+
+    let output = match tokio::process::Command::new("sqlite3")
+        .arg("-separator")
+        .arg("|")
+        .arg(db_path)
+        .arg(&query)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!(
+                rowid = message_rowid,
+                error = %stderr,
+                "iMessage: failed to query attachments"
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!(
+                rowid = message_rowid,
+                error = %e,
+                "iMessage: sqlite3 attachment query failed"
+            );
+            return Vec::new();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(3, '|').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let raw_path = parts[0];
+        let mime = parts[1];
+        let total_bytes: u64 = parts[2].parse().unwrap_or(0);
+
+        // Skip oversized files
+        if total_bytes > MAX_IMESSAGE_ATTACHMENT_SIZE {
+            tracing::warn!(
+                path = %raw_path,
+                size = total_bytes,
+                "iMessage: skipping oversized attachment"
+            );
+            continue;
+        }
+
+        // chat.db stores paths with ~ prefix → expand to real path
+        let file_path = if let Some(rest) = raw_path.strip_prefix("~/") {
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+            home.join(rest)
+        } else {
+            std::path::PathBuf::from(raw_path)
+        };
+
+        if !file_path.exists() {
+            tracing::debug!(
+                path = %file_path.display(),
+                "iMessage: attachment file not found on disk"
+            );
+            continue;
+        }
+
+        match std::fs::read(&file_path) {
+            Ok(data) => {
+                let filename = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment")
+                    .to_string();
+                let mc = MediaContent::new(data, mime).with_filename(filename.clone());
+                tracing::debug!(
+                    filename = %filename,
+                    mime = %mime,
+                    size = mc.size(),
+                    "iMessage: loaded attachment from disk"
+                );
+                result.push(mc);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %file_path.display(),
+                    error = %e,
+                    "iMessage: failed to read attachment file"
+                );
+            }
+        }
+    }
+
+    result
+}
 
 /// Split a long message into chunks, preferring line-break boundaries.
 fn split_message(text: &str) -> Vec<String> {

@@ -92,7 +92,7 @@ mod wrapper;
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
-pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MediaAttachment};
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,

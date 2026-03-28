@@ -78,7 +78,30 @@ struct SlackEvent {
 
     /// Subtype (bot_message, etc.)
     subtype: Option<String>,
+
+    /// File attachments shared in the message.
+    #[serde(default)]
+    files: Option<Vec<SlackFile>>,
 }
+
+/// Slack file attachment.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SlackFile {
+    /// File ID.
+    id: String,
+    /// File name.
+    name: Option<String>,
+    /// MIME type.
+    mimetype: Option<String>,
+    /// File size in bytes.
+    size: Option<u64>,
+    /// Private download URL (requires auth header).
+    url_private_download: Option<String>,
+}
+
+/// Maximum file size we'll download from Slack (20 MB).
+const MAX_SLACK_DOWNLOAD_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Metadata stored with emitted messages for response routing.
 #[derive(Debug, Serialize, Deserialize)]
@@ -326,7 +349,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
-                emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id, event.files.as_deref());
             }
         }
 
@@ -348,7 +371,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
-                    emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                    emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id, event.files.as_deref());
                 }
             }
         }
@@ -369,6 +392,7 @@ fn emit_message(
     channel: String,
     thread_ts: Option<String>,
     team_id: Option<String>,
+    files: Option<&[SlackFile]>,
 ) {
     let message_ts = thread_ts.clone().unwrap_or_default();
 
@@ -390,13 +414,99 @@ fn emit_message(
     // Strip @ mentions of the bot from the text for cleaner messages
     let cleaned_text = strip_bot_mention(&text);
 
+    // Download file attachments
+    let attachments = download_slack_files(files.unwrap_or_default());
+
+    // Determine content
+    let content = if cleaned_text.is_empty() && !attachments.is_empty() {
+        "[Media received \u{2014} please analyze the attached content]".to_string()
+    } else {
+        cleaned_text
+    };
+
     channel_host::emit_message(&EmittedMessage {
         user_id,
-        user_name: None, // Could fetch from Slack API if needed
-        content: cleaned_text,
+        user_name: None,
+        content,
         thread_id: thread_ts,
         metadata_json,
+        attachments,
     });
+}
+
+/// Download Slack file attachments using url_private_download.
+fn download_slack_files(files: &[SlackFile]) -> Vec<channel_host::MediaAttachment> {
+    let mut result = Vec::new();
+
+    let headers_json = serde_json::json!({
+        "Authorization": "Bearer {SLACK_BOT_TOKEN}"
+    })
+    .to_string();
+
+    for file in files {
+        // Skip oversized files
+        if let Some(size) = file.size {
+            if size > MAX_SLACK_DOWNLOAD_SIZE {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Slack: skipping oversized file '{}': {} bytes",
+                        file.name.as_deref().unwrap_or("unknown"),
+                        size
+                    ),
+                );
+                continue;
+            }
+        }
+
+        let Some(ref url) = file.url_private_download else {
+            continue;
+        };
+
+        match channel_host::http_request("GET", url, &headers_json, None, Some(30_000)) {
+            Ok(resp) if resp.status == 200 && !resp.body.is_empty() => {
+                let mime = file
+                    .mimetype
+                    .as_deref()
+                    .unwrap_or("application/octet-stream");
+                result.push(channel_host::MediaAttachment {
+                    mime_type: mime.to_string(),
+                    data: resp.body,
+                    filename: file.name.clone(),
+                });
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Slack: downloaded file '{}' ({} bytes)",
+                        file.name.as_deref().unwrap_or("unknown"),
+                        result.last().map(|a| a.data.len()).unwrap_or(0)
+                    ),
+                );
+            }
+            Ok(resp) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Slack: file download returned HTTP {} for '{}'",
+                        resp.status,
+                        file.name.as_deref().unwrap_or("unknown")
+                    ),
+                );
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Slack: file download failed for '{}': {}",
+                        file.name.as_deref().unwrap_or("unknown"),
+                        e
+                    ),
+                );
+            }
+        }
+    }
+
+    result
 }
 
 // ============================================================================

@@ -35,6 +35,7 @@ use super::{
     StreamMode,
 };
 use crate::error::ChannelError;
+use crate::media::MediaContent;
 
 /// Channel name constant.
 const NAME: &str = "discord";
@@ -108,7 +109,27 @@ struct MessageCreate {
     mention_everyone: bool,
     #[serde(default)]
     mentions: Vec<MessageAuthor>,
+    /// File attachments (images, docs, audio, video).
+    #[serde(default)]
+    attachments: Vec<DiscordAttachment>,
 }
+
+/// Discord attachment from a MESSAGE_CREATE event.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct DiscordAttachment {
+    id: String,
+    filename: String,
+    /// MIME type (e.g. "image/png").
+    content_type: Option<String>,
+    /// File size in bytes.
+    size: u64,
+    /// CDN URL to download from.
+    url: String,
+}
+
+/// Maximum single attachment size we'll download (20 MB).
+const MAX_DISCORD_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
 
 /// Message author.
 #[derive(Debug, Clone, Deserialize)]
@@ -537,17 +558,30 @@ impl Channel for DiscordChannel {
                                 .trim()
                                 .to_string();
 
-                            if clean.is_empty() {
+                            // Download media attachments from Discord CDN
+                            let attachments = download_discord_attachments(
+                                &client, &msg.attachments,
+                            ).await;
+
+                            // Skip messages with no text AND no media
+                            if clean.is_empty() && attachments.is_empty() {
                                 continue;
                             }
 
-                            let incoming = IncomingMessage::new(NAME, &msg.author.id, &clean)
+                            let content = if clean.is_empty() && !attachments.is_empty() {
+                                "[Media received — please analyze the attached content]".to_string()
+                            } else {
+                                clean
+                            };
+
+                            let incoming = IncomingMessage::new(NAME, &msg.author.id, &content)
                                 .with_user_name(msg.author.username.clone())
                                 .with_metadata(serde_json::json!({
                                     "channel_id": msg.channel_id,
                                     "message_id": msg.id,
                                     "guild_id": msg.guild_id,
-                                }));
+                                }))
+                                .with_attachments(attachments);
 
                             if tx.send(incoming).await.is_err() {
                                 tracing::warn!("Discord channel receiver dropped");
@@ -716,6 +750,72 @@ impl Channel for DiscordChannel {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Download Discord CDN attachments, returning `MediaContent` for each.
+async fn download_discord_attachments(
+    client: &Client,
+    attachments: &[DiscordAttachment],
+) -> Vec<MediaContent> {
+    let mut result = Vec::new();
+
+    for att in attachments {
+        // Skip oversized files
+        if att.size > MAX_DISCORD_ATTACHMENT_SIZE {
+            tracing::warn!(
+                filename = %att.filename,
+                size = att.size,
+                max = MAX_DISCORD_ATTACHMENT_SIZE,
+                "Discord: skipping oversized attachment"
+            );
+            continue;
+        }
+
+        match client.get(&att.url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        let mime = att
+                            .content_type
+                            .as_deref()
+                            .unwrap_or("application/octet-stream");
+                        let mc = MediaContent::new(bytes.to_vec(), mime)
+                            .with_filename(att.filename.clone());
+                        tracing::debug!(
+                            filename = %att.filename,
+                            mime = %mime,
+                            size = bytes.len(),
+                            "Discord: downloaded attachment"
+                        );
+                        result.push(mc);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            filename = %att.filename,
+                            error = %e,
+                            "Discord: failed to read attachment bytes"
+                        );
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    filename = %att.filename,
+                    status = %resp.status(),
+                    "Discord: attachment download returned non-200"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    filename = %att.filename,
+                    error = %e,
+                    "Discord: attachment download failed"
+                );
+            }
+        }
+    }
+
+    result
+}
 
 /// Split a long message into chunks for Discord's 2000-char limit.
 fn split_message(text: &str) -> Vec<String> {

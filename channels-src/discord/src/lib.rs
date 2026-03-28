@@ -414,6 +414,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         content,
         thread_id: None,
         metadata_json,
+        attachments: vec![],
     });
     true
 }
@@ -467,6 +468,7 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
         content: format!("[Button clicked] {}", message.content),
         thread_id: None,
         metadata_json,
+        attachments: vec![],
     });
 }
 

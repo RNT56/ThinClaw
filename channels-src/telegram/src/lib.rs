@@ -81,6 +81,123 @@ struct TelegramMessage {
 
     /// Bot command entities (for /commands).
     entities: Option<Vec<MessageEntity>>,
+
+    /// Photo message — array of PhotoSize, sorted by size (last = largest).
+    #[serde(default)]
+    photo: Option<Vec<PhotoSize>>,
+
+    /// Voice message (OGG/Opus audio).
+    voice: Option<TelegramVoice>,
+
+    /// Audio file sent as a music file.
+    audio: Option<TelegramAudio>,
+
+    /// General file/document.
+    document: Option<TelegramDocument>,
+
+    /// Video message.
+    video: Option<TelegramVideo>,
+
+    /// Video note (round video message).
+    video_note: Option<TelegramVideoNote>,
+
+    /// Sticker.
+    sticker: Option<TelegramSticker>,
+}
+
+/// Telegram PhotoSize object.
+/// https://core.telegram.org/bots/api#photosize
+#[derive(Debug, Deserialize)]
+struct PhotoSize {
+    file_id: String,
+    file_unique_id: String,
+    width: i64,
+    height: i64,
+    file_size: Option<i64>,
+}
+
+/// Telegram Voice object.
+/// https://core.telegram.org/bots/api#voice
+#[derive(Debug, Deserialize)]
+struct TelegramVoice {
+    file_id: String,
+    file_unique_id: String,
+    duration: i64,
+    mime_type: Option<String>,
+    file_size: Option<i64>,
+}
+
+/// Telegram Audio object.
+/// https://core.telegram.org/bots/api#audio
+#[derive(Debug, Deserialize)]
+struct TelegramAudio {
+    file_id: String,
+    file_unique_id: String,
+    duration: i64,
+    performer: Option<String>,
+    title: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    file_size: Option<i64>,
+}
+
+/// Telegram Document object.
+/// https://core.telegram.org/bots/api#document
+#[derive(Debug, Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    file_unique_id: String,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    file_size: Option<i64>,
+}
+
+/// Telegram Video object.
+/// https://core.telegram.org/bots/api#video
+#[derive(Debug, Deserialize)]
+struct TelegramVideo {
+    file_id: String,
+    file_unique_id: String,
+    width: i64,
+    height: i64,
+    duration: i64,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    file_size: Option<i64>,
+}
+
+/// Telegram VideoNote object.
+/// https://core.telegram.org/bots/api#videonote
+#[derive(Debug, Deserialize)]
+struct TelegramVideoNote {
+    file_id: String,
+    file_unique_id: String,
+    length: i64,
+    duration: i64,
+    file_size: Option<i64>,
+}
+
+/// Telegram Sticker object (partial).
+/// https://core.telegram.org/bots/api#sticker
+#[derive(Debug, Deserialize)]
+struct TelegramSticker {
+    file_id: String,
+    file_unique_id: String,
+    width: i64,
+    height: i64,
+    is_animated: Option<bool>,
+    is_video: Option<bool>,
+    file_size: Option<i64>,
+}
+
+/// Telegram File object (response from getFile).
+/// https://core.telegram.org/bots/api#file
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+    file_id: String,
+    file_unique_id: String,
+    file_size: Option<i64>,
+    file_path: Option<String>,
 }
 
 /// Telegram User object.
@@ -986,11 +1103,18 @@ fn handle_message(message: TelegramMessage) {
     // Use text or caption (for media messages)
     let content = message
         .text
+        .as_deref()
         .filter(|t| !t.is_empty())
-        .or_else(|| message.caption.filter(|c| !c.is_empty()))
-        .unwrap_or_default();
+        .or_else(|| message.caption.as_deref().filter(|c| !c.is_empty()))
+        .unwrap_or_default()
+        .to_string();
 
-    if content.is_empty() {
+    // Collect media descriptors: (file_id, mime_type, filename)
+    let media_descriptors = collect_media_descriptors(&message);
+    let has_media = !media_descriptors.is_empty();
+
+    // Skip messages with no content AND no media
+    if content.is_empty() && !has_media {
         return;
     }
 
@@ -1097,6 +1221,7 @@ fn handle_message(message: TelegramMessage) {
                 content.to_lowercase().contains(&mention.to_lowercase())
             };
 
+            // In groups: need command, mention, or direct reply to bot
             if !has_command && !has_bot_mention {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
@@ -1124,17 +1249,30 @@ fn handle_message(message: TelegramMessage) {
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
-    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
-    let content_to_emit = match content_to_emit_for_agent(
-        &content,
-        if bot_username.is_empty() {
-            None
+    // Download media attachments
+    let attachments = download_media_attachments(&media_descriptors);
+
+    // Determine content to emit
+    let content_to_emit = if content.is_empty() {
+        // Media-only message — provide a default prompt so the agent sees it
+        if has_media {
+            "[Media received — please analyze the attached content]".to_string()
         } else {
-            Some(bot_username.as_str())
-        },
-    ) {
-        Some(value) => value,
-        None => return,
+            return; // Should not reach here (checked above)
+        }
+    } else {
+        let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
+        match content_to_emit_for_agent(
+            &content,
+            if bot_username.is_empty() {
+                None
+            } else {
+                Some(bot_username.as_str())
+            },
+        ) {
+            Some(value) => value,
+            None => return,
+        }
     };
 
     // Emit the message to the agent
@@ -1144,16 +1282,237 @@ fn handle_message(message: TelegramMessage) {
         content: content_to_emit,
         thread_id: None, // Telegram doesn't have threads in the same way
         metadata_json,
+        attachments,
     });
 
     channel_host::log(
         channel_host::LogLevel::Debug,
         &format!(
-            "Emitted message from user {} in chat {}",
-            from.id, message.chat.id
+            "Emitted message from user {} in chat {} (attachments: {})",
+            from.id, message.chat.id, media_descriptors.len()
         ),
     );
 }
+
+// ============================================================================
+// Media Download Helpers
+// ============================================================================
+
+/// Maximum file size we'll attempt to download (20 MB — matches Telegram Bot API limit).
+const MAX_DOWNLOAD_SIZE: i64 = 20 * 1024 * 1024;
+
+/// A descriptor for a media file to download.
+struct MediaDescriptor {
+    file_id: String,
+    mime_type: String,
+    filename: Option<String>,
+}
+
+/// Collect all downloadable media descriptors from the message.
+fn collect_media_descriptors(message: &TelegramMessage) -> Vec<MediaDescriptor> {
+    let mut descriptors = Vec::new();
+
+    // Photo: take the largest resolution (last element)
+    if let Some(ref photos) = message.photo {
+        if let Some(largest) = photos.last() {
+            // Skip photos that are clearly too large
+            if largest.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+                descriptors.push(MediaDescriptor {
+                    file_id: largest.file_id.clone(),
+                    mime_type: "image/jpeg".to_string(), // Telegram always serves photos as JPEG
+                    filename: Some(format!("photo_{}.jpg", largest.file_unique_id)),
+                });
+            }
+        }
+    }
+
+    // Voice message (OGG/Opus)
+    if let Some(ref voice) = message.voice {
+        if voice.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: voice.file_id.clone(),
+                mime_type: voice
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "audio/ogg".to_string()),
+                filename: Some(format!("voice_{}.ogg", voice.file_unique_id)),
+            });
+        }
+    }
+
+    // Audio file (music)
+    if let Some(ref audio) = message.audio {
+        if audio.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: audio.file_id.clone(),
+                mime_type: audio
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "audio/mpeg".to_string()),
+                filename: audio.file_name.clone(),
+            });
+        }
+    }
+
+    // Document (general file)
+    if let Some(ref doc) = message.document {
+        if doc.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: doc.file_id.clone(),
+                mime_type: doc
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                filename: doc.file_name.clone(),
+            });
+        }
+    }
+
+    // Video
+    if let Some(ref video) = message.video {
+        if video.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: video.file_id.clone(),
+                mime_type: video
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "video/mp4".to_string()),
+                filename: video.file_name.clone(),
+            });
+        }
+    }
+
+    // Video note (round video)
+    if let Some(ref vn) = message.video_note {
+        if vn.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: vn.file_id.clone(),
+                mime_type: "video/mp4".to_string(),
+                filename: Some(format!("video_note_{}.mp4", vn.file_unique_id)),
+            });
+        }
+    }
+
+    // Sticker (as image — skip animated/video stickers)
+    if let Some(ref sticker) = message.sticker {
+        let is_static = !sticker.is_animated.unwrap_or(false) && !sticker.is_video.unwrap_or(false);
+        if is_static && sticker.file_size.unwrap_or(0) <= MAX_DOWNLOAD_SIZE {
+            descriptors.push(MediaDescriptor {
+                file_id: sticker.file_id.clone(),
+                mime_type: "image/webp".to_string(),
+                filename: Some(format!("sticker_{}.webp", sticker.file_unique_id)),
+            });
+        }
+    }
+
+    descriptors
+}
+
+/// Download media files from Telegram and convert to WIT MediaAttachment format.
+fn download_media_attachments(
+    descriptors: &[MediaDescriptor],
+) -> Vec<near::agent::channel_host::MediaAttachment> {
+    use near::agent::channel_host::MediaAttachment;
+
+    let mut attachments = Vec::new();
+    let headers_json = serde_json::json!({"Accept": "*/*"}).to_string();
+
+    for desc in descriptors {
+        match download_telegram_file(&desc.file_id, &headers_json) {
+            Ok(data) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Downloaded media: {} ({}, {} bytes)",
+                        desc.filename.as_deref().unwrap_or("unnamed"),
+                        desc.mime_type,
+                        data.len()
+                    ),
+                );
+                attachments.push(MediaAttachment {
+                    mime_type: desc.mime_type.clone(),
+                    data,
+                    filename: desc.filename.clone(),
+                });
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to download media {}: {}",
+                        desc.filename.as_deref().unwrap_or("unnamed"),
+                        e
+                    ),
+                );
+            }
+        }
+    }
+
+    attachments
+}
+
+/// Download a file from Telegram Bot API using getFile + file download.
+///
+/// Step 1: Call getFile to get the file_path
+/// Step 2: Download from https://api.telegram.org/file/bot<token>/<file_path>
+///
+/// The host injects the bot token into the request automatically.
+fn download_telegram_file(file_id: &str, headers_json: &str) -> Result<Vec<u8>, String> {
+    // Step 1: getFile API call
+    let get_file_url = format!(
+        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}",
+        file_id
+    );
+
+    let response = channel_host::http_request("GET", &get_file_url, headers_json, None, Some(10_000))
+        .map_err(|e| format!("getFile HTTP failed: {}", e))?;
+
+    if response.status != 200 {
+        return Err(format!("getFile returned HTTP {}", response.status));
+    }
+
+    let api_response: TelegramApiResponse<TelegramFile> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
+
+    if !api_response.ok {
+        return Err(format!(
+            "getFile API error: {}",
+            api_response.description.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    let file = api_response
+        .result
+        .ok_or_else(|| "getFile returned no result".to_string())?;
+
+    let file_path = file
+        .file_path
+        .ok_or_else(|| "getFile returned no file_path".to_string())?;
+
+    // Step 2: Download the actual file binary
+    let download_url = format!(
+        "https://api.telegram.org/file/bot{{TELEGRAM_BOT_TOKEN}}/{}",
+        file_path
+    );
+
+    let download_response =
+        channel_host::http_request("GET", &download_url, headers_json, None, Some(30_000))
+            .map_err(|e| format!("File download HTTP failed: {}", e))?;
+
+    if download_response.status != 200 {
+        return Err(format!(
+            "File download returned HTTP {}",
+            download_response.status
+        ));
+    }
+
+    if download_response.body.is_empty() {
+        return Err("File download returned empty body".to_string());
+    }
+
+    Ok(download_response.body)
+}
+
 
 /// Clean message text by removing bot commands and @mentions at the start.
 /// When bot_username is set, only strips that specific mention; otherwise strips any leading @mention.

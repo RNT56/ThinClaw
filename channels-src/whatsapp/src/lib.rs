@@ -130,12 +130,27 @@ struct WhatsAppMessage {
     /// Unix timestamp
     timestamp: String,
 
-    /// Message type: text, image, audio, video, document, etc.
+    /// Message type: text, image, audio, video, document, sticker, etc.
     #[serde(rename = "type")]
     message_type: String,
 
     /// Text content (if type is "text")
     text: Option<TextContent>,
+
+    /// Image content (if type is "image")
+    image: Option<WhatsAppMedia>,
+
+    /// Audio content (if type is "audio")
+    audio: Option<WhatsAppMedia>,
+
+    /// Video content (if type is "video")
+    video: Option<WhatsAppMedia>,
+
+    /// Document content (if type is "document")
+    document: Option<WhatsAppDocument>,
+
+    /// Sticker content (if type is "sticker")
+    sticker: Option<WhatsAppMedia>,
 
     /// Context for replies
     context: Option<MessageContext>,
@@ -147,6 +162,35 @@ struct TextContent {
     /// The message body
     body: String,
 }
+
+/// WhatsApp media content (image, audio, video, sticker).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct WhatsAppMedia {
+    /// Media ID for downloading.
+    id: String,
+    /// MIME type (e.g. "image/jpeg").
+    mime_type: Option<String>,
+    /// Caption text.
+    caption: Option<String>,
+}
+
+/// WhatsApp document content.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct WhatsAppDocument {
+    /// Media ID for downloading.
+    id: String,
+    /// MIME type.
+    mime_type: Option<String>,
+    /// Original filename.
+    filename: Option<String>,
+    /// Caption text.
+    caption: Option<String>,
+}
+
+/// Maximum file size we'll download (20 MB).
+const MAX_WHATSAPP_DOWNLOAD_SIZE: usize = 20 * 1024 * 1024;
 
 /// Reply context.
 #[derive(Debug, Deserialize)]
@@ -624,21 +668,72 @@ fn handle_message(
     phone_number_id: &str,
     contact_names: &std::collections::HashMap<String, String>,
 ) {
-    // Only handle text messages for now
-    // TODO: Add support for image, audio, video, document, etc.
-    if message.message_type != "text" {
+    // Extract text content — from text.body or media caption
+    let text = message
+        .text
+        .as_ref()
+        .filter(|t| !t.body.is_empty())
+        .map(|t| t.body.clone())
+        .or_else(|| {
+            // Try caption from media types
+            message
+                .image
+                .as_ref()
+                .and_then(|m| m.caption.clone())
+                .or_else(|| message.video.as_ref().and_then(|m| m.caption.clone()))
+                .or_else(|| message.document.as_ref().and_then(|d| d.caption.clone()))
+        })
+        .unwrap_or_default();
+
+    // Collect media descriptors: (media_id, mime_type, filename)
+    let mut media_descriptors: Vec<(String, String, Option<String>)> = Vec::new();
+
+    if let Some(ref img) = message.image {
+        media_descriptors.push((
+            img.id.clone(),
+            img.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string()),
+            None,
+        ));
+    }
+    if let Some(ref audio) = message.audio {
+        media_descriptors.push((
+            audio.id.clone(),
+            audio.mime_type.clone().unwrap_or_else(|| "audio/ogg".to_string()),
+            None,
+        ));
+    }
+    if let Some(ref video) = message.video {
+        media_descriptors.push((
+            video.id.clone(),
+            video.mime_type.clone().unwrap_or_else(|| "video/mp4".to_string()),
+            None,
+        ));
+    }
+    if let Some(ref doc) = message.document {
+        media_descriptors.push((
+            doc.id.clone(),
+            doc.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+            doc.filename.clone(),
+        ));
+    }
+    if let Some(ref sticker) = message.sticker {
+        media_descriptors.push((
+            sticker.id.clone(),
+            sticker.mime_type.clone().unwrap_or_else(|| "image/webp".to_string()),
+            None,
+        ));
+    }
+
+    let has_media = !media_descriptors.is_empty();
+
+    // Skip messages with no text AND no media
+    if text.is_empty() && !has_media {
         channel_host::log(
             channel_host::LogLevel::Debug,
-            &format!("Skipping non-text message type: {}", message.message_type),
+            &format!("Skipping empty message type: {}", message.message_type),
         );
         return;
     }
-
-    // Extract text content
-    let text = match &message.text {
-        Some(t) if !t.body.is_empty() => t.body.clone(),
-        _ => return,
-    };
 
     // Look up sender's name from contacts
     let user_name = contact_names.get(&message.from).cloned();
@@ -652,11 +747,52 @@ fn handle_message(
         return;
     }
 
+    // Download media attachments
+    let headers_json = serde_json::json!({"Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"}).to_string();
+    let mut attachments = Vec::new();
+
+    for (media_id, mime_type, filename) in &media_descriptors {
+        match download_whatsapp_media(media_id, &headers_json) {
+            Ok(data) => {
+                if data.len() > MAX_WHATSAPP_DOWNLOAD_SIZE {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Skipping oversized WhatsApp media: {} bytes", data.len()),
+                    );
+                    continue;
+                }
+                let mut att = channel_host::MediaAttachment {
+                    mime_type: mime_type.clone(),
+                    data,
+                    filename: filename.clone(),
+                };
+                // If no filename, generate one from media type
+                if att.filename.is_none() {
+                    let ext = mime_type.split('/').last().unwrap_or("bin");
+                    att.filename = Some(format!("media_{}.{}", media_id, ext));
+                }
+                attachments.push(att);
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to download WhatsApp media {}: {}", media_id, e),
+                );
+            }
+        }
+    }
+
+    // Determine content
+    let content = if text.is_empty() && !attachments.is_empty() {
+        "[Media received \u{2014} please analyze the attached content]".to_string()
+    } else {
+        text
+    };
+
     // Build metadata for response routing
-    // This is critical - the response handler uses this to know where to send
     let metadata = WhatsAppMessageMetadata {
         phone_number_id: phone_number_id.to_string(),
-        sender_phone: message.from.clone(), // This becomes recipient in response
+        sender_phone: message.from.clone(),
         message_id: message.id.clone(),
         timestamp: message.timestamp.clone(),
     };
@@ -667,9 +803,10 @@ fn handle_message(
     channel_host::emit_message(&EmittedMessage {
         user_id: message.from.clone(),
         user_name,
-        content: text,
-        thread_id: None, // WhatsApp doesn't have threads like Slack/Discord
+        content,
+        thread_id: None,
         metadata_json,
+        attachments,
     });
 
     channel_host::log(
@@ -685,6 +822,58 @@ fn handle_message(
 // Utilities
 // ============================================================================
 
+/// WhatsApp Cloud API media URL response.
+#[derive(Debug, Deserialize)]
+struct MediaUrlResponse {
+    /// Download URL for the media.
+    url: Option<String>,
+}
+
+/// Download media from the WhatsApp Cloud API.
+///
+/// Step 1: GET `https://graph.facebook.com/v19.0/<media_id>` → get download URL
+/// Step 2: GET the download URL → binary data
+fn download_whatsapp_media(media_id: &str, headers_json: &str) -> Result<Vec<u8>, String> {
+    // Step 1: Get the media download URL
+    let url = format!("https://graph.facebook.com/v19.0/{}", media_id);
+
+    let response = channel_host::http_request("GET", &url, headers_json, None, Some(10_000))
+        .map_err(|e| format!("Media URL request failed: {}", e))?;
+
+    if response.status != 200 {
+        return Err(format!("Media URL returned HTTP {}", response.status));
+    }
+
+    let media_info: MediaUrlResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse media URL response: {}", e))?;
+
+    let download_url = media_info
+        .url
+        .ok_or_else(|| "No URL in media response".to_string())?;
+
+    // Step 2: Download the actual file binary
+    let download_response = channel_host::http_request(
+        "GET",
+        &download_url,
+        headers_json,
+        None,
+        Some(30_000),
+    )
+    .map_err(|e| format!("Media download failed: {}", e))?;
+
+    if download_response.status != 200 {
+        return Err(format!(
+            "Media download returned HTTP {}",
+            download_response.status
+        ));
+    }
+
+    if download_response.body.is_empty() {
+        return Err("Media download returned empty body".to_string());
+    }
+
+    Ok(download_response.body)
+}
 // ============================================================================
 // Permission & Pairing
 // ============================================================================

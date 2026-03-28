@@ -118,14 +118,24 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
-        // ── Media attachment extraction ──────────────────────────────
-        // If the message carries binary attachments (images, PDFs, audio),
-        // extract text from each and prepend to the user content so the LLM
-        // sees the extracted information alongside the user's message.
-        let content = if !message.attachments.is_empty() {
+        // ── Media attachment handling ────────────────────────────────
+        // Images/audio/video → multimodal: attached to ChatMessage for vision/audio LLMs
+        // PDFs/unknown → text extraction: prepended to the user content
+        let (multimodal_attachments, text_extract_attachments): (Vec<_>, Vec<_>) = message
+            .attachments
+            .iter()
+            .cloned()
+            .partition(|a| matches!(
+                a.media_type,
+                crate::media::MediaType::Image
+                | crate::media::MediaType::Audio
+                | crate::media::MediaType::Video
+            ));
+
+        let content = if !text_extract_attachments.is_empty() {
             let pipeline = crate::media::MediaPipeline::new();
             let mut media_context = String::new();
-            for (idx, attachment) in message.attachments.iter().enumerate() {
+            for (idx, attachment) in text_extract_attachments.iter().enumerate() {
                 match pipeline.extract(attachment) {
                     Ok(extracted) => {
                         if !media_context.is_empty() {
@@ -159,6 +169,16 @@ impl Agent {
             content.to_string()
         };
         let content = content.as_str();
+
+        if !multimodal_attachments.is_empty() {
+            tracing::info!(
+                attachment_count = multimodal_attachments.len(),
+                total_bytes = multimodal_attachments.iter().map(|a| a.size()).sum::<usize>(),
+                types = ?multimodal_attachments.iter().map(|a| a.media_type.to_string()).collect::<Vec<_>>(),
+                "Routing media attachments to multimodal LLM processing"
+            );
+        }
+
 
         // First check thread state without holding lock during I/O
         let thread_state = {
@@ -284,7 +304,7 @@ impl Agent {
         }
 
         // Start the turn and get messages
-        let turn_messages = {
+        let mut turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -293,6 +313,18 @@ impl Agent {
             thread.start_turn(content);
             thread.messages()
         };
+
+        // Attach multimodal media to the last user message for LLM processing.
+        // The rig adapter converts these to provider-native base64 content blocks.
+        if !multimodal_attachments.is_empty() {
+            if let Some(last_user) = turn_messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == crate::llm::Role::User)
+            {
+                last_user.attachments = multimodal_attachments;
+            }
+        }
 
         // Persist user message to DB immediately so it survives crashes
         self.persist_user_message(thread_id, &message.user_id, content)

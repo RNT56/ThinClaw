@@ -213,6 +213,11 @@ fn make_nullable(schema: &mut JsonValue) {
 ///
 /// Returns `(preamble, chat_history)` where preamble is extracted from
 /// any System message and chat_history contains the rest.
+///
+/// When a user message carries image attachments, the message is converted
+/// to a multimodal `UserContent` with both image and text parts. This is
+/// provider-agnostic: rig-core handles the format conversion for OpenAI,
+/// Anthropic, Gemini, Ollama, etc.
 fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage>) {
     let mut preamble: Option<String> = None;
     let mut history = Vec::new();
@@ -230,7 +235,72 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::User => {
-                history.push(RigMessage::user(&msg.content));
+                // Check for multimodal attachments (images, audio, video)
+                let multimodal_attachments: Vec<_> = msg
+                    .attachments
+                    .iter()
+                    .filter(|a| matches!(
+                        a.media_type,
+                        crate::media::MediaType::Image
+                        | crate::media::MediaType::Audio
+                        | crate::media::MediaType::Video
+                    ))
+                    .collect();
+
+                if multimodal_attachments.is_empty() {
+                    // Text-only user message
+                    history.push(RigMessage::user(&msg.content));
+                } else {
+                    // Multimodal: media + text
+                    let mut parts: Vec<UserContent> = Vec::new();
+
+                    for att in &multimodal_attachments {
+                        match att.media_type {
+                            crate::media::MediaType::Image => {
+                                let media_type = mime_to_rig_image_type(&att.mime_type);
+                                parts.push(UserContent::image_base64(
+                                    att.to_base64(),
+                                    media_type,
+                                    Some(rig::message::ImageDetail::Auto),
+                                ));
+                            }
+                            crate::media::MediaType::Audio => {
+                                let media_type = mime_to_rig_audio_type(&att.mime_type);
+                                parts.push(UserContent::audio(
+                                    att.to_base64(),
+                                    media_type,
+                                ));
+                            }
+                            crate::media::MediaType::Video => {
+                                let media_type = mime_to_rig_video_type(&att.mime_type);
+                                parts.push(UserContent::Video(rig::message::Video {
+                                    data: rig::message::DocumentSourceKind::Base64(att.to_base64()),
+                                    media_type,
+                                    additional_params: None,
+                                }));
+                            }
+                            _ => {} // Filtered out above
+                        }
+                    }
+
+                    // Add text content (may be empty for media-only messages)
+                    if !msg.content.is_empty() {
+                        parts.push(UserContent::text(&msg.content));
+                    }
+
+                    if let Ok(many) = OneOrMany::many(parts) {
+                        history.push(RigMessage::User { content: many });
+                    } else {
+                        // Fallback: text-only
+                        history.push(RigMessage::user(&msg.content));
+                    }
+
+                    tracing::debug!(
+                        media_count = multimodal_attachments.len(),
+                        types = ?multimodal_attachments.iter().map(|a| a.media_type.to_string()).collect::<Vec<_>>(),
+                        "Built multimodal user message with media attachments"
+                    );
+                }
             }
             crate::llm::Role::Assistant => {
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -279,6 +349,44 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 
     (preamble, history)
 }
+
+/// Map a MIME type string to rig-core's `ImageMediaType`.
+///
+/// Returns `None` for unrecognized types (rig will still try to handle them).
+fn mime_to_rig_image_type(mime: &str) -> Option<rig::message::ImageMediaType> {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some(rig::message::ImageMediaType::JPEG),
+        "image/png" => Some(rig::message::ImageMediaType::PNG),
+        "image/gif" => Some(rig::message::ImageMediaType::GIF),
+        "image/webp" => Some(rig::message::ImageMediaType::WEBP),
+        "image/heic" => Some(rig::message::ImageMediaType::HEIC),
+        "image/heif" => Some(rig::message::ImageMediaType::HEIF),
+        "image/svg+xml" => Some(rig::message::ImageMediaType::SVG),
+        _ => None,
+    }
+}
+
+fn mime_to_rig_audio_type(mime: &str) -> Option<rig::message::AudioMediaType> {
+    match mime.to_ascii_lowercase().as_str() {
+        "audio/wav" | "audio/x-wav" => Some(rig::message::AudioMediaType::WAV),
+        "audio/mpeg" | "audio/mp3" => Some(rig::message::AudioMediaType::MP3),
+        "audio/aiff" => Some(rig::message::AudioMediaType::AIFF),
+        "audio/aac" | "audio/mp4" | "audio/m4a" => Some(rig::message::AudioMediaType::AAC),
+        "audio/ogg" | "audio/opus" => Some(rig::message::AudioMediaType::OGG),
+        "audio/flac" => Some(rig::message::AudioMediaType::FLAC),
+        _ => None,
+    }
+}
+
+fn mime_to_rig_video_type(mime: &str) -> Option<rig::message::VideoMediaType> {
+    match mime.to_ascii_lowercase().as_str() {
+        "video/x-msvideo" => Some(rig::message::VideoMediaType::AVI),
+        "video/mp4" => Some(rig::message::VideoMediaType::MP4),
+        "video/mpeg" => Some(rig::message::VideoMediaType::MPEG),
+        _ => None,
+    }
+}
+
 
 /// Responses-style providers require a non-empty tool call ID.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
@@ -892,6 +1000,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            attachments: Vec::new(),
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -1041,6 +1150,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            attachments: Vec::new(),
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);

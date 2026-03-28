@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::SignalConfig;
 use crate::error::ChannelError;
+use crate::media::MediaContent;
 use crate::pairing::PairingStore;
 
 const GROUP_TARGET_PREFIX: &str = "group:";
@@ -76,8 +77,32 @@ struct DataMessage {
     #[serde(rename = "groupInfo", default)]
     group_info: Option<GroupInfo>,
     #[serde(default)]
-    attachments: Option<Vec<serde_json::Value>>,
+    attachments: Option<Vec<SignalAttachment>>,
 }
+
+/// Signal attachment from signal-cli SSE events.
+///
+/// signal-cli stores downloaded attachments locally. The `id` field is the
+/// local filename under `~/.local/share/signal-cli/attachments/`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SignalAttachment {
+    /// MIME type (e.g. "image/jpeg", "audio/aac").
+    #[serde(rename = "contentType", default)]
+    content_type: Option<String>,
+    /// Original filename.
+    #[serde(default)]
+    filename: Option<String>,
+    /// File size in bytes.
+    #[serde(default)]
+    size: Option<u64>,
+    /// Local attachment ID — the filename in signal-cli's attachment store.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// Maximum single attachment size we'll read from disk (20 MB).
+const MAX_SIGNAL_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct GroupInfo {
@@ -593,9 +618,16 @@ impl SignalChannel {
             return None;
         }
 
-        // Use message text, or fall back to "[Attachment]" for attachment-only messages
-        // when ignore_attachments is false. This ensures attachment-only messages are
-        // still processed when the user wants them (rather than always being dropped).
+        // Collect media attachments from signal-cli's local file store
+        let media_attachments = if has_attachments && !self.config.ignore_attachments {
+            collect_signal_attachments(
+                data_msg.attachments.as_deref().unwrap_or_default(),
+            )
+        } else {
+            Vec::new()
+        };
+
+        // Use message text, or fall back to a media prompt for attachment-only messages
         let text = data_msg
             .message
             .as_deref()
@@ -603,7 +635,7 @@ impl SignalChannel {
             .map(String::from)
             .or_else(|| {
                 if has_attachments {
-                    Some("[Attachment]".to_string())
+                    Some("[Media received — please analyze the attached content]".to_string())
                 } else {
                     None
                 }
@@ -725,7 +757,9 @@ impl SignalChannel {
             "signal_timestamp": timestamp,
         });
 
-        let mut msg = IncomingMessage::new("signal", &sender, text).with_metadata(metadata);
+        let mut msg = IncomingMessage::new("signal", &sender, text)
+            .with_metadata(metadata)
+            .with_attachments(media_attachments);
 
         // Use sourceName as display name if available.
         if let Some(ref name) = envelope.source_name
@@ -1032,6 +1066,110 @@ impl SignalChannel {
             tracing::warn!("Signal: failed to send status message: {}", e);
         }
     }
+}
+
+/// Read Signal attachments from signal-cli's local file store.
+///
+/// signal-cli stores downloaded attachments at:
+/// - Linux: `~/.local/share/signal-cli/attachments/<id>`
+/// - macOS: `~/Library/Application Support/signal-cli/attachments/<id>`
+fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Vec<MediaContent> {
+    let mut result = Vec::new();
+
+    // Resolve signal-cli attachment directory
+    let attachment_dir = signal_attachment_dir();
+    let Some(attachment_dir) = attachment_dir else {
+        tracing::debug!("Signal: cannot resolve signal-cli attachment directory");
+        return result;
+    };
+
+    for att in attachments {
+        // Need an attachment ID to locate the file
+        let Some(ref att_id) = att.id else {
+            tracing::debug!("Signal: attachment has no id, skipping");
+            continue;
+        };
+
+        // Check size before reading
+        if let Some(size) = att.size
+            && size > MAX_SIGNAL_ATTACHMENT_SIZE
+        {
+            tracing::warn!(
+                id = %att_id,
+                size = size,
+                max = MAX_SIGNAL_ATTACHMENT_SIZE,
+                "Signal: skipping oversized attachment"
+            );
+            continue;
+        }
+
+        let path = attachment_dir.join(att_id);
+        if !path.exists() {
+            tracing::debug!(
+                id = %att_id,
+                path = %path.display(),
+                "Signal: attachment file not found on disk"
+            );
+            continue;
+        }
+
+        match std::fs::read(&path) {
+            Ok(data) => {
+                if data.len() as u64 > MAX_SIGNAL_ATTACHMENT_SIZE {
+                    tracing::warn!(
+                        id = %att_id,
+                        size = data.len(),
+                        "Signal: attachment file exceeds size limit"
+                    );
+                    continue;
+                }
+                let mime = att
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream");
+                let mut mc = MediaContent::new(data, mime);
+                if let Some(ref filename) = att.filename {
+                    mc = mc.with_filename(filename.clone());
+                }
+                tracing::debug!(
+                    id = %att_id,
+                    mime = %mime,
+                    size = mc.size(),
+                    "Signal: loaded attachment from disk"
+                );
+                result.push(mc);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id = %att_id,
+                    error = %e,
+                    "Signal: failed to read attachment file"
+                );
+            }
+        }
+    }
+
+    result
+}
+
+/// Resolve the signal-cli attachment directory.
+fn signal_attachment_dir() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+
+    // Linux: ~/.local/share/signal-cli/attachments
+    let linux_path = home.join(".local/share/signal-cli/attachments");
+    if linux_path.is_dir() {
+        return Some(linux_path);
+    }
+
+    // macOS: ~/Library/Application Support/signal-cli/attachments
+    let macos_path = home.join("Library/Application Support/signal-cli/attachments");
+    if macos_path.is_dir() {
+        return Some(macos_path);
+    }
+
+    // Fallback: try the Linux path anyway (it may be created later)
+    Some(linux_path)
 }
 
 /// Long-running SSE listener that reconnects with exponential backoff.
@@ -1784,7 +1922,12 @@ mod tests {
                 message: None,
                 timestamp: Some(1_700_000_000_000),
                 group_info: None,
-                attachments: Some(vec![serde_json::json!({"contentType": "image/png"})]),
+                attachments: Some(vec![SignalAttachment {
+                    content_type: Some("image/png".to_string()),
+                    filename: None,
+                    size: None,
+                    id: None,
+                }]),
             }),
             story_message: None,
             timestamp: Some(1_700_000_000_000),
@@ -2083,7 +2226,12 @@ mod tests {
                 message: Some("Check this out".to_string()),
                 timestamp: Some(1_700_000_000_000),
                 group_info: None,
-                attachments: Some(vec![serde_json::json!({"contentType": "image/png"})]),
+                attachments: Some(vec![SignalAttachment {
+                    content_type: Some("image/png".to_string()),
+                    filename: None,
+                    size: None,
+                    id: None,
+                }]),
             }),
             story_message: None,
             timestamp: Some(1_700_000_000_000),
@@ -2117,20 +2265,25 @@ mod tests {
                 message: None,
                 timestamp: Some(1_700_000_000_000),
                 group_info: None,
-                attachments: Some(vec![serde_json::json!({"contentType": "image/png"})]),
+                attachments: Some(vec![SignalAttachment {
+                    content_type: Some("image/png".to_string()),
+                    filename: None,
+                    size: None,
+                    id: None,
+                }]),
             }),
             story_message: None,
             timestamp: Some(1_700_000_000_000),
         };
         // With ignore_attachments=false, attachment-only messages are now
-        // processed with a placeholder "[Attachment]" text.
+        // processed with a media analysis prompt.
         let result = ch.process_envelope(&env);
         assert!(
             result.is_some(),
             "Attachment-only should be processed when ignore_attachments=false"
         );
         let (msg, _) = result.unwrap();
-        assert_eq!(msg.content, "[Attachment]");
+        assert_eq!(msg.content, "[Media received \u{2014} please analyze the attached content]");
         Ok(())
     }
 

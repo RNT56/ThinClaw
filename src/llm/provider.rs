@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
+use crate::media::MediaContent;
 
 /// Configuration for extended thinking / reasoning mode.
 ///
@@ -52,6 +53,15 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Media attachments for multimodal messages (user role only).
+    ///
+    /// Supports images, audio, and video. Carried through the pipeline
+    /// and converted to provider-native format (e.g. base64 data URIs
+    /// via rig-core's `UserContent::Image/Audio/Video`) at the LLM
+    /// adapter boundary. Works with any provider that supports
+    /// vision/audio (OpenAI, Anthropic, Gemini, Ollama, etc.).
+    #[serde(skip)]
+    pub attachments: Vec<MediaContent>,
 }
 
 impl ChatMessage {
@@ -63,6 +73,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -74,6 +85,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -85,6 +97,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -103,6 +116,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            attachments: Vec::new(),
         }
     }
 
@@ -118,20 +132,31 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            attachments: Vec::new(),
         }
+    }
+
+    /// Attach media content (images) for multimodal processing.
+    pub fn with_attachments(mut self, attachments: Vec<MediaContent>) -> Self {
+        self.attachments = attachments;
+        self
     }
 
     /// Estimate character count for context size diagnostics.
     ///
-    /// Returns a rough count of characters in this message, including content
-    /// and any serialized tool calls. Not an exact token count, but useful for
-    /// order-of-magnitude context window monitoring.
+    /// Returns a rough count of characters in this message, including content,
+    /// serialized tool calls, and base64-encoded attachment data. Not an exact
+    /// token count, but useful for order-of-magnitude context window monitoring.
     pub fn estimated_chars(&self) -> usize {
         let mut chars = self.content.len();
         if let Some(ref calls) = self.tool_calls {
             for tc in calls {
                 chars += tc.name.len() + tc.arguments.to_string().len() + 20; // ~20 for JSON overhead
             }
+        }
+        // Base64 encoding inflates data by ~4/3x
+        for att in &self.attachments {
+            chars += att.size() * 4 / 3;
         }
         chars
     }

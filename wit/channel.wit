@@ -113,6 +113,16 @@ interface channel-host {
 
     // ==================== Channel-Specific Capabilities ====================
 
+    /// A binary media attachment (image, document, audio, etc.).
+    record media-attachment {
+        /// MIME type (e.g., "image/jpeg", "application/pdf").
+        mime-type: string,
+        /// Raw binary data.
+        data: list<u8>,
+        /// Optional filename.
+        filename: option<string>,
+    }
+
     /// A message to emit to the agent.
     record emitted-message {
         /// User identifier within the channel (e.g., Slack user ID).
@@ -125,6 +135,8 @@ interface channel-host {
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.
         metadata-json: string,
+        /// Binary media attachments (images, documents, etc.).
+        attachments: list<media-attachment>,
     }
 
     /// Emit a message to the agent.
