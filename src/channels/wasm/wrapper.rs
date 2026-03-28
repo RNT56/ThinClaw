@@ -2039,6 +2039,60 @@ impl Channel for WasmChannel {
 
         Ok(())
     }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        // For WASM channels, broadcast routes through on_respond with a
+        // synthetic metadata containing the user_id as the chat_id.
+        // This works because on_respond just needs chat_id to know where
+        // to send the message.
+        //
+        // If user_id is not a valid numeric ID (e.g. "default"), we can't
+        // address a specific chat — skip gracefully.
+        let chat_id: i64 = match user_id.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                tracing::debug!(
+                    channel = %self.name,
+                    user_id = %user_id,
+                    "WASM broadcast: skipping — user_id is not a numeric chat ID"
+                );
+                return Ok(());
+            }
+        };
+
+        // Build minimal metadata that on_respond can parse.
+        // message_id=0 means "don't reply to a specific message".
+        let metadata = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": 0,
+            "user_id": chat_id,
+            "is_private": true,
+        });
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+
+        tracing::info!(
+            channel = %self.name,
+            chat_id = chat_id,
+            content_len = response.content.len(),
+            "WASM broadcast: sending proactive message via on_respond"
+        );
+
+        self.call_on_respond(
+            uuid::Uuid::new_v4(),
+            &response.content,
+            response.thread_id.as_deref(),
+            &metadata_json,
+        )
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: self.name.clone(),
+            reason: format!("broadcast via on_respond: {}", e),
+        })
+    }
 }
 
 impl std::fmt::Debug for WasmChannel {
@@ -2115,6 +2169,14 @@ impl Channel for SharedWasmChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.inner.shutdown().await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
     }
 }
 
