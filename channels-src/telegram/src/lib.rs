@@ -410,7 +410,7 @@ impl Guest for TelegramChannel {
         // Configure polling only if not in webhook mode
         let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: 30000, // 30 seconds minimum
+                interval_ms: 5000, // 5 seconds between poll ticks
                 enabled: true,
             })
         } else {
@@ -488,17 +488,20 @@ impl Guest for TelegramChannel {
         );
 
         let headers_json = serde_json::json!({}).to_string();
-        let primary_url = get_updates_url(offset, 30);
+        // The WASM host enforces a 30s callback_timeout on on_poll.
+        // Use a 20s long-poll so the full cycle (WASM startup + HTTP + processing)
+        // fits comfortably within the 30s window.  Previous value of 30s caused
+        // the callback to ALWAYS time out, leaving orphaned HTTP requests and
+        // triggering 409 conflicts on subsequent getUpdates calls.
+        let primary_url = get_updates_url(offset, 20);
 
-        // 35s HTTP timeout outlives Telegram's 30s server-side long-poll.
-        // If the TCP connection drops, retry once immediately with a short poll
-        // so we don't wait a full extra tick (~30s) before delivering updates.
+        // 25s HTTP timeout outlives Telegram's 20s server-side long-poll.
         let result = match channel_host::http_request(
             "GET",
             &primary_url,
             &headers_json,
             None,
-            Some(35_000),
+            Some(25_000),
         ) {
             Ok(response) => Ok(response),
             Err(primary_err) => {
