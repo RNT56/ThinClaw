@@ -21,7 +21,9 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "graph.facebook.com", "path_prefix": "/" }
+        { "host": "graph.facebook.com", "path_prefix": "/" },
+        { "host": "lookaside.fbsbx.com", "path_prefix": "/" },
+        { "host": "*.fbcdn.net", "path_prefix": "/" }
       ],
       "rate_limit": {
         "requests_per_minute": 80,

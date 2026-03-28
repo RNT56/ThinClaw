@@ -14,7 +14,9 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "discord.com", "path_prefix": "/api/v10" }
+        { "host": "discord.com", "path_prefix": "/api/v10" },
+        { "host": "cdn.discordapp.com", "path_prefix": "/" },
+        { "host": "media.discordapp.net", "path_prefix": "/" }
       ],
       "credentials": {
         "discord_bot_token": {
