@@ -19,3 +19,6 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Local analysis/comparison reports
+thinclaw_vs_ironclaw_report.md
+

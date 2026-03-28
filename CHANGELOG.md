@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.2) - 2026-03-28
+
+### Added
+
+- Multimodal media pipeline for all channels — images, audio, video, and documents are downloaded and routed to the LLM across Telegram, Discord, Signal, iMessage, WhatsApp, and Slack
+- Discord native channel: CDN attachment download with 20MB size limit
+- Signal channel: typed `SignalAttachment` struct, reads binary from signal-cli's local attachment store
+- iMessage channel: queries `attachment` + `message_attachment_join` tables from chat.db, reads files from disk
+- WhatsApp WASM channel: 2-step Cloud API media download (media URL → binary), supports image/audio/video/document/sticker with captions
+- Slack WASM channel: file download via `url_private_download` with Bearer auth
+- WIT `media-attachment` record and `attachments` field on `emitted-message` for WASM channel binary media transport
+- WASM host boundary: 20MB per-file and 50MB per-message attachment size limits
+- BOOT.md startup hook: pre-reads workspace docs instead of relying on tool calls
+- Multi-provider LLM routing: Provider Vault, agent model switching, wizard fallback step
+- Runtime-configurable Claude Code model/max-turns via WebUI
+- Active channel names injected into LLM system prompt
+- Settings page UX overhaul: subtabs, collapsible sections, search
+- Provider Vault moved to dedicated tab with enhanced broadcast logging
+- Broadcast support for WASM channels via `on_respond`
+- BOOT.md startup briefing: daily logs, memory, heartbeat greeting with DB persistence
+
+### Fixed
+
+- Apple Mail timestamps showing year 2057 (+31 year offset)
+- Telegram polling timeout mismatch causing 409 conflicts
+- Telegram webhooks unreachable — tunnel forwards to wrong port
+- Telegram falls back to polling when webhook fails + Provider UX fixes
+- Numeric-looking strings (chat IDs) in `Option<String>` settings
+- Detect and bail on tailscale funnel startup failures
+- Bail on empty Tailscale hostname instead of producing broken URL
+- Telegram broadcast delivery + thread deletion in WebUI
+- Boot hook delivery: Telegram, WebUI persistence, BOOT.md migration
+- `memory_tree` fails with 'Input cannot be empty' on default params
+- Settings array parsing, model reset, provider auto-enable, XSS
+- Apple Mail polling crash + add apple_mail search/send tool
+- Apple Mail `allow_from` wired to DB settings + security warning
+- Prevent BOOTSTRAP.md from re-executing on every restart
+
+### Other
+
+- Update WASM artifact URLs and SHA256 checksums
+
 ## [0.13.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.0) - 2026-03-26
 
 ### Added
