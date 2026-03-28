@@ -955,9 +955,43 @@ impl Agent {
                         "Executing BOOT.md startup hook (target channel: {})",
                         target_channel,
                     );
+
+                    // Pre-read workspace documents that BOOT.md references so the
+                    // LLM always has this context, even if it skips tool calls.
+                    let mut context_sections = Vec::new();
+
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let ctx_docs = [
+                        ("HEARTBEAT.md", "HEARTBEAT.md"),
+                        ("MEMORY.md", "MEMORY.md"),
+                        (&format!("daily/{}.md", today), &format!("daily/{}.md", today)),
+                    ];
+                    for (path, label) in &ctx_docs {
+                        match workspace.read(path).await {
+                            Ok(d) if !d.content.trim().is_empty() => {
+                                context_sections.push(format!(
+                                    "--- {} ---\n{}",
+                                    label, d.content
+                                ));
+                            }
+                            _ => {} // Missing or empty — skip silently
+                        }
+                    }
+
+                    let enriched_content = if context_sections.is_empty() {
+                        doc.content.clone()
+                    } else {
+                        format!(
+                            "{}\n\n## Pre-loaded context\n\nThe following workspace documents were pre-read for you. \
+                             You do NOT need to call memory_read for these — the data is already here.\n\n{}",
+                            doc.content,
+                            context_sections.join("\n\n")
+                        )
+                    };
+
                     self.run_startup_hook(
                         "boot",
-                        &doc.content,
+                        &enriched_content,
                         target_channel,
                         notify_user,
                     )
