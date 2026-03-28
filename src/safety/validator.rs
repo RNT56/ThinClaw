@@ -193,7 +193,9 @@ impl Validator {
     pub fn validate_tool_params(&self, params: &serde_json::Value) -> ValidationResult {
         let mut result = ValidationResult::ok();
 
-        // Recursively check all string values in the JSON
+        // Recursively check all string values in the JSON.
+        // Empty strings are allowed — they are valid parameter values
+        // (e.g. memory_tree path="" means workspace root).
         fn check_strings(
             value: &serde_json::Value,
             validator: &Validator,
@@ -201,8 +203,12 @@ impl Validator {
         ) {
             match value {
                 serde_json::Value::String(s) => {
-                    let string_result = validator.validate(s);
-                    *result = std::mem::take(result).merge(string_result);
+                    // Skip empty strings — they are valid for optional params
+                    // with empty defaults (e.g. memory_tree path).
+                    if !s.is_empty() {
+                        let string_result = validator.validate(s);
+                        *result = std::mem::take(result).merge(string_result);
+                    }
                 }
                 serde_json::Value::Array(arr) => {
                     for item in arr {
