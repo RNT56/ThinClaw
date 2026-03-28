@@ -110,12 +110,10 @@ impl AppleMailTool {
             }
             let read_status = if parts[5] == "1" { "read" } else { "UNREAD" };
             let date_ts: i64 = parts[4].parse().unwrap_or(0);
-            // Apple Mail stores dates as Core Data timestamps
-            // (seconds since 2001-01-01). Convert to human-readable.
+            // Apple Mail's Envelope Index stores date_received as Unix
+            // timestamps (seconds since 1970-01-01), NOT Core Data timestamps.
             let date_str = if date_ts > 0 {
-                // Core Data epoch → Unix epoch offset: 978307200
-                let unix_ts = date_ts + 978_307_200;
-                chrono::DateTime::from_timestamp(unix_ts, 0)
+                chrono::DateTime::from_timestamp(date_ts, 0)
                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| format!("ts:{date_ts}"))
             } else {
