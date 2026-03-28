@@ -1221,10 +1221,10 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok(((), _host_state))) => {
-                tracing::debug!(
+                tracing::info!(
                     channel = %channel_name,
                     message_id = %message_id,
-                    "WASM channel on_respond completed"
+                    "WASM channel on_respond completed successfully"
                 );
                 Ok(())
             }
@@ -2081,14 +2081,29 @@ impl Channel for WasmChannel {
             "WASM broadcast: sending proactive message via on_respond"
         );
 
-        self.call_on_respond(
+        let result = self.call_on_respond(
             uuid::Uuid::new_v4(),
             &response.content,
             response.thread_id.as_deref(),
             &metadata_json,
         )
-        .await
-        .map_err(|e| ChannelError::SendFailed {
+        .await;
+
+        match &result {
+            Ok(()) => tracing::info!(
+                channel = %self.name,
+                chat_id = chat_id,
+                "WASM broadcast: on_respond completed without error"
+            ),
+            Err(e) => tracing::error!(
+                channel = %self.name,
+                chat_id = chat_id,
+                error = %e,
+                "WASM broadcast: on_respond FAILED"
+            ),
+        }
+
+        result.map_err(|e| ChannelError::SendFailed {
             name: self.name.clone(),
             reason: format!("broadcast via on_respond: {}", e),
         })

@@ -1127,6 +1127,7 @@ function switchTab(tab) {
     stopPairingPoll();
   }
   if (tab === 'skills') loadSkills();
+  if (tab === 'providers') loadProviders();
   if (tab === 'settings') loadSettings();
 }
 
@@ -3760,49 +3761,83 @@ for (const section of Object.values(SETTINGS_SCHEMA)) {
 
 // --- Provider Vault ---
 
-function loadProviderVault() {
-  const container = document.getElementById('provider-vault');
+function loadProviders() {
+  const container = document.getElementById('providers-content');
+  container.innerHTML = '<div class="settings-loading">Loading providers...</div>';
   apiFetch('/api/providers').then((data) => {
-    container.style.display = '';
     renderProviderVault(data.providers || []);
-  }).catch(() => {
-    container.style.display = 'none';
+  }).catch((err) => {
+    container.innerHTML = '<div class="empty-state">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
   });
 }
 
+function loadProviderVault() {
+  loadProviders();
+}
+
 function renderProviderVault(providers) {
-  const container = document.getElementById('provider-vault');
+  const container = document.getElementById('providers-content');
   const configured = providers.filter(p => p.has_key).length;
-  let html = `<div class="settings-section"><h3>🔑 Provider Vault <span class="vault-badge">${configured} / ${providers.length} configured</span></h3>`;
-  html += '<p class="vault-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>';
-  html += '<div class="vault-grid">';
-  for (const p of providers) {
-    const statusIcon = p.has_key ? '✅' : '⬚';
-    const statusClass = p.has_key ? 'vault-configured' : 'vault-unconfigured';
-    html += `<div class="vault-row ${statusClass}" id="vault-row-${escapeHtml(p.slug)}">`;
-    html += `<div class="vault-provider"><span class="vault-status-icon">${statusIcon}</span>`;
-    html += `<strong>${escapeHtml(p.display_name)}</strong>`;
-    html += `<span class="vault-model-hint">${escapeHtml(p.default_model)}</span></div>`;
-    html += `<div class="vault-actions">`;
-    if (p.has_key) {
-      html += `<span class="vault-key-label">Key configured</span>`;
-      html += `<button class="btn-vault-remove" data-slug="${escapeHtml(p.slug)}" data-name="${escapeHtml(p.display_name)}">Remove</button>`;
-    } else {
-      html += `<input type="password" id="vault-key-${escapeHtml(p.slug)}" class="vault-key-input" placeholder="${escapeHtml(p.env_key_name)}">`;
-      html += `<button class="btn-vault-save" data-slug="${escapeHtml(p.slug)}">Save</button>`;
+  const total = providers.length;
+
+  let html = '<div class="vault-stats">';
+  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + configured + '</span><span class="vault-stat-label">Configured</span></div>';
+  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + (total - configured) + '</span><span class="vault-stat-label">Available</span></div>';
+  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + total + '</span><span class="vault-stat-label">Total Providers</span></div>';
+  html += '</div>';
+
+  // Configured providers
+  if (configured > 0) {
+    html += '<h3 class="vault-section-title">Configured Providers</h3>';
+    html += '<div class="vault-card-grid">';
+    for (const p of providers.filter(x => x.has_key)) {
+      html += renderProviderCard(p);
     }
-    html += `</div></div>`;
+    html += '</div>';
   }
-  html += '</div></div>';
+
+  // Unconfigured providers
+  const unconfigured = providers.filter(x => !x.has_key);
+  if (unconfigured.length > 0) {
+    html += '<h3 class="vault-section-title">Available Providers</h3>';
+    html += '<div class="vault-card-grid">';
+    for (const p of unconfigured) {
+      html += renderProviderCard(p);
+    }
+    html += '</div>';
+  }
+
   container.innerHTML = html;
 
-  // Attach event listeners via delegation (avoids inline onclick XSS risk)
+  // Attach event listeners
   container.querySelectorAll('.btn-vault-save').forEach(btn => {
     btn.addEventListener('click', () => saveProviderKey(btn.dataset.slug));
   });
   container.querySelectorAll('.btn-vault-remove').forEach(btn => {
     btn.addEventListener('click', () => removeProviderKey(btn.dataset.slug, btn.dataset.name));
   });
+}
+
+function renderProviderCard(p) {
+  const statusIcon = p.has_key ? '✅' : '⬚';
+  const statusClass = p.has_key ? 'vault-card configured' : 'vault-card unconfigured';
+  let html = '<div class="' + statusClass + '" id="vault-card-' + escapeHtml(p.slug) + '">';
+  html += '<div class="vault-card-header">';
+  html += '<span class="vault-card-status">' + statusIcon + '</span>';
+  html += '<strong class="vault-card-name">' + escapeHtml(p.display_name) + '</strong>';
+  html += '</div>';
+  html += '<div class="vault-card-model">' + escapeHtml(p.default_model) + '</div>';
+  html += '<div class="vault-card-actions">';
+  if (p.has_key) {
+    html += '<span class="vault-key-status">Key configured</span>';
+    html += '<button class="btn-vault-remove" data-slug="' + escapeHtml(p.slug) + '" data-name="' + escapeHtml(p.display_name) + '">Remove Key</button>';
+  } else {
+    html += '<input type="password" id="vault-key-' + escapeHtml(p.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(p.env_key_name) + '">';
+    html += '<button class="btn-vault-save" data-slug="' + escapeHtml(p.slug) + '">Save Key</button>';
+  }
+  html += '</div>';
+  html += '</div>';
+  return html;
 }
 
 function saveProviderKey(slug) {
@@ -3832,7 +3867,6 @@ function removeProviderKey(slug, displayName) {
 let settingsCache = {}; // key -> { value, updated_at }
 
 function loadSettings() {
-  loadProviderVault();
   const container = document.getElementById('settings-sections');
   container.innerHTML = '<div class="settings-loading">Loading settings...</div>';
 

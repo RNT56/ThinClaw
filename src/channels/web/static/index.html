@@ -44,6 +44,7 @@
       <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
       <button data-tab="skills">Skills</button>
+      <button data-tab="providers">Providers</button>
       <button data-tab="settings">Settings</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
@@ -263,6 +264,19 @@
       </div>
     </div>
 
+    <!-- Providers Tab -->
+    <div class="tab-panel" id="tab-providers">
+      <div class="providers-container">
+        <div class="providers-header">
+          <h2>🔑 Provider Vault</h2>
+          <p class="providers-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>
+        </div>
+        <div class="providers-content" id="providers-content">
+          <div class="settings-loading">Loading providers...</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Settings Tab -->
     <div class="tab-panel" id="tab-settings">
       <div class="settings-container">
@@ -277,8 +291,6 @@
             <button class="btn-ext" onclick="loadSettings()" title="Reload">Refresh</button>
           </div>
         </div>
-
-        <div class="provider-vault" id="provider-vault" style="display:none"></div>
 
         <div class="settings-sections" id="settings-sections">
           <div class="settings-loading">Loading settings...</div>
