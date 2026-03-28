@@ -992,12 +992,28 @@ impl Workspace {
 
         let mut count = 0;
         for (path, content) in seed_files {
-            // Skip files that already exist AND have content (never overwrite user edits).
+            // Skip files that already exist AND have meaningful content
+            // (never overwrite user edits).
             // Re-seed documents that exist but are empty — this can happen if a race
             // during first boot creates an empty document via get_or_create_document_by_path
             // before seeding runs.
+            //
+            // Special case: BOOT.md migration — if the existing BOOT.md is
+            // "effectively empty" (all HTML comments/headers, e.g. the old
+            // comment-only template), re-seed it with the new startup
+            // briefing so existing users get the proactive boot greeting.
             match self.read(path).await {
-                Ok(doc) if !doc.content.is_empty() => continue,
+                Ok(doc) if !doc.content.is_empty() => {
+                    if *path == paths::BOOT
+                        && crate::agent::heartbeat::is_effectively_empty(&doc.content)
+                    {
+                        tracing::info!(
+                            "Upgrading BOOT.md from comment-only template to startup briefing"
+                        );
+                    } else {
+                        continue;
+                    }
+                }
                 Ok(_) => {
                     tracing::info!("Re-seeding empty document: {}", path);
                 }

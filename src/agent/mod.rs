@@ -22,7 +22,7 @@ pub mod cron_stagger;
 mod dispatcher;
 mod dispatcher_helpers;
 pub mod global_session;
-mod heartbeat;
+pub(crate) mod heartbeat;
 pub mod job_monitor;
 pub mod management_api;
 pub mod presence;

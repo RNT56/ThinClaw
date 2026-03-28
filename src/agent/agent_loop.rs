@@ -934,6 +934,16 @@ impl Agent {
             .as_deref()
             .unwrap_or("web");
 
+        // Resolve the notification recipient. For channels like Telegram,
+        // this must be a numeric chat ID (e.g. the owner_id), not the
+        // literal string "default" which Telegram::broadcast() silently drops.
+        // We use the same resolution chain as heartbeat notifications.
+        let notify_user = self
+            .heartbeat_config
+            .as_ref()
+            .and_then(|hb| hb.notify_user.as_deref())
+            .unwrap_or("default");
+
         // ── 1. BOOT.md — runs on every startup ────────────────────────
         match workspace
             .read(crate::workspace::paths::BOOT)
@@ -949,6 +959,7 @@ impl Agent {
                         "boot",
                         &doc.content,
                         target_channel,
+                        notify_user,
                     )
                     .await;
                 } else {
@@ -978,6 +989,7 @@ impl Agent {
                         "bootstrap",
                         &doc.content,
                         target_channel,
+                        notify_user,
                     )
                     .await;
 
@@ -1038,13 +1050,15 @@ impl Agent {
         hook_name: &str,
         content: &str,
         target_channel: &str,
+        notify_user: &str,
     ) {
         // Build a synthetic IncomingMessage from the hook content.
         // The channel is set to the hook name (e.g. "boot", "bootstrap")
-        // so handle_message can identify the source.
+        // so handle_message can identify the source. The user_id is the
+        // resolved notification recipient (e.g. Telegram owner_id).
         let message = IncomingMessage::new(
             hook_name,
-            "default",
+            notify_user,
             content,
         );
 
@@ -1054,7 +1068,7 @@ impl Agent {
                 let out = OutgoingResponse::text(&response);
                 if let Err(e) = self
                     .channels
-                    .broadcast(target_channel, "default", out.clone())
+                    .broadcast(target_channel, notify_user, out.clone())
                     .await
                 {
                     tracing::warn!(
@@ -1067,7 +1081,7 @@ impl Agent {
                     if target_channel != "web" {
                         let _ = self
                             .channels
-                            .broadcast("web", "default", out)
+                            .broadcast("web", notify_user, out)
                             .await;
                     }
                 } else {
@@ -1081,13 +1095,13 @@ impl Agent {
                 if target_channel != "web" {
                     let _ = self
                         .channels
-                        .broadcast("web", "default", OutgoingResponse::text(&response))
+                        .broadcast("web", notify_user, OutgoingResponse::text(&response))
                         .await;
                 }
 
                 // Persist the boot/bootstrap response to conversation history
                 // so late-connecting WebUI clients can see it when they load.
-                self.persist_hook_response(hook_name, &response).await;
+                self.persist_hook_response(hook_name, notify_user, &response).await;
             }
             Ok(Some(_empty)) => {
                 tracing::debug!("{} hook returned empty response — nothing to send", hook_name);
@@ -1105,21 +1119,31 @@ impl Agent {
         }
     }
 
-    /// Persist a startup hook response to the conversation database.
+    /// Persist a startup hook response to the **assistant conversation** in the
+    /// database. This is the pinned "Assistant" thread in the WebUI sidebar.
     ///
-    /// Creates (or reuses) a conversation for the hook and saves the agent's
-    /// response as an assistant message. This ensures late-connecting WebUI
-    /// clients can see boot/bootstrap greetings when they open the dashboard.
-    async fn persist_hook_response(&self, hook_name: &str, response: &str) {
+    /// By writing the boot greeting here, late-connecting WebUI clients see it
+    /// when they click on the Assistant thread.
+    async fn persist_hook_response(&self, hook_name: &str, notify_user: &str, response: &str) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
             None => return,
         };
 
-        // Use get_or_create so we reuse the same conversation across boots
-        // for the boot hook, keeping a clean history.
+        // Use the same (user_id, channel) pair as the WebUI's threads handler
+        // so the boot response appears in the pinned "Assistant" thread.
+        // The WebUI calls get_or_create_assistant_conversation(user_id, "gateway").
+        let gateway_user = if notify_user == "default" {
+            "default"
+        } else {
+            // For Telegram users (numeric IDs), the web gateway still uses
+            // "default" as its user_id. Boot responses should appear in the
+            // web assistant thread regardless of the notification recipient.
+            "default"
+        };
+
         let conversation_id = match store
-            .get_or_create_assistant_conversation("default", "web")
+            .get_or_create_assistant_conversation(gateway_user, "gateway")
             .await
         {
             Ok(id) => id,
@@ -1145,7 +1169,7 @@ impl Agent {
             );
         } else {
             tracing::debug!(
-                "Persisted {} hook response to conversation {}",
+                "Persisted {} hook response to assistant conversation {}",
                 hook_name,
                 conversation_id
             );
