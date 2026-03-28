@@ -3783,7 +3783,6 @@ function renderProviderVault(providers) {
   let html = '<div class="vault-stats">';
   html += '<div class="vault-stat-card"><span class="vault-stat-number">' + configured + '</span><span class="vault-stat-label">Configured</span></div>';
   html += '<div class="vault-stat-card"><span class="vault-stat-number">' + (total - configured) + '</span><span class="vault-stat-label">Available</span></div>';
-  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + total + '</span><span class="vault-stat-label">Total Providers</span></div>';
   html += '</div>';
 
   // Configured providers
@@ -3826,7 +3825,7 @@ function renderProviderCard(p) {
   html += '<span class="vault-card-status">' + statusIcon + '</span>';
   html += '<strong class="vault-card-name">' + escapeHtml(p.display_name) + '</strong>';
   html += '</div>';
-  html += '<div class="vault-card-model">' + escapeHtml(p.default_model) + '</div>';
+  html += '<div class="vault-card-model">Default: ' + escapeHtml(p.default_model) + '</div>';
   html += '<div class="vault-card-actions">';
   if (p.has_key) {
     html += '<span class="vault-key-status">Key configured</span>';

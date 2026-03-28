@@ -365,7 +365,7 @@ impl Guest for TelegramChannel {
 
         // Mode is determined by whether the host injected a tunnel_url
         // If tunnel is configured, use webhooks. Otherwise, use polling.
-        let webhook_mode = config.tunnel_url.is_some();
+        let mut webhook_mode = config.tunnel_url.is_some();
 
         if webhook_mode {
             channel_host::log(
@@ -383,8 +383,12 @@ impl Guest for TelegramChannel {
                 if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
                     channel_host::log(
                         channel_host::LogLevel::Error,
-                        &format!("Failed to register webhook: {}", e),
+                        &format!("Failed to register webhook: {} — falling back to polling mode", e),
                     );
+                    // Fall back to polling mode — delete any stale webhook so
+                    // getUpdates works, then flip the mode flag.
+                    let _ = delete_webhook();
+                    webhook_mode = false;
                 }
             }
         } else {

@@ -3727,9 +3727,9 @@ mark {
 /* ===== Providers Tab ===== */
 
 .providers-container {
-  max-width: 900px;
-  margin: 0 auto;
   padding: 24px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .providers-header h2 {
@@ -3748,7 +3748,7 @@ mark {
 /* Provider stats row */
 .vault-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 12px;
   margin-bottom: 28px;
 }
