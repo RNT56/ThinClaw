@@ -59,11 +59,20 @@ impl Tunnel for TailscaleTunnel {
 
             let status: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .map_err(|e| anyhow::anyhow!("Failed to parse tailscale status JSON: {e}"))?;
-            status["Self"]["DNSName"]
+            let dns_name = status["Self"]["DNSName"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("tailscale status missing Self.DNSName field"))?
                 .trim_end_matches('.')
-                .to_string()
+                .to_string();
+
+            if dns_name.is_empty() {
+                bail!(
+                    "Tailscale DNSName is empty — is Tailscale logged in? \
+                     Run `tailscale login` or `tailscale up` to authenticate."
+                );
+            }
+
+            dns_name
         };
 
         let target = format!("http://{local_host}:{local_port}");
