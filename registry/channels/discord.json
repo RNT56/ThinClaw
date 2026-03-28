@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/discord-wasm32-wasip2.tar.gz",
-      "sha256": "44045e5368e62329e78c2cd64e9393f4ce0b36c2656904e50ac895d05f06ebcc"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/discord-wasm32-wasip2.tar.gz",
+      "sha256": "d996c5603ee8ab2e8e11ea7eaffb05e70dbf70b1450ef51770936c1501ae1907"
     }
   },
   "auth_summary": {

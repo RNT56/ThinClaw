@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/telegram-wasm32-wasip2.tar.gz",
-      "sha256": "d01aa7af00b48266ee8636ca7acd4111e9ff73462bcf3751be6bbcc66ef65500"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/telegram-wasm32-wasip2.tar.gz",
+      "sha256": "493a03dede326f461678c0885a3ffea1eddc48d244d15f556a09facd71ad56e3"
     }
   },
   "auth_summary": {

@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/google-drive-wasm32-wasip2.tar.gz",
-      "sha256": "b6a36bc9e0bb6e66586a1b8ffa2e141b43556c408d31aeaa0757d82dfc0fd38c"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/google-drive-wasm32-wasip2.tar.gz",
+      "sha256": "e4a1bf15ce5dba1231940fbb6fddd7061a3f704d7cbad968d34d9f604be5fa37"
     }
   },
   "auth_summary": {

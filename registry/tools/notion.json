@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/notion-wasm32-wasip2.tar.gz",
-      "sha256": "b163131888c57fc95ad7b4fb066723685196d7c714179b90490286b614146697"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/notion-wasm32-wasip2.tar.gz",
+      "sha256": "2224aedf62c479bdb397e48c887f675ebe0999b9bafa0a9f50262a4f8de37047"
     }
   },
   "auth_summary": {

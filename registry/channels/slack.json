@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.1/slack-wasm32-wasip2.tar.gz",
-      "sha256": "dabbe9c3625437261d175487e71224251f11a71267744df96dc93989a37ff894"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/slack-wasm32-wasip2.tar.gz",
+      "sha256": "30e26ecfc602b26b811aac1dc6c4788758d4888a1cb7e79437bcf2c877f16edf"
     }
   },
   "auth_summary": {
