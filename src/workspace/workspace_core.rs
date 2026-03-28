@@ -921,17 +921,26 @@ impl Workspace {
             ),
             (
                 paths::BOOT,
-                "# Boot Hook\n\n\
-                 <!-- BOOT.md runs silently on every agent startup.\n\
-                      Add tasks below that should run each time the agent wakes up.\n\
-                      Tasks are executed before any user interaction begins.\n\n\
-                      Examples:\n\
-                      - Check for time-sensitive items\n\
-                      - Run a memory hygiene pass (consolidate MEMORY.md)\n\
-                      - Review upcoming calendar events\n\n\
-                      Keep this file minimal. Heavy tasks belong in HEARTBEAT.md.\n\
-                      Leave empty (comment-only) to skip boot tasks.\n\
-                 -->",
+                "# Boot Hook — Startup Briefing\n\n\
+                 You just came online. Before any user interaction, \
+                 prepare a short startup briefing.\n\n\
+                 ## Steps\n\n\
+                 1. Read today's daily log (`memory_read` target: \
+                 `daily/YYYY-MM-DD.md` with today's date) and yesterday's \
+                 for recent context.\n\
+                 2. Read `MEMORY.md` for long-term notes and decisions.\n\
+                 3. Read `HEARTBEAT.md` for any open background tasks.\n\
+                 4. Check the current time and day of week.\n\n\
+                 ## Output\n\n\
+                 Compose a brief, warm greeting to your human that includes:\n\n\
+                 - A natural hello with the time/day awareness (morning, afternoon, etc.)\n\
+                 - A 2-3 line summary of what happened recently (from daily logs)\n\
+                 - Any open tasks or reminders (from HEARTBEAT.md)\n\
+                 - Anything time-sensitive coming up\n\n\
+                 Keep it concise — 4-8 lines max. If there's nothing notable, \
+                 just say hi and that you're ready.\n\n\
+                 <!-- Edit this file to customize your agent's boot behavior.\n\
+                      Remove these instructions entirely to skip the boot hook. -->",
             ),
             (
                 paths::BOOTSTRAP,

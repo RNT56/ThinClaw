@@ -1084,6 +1084,10 @@ impl Agent {
                         .broadcast("web", "default", OutgoingResponse::text(&response))
                         .await;
                 }
+
+                // Persist the boot/bootstrap response to conversation history
+                // so late-connecting WebUI clients can see it when they load.
+                self.persist_hook_response(hook_name, &response).await;
             }
             Ok(Some(_empty)) => {
                 tracing::debug!("{} hook returned empty response — nothing to send", hook_name);
@@ -1098,6 +1102,53 @@ impl Agent {
                     e
                 );
             }
+        }
+    }
+
+    /// Persist a startup hook response to the conversation database.
+    ///
+    /// Creates (or reuses) a conversation for the hook and saves the agent's
+    /// response as an assistant message. This ensures late-connecting WebUI
+    /// clients can see boot/bootstrap greetings when they open the dashboard.
+    async fn persist_hook_response(&self, hook_name: &str, response: &str) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        // Use get_or_create so we reuse the same conversation across boots
+        // for the boot hook, keeping a clean history.
+        let conversation_id = match store
+            .get_or_create_assistant_conversation("default", "web")
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to get/create conversation for {} hook: {}",
+                    hook_name,
+                    e
+                );
+                return;
+            }
+        };
+
+        // Save the agent's startup response
+        if let Err(e) = store
+            .add_conversation_message(conversation_id, "assistant", response)
+            .await
+        {
+            tracing::warn!(
+                "Failed to persist {} hook response: {}",
+                hook_name,
+                e
+            );
+        } else {
+            tracing::debug!(
+                "Persisted {} hook response to conversation {}",
+                hook_name,
+                conversation_id
+            );
         }
     }
 
