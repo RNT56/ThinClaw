@@ -987,6 +987,16 @@ function loadThreads() {
       meta.className = 'thread-meta';
       meta.textContent = (thread.turn_count || 0) + ' turns';
       item.appendChild(meta);
+      // Delete button
+      const delBtn = document.createElement('button');
+      delBtn.className = 'thread-delete-btn';
+      delBtn.innerHTML = '&times;';
+      delBtn.title = 'Delete thread';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteThread(thread.id, thread.title || thread.id.substring(0, 8));
+      });
+      item.appendChild(delBtn);
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
@@ -1030,6 +1040,21 @@ function createNewThread() {
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
+  });
+}
+
+function deleteThread(threadId, threadName) {
+  if (!confirm('Delete thread "' + threadName + '"? This cannot be undone.')) return;
+  apiFetch('/api/chat/thread/' + encodeURIComponent(threadId), { method: 'DELETE' }).then(() => {
+    showToast('Thread deleted', 'success');
+    // If the deleted thread was active, switch to assistant
+    if (currentThreadId === threadId) {
+      switchToAssistant();
+    } else {
+      loadThreads();
+    }
+  }).catch((err) => {
+    showToast('Failed to delete: ' + err.message, 'error');
   });
 }
 

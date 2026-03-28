@@ -2897,7 +2897,7 @@ mark {
 .thread-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 8px 12px;
   cursor: pointer;
   font-size: 13px;
@@ -2917,13 +2917,38 @@ mark {
 }
 
 .thread-label {
+  flex: 1;
   font-family: var(--font-mono);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-meta {
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+.thread-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.thread-item:hover .thread-delete-btn {
+  opacity: 1;
+}
+
+.thread-delete-btn:hover {
+  color: var(--danger);
 }
 
 /* --- Memory editing --- */

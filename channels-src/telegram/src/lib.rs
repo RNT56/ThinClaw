@@ -757,7 +757,12 @@ fn send_message(
     });
 
     if let Some(message_id) = reply_to_message_id {
-        payload["reply_to_message_id"] = serde_json::Value::Number(message_id.into());
+        // Skip reply_to_message_id when it's 0 — this happens for broadcast
+        // (proactive) messages where there's no original message to reply to.
+        // Telegram rejects message_id 0 with "message to reply not found".
+        if message_id > 0 {
+            payload["reply_to_message_id"] = serde_json::Value::Number(message_id.into());
+        }
     }
 
     if let Some(mode) = parse_mode {

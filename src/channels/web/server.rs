@@ -16,7 +16,7 @@ use axum::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -221,6 +221,7 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -1011,6 +1012,66 @@ async fn chat_new_thread_handler(
     }
 
     Ok(Json(info))
+}
+
+/// Delete a conversation thread and all its messages.
+///
+/// Protected: refuses to delete the pinned "assistant" thread.
+async fn chat_delete_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let thread_id: Uuid = id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread ID".to_string()))?;
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Prevent deleting the assistant thread
+    let assistant_id = store
+        .get_or_create_assistant_conversation(&state.user_id, "gateway")
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if thread_id == assistant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot delete the Assistant thread".to_string(),
+        ));
+    }
+
+    // Verify ownership
+    let belongs = store
+        .conversation_belongs_to_user(thread_id, &state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !belongs {
+        return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+    }
+
+    // Delete from DB (cascades to messages)
+    let deleted = store
+        .delete_conversation(thread_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Also remove from in-memory session if present
+    if let Some(ref session_manager) = state.session_manager {
+        let session = session_manager.get_or_create_session(&state.user_id).await;
+        let mut sess = session.lock().await;
+        sess.threads.remove(&thread_id);
+    }
+
+    tracing::info!(thread_id = %thread_id, deleted = deleted, "Thread deleted");
+
+    Ok(Json(serde_json::json!({
+        "deleted": deleted,
+        "thread_id": thread_id.to_string(),
+    })))
 }
 
 // --- Memory handlers ---
