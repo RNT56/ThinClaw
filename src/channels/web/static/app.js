@@ -3851,51 +3851,178 @@ function renderSettings() {
   const container = document.getElementById('settings-sections');
   container.innerHTML = '';
 
-  // Render known sections
-  for (const [sectionName, section] of Object.entries(SETTINGS_SCHEMA)) {
-    const sectionEl = document.createElement('div');
-    sectionEl.className = 'settings-section';
+  // --- Search bar ---
+  const searchWrap = document.createElement('div');
+  searchWrap.className = 'settings-search-wrap';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.id = 'settings-search';
+  searchInput.className = 'settings-search-input';
+  searchInput.placeholder = '🔍  Search settings...';
+  searchInput.addEventListener('input', () => filterSettings(searchInput.value));
+  searchWrap.appendChild(searchInput);
+  container.appendChild(searchWrap);
 
-    const header = document.createElement('h3');
-    header.innerHTML = section.icon + ' ' + escapeHtml(sectionName);
-    sectionEl.appendChild(header);
+  // --- Subtabs ---
+  const subtabGroups = {
+    'General': ['Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
+    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
+    'Advanced': [],
+  };
 
-    const grid = document.createElement('div');
-    grid.className = 'settings-grid';
+  const subtabBar = document.createElement('div');
+  subtabBar.className = 'settings-subtab-bar';
+  let firstTab = true;
+  for (const tabName of Object.keys(subtabGroups)) {
+    const btn = document.createElement('button');
+    btn.className = 'settings-subtab' + (firstTab ? ' active' : '');
+    btn.textContent = tabName;
+    btn.dataset.tab = tabName;
+    btn.addEventListener('click', () => switchSettingsSubtab(tabName));
+    subtabBar.appendChild(btn);
+    firstTab = false;
+  }
+  container.appendChild(subtabBar);
 
-    for (const field of section.fields) {
-      grid.appendChild(renderSettingField(field));
+  // --- Render sections into panes ---
+  for (const [tabName, sectionNames] of Object.entries(subtabGroups)) {
+    const pane = document.createElement('div');
+    pane.className = 'settings-pane' + (tabName === 'General' ? ' active' : '');
+    pane.dataset.tab = tabName;
+
+    const sectionsToRender = tabName === 'Advanced'
+      ? Object.keys(SETTINGS_SCHEMA).filter(s => !subtabGroups['General'].includes(s) && !subtabGroups['Channels'].includes(s))
+      : sectionNames;
+
+    let isFirst = true;
+    for (const sectionName of sectionsToRender) {
+      const section = SETTINGS_SCHEMA[sectionName];
+      if (!section) continue;
+      pane.appendChild(renderSettingsSection(sectionName, section, isFirst));
+      isFirst = false;
     }
 
-    sectionEl.appendChild(grid);
-    container.appendChild(sectionEl);
-  }
-
-  // Collect "other" settings not in schema
-  const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k)).sort();
-  if (otherKeys.length > 0) {
-    const sectionEl = document.createElement('div');
-    sectionEl.className = 'settings-section';
-
-    const header = document.createElement('h3');
-    header.textContent = '📋 Other';
-    sectionEl.appendChild(header);
-
-    const grid = document.createElement('div');
-    grid.className = 'settings-grid';
-
-    for (const key of otherKeys) {
-      grid.appendChild(renderSettingField({
-        key: key,
-        label: key,
-        type: guessType(settingsCache[key]?.value),
-        desc: '',
-      }));
+    // "Other" settings go into Advanced tab
+    if (tabName === 'Advanced') {
+      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k)).sort();
+      if (otherKeys.length > 0) {
+        const otherSection = {
+          icon: '📋',
+          fields: otherKeys.map(key => ({
+            key: key,
+            label: key,
+            type: guessType(settingsCache[key]?.value),
+            desc: '',
+          }))
+        };
+        pane.appendChild(renderSettingsSection('Other', otherSection, sectionsToRender.length === 0));
+      }
     }
 
-    sectionEl.appendChild(grid);
-    container.appendChild(sectionEl);
+    container.appendChild(pane);
   }
+}
+
+function renderSettingsSection(sectionName, section, startOpen) {
+  const sectionEl = document.createElement('div');
+  sectionEl.className = 'settings-section' + (startOpen ? '' : ' collapsed');
+  sectionEl.dataset.sectionName = sectionName.toLowerCase();
+
+  const header = document.createElement('div');
+  header.className = 'settings-section-header';
+  header.addEventListener('click', () => {
+    sectionEl.classList.toggle('collapsed');
+  });
+
+  const headerTitle = document.createElement('span');
+  headerTitle.className = 'settings-section-title';
+  headerTitle.innerHTML = section.icon + ' ' + escapeHtml(sectionName);
+  header.appendChild(headerTitle);
+
+  const chevron = document.createElement('span');
+  chevron.className = 'settings-section-chevron';
+  chevron.innerHTML = '&#9660;';
+  header.appendChild(chevron);
+
+  const countBadge = document.createElement('span');
+  countBadge.className = 'settings-section-count';
+  const configuredCount = section.fields.filter(f => settingsCache[f.key]?.value != null).length;
+  if (configuredCount > 0) {
+    countBadge.textContent = configuredCount + '/' + section.fields.length;
+  } else {
+    countBadge.textContent = section.fields.length + ' fields';
+  }
+  header.appendChild(countBadge);
+
+  sectionEl.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'settings-section-body';
+
+  const grid = document.createElement('div');
+  grid.className = 'settings-grid';
+
+  for (const field of section.fields) {
+    grid.appendChild(renderSettingField(field));
+  }
+
+  body.appendChild(grid);
+  sectionEl.appendChild(body);
+
+  return sectionEl;
+}
+
+function switchSettingsSubtab(tabName) {
+  document.querySelectorAll('.settings-subtab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tabName);
+  });
+  document.querySelectorAll('.settings-pane').forEach(pane => {
+    pane.classList.toggle('active', pane.dataset.tab === tabName);
+  });
+}
+
+function filterSettings(query) {
+  const q = query.toLowerCase().trim();
+  const panes = document.querySelectorAll('.settings-pane');
+
+  if (!q) {
+    // Reset: show active tab, un-hide all
+    panes.forEach(pane => {
+      pane.querySelectorAll('.settings-section').forEach(sec => sec.style.display = '');
+      pane.querySelectorAll('.setting-row').forEach(row => row.style.display = '');
+    });
+    // Restore active tab
+    document.querySelectorAll('.settings-subtab').forEach(btn => {
+      const tabName = btn.dataset.tab;
+      btn.classList.toggle('active', tabName === (document.querySelector('.settings-subtab.active')?.dataset.tab || 'General'));
+    });
+    return;
+  }
+
+  // Show ALL panes during search, hide non-matching rows
+  panes.forEach(pane => {
+    pane.classList.add('active');
+    pane.querySelectorAll('.settings-section').forEach(sec => {
+      let hasMatch = false;
+      const sectionName = sec.dataset.sectionName || '';
+      if (sectionName.includes(q)) hasMatch = true;
+
+      sec.querySelectorAll('.setting-row').forEach(row => {
+        const label = row.querySelector('.setting-label')?.textContent.toLowerCase() || '';
+        const desc = row.querySelector('.setting-desc')?.textContent.toLowerCase() || '';
+        const key = row.id.replace('setting-', '').replace(/-/g, '.').toLowerCase();
+        const match = label.includes(q) || desc.includes(q) || key.includes(q) || sectionName.includes(q);
+        row.style.display = match ? '' : 'none';
+        if (match) hasMatch = true;
+      });
+
+      sec.style.display = hasMatch ? '' : 'none';
+      if (hasMatch) sec.classList.remove('collapsed');
+    });
+  });
+
+  // Dim subtab buttons during search
+  document.querySelectorAll('.settings-subtab').forEach(btn => btn.classList.remove('active'));
 }
 
 function guessType(value) {
