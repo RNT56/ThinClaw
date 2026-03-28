@@ -173,6 +173,7 @@ pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
+    extra_public_routes: Vec<axum::Router>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -379,6 +380,13 @@ pub async fn start_server(
             header::HeaderValue::from_static("DENY"),
         ))
         .with_state(state.clone());
+
+    // Merge extra public routes (e.g. WASM webhook endpoints) AFTER
+    // .with_state() so both sides are Router<()>.
+    let mut app = app;
+    for routes in extra_public_routes {
+        app = app.merge(routes);
+    }
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);

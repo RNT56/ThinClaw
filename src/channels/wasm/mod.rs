@@ -83,7 +83,7 @@ mod capabilities;
 mod error;
 mod host;
 mod loader;
-mod router;
+pub mod router;
 mod runtime;
 mod schema;
 mod wrapper;

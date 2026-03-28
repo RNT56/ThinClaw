@@ -54,6 +54,9 @@ pub struct GatewayChannel {
     state: Arc<GatewayState>,
     /// The actual auth token in use (generated or from config).
     auth_token: String,
+    /// Extra public routes (e.g. WASM channel webhook endpoints) to merge
+    /// into the gateway server so they are reachable via the tunnel.
+    webhook_routes: Vec<axum::Router>,
 }
 
 impl GatewayChannel {
@@ -102,6 +105,7 @@ impl GatewayChannel {
             config,
             state,
             auth_token,
+            webhook_routes: Vec::new(),
         }
     }
 
@@ -249,6 +253,14 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject extra public routes (e.g. WASM channel webhook endpoints)
+    /// that should be accessible through the gateway port (and hence via
+    /// the public tunnel URL).
+    pub fn with_webhook_routes(mut self, routes: Vec<axum::Router>) -> Self {
+        self.webhook_routes = routes;
+        self
+    }
+
     /// Get the auth token (for printing to console on startup).
     pub fn auth_token(&self) -> &str {
         &self.auth_token
@@ -280,7 +292,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
+        server::start_server(addr, self.state.clone(), self.auth_token.clone(), self.webhook_routes.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

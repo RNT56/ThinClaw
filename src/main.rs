@@ -748,6 +748,16 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref ss) = components.secrets_store {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }
+        // Mount WASM channel webhook routes on the gateway so they are
+        // reachable through the public tunnel URL. We create a second
+        // Router instance since axum::Router is not Clone.
+        if let Some((_, _, ref wasm_router)) = wasm_channel_runtime_state {
+            let gateway_webhook_routes = thinclaw::channels::wasm::router::create_wasm_channel_router(
+                Arc::clone(wasm_router),
+                components.extension_manager.as_ref().map(Arc::clone),
+            );
+            gw = gw.with_webhook_routes(vec![gateway_webhook_routes]);
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
