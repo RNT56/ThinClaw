@@ -248,6 +248,14 @@ impl Reasoning {
         self.llm = new_llm;
     }
 
+    /// Get a clone of the current LLM provider handle.
+    ///
+    /// Used by the dispatcher to snapshot the original provider so it can be
+    /// restored when an `llm_select(model="reset")` is issued.
+    pub fn current_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.llm)
+    }
+
 
     /// Wire a shared cost tracker so every LLM call is recorded.
     ///

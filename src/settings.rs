@@ -1190,8 +1190,20 @@ impl Settings {
                     serde_json::from_str(value)
                         .unwrap_or(serde_json::Value::String(value.to_string()))
                 }
-                serde_json::Value::Array(_) => serde_json::from_str(value)
-                    .map_err(|e| format!("Invalid JSON array for {}: {}", path, e))?,
+                serde_json::Value::Array(_) => {
+                    // Try to parse as JSON array first; if that fails, try
+                    // comma-separated string (e.g. "openai/gpt-4o,groq/llama" from
+                    // the WebUI text input) and convert it into a JSON array.
+                    serde_json::from_str(value).unwrap_or_else(|_| {
+                        let items: Vec<serde_json::Value> = value
+                            .split(',')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| serde_json::Value::String(s.to_string()))
+                            .collect();
+                        serde_json::Value::Array(items)
+                    })
+                }
                 serde_json::Value::Object(_) => serde_json::from_str(value)
                     .map_err(|e| format!("Invalid JSON object for {}: {}", path, e))?,
                 serde_json::Value::String(_) => serde_json::Value::String(value.to_string()),
@@ -1368,6 +1380,34 @@ mod tests {
 
         settings.set("heartbeat.enabled", "true").unwrap();
         assert!(settings.heartbeat.enabled);
+
+        // Array field: JSON array syntax works
+        settings
+            .set(
+                "providers.fallback_chain",
+                "[\"openai/gpt-4o\",\"groq/llama-3.3-70b\"]",
+            )
+            .unwrap();
+        assert_eq!(
+            settings.providers.fallback_chain,
+            vec!["openai/gpt-4o", "groq/llama-3.3-70b"]
+        );
+
+        // Array field: comma-separated string is auto-split into array
+        settings
+            .set(
+                "providers.fallback_chain",
+                "openai/gpt-4o, groq/llama-3.3-70b",
+            )
+            .unwrap();
+        assert_eq!(
+            settings.providers.fallback_chain,
+            vec!["openai/gpt-4o", "groq/llama-3.3-70b"]
+        );
+
+        // Array field: empty string results in empty array
+        settings.set("providers.fallback_chain", "").unwrap();
+        assert!(settings.providers.fallback_chain.is_empty());
     }
 
     #[test]

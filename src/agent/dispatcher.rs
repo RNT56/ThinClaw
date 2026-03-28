@@ -208,6 +208,8 @@ impl Agent {
         let mut memory_flush_fired = false;
         // Track the last applied model override to avoid recreating the provider each iteration.
         let mut last_applied_model_override: Option<String> = None;
+        // Store the original LLM so we can restore it when the override is reset.
+        let original_llm = reasoning.current_llm();
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -255,10 +257,9 @@ impl Agent {
                             }
                         }
                     } else {
-                        // Override was reset — swap back to primary. We don't
-                        // store the original LLM, so we just keep the current one.
-                        // The agent would start a new conversation for a clean reset.
-                        tracing::info!("Agent model override reset to primary");
+                        // Override was reset — swap back to the original provider.
+                        tracing::info!("Agent model override reset — restoring primary");
+                        reasoning.swap_llm(original_llm.clone());
                     }
                     last_applied_model_override = current_spec;
                 }

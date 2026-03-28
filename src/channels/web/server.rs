@@ -2816,6 +2816,13 @@ async fn providers_save_key_handler(
         "Provider Vault: API key saved and secrets refreshed"
     );
 
+    // Auto-add provider to `providers.enabled` and `providers.fallback_chain`
+    // so the new key is immediately usable for failover without manual settings
+    // editing or a restart.
+    if let Some(ref db) = state.store {
+        auto_enable_provider(db.as_ref(), &state.user_id, &slug, endpoint.default_model).await;
+    }
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "message": format!("API key saved for {}", endpoint.display_name),
@@ -2849,10 +2856,99 @@ async fn providers_delete_key_handler(
         "Provider Vault: API key removed and secrets refreshed"
     );
 
+    // Remove provider from `providers.enabled` and `providers.fallback_chain`.
+    if let Some(ref db) = state.store {
+        auto_disable_provider(db.as_ref(), &state.user_id, &slug).await;
+    }
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "message": format!("API key removed for {}", endpoint.display_name),
     })))
+}
+
+/// Auto-add a provider slug to `providers.enabled` and its default model to
+/// `providers.fallback_chain` when a new API key is saved via the Provider Vault.
+///
+/// This ensures the new key is immediately usable for automatic failover
+/// without the user needing to manually set settings or restart.
+async fn auto_enable_provider(
+    db: &dyn crate::db::Database,
+    user_id: &str,
+    slug: &str,
+    default_model: &str,
+) {
+
+    // --- providers.enabled ---
+    let enabled = db.get_setting(user_id, "providers.enabled").await.ok().flatten();
+    let mut enabled_list: Vec<String> = enabled
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if !enabled_list.iter().any(|s| s == slug) {
+        enabled_list.push(slug.to_string());
+        if let Err(e) = db
+            .set_setting(user_id, "providers.enabled", &serde_json::json!(enabled_list))
+            .await
+        {
+            tracing::warn!("Failed to auto-enable provider '{}': {}", slug, e);
+        } else {
+            tracing::info!(provider = %slug, "Provider auto-enabled in providers.enabled");
+        }
+    }
+
+    // --- providers.fallback_chain ---
+    let chain = db.get_setting(user_id, "providers.fallback_chain").await.ok().flatten();
+    let mut chain_list: Vec<String> = chain
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let fallback_entry = format!("{}/{}", slug, default_model);
+    if !chain_list.iter().any(|s| s.starts_with(&format!("{}/", slug))) {
+        chain_list.push(fallback_entry.clone());
+        if let Err(e) = db
+            .set_setting(user_id, "providers.fallback_chain", &serde_json::json!(chain_list))
+            .await
+        {
+            tracing::warn!("Failed to add '{}' to fallback chain: {}", fallback_entry, e);
+        } else {
+            tracing::info!(entry = %fallback_entry, "Provider added to fallback chain");
+        }
+    }
+}
+
+/// Remove a provider slug from `providers.enabled` and its entries from
+/// `providers.fallback_chain` when an API key is deleted via the Provider Vault.
+async fn auto_disable_provider(
+    db: &dyn crate::db::Database,
+    user_id: &str,
+    slug: &str,
+) {
+
+    // --- providers.enabled ---
+    let enabled = db.get_setting(user_id, "providers.enabled").await.ok().flatten();
+    if let Some(mut enabled_list) = enabled.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()) {
+        let before = enabled_list.len();
+        enabled_list.retain(|s| s != slug);
+        if enabled_list.len() != before {
+            let _ = db
+                .set_setting(user_id, "providers.enabled", &serde_json::json!(enabled_list))
+                .await;
+            tracing::info!(provider = %slug, "Provider removed from providers.enabled");
+        }
+    }
+
+    // --- providers.fallback_chain ---
+    let chain = db.get_setting(user_id, "providers.fallback_chain").await.ok().flatten();
+    if let Some(mut chain_list) = chain.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()) {
+        let prefix = format!("{}/", slug);
+        let before = chain_list.len();
+        chain_list.retain(|s| !s.starts_with(&prefix));
+        if chain_list.len() != before {
+            let _ = db
+                .set_setting(user_id, "providers.fallback_chain", &serde_json::json!(chain_list))
+                .await;
+            tracing::info!(provider = %slug, "Provider entries removed from fallback chain");
+        }
+    }
 }
 
 // --- Settings handlers ---

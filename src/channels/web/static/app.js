@@ -3754,22 +3754,30 @@ function renderProviderVault(providers) {
   for (const p of providers) {
     const statusIcon = p.has_key ? '✅' : '⬚';
     const statusClass = p.has_key ? 'vault-configured' : 'vault-unconfigured';
-    html += `<div class="vault-row ${statusClass}" id="vault-row-${p.slug}">`;
+    html += `<div class="vault-row ${statusClass}" id="vault-row-${escapeHtml(p.slug)}">`;
     html += `<div class="vault-provider"><span class="vault-status-icon">${statusIcon}</span>`;
     html += `<strong>${escapeHtml(p.display_name)}</strong>`;
     html += `<span class="vault-model-hint">${escapeHtml(p.default_model)}</span></div>`;
     html += `<div class="vault-actions">`;
     if (p.has_key) {
       html += `<span class="vault-key-label">Key configured</span>`;
-      html += `<button class="btn-vault-remove" onclick="removeProviderKey('${p.slug}', '${escapeHtml(p.display_name)}')">Remove</button>`;
+      html += `<button class="btn-vault-remove" data-slug="${escapeHtml(p.slug)}" data-name="${escapeHtml(p.display_name)}">Remove</button>`;
     } else {
-      html += `<input type="password" id="vault-key-${p.slug}" class="vault-key-input" placeholder="${escapeHtml(p.env_key_name)}">`;
-      html += `<button class="btn-vault-save" onclick="saveProviderKey('${p.slug}')">Save</button>`;
+      html += `<input type="password" id="vault-key-${escapeHtml(p.slug)}" class="vault-key-input" placeholder="${escapeHtml(p.env_key_name)}">`;
+      html += `<button class="btn-vault-save" data-slug="${escapeHtml(p.slug)}">Save</button>`;
     }
     html += `</div></div>`;
   }
   html += '</div></div>';
   container.innerHTML = html;
+
+  // Attach event listeners via delegation (avoids inline onclick XSS risk)
+  container.querySelectorAll('.btn-vault-save').forEach(btn => {
+    btn.addEventListener('click', () => saveProviderKey(btn.dataset.slug));
+  });
+  container.querySelectorAll('.btn-vault-remove').forEach(btn => {
+    btn.addEventListener('click', () => removeProviderKey(btn.dataset.slug, btn.dataset.name));
+  });
 }
 
 function saveProviderKey(slug) {
