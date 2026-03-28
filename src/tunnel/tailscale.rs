@@ -76,12 +76,68 @@ impl Tunnel for TailscaleTunnel {
         };
 
         let target = format!("http://{local_host}:{local_port}");
-        let child = Command::new("tailscale")
+
+        // Spawn the tailscale serve/funnel process
+        let mut child = Command::new("tailscale")
             .args([subcommand, &target])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+
+        // Wait briefly to detect early exit (e.g., "Funnel is not enabled",
+        // auth errors, permission denied, etc.). A successful `tailscale funnel`
+        // runs as a long-lived daemon and won't exit within this window.
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        // Check if the process has exited (which means failure)
+        match child.try_wait() {
+            Ok(Some(exit_status)) => {
+                // Process already exited — read stderr for the error message
+                let mut stderr_msg = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let _ = stderr.read_to_end(&mut buf).await;
+                    stderr_msg = String::from_utf8_lossy(&buf).trim().to_string();
+                }
+                if stderr_msg.is_empty() {
+                    let mut stdout_msg = String::new();
+                    if let Some(mut stdout) = child.stdout.take() {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        let _ = stdout.read_to_end(&mut buf).await;
+                        stdout_msg = String::from_utf8_lossy(&buf).trim().to_string();
+                    }
+                    if !stdout_msg.is_empty() {
+                        stderr_msg = stdout_msg;
+                    }
+                }
+                let detail = if stderr_msg.is_empty() {
+                    format!("exit code: {}", exit_status)
+                } else {
+                    stderr_msg
+                };
+                bail!(
+                    "tailscale {subcommand} failed to start: {detail}\n\
+                     \n\
+                     If you see 'Funnel is not enabled', visit your Tailscale \
+                     admin console to enable it, or switch to a different tunnel \
+                     provider (ngrok, cloudflare) in ThinClaw settings."
+                );
+            }
+            Ok(None) => {
+                // Process is still running — good, funnel is active
+                tracing::info!(
+                    subcommand,
+                    hostname = %hostname,
+                    "Tailscale {subcommand} process started and still running"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Could not check tailscale {subcommand} status: {e}");
+            }
+        }
 
         let public_url = format!("https://{hostname}");
 
