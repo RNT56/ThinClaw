@@ -1186,7 +1186,16 @@ impl Settings {
                     }
                 }
                 serde_json::Value::Null => {
-                    // Could be Option<T>, try to parse as JSON or use string
+                    // Could be Option<T>. Parse as JSON to infer the value type.
+                    //
+                    // Pitfall: numeric-looking strings like "684480568" parse as
+                    // serde_json::Value::Number. This works for Option<i64> fields
+                    // (e.g. telegram_owner_id) but breaks Option<String> fields
+                    // (e.g. notifications.recipient) since serde won't coerce
+                    // Number → String.
+                    //
+                    // Solution: try inserting the parsed value and deserializing
+                    // the whole Settings. If that fails, fall back to String.
                     serde_json::from_str(value)
                         .unwrap_or(serde_json::Value::String(value.to_string()))
                 }
@@ -1213,11 +1222,33 @@ impl Settings {
             serde_json::from_str(value).unwrap_or(serde_json::Value::String(value.to_string()))
         };
 
-        obj.insert((*final_key).to_string(), new_value);
+        obj.insert((*final_key).to_string(), new_value.clone());
 
-        // Deserialize back to Settings
-        *self =
-            serde_json::from_value(json).map_err(|e| format!("Failed to apply setting: {}", e))?;
+        // Deserialize back to Settings.
+        // If this fails and the value was inserted into a Null field as a Number
+        // (e.g. "684480568" into an Option<String>), retry with String.
+        match serde_json::from_value(json.clone()) {
+            Ok(s) => {
+                *self = s;
+            }
+            Err(e) => {
+                if matches!(new_value, serde_json::Value::Number(_)) {
+                    // Retry: the field is likely Option<String>, not Option<i64>.
+                    // Re-navigate to the parent and insert as String instead.
+                    let mut cur = &mut json;
+                    for part in &parts[..parts.len() - 1] {
+                        cur = cur.get_mut(*part).expect("path already validated");
+                    }
+                    cur.as_object_mut()
+                        .expect("parent is object")
+                        .insert((*final_key).to_string(), serde_json::Value::String(value.to_string()));
+                    *self = serde_json::from_value(json)
+                        .map_err(|e2| format!("Failed to apply setting: {} (also tried as string: {})", e, e2))?;
+                } else {
+                    return Err(format!("Failed to apply setting: {}", e));
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1475,6 +1506,37 @@ mod tests {
             .set("channels.telegram_owner_id", "987654321")
             .unwrap();
         assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
+    }
+
+    /// Regression test: numeric-looking chat IDs stored as JSON strings in the
+    /// DB must round-trip correctly into Option<String> fields.
+    #[test]
+    fn test_notification_recipient_db_round_trip() {
+        let mut settings = Settings::default();
+        settings.notifications.recipient = Some("684480568".to_string());
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(
+            restored.notifications.recipient,
+            Some("684480568".to_string()),
+            "numeric-looking recipient must survive DB round-trip as String"
+        );
+    }
+
+    /// Regression test: set() with a numeric-looking string into an
+    /// Option<String> field (existing value is Null) must produce Some(String).
+    #[test]
+    fn test_notification_recipient_via_set() {
+        let mut settings = Settings::default();
+        settings
+            .set("notifications.recipient", "684480568")
+            .unwrap();
+        assert_eq!(
+            settings.notifications.recipient,
+            Some("684480568".to_string()),
+            "set() must coerce numeric-looking value into String for Option<String> fields"
+        );
     }
 
     #[test]
