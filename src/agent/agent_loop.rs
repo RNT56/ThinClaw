@@ -78,6 +78,8 @@ pub struct AgentDeps {
     pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     /// Optional multi-agent router for workspace isolation & priority-based routing.
     pub agent_router: Option<Arc<AgentRouter>>,
+    /// Optional agent registry for persistent agent workspace management + A2A.
+    pub agent_registry: Option<Arc<crate::agent::agent_registry::AgentRegistry>>,
     /// Shared canvas panel store for the A2UI / Canvas tool integration.
     /// When present, the agent loop auto-populates panels from canvas tool
     /// outputs and the HTTP gateway serves them at `/canvas/`.

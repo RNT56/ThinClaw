@@ -18,13 +18,14 @@ use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
-    CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    LlmListModelsTool, LlmSelectTool, SharedModelOverride,
-    MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillReadTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, WriteFileTool,
+    CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool,
+    HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListAgentsTool, ListDirTool,
+    ListJobsTool, LlmListModelsTool, LlmSelectTool, SharedModelOverride, MemoryDeleteTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool,
+    PromptQueue, ReadFileTool, RemoveAgentTool, ShellTool, SkillInstallTool, SkillListTool,
+    SkillReadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -85,6 +86,11 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "apple_mail",
     "llm_select",
     "llm_list_models",
+    "create_agent",
+    "list_agents",
+    "update_agent",
+    "remove_agent",
+    "message_agent",
 ];
 
 /// Registry of available tools.
@@ -572,6 +578,22 @@ impl ToolRegistry {
         self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
         self.register_sync(Arc::new(LlmListModelsTool));
         tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
+    }
+
+    /// Register agent management tools (create, list, update, remove, message).
+    ///
+    /// These allow the LLM to manage persistent agent workspaces and
+    /// communicate with other agents through conversation.
+    pub fn register_agent_management_tools(
+        &self,
+        registry: Arc<crate::agent::agent_registry::AgentRegistry>,
+    ) {
+        self.register_sync(Arc::new(CreateAgentTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(ListAgentsTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(UpdateAgentTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(RemoveAgentTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(MessageAgentTool::new(registry)));
+        tracing::info!("Registered 5 agent management tools");
     }
 
     /// Register the software builder tool.

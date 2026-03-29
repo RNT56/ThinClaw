@@ -311,6 +311,7 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_sender: None,
             agent_router: None,
+            agent_registry: None,
             canvas_store: None,
             subagent_executor: None,
             cost_tracker: None,

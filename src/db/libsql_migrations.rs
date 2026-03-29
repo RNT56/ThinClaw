@@ -546,4 +546,22 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440011', 'mailchimp_api_key', '[a-f0-9]{32}-us[0-9]{1,2}', 'medium', 'block', 1, datetime('now')),
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, datetime('now'));
 
+-- ==================== Agent Workspaces ====================
+
+CREATE TABLE IF NOT EXISTS agent_workspaces (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    system_prompt TEXT,
+    model TEXT,
+    bound_channels TEXT NOT NULL DEFAULT '[]',
+    trigger_keywords TEXT NOT NULL DEFAULT '[]',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_ws_agent_id ON agent_workspaces(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_ws_default ON agent_workspaces(is_default);
+
 "#;

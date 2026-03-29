@@ -114,6 +114,7 @@ impl AgentConfig {
             )?,
             model_thinking_overrides: parse_model_thinking_overrides()?,
             workspace_mode: optional_env("WORKSPACE_MODE")?
+                .or_else(|| settings.agent.workspace_mode.clone())
                 .unwrap_or_else(|| "sandboxed".to_string()),
             workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
             notify_channel: optional_env("NOTIFY_CHANNEL")?

@@ -14,6 +14,7 @@
 
 mod agent_loop;
 pub mod agent_router;
+pub mod agent_registry;
 mod commands;
 pub mod compaction;
 pub mod context_monitor;
@@ -46,6 +47,7 @@ pub mod worker;
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps, BackgroundTasksHandle};
 pub use agent_router::{AgentRouter, AgentWorkspace, RoutingDecision, RoutingReason};
+pub use agent_registry::{AgentRegistry, AgentRegistryError};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use cron_stagger::{CronGate, FinishedRunPayload, StaggerConfig};

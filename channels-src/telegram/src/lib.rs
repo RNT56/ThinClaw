@@ -296,6 +296,10 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Telegram limits messages to 4096 UTF-8 characters.
+/// https://core.telegram.org/bots/api#sendmessage
+const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -712,50 +716,56 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Try sending with Markdown first; fall back to plain text if Telegram
-        // can't parse the entities (e.g. model leaked <tool_call> with underscores).
-        let result = send_message(
-            metadata.chat_id,
-            &response.content,
-            Some(metadata.message_id),
-            Some("Markdown"),
-        );
+        let chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LENGTH);
 
-        match result {
-            Ok(msg_id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("Markdown parse failed ({}), retrying as plain text", detail),
-                );
-                let msg_id = send_message(
-                    metadata.chat_id,
-                    &response.content,
-                    Some(metadata.message_id),
-                    None,
-                )
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+        for (i, chunk) in chunks.iter().enumerate() {
+            // Only the first chunk is a reply to the original message
+            let reply_to = if i == 0 {
+                Some(metadata.message_id)
+            } else {
+                None
+            };
 
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
+            // Try sending with Markdown first; fall back to plain text if Telegram
+            // can't parse the entities (e.g. model leaked <tool_call> with underscores).
+            let result = send_message(
+                metadata.chat_id,
+                chunk,
+                reply_to,
+                Some("Markdown"),
+            );
+
+            match result {
+                Ok(msg_id) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Sent message chunk {}/{} to chat {}: message_id={}",
+                            i + 1,
+                            chunks.len(),
+                            metadata.chat_id,
+                            msg_id
+                        ),
+                    );
+                }
+                Err(SendError::ParseEntities(detail)) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Markdown parse failed ({}), retrying as plain text", detail),
+                    );
+                    send_message(
+                        metadata.chat_id,
+                        chunk,
+                        reply_to,
+                        None,
+                    )
+                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+                }
+                Err(e) => return Err(e.to_string()),
             }
-            Err(e) => Err(e.to_string()),
         }
+
+        Ok(())
     }
 
     fn on_status(update: StatusUpdate) {
@@ -944,6 +954,66 @@ fn send_message(
         }
         Err(e) => Err(SendError::Other(format!("HTTP request failed: {}", e))),
     }
+}
+
+// ============================================================================
+// Message Splitting
+// ============================================================================
+
+/// Split a message into chunks that fit within a character limit.
+///
+/// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
+/// then at the last space. Falls back to hard splitting at the char limit.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find the best split point within max_len characters
+        let search_area = &remaining[..max_len];
+
+        // Priority 1: split at a paragraph break (\n\n)
+        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1) // include first \n
+            // Priority 2: split at a line break
+            .or_else(|| search_area.rfind('\n'))
+            // Priority 3: split at a space
+            .or_else(|| search_area.rfind(' '))
+            // Fallback: hard split at max_len (but on a char boundary)
+            .unwrap_or_else(|| {
+                // Find the last valid char boundary at or before max_len
+                let mut boundary = max_len;
+                while boundary > 0 && !remaining.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                boundary
+            });
+
+        if split_at == 0 {
+            // Safety valve: avoid infinite loop
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    // Filter out empty chunks
+    chunks.retain(|c| !c.is_empty());
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
 }
 
 // ============================================================================

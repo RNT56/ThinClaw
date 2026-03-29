@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    AgentRegistryStore, AgentWorkspaceRecord, ConversationStore, Database, JobStore, RoutineStore,
+    SandboxStore, SettingsStore, ToolFailureStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -683,5 +683,187 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
             .await
+    }
+}
+
+// ==================== AgentRegistryStore ====================
+
+#[async_trait]
+impl AgentRegistryStore for PgBackend {
+    async fn save_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError> {
+        let client = self.store.pool().get().await.map_err(|e| {
+            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
+        })?;
+
+        // Ensure table exists (only on first call per process lifetime)
+        static TABLE_CREATED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !TABLE_CREATED.load(std::sync::atomic::Ordering::Relaxed) {
+            client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS agent_workspaces (
+                        id UUID PRIMARY KEY,
+                        agent_id TEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL,
+                        system_prompt TEXT,
+                        model TEXT,
+                        bound_channels JSONB NOT NULL DEFAULT '[]',
+                        trigger_keywords JSONB NOT NULL DEFAULT '[]',
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )",
+                    &[],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("Failed to ensure agent_workspaces table: {e}")))?;
+            TABLE_CREATED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        let bound_channels = serde_json::to_value(&ws.bound_channels)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let trigger_keywords = serde_json::to_value(&ws.trigger_keywords)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+
+        client
+            .execute(
+                "INSERT INTO agent_workspaces \
+                 (id, agent_id, display_name, system_prompt, model, \
+                  bound_channels, trigger_keywords, is_default, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[
+                    &ws.id,
+                    &ws.agent_id,
+                    &ws.display_name,
+                    &ws.system_prompt,
+                    &ws.model,
+                    &bound_channels,
+                    &trigger_keywords,
+                    &ws.is_default,
+                    &ws.created_at,
+                    &ws.updated_at,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to save agent workspace: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn get_agent_workspace(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentWorkspaceRecord>, DatabaseError> {
+        let client = self.store.pool().get().await.map_err(|e| {
+            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
+        })?;
+
+        let row = client
+            .query_opt(
+                "SELECT id, agent_id, display_name, system_prompt, model, \
+                 bound_channels, trigger_keywords, is_default, created_at, updated_at \
+                 FROM agent_workspaces WHERE agent_id = $1",
+                &[&agent_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to get agent workspace: {e}")))?;
+
+        Ok(row.map(|r| pg_row_to_agent_workspace(&r)))
+    }
+
+    async fn list_agent_workspaces(&self) -> Result<Vec<AgentWorkspaceRecord>, DatabaseError> {
+        let client = self.store.pool().get().await.map_err(|e| {
+            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
+        })?;
+
+        let rows = client
+            .query(
+                "SELECT id, agent_id, display_name, system_prompt, model, \
+                 bound_channels, trigger_keywords, is_default, created_at, updated_at \
+                 FROM agent_workspaces ORDER BY created_at ASC",
+                &[],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to list agent workspaces: {e}")))?;
+
+        Ok(rows.iter().map(pg_row_to_agent_workspace).collect())
+    }
+
+    async fn delete_agent_workspace(&self, agent_id: &str) -> Result<bool, DatabaseError> {
+        let client = self.store.pool().get().await.map_err(|e| {
+            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
+        })?;
+
+        let affected = client
+            .execute(
+                "DELETE FROM agent_workspaces WHERE agent_id = $1",
+                &[&agent_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to delete agent workspace: {e}")))?;
+
+        Ok(affected > 0)
+    }
+
+    async fn update_agent_workspace(
+        &self,
+        ws: &AgentWorkspaceRecord,
+    ) -> Result<(), DatabaseError> {
+        let client = self.store.pool().get().await.map_err(|e| {
+            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
+        })?;
+
+        let bound_channels = serde_json::to_value(&ws.bound_channels)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let trigger_keywords = serde_json::to_value(&ws.trigger_keywords)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+
+        let affected = client
+            .execute(
+                "UPDATE agent_workspaces SET \
+                 display_name = $1, system_prompt = $2, model = $3, \
+                 bound_channels = $4, trigger_keywords = $5, is_default = $6, \
+                 updated_at = NOW() \
+                 WHERE agent_id = $7",
+                &[
+                    &ws.display_name,
+                    &ws.system_prompt,
+                    &ws.model,
+                    &bound_channels,
+                    &trigger_keywords,
+                    &ws.is_default,
+                    &ws.agent_id,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to update agent workspace: {e}")))?;
+
+        if affected == 0 {
+            return Err(DatabaseError::Query(format!(
+                "Agent workspace '{}' not found",
+                ws.agent_id
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord {
+    let bound_channels: serde_json::Value = row.get("bound_channels");
+    let trigger_keywords: serde_json::Value = row.get("trigger_keywords");
+
+    AgentWorkspaceRecord {
+        id: row.get("id"),
+        agent_id: row.get("agent_id"),
+        display_name: row.get("display_name"),
+        system_prompt: row.get("system_prompt"),
+        model: row.get("model"),
+        bound_channels: serde_json::from_value(bound_channels).unwrap_or_default(),
+        trigger_keywords: serde_json::from_value(trigger_keywords).unwrap_or_default(),
+        is_default: row.get("is_default"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }

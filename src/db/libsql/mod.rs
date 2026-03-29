@@ -13,6 +13,7 @@ mod sandbox;
 mod settings;
 mod tool_failures;
 mod workspace;
+mod agent_registry;
 
 use std::path::Path;
 use std::sync::Arc;

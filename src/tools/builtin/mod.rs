@@ -3,6 +3,7 @@
 pub mod llm_tools;
 
 mod agent_control;
+pub mod agent_management;
 mod apple_mail;
 mod browser;
 mod camera_capture;
@@ -61,6 +62,9 @@ pub use skill_tools::{
 };
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
+pub use agent_management::{
+    CreateAgentTool, ListAgentsTool, UpdateAgentTool, RemoveAgentTool, MessageAgentTool,
+};
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use tts::TtsTool;

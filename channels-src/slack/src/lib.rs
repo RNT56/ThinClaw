@@ -261,70 +261,76 @@ impl Guest for SlackChannel {
         let metadata: SlackMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Build Slack API request
-        let mut payload = serde_json::json!({
-            "channel": metadata.channel,
-            "text": response.content,
-        });
+        let thread_ts = response.thread_id.or(metadata.thread_ts);
 
-        // Add thread_ts for threaded replies
-        if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
-            payload["thread_ts"] = serde_json::Value::String(thread_ts);
-        }
-
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to serialize payload: {}", e))?;
-
-        // Make HTTP request to Slack API
-        // The bot token is injected by the host based on credential configuration
+        // Headers for Slack API
         let headers = serde_json::json!({
             "Content-Type": "application/json"
         });
 
-        let result = channel_host::http_request(
-            "POST",
-            "https://slack.com/api/chat.postMessage",
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
+        // Split content into chunks that fit Slack's 4000 char limit
+        let chunks = split_message(&response.content, SLACK_MAX_MESSAGE_LENGTH);
 
-        match result {
-            Ok(http_response) => {
-                if http_response.status != 200 {
-                    return Err(format!(
-                        "Slack API returned status {}",
-                        http_response.status
-                    ));
-                }
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut payload = serde_json::json!({
+                "channel": metadata.channel,
+                "text": chunk,
+            });
 
-                // Parse Slack response
-                let slack_response: SlackPostMessageResponse =
-                    serde_json::from_slice(&http_response.body)
-                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
-
-                if !slack_response.ok {
-                    return Err(format!(
-                        "Slack API error: {}",
-                        slack_response
-                            .error
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
-                }
-
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Posted message to Slack channel {}: ts={}",
-                        metadata.channel,
-                        slack_response.ts.unwrap_or_default()
-                    ),
-                );
-
-                Ok(())
+            // Add thread_ts for threaded replies (all chunks in same thread)
+            if let Some(ref ts) = thread_ts {
+                payload["thread_ts"] = serde_json::Value::String(ts.clone());
             }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
+
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+            let result = channel_host::http_request(
+                "POST",
+                "https://slack.com/api/chat.postMessage",
+                &headers.to_string(),
+                Some(&payload_bytes),
+                None,
+            );
+
+            match result {
+                Ok(http_response) => {
+                    if http_response.status != 200 {
+                        return Err(format!(
+                            "Slack API returned status {}",
+                            http_response.status
+                        ));
+                    }
+
+                    let slack_response: SlackPostMessageResponse =
+                        serde_json::from_slice(&http_response.body)
+                            .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
+
+                    if !slack_response.ok {
+                        return Err(format!(
+                            "Slack API error: {}",
+                            slack_response
+                                .error
+                                .unwrap_or_else(|| "unknown".to_string())
+                        ));
+                    }
+
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Posted message chunk {}/{} to Slack channel {}: ts={}",
+                            i + 1,
+                            chunks.len(),
+                            metadata.channel,
+                            slack_response.ts.unwrap_or_default()
+                        ),
+                    );
+                }
+                Err(e) => return Err(format!("HTTP request failed: {}", e)),
+            }
         }
+
+        Ok(())
     }
 
     fn on_status(_update: StatusUpdate) {}
@@ -661,3 +667,55 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 // Export the component
 export!(SlackChannel);
+
+/// Slack limits messages to ~4000 characters.
+/// https://api.slack.com/reference/surfaces/formatting#characters
+const SLACK_MAX_MESSAGE_LENGTH: usize = 4000;
+
+/// Split a message into chunks that fit within a character limit.
+///
+/// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
+/// then at the last space. Falls back to hard splitting at the char limit.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let search_area = &remaining[..max_len];
+
+        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+            .or_else(|| search_area.rfind('\n'))
+            .or_else(|| search_area.rfind(' '))
+            .unwrap_or_else(|| {
+                let mut boundary = max_len;
+                while boundary > 0 && !remaining.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                boundary
+            });
+
+        if split_at == 0 {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks.retain(|c| !c.is_empty());
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
+}

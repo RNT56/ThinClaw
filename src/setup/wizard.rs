@@ -3048,10 +3048,15 @@ impl SetupWizard {
         match choice {
             0 => {
                 self.settings.agent.auto_approve_tools = false;
+                // Standard mode: keep sandboxed workspace (default)
                 print_success("Standard approval mode — agent will ask before destructive operations.");
             }
             1 => {
                 self.settings.agent.auto_approve_tools = true;
+                // Autonomous mode: grant unrestricted filesystem/shell access.
+                // Without this, the system prompt says "sandboxed" and the LLM
+                // halluccinates restrictions (e.g. refusing to run osascript, ps).
+                self.settings.agent.workspace_mode = Some("unrestricted".to_string());
                 print_success(
                     "Autonomous mode — safe operations auto-approved, destructive commands still blocked.",
                 );
@@ -3062,6 +3067,8 @@ impl SetupWizard {
             }
             2 => {
                 self.settings.agent.auto_approve_tools = true;
+                // Full auto: grant unrestricted filesystem/shell access.
+                self.settings.agent.workspace_mode = Some("unrestricted".to_string());
                 print_success("Full auto-approve mode — ALL tool executions will run without asking.");
                 print_info("⚠️  Use with extreme caution. This is intended for benchmarks/CI environments.");
             }
@@ -3340,6 +3347,11 @@ impl SetupWizard {
         // Agent local tools
         if self.settings.agent.allow_local_tools {
             env_vars.push(("ALLOW_LOCAL_TOOLS", "true".to_string()));
+        }
+
+        // Agent workspace mode (unrestricted, sandboxed, project)
+        if let Some(ref mode) = self.settings.agent.workspace_mode {
+            env_vars.push(("WORKSPACE_MODE", mode.clone()));
         }
 
         if !env_vars.is_empty() {

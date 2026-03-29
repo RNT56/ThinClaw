@@ -1127,15 +1127,19 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
 
         match mode {
             "sandboxed" => format!(
-                "\n\n## Workspace\nFilesystem sandboxed to `{root}`. Create files directly — never tell the user to do it manually.\n\
+                "\n\n## Workspace\nYou are running directly on the user's device (macOS/Linux). \
+                 File tools are scoped to `{root}`, but the `shell` tool can run any system command \
+                 (ps, osascript, open, etc.). Create files directly — never tell the user to do it manually.\n\
                  Agent memory (SOUL/MEMORY/daily) → `memory_write` | User files → `write_file`{screen_hint}"
             ),
             "project" => format!(
-                "\n\n## Workspace\nProject root: `{root}`. Full filesystem access via tools. Create files directly.\n\
+                "\n\n## Workspace\nYou are running directly on the user's device. \
+                 Project root: `{root}`. Full filesystem and system access via tools. Create files directly.\n\
                  Agent memory → `memory_write` | User files → `write_file`{screen_hint}"
             ),
             _ => format!(
-                "\n\n## Workspace\nFull filesystem access on user's device. Create files directly — never tell the user to do it manually.\n\
+                "\n\n## Workspace\nYou are running directly on the user's device with full filesystem and system access. \
+                 You can run any command (shell, osascript, system APIs). Create files directly — never tell the user to do it manually.\n\
                  Agent memory (SOUL/MEMORY/daily) → `memory_write` | User files → `write_file`{screen_hint}"
             ),
         }

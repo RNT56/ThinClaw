@@ -264,50 +264,64 @@ impl Guest for DiscordChannel {
             metadata.application_id, metadata.token
         );
 
-        // Truncate content to 2000 characters to comply with Discord limits
-        let content = truncate_message(&response.content);
+        // Split content into chunks that fit Discord's 2000 char limit
+        let chunks = split_message(&response.content, DISCORD_MAX_MESSAGE_LENGTH);
 
-        let mut payload = serde_json::json!({
-            "content": content,
-        });
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut payload = serde_json::json!({
+                "content": chunk,
+            });
 
-        // Check for embeds in metadata
-        if let Ok(meta_json) = serde_json::from_str::<serde_json::Value>(&response.metadata_json) {
-            if let Some(embeds) = meta_json.get("embeds") {
-                payload["embeds"] = embeds.clone();
-            }
-        }
-
-        let payload_bytes =
-            serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
-
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
-
-        let result = channel_host::http_request(
-            "POST",
-            &url,
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
-
-        match result {
-            Ok(http_response) => {
-                if http_response.status >= 200 && http_response.status < 300 {
-                    channel_host::log(channel_host::LogLevel::Debug, "Posted followup to Discord");
-                    Ok(())
-                } else {
-                    let body_str = String::from_utf8_lossy(&http_response.body);
-                    Err(format!(
-                        "Discord API error: {} - {}",
-                        http_response.status, body_str
-                    ))
+            // Attach embeds only to the first chunk
+            if i == 0 {
+                if let Ok(meta_json) =
+                    serde_json::from_str::<serde_json::Value>(&response.metadata_json)
+                {
+                    if let Some(embeds) = meta_json.get("embeds") {
+                        payload["embeds"] = embeds.clone();
+                    }
                 }
             }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
+
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|e| format!("Failed to serialize: {}", e))?;
+
+            let headers = serde_json::json!({
+                "Content-Type": "application/json"
+            });
+
+            let result = channel_host::http_request(
+                "POST",
+                &url,
+                &headers.to_string(),
+                Some(&payload_bytes),
+                None,
+            );
+
+            match result {
+                Ok(http_response) => {
+                    if http_response.status >= 200 && http_response.status < 300 {
+                        channel_host::log(
+                            channel_host::LogLevel::Debug,
+                            &format!(
+                                "Posted followup chunk {}/{} to Discord",
+                                i + 1,
+                                chunks.len()
+                            ),
+                        );
+                    } else {
+                        let body_str = String::from_utf8_lossy(&http_response.body);
+                        return Err(format!(
+                            "Discord API error: {} - {}",
+                            http_response.status, body_str
+                        ));
+                    }
+                }
+                Err(e) => return Err(format!("HTTP request failed: {}", e)),
+            }
         }
+
+        Ok(())
     }
 
     fn on_status(_update: StatusUpdate) {}
@@ -624,21 +638,61 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 export!(DiscordChannel);
 
-fn truncate_message(content: &str) -> String {
-    if content.len() <= 2000 {
-        content.to_string()
-    } else {
-        let max_bytes = 1990;
-        let cutoff = content
-            .char_indices()
-            .map(|(i, c)| i + c.len_utf8())
-            .take_while(|&end| end <= max_bytes)
-            .last()
-            .unwrap_or(0);
-        let mut truncated = content[..cutoff].to_string();
-        truncated.push_str("\n... (truncated)");
-        truncated
+/// Discord limits messages to 2000 characters.
+/// https://discord.com/developers/docs/resources/channel#create-message
+const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
+
+/// Split a message into chunks that fit within a character limit.
+///
+/// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
+/// then at the last space. Falls back to hard splitting at the char limit.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
     }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find the best split point within max_len characters
+        let search_area = &remaining[..max_len];
+
+        // Priority 1: split at a paragraph break (\n\n)
+        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+            // Priority 2: split at a line break
+            .or_else(|| search_area.rfind('\n'))
+            // Priority 3: split at a space
+            .or_else(|| search_area.rfind(' '))
+            // Fallback: hard split at max_len (but on a char boundary)
+            .unwrap_or_else(|| {
+                let mut boundary = max_len;
+                while boundary > 0 && !remaining.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                boundary
+            });
+
+        if split_at == 0 {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks.retain(|c| !c.is_empty());
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
 }
 
 #[cfg(test)]
@@ -646,29 +700,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_truncate_message() {
+    fn test_split_message_short() {
         let short = "Hello world";
-        assert_eq!(truncate_message(short), short);
+        let chunks = split_message(short, 2000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], short);
+    }
 
-        let long = "a".repeat(2005);
-        let truncated = truncate_message(&long);
-        assert_eq!(truncated.len(), 2006); // 1990 + 16 chars suffix
-        assert!(truncated.ends_with("\n... (truncated)"));
+    #[test]
+    fn test_split_message_long() {
+        let long = "a".repeat(2500);
+        let chunks = split_message(&long, 2000);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 2000);
+        }
+    }
 
-        // Test with multibyte characters (Euro sign is 3 bytes)
-        // 1000 chars * 3 bytes = 3000 bytes
-        let multi = "€".repeat(1000);
-        let truncated_multi = truncate_message(&multi);
-
-        // 1990 bytes limit. 1990 / 3 = 663 with remainder 1.
-        // Should truncate at 663 chars (1989 bytes).
-        // Suffix is 16 bytes. Total: 1989 + 16 = 2005 bytes.
-        assert!(truncated_multi.len() <= 2006);
-        assert!(truncated_multi.len() >= 2006 - 4); // Allow for max utf8 char width variance
-        assert!(truncated_multi.ends_with("\n... (truncated)"));
-
-        let content_part = &truncated_multi[..truncated_multi.len() - 16];
-        assert!(content_part.chars().all(|c| c == '€'));
+    #[test]
+    fn test_split_message_at_newline() {
+        let text = format!("{}\n\n{}", "a".repeat(1000), "b".repeat(1000));
+        let chunks = split_message(&text, 1500);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].starts_with('a'));
+        assert!(chunks[1].starts_with('b'));
     }
 
     #[test]

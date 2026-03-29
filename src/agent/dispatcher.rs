@@ -1434,6 +1434,101 @@ impl Agent {
                                     }
                                 }
 
+                                // ── message_agent interception ────────────────────
+                                // The message_agent tool outputs a structured A2A
+                                // request. We intercept it here to run the target
+                                // agent's task via SubagentExecutor with the target's
+                                // system prompt and model.
+                                if tc.name == "message_agent"
+                                    && let Ok(ref output) = tool_result
+                                    && let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(output)
+                                    && parsed
+                                        .get("a2a_request")
+                                        .and_then(|v| v.as_bool())
+                                        == Some(true)
+                                {
+                                    let target_id = parsed
+                                        .get("target_agent_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let target_name = parsed
+                                        .get("target_display_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(target_id);
+                                    let a2a_message = parsed
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let system_prompt = parsed
+                                        .get("target_system_prompt")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let target_model = parsed
+                                        .get("target_model")
+                                        .and_then(|v| v.as_str());
+                                    let timeout_secs = parsed
+                                        .get("timeout_secs")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(120);
+
+                                    if let Some(executor) = self.subagent_executor.as_ref() {
+                                        let request =
+                                            crate::agent::subagent_executor::SubagentSpawnRequest {
+                                                name: format!("a2a:{}", target_id),
+                                                task: a2a_message.to_string(),
+                                                system_prompt: Some(system_prompt.to_string()),
+                                                allowed_tools: None,
+                                                model: target_model.map(String::from),
+                                                wait: true,
+                                                timeout_secs: Some(timeout_secs),
+                                            };
+
+                                        let exec_result = executor
+                                            .spawn(
+                                                request,
+                                                &message.channel,
+                                                &message.metadata,
+                                            )
+                                            .await;
+
+                                        tool_result = match exec_result {
+                                            Ok(result) => Ok(
+                                                serde_json::json!({
+                                                    "a2a_response": true,
+                                                    "from_agent": target_id,
+                                                    "from_display_name": target_name,
+                                                    "response": result.response,
+                                                    "success": result.success,
+                                                    "iterations": result.iterations,
+                                                    "duration_ms": result.duration_ms,
+                                                })
+                                                .to_string(),
+                                            ),
+                                            Err(e) => Ok(
+                                                serde_json::json!({
+                                                    "a2a_response": true,
+                                                    "from_agent": target_id,
+                                                    "error": e.to_string(),
+                                                    "success": false,
+                                                })
+                                                .to_string(),
+                                            ),
+                                        };
+                                    } else {
+                                        tool_result = Ok(serde_json::json!({
+                                            "error": "Sub-agent system not initialized — cannot route A2A message",
+                                            "a2a_response": true,
+                                        })
+                                        .to_string());
+                                    }
+
+                                    tracing::info!(
+                                        target_agent = %target_id,
+                                        "Dispatched A2A message via SubagentExecutor"
+                                    );
+                                }
+
                                 // Record result in thread
                                 {
                                     let mut sess = session.lock().await;

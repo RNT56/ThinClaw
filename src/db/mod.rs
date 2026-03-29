@@ -25,6 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::BrokenTool;
@@ -420,6 +421,54 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
 }
 
+// ==================== Agent Registry ====================
+
+/// Persistent record for an agent workspace configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWorkspaceRecord {
+    /// Primary key (UUID).
+    pub id: Uuid,
+    /// Unique human-readable identifier (slug). Validated: `[a-z0-9_-]{2,32}`.
+    pub agent_id: String,
+    /// Display name for the agent.
+    pub display_name: String,
+    /// System prompt override for this agent.
+    pub system_prompt: Option<String>,
+    /// Model override (e.g. "openai/gpt-4o").
+    pub model: Option<String>,
+    /// Channels this agent is bound to (empty = all channels).
+    pub bound_channels: Vec<String>,
+    /// Keywords/mentions that trigger routing to this agent.
+    pub trigger_keywords: Vec<String>,
+    /// Whether this is the default agent (receives unrouted messages).
+    pub is_default: bool,
+    /// When the record was created.
+    pub created_at: DateTime<Utc>,
+    /// When the record was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait AgentRegistryStore: Send + Sync {
+    /// Save (insert) a new agent workspace.
+    async fn save_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError>;
+
+    /// Get an agent workspace by its human-readable `agent_id`.
+    async fn get_agent_workspace(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentWorkspaceRecord>, DatabaseError>;
+
+    /// List all agent workspaces.
+    async fn list_agent_workspaces(&self) -> Result<Vec<AgentWorkspaceRecord>, DatabaseError>;
+
+    /// Delete an agent workspace by `agent_id`. Returns true if it existed.
+    async fn delete_agent_workspace(&self, agent_id: &str) -> Result<bool, DatabaseError>;
+
+    /// Update an existing agent workspace (matched by `agent_id`).
+    async fn update_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -433,6 +482,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + AgentRegistryStore
     + Send
     + Sync
 {

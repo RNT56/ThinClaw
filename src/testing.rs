@@ -297,6 +297,7 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_sender: None,
             agent_router: None,
+            agent_registry: None,
             canvas_store: None,
             subagent_executor: None,
             cost_tracker: None,

@@ -915,6 +915,42 @@ async fn main() -> anyhow::Result<()> {
     let model_override = thinclaw::tools::builtin::new_shared_model_override();
     components.tools.register_llm_tools(model_override.clone());
 
+    // ── Agent registry (persistent multi-agent management) ──────────────
+    //
+    // A single shared AgentRouter is used by both the registry (for CRUD sync)
+    // and the agent loop (for message routing). The registry populates it from
+    // the database at startup.
+    let shared_agent_router = Arc::new(thinclaw::agent::AgentRouter::new());
+
+    let agent_registry = {
+        let registry = thinclaw::agent::agent_registry::AgentRegistry::new(
+            Arc::clone(&shared_agent_router),
+            components.db.clone(),
+        );
+
+        // Load persisted agent workspaces from DB → populate the shared router
+        if components.db.is_some() {
+            match registry.load_from_db().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Loaded {} persisted agent workspace(s)", count);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load agent workspaces from DB: {}", e);
+                }
+                _ => {}
+            }
+        }
+
+        let registry = Arc::new(registry);
+
+        // Register agent management tools (create, list, update, remove, message)
+        components
+            .tools
+            .register_agent_management_tools(Arc::clone(&registry));
+
+        registry
+    };
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -929,7 +965,8 @@ async fn main() -> anyhow::Result<()> {
         hooks: components.hooks,
         cost_guard: components.cost_guard,
         sse_sender: routine_sse_sender,
-        agent_router: None,
+        agent_router: Some(shared_agent_router),
+        agent_registry: Some(agent_registry),
         canvas_store: Some(canvas_store),
         subagent_executor: Some(subagent_executor),
         cost_tracker: Some(components.cost_tracker),

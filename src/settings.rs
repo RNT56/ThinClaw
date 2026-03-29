@@ -685,6 +685,15 @@ pub struct AgentSettings {
     /// sandbox — that only isolates worker processes like Claude Code.
     #[serde(default)]
     pub allow_local_tools: bool,
+
+    /// Workspace mode: "unrestricted", "sandboxed", or "project".
+    /// Controls the system prompt and filesystem restrictions.
+    /// - "unrestricted": full access to host filesystem and OS APIs
+    /// - "sandboxed": file tools confined to workspace_root
+    /// - "project": shell cwd = workspace_root, files accessible anywhere
+    /// Set by the wizard based on autonomy level. Defaults to None (= "sandboxed").
+    #[serde(default)]
+    pub workspace_mode: Option<String>,
 }
 
 fn default_agent_name() -> String {
@@ -756,6 +765,7 @@ impl Default for AgentSettings {
             thinking_budget_tokens: default_thinking_budget_tokens(),
             auto_approve_tools: false,
             allow_local_tools: false,
+            workspace_mode: None,
         }
     }
 }

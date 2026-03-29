@@ -428,94 +428,93 @@ impl Guest for WhatsAppChannel {
             .unwrap_or_else(|| "v18.0".to_string());
 
         // Build WhatsApp API URL with token placeholder
-        // Host will replace {WHATSAPP_ACCESS_TOKEN} with actual token in Authorization header
         let api_url = format!(
             "https://graph.facebook.com/{}/{}/messages",
             api_version, metadata.phone_number_id
         );
 
-        // Build sendMessage payload
-        let payload = serde_json::json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": metadata.sender_phone,  // Original sender becomes recipient
-            "type": "text",
-            "text": {
-                "preview_url": false,
-                "body": response.content
-            }
-        });
-
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to serialize payload: {}", e))?;
-
         // Headers with Bearer token placeholder
-        // Host will inject the actual access token
         let headers = serde_json::json!({
             "Content-Type": "application/json",
             "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         });
 
-        let result = channel_host::http_request(
-            "POST",
-            &api_url,
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
+        // Split content into chunks that fit WhatsApp's 4096 char limit
+        let chunks = split_message(&response.content, WHATSAPP_MAX_MESSAGE_LENGTH);
 
-        match result {
-            Ok(http_response) => {
-                // Parse WhatsApp API response
-                let api_response: Result<WhatsAppApiResponse, _> =
-                    serde_json::from_slice(&http_response.body);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let payload = serde_json::json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": metadata.sender_phone,
+                "type": "text",
+                "text": {
+                    "preview_url": false,
+                    "body": chunk
+                }
+            });
 
-                match api_response {
-                    Ok(resp) => {
-                        // Check for API error
-                        if let Some(error) = resp.error {
-                            return Err(format!(
-                                "WhatsApp API error: {} (code: {:?})",
-                                error.message, error.code
-                            ));
-                        }
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
-                        // Success - log the sent message ID
-                        if let Some(messages) = resp.messages {
-                            if let Some(sent) = messages.first() {
-                                channel_host::log(
-                                    channel_host::LogLevel::Debug,
-                                    &format!(
-                                        "Sent message to {}: id={}",
-                                        metadata.sender_phone, sent.id
-                                    ),
-                                );
+            let result = channel_host::http_request(
+                "POST",
+                &api_url,
+                &headers.to_string(),
+                Some(&payload_bytes),
+                None,
+            );
+
+            match result {
+                Ok(http_response) => {
+                    let api_response: Result<WhatsAppApiResponse, _> =
+                        serde_json::from_slice(&http_response.body);
+
+                    match api_response {
+                        Ok(resp) => {
+                            if let Some(error) = resp.error {
+                                return Err(format!(
+                                    "WhatsApp API error: {} (code: {:?})",
+                                    error.message, error.code
+                                ));
+                            }
+
+                            if let Some(messages) = resp.messages {
+                                if let Some(sent) = messages.first() {
+                                    channel_host::log(
+                                        channel_host::LogLevel::Debug,
+                                        &format!(
+                                            "Sent message chunk {}/{} to {}: id={}",
+                                            i + 1,
+                                            chunks.len(),
+                                            metadata.sender_phone,
+                                            sent.id
+                                        ),
+                                    );
+                                }
                             }
                         }
-
-                        Ok(())
-                    }
-                    Err(e) => {
-                        // Couldn't parse response, check status code
-                        if http_response.status >= 200 && http_response.status < 300 {
-                            // Probably OK even if we can't parse
-                            channel_host::log(
-                                channel_host::LogLevel::Info,
-                                "Message sent (response parse failed but status OK)",
-                            );
-                            Ok(())
-                        } else {
-                            let body_str = String::from_utf8_lossy(&http_response.body);
-                            Err(format!(
-                                "WhatsApp API HTTP {}: {} (parse error: {})",
-                                http_response.status, body_str, e
-                            ))
+                        Err(e) => {
+                            if http_response.status >= 200 && http_response.status < 300 {
+                                channel_host::log(
+                                    channel_host::LogLevel::Info,
+                                    "Message sent (response parse failed but status OK)",
+                                );
+                            } else {
+                                let body_str = String::from_utf8_lossy(&http_response.body);
+                                return Err(format!(
+                                    "WhatsApp API HTTP {}: {} (parse error: {})",
+                                    http_response.status, body_str, e
+                                ));
+                            }
                         }
                     }
                 }
+                Err(e) => return Err(format!("HTTP request failed: {}", e)),
             }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
         }
+
+        Ok(())
     }
 
     fn on_status(_update: StatusUpdate) {}
@@ -1031,6 +1030,58 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 // Export the component
 export!(WhatsAppChannel);
+
+/// WhatsApp limits messages to 4096 characters.
+/// https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages
+const WHATSAPP_MAX_MESSAGE_LENGTH: usize = 4096;
+
+/// Split a message into chunks that fit within a character limit.
+///
+/// Tries to split at paragraph boundaries (`\n\n`), then line boundaries (`\n`),
+/// then at the last space. Falls back to hard splitting at the char limit.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let search_area = &remaining[..max_len];
+
+        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+            .or_else(|| search_area.rfind('\n'))
+            .or_else(|| search_area.rfind(' '))
+            .unwrap_or_else(|| {
+                let mut boundary = max_len;
+                while boundary > 0 && !remaining.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                boundary
+            });
+
+        if split_at == 0 {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks.retain(|c| !c.is_empty());
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
+}
 
 // ============================================================================
 // Tests
