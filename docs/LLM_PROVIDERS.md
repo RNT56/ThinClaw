@@ -1,6 +1,6 @@
 # LLM Provider Configuration
 
-IronClaw defaults to `openai_compatible` so it works with any OpenAI-compatible
+ThinClaw defaults to `openai_compatible` so it works with any OpenAI-compatible
 endpoint out of the box. It also supports Anthropic, OpenAI, Ollama, and Tinfoil
 for private inference. This guide covers the most common configurations.
 
@@ -154,7 +154,7 @@ LLM_MODEL=llama-3.2-3b-instruct-q4_K_M
 Instead of editing `.env` manually, run the onboarding wizard:
 
 ```bash
-ironclaw onboard
+thinclaw onboard
 ```
 
 Select **"OpenAI-compatible"** for OpenRouter, Together AI, Fireworks, vLLM, LiteLLM,

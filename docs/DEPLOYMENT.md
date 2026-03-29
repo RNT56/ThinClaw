@@ -342,7 +342,7 @@ The root `docker-compose.yml` provides a **local PostgreSQL** instance for devel
 docker compose up -d
 ```
 
-This starts `pgvector/pgvector:pg16` on port 5432 with dev-only credentials (`ironclaw`/`ironclaw`). Use this when developing with the `postgres` feature flag instead of libSQL.
+This starts `pgvector/pgvector:pg16` on port 5432 with dev-only credentials (`thinclaw`/`thinclaw`). Use this when developing with the `postgres` feature flag instead of libSQL.
 
 > **Note:** This is for local development only. For production, use the `deploy/docker-compose.yml` stack or Path 4's automated setup.
 

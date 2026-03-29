@@ -1,4 +1,4 @@
-# Contributing to IronClaw
+# Contributing to ThinClaw
 
 ## Quick Start
 
@@ -7,15 +7,14 @@
 npm run ci
 
 # Or individual checks:
-npm run lint:ironclaw    # cargo clippy (warnings = errors)
-npm run lint:fmt         # cargo fmt --check
-npm run lint:ts          # TypeScript type-check
-npm run test:ironclaw    # cargo test
+cargo clippy --all-targets -- -D warnings   # lint (warnings = errors)
+cargo fmt --check                            # formatting check
+cargo test                                   # run tests
 ```
 
 ## Before Opening a PR
 
-1. **Run `npm run ci`** — must pass cleanly (no clippy warnings, no fmt diffs, all tests green).
+1. **Run clippy + fmt + tests** — must pass cleanly (no clippy warnings, no fmt diffs, all tests green).
 2. **Review the relevant parity rows in `FEATURE_PARITY.md`** if your change affects a tracked capability.
 3. **Update `CHANGELOG.md`** for user-facing changes.
 
@@ -29,9 +28,19 @@ npm run test:ironclaw    # cargo test
 ### Fixing Lint Issues
 
 ```bash
-npm run lint:ironclaw:fix   # Auto-fix clippy suggestions
-npm run lint:fmt:fix        # Auto-format code
+cargo clippy --fix --allow-dirty    # Auto-fix clippy suggestions
+cargo fmt                           # Auto-format code
 ```
+
+## Building WASM Channels
+
+After modifying any channel source code in `channels-src/`, rebuild everything:
+
+```bash
+./scripts/build-all.sh
+```
+
+This rebuilds all WASM channels and the main ThinClaw binary. See [docs/BUILDING_CHANNELS.md](docs/BUILDING_CHANNELS.md) for the full guide.
 
 ## Feature Parity Requirement
 
