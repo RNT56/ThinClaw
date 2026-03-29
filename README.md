@@ -202,14 +202,17 @@ Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) insta
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
 
-# Build (full features — PostgreSQL + libSQL + all runtime modules)
+# Build (light profile — default: databases + document extraction)
 cargo build --release
 
+# Build (full features — light + web gateway + REPL + tunnel + Docker)
+cargo build --release --features full
+
 # Build (desktop embedding — libSQL only, minimal footprint)
-cargo build --release --no-default-features --features desktop
+cargo build --release --features desktop
 
 # Build (air-gapped — all WASM extensions embedded in binary, +6-13 MB)
-cargo build --release --features bundled-wasm
+cargo build --release --features full,bundled-wasm
 
 # Run tests
 cargo test
@@ -446,17 +449,24 @@ These can also be configured in the WebUI under **Settings → Features**.
 
 ### Feature Flags
 
+The default build profile is `light` — a minimal, fast-compiling configuration suitable
+for most use cases. Use `--features full` for the complete feature set.
+
+📖 **Full build profiles guide:** [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
+
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `full` | Everything (PostgreSQL + libSQL + all modules) | ✅ |
-| `desktop` | Tauri embedding (libSQL only, minimal footprint) | |
-| `postgres` | PostgreSQL + pgvector support | ✅ |
-| `libsql` | Embedded libSQL/Turso support | ✅ |
-| `html-to-markdown` | Web page → markdown conversion | ✅ |
-| `repl` | Interactive terminal REPL + boot screen | ✅ |
-| `web-gateway` | Browser UI with SSE/WebSocket streaming | ✅ |
-| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ |
-| `docker-sandbox` | Isolated container execution for untrusted code | ✅ |
+| `light` | Core agent + databases + HTML/doc extraction | ✅ (default) |
+| `full` | Everything (light + web gateway + REPL + tunnel + Docker) | |
+| `desktop` | Tauri/Scrappy embedding (libSQL, minimal footprint) | |
+| `postgres` | PostgreSQL + pgvector + TLS support | ✅ (via light) |
+| `libsql` | Embedded libSQL/Turso support | ✅ (via light) |
+| `html-to-markdown` | Web page → markdown conversion | ✅ (via light) |
+| `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | ✅ (via light) |
+| `repl` | Interactive terminal REPL + boot screen | ✅ (via full) |
+| `web-gateway` | Browser UI with SSE/WebSocket streaming | ✅ (via full) |
+| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ (via full) |
+| `docker-sandbox` | Isolated container execution for untrusted code | ✅ (via full) |
 | `voice` | Voice wake word detection (cpal audio capture) | |
 | `bundled-wasm` | Embed all WASM extensions in binary for air-gapped deploys (+6-13 MB) | |
 
@@ -575,7 +585,7 @@ cargo test test_name
 
 - **Deployment & Remote Setup**: See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for standalone, Docker, and Scrappy connection guides.
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
-- **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
+- **Changing channel sources**: Run `./scripts/build-all.sh` to rebuild all WASM channels and the main binary.
 - **Air-gapped builds**: Use `cargo build --release --features bundled-wasm` to embed all WASM extensions in the binary.
 
 ## OpenClaw & IronClaw Heritage

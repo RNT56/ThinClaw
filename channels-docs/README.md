@@ -25,6 +25,7 @@ through a unified `ChannelManager`.
 | [Telegram](telegram.md) | Telegram Bot API (long polling) | All | `TELEGRAM_BOT_TOKEN=...` |
 | [Slack](slack.md) | Socket Mode (WebSocket) | All | `SLACK_BOT_TOKEN=...` |
 | [Discord](discord.md) | Gateway WebSocket | All | `DISCORD_BOT_TOKEN=...` |
+| WhatsApp | Cloud API webhook | All | `thinclaw extension install whatsapp` |
 | [Nostr](nostr.md) | NIP-04 encrypted DMs | All | `NOSTR_PRIVATE_KEY=...` |
 
 ### Email Channels
@@ -65,6 +66,24 @@ through a unified `ChannelManager`.
 │                    MessageStream → Agent Loop                 │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+## Message Formatting
+
+LLMs output standard Markdown, but each platform uses its own formatting syntax.
+ThinClaw automatically converts Markdown to platform-native formats:
+
+| Channel | Output Format | How |
+|---------|---------------|-----|
+| **Telegram** | HTML | `markdown_to_telegram_html()` with `parse_mode=HTML` |
+| **Slack** | Slack mrkdwn | `markdown_to_slack_mrkdwn()` — `**bold**`→`*bold*`, links→`<url\|text>` |
+| **WhatsApp** | WhatsApp text | `markdown_to_whatsapp()` — `**bold**`→`*bold*`, links→`text (url)` |
+| **Discord** | Markdown | Pass-through (Discord supports standard Markdown) |
+| **REPL** | Terminal ANSI | `termimad` renders Markdown with ANSI colors |
+| **Web Gateway** | Raw Markdown | Frontend renders Markdown via the browser |
+| Signal, iMessage, Nostr | Plain text | No rich text API available |
+| Gmail, Apple Mail | Plain text | Sent as `text/plain` |
+
+Code blocks and inline code are always preserved unchanged across all converters.
 
 ## General Notes
 

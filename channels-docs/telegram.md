@@ -41,7 +41,7 @@ TELEGRAM_STREAM_MODE=full
 - Owner-only mode via `TELEGRAM_OWNER_ID`
 - Allow-list for multi-user access
 - Rate-limited message editing for streaming
-- Markdown formatting in responses
+- Rich HTML formatting (Markdown auto-converted to Telegram HTML: bold, italic, code, links, headings)
 - Auto-reconnect on disconnect
 
 ## Stream Modes

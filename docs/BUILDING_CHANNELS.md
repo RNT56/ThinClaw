@@ -1,6 +1,6 @@
 # Building WASM Channels
 
-This guide covers how to build WASM channel modules for IronClaw.
+This guide covers how to build WASM channel modules for ThinClaw.
 
 ## Overview
 
@@ -19,7 +19,7 @@ channels/                    # Or channels-src/
 
 After building, deploy to:
 ```
-~/.ironclaw/channels/
+~/.thinclaw/channels/
 ├── my-channel.wasm
 └── my-channel.capabilities.json
 ```
@@ -31,7 +31,7 @@ After building, deploy to:
 name = "my-channel"
 version = "0.1.0"
 edition = "2021"
-description = "My messaging platform channel for IronClaw"
+description = "My messaging platform channel for ThinClaw"
 
 [lib]
 crate-type = ["cdylib"]
@@ -111,6 +111,7 @@ impl Guest for MyChannel {
     /// Send a response back to the messaging platform.
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         // Parse metadata to get routing info
+        // Convert Markdown to platform-native format (see Message Formatting below)
         // Call platform API to send message
     }
 
@@ -248,46 +249,57 @@ Create `my-channel.capabilities.json`:
 
 ### Supply Chain Security: No Committed Binaries
 
-**Do not commit compiled WASM binaries.** They are a supply chain risk — the binary in a PR may not match the source. IronClaw builds channels from source:
+**Do not commit compiled WASM binaries.** They are a supply chain risk — the binary in a PR may not match the source. ThinClaw builds channels from source:
 
 - `cargo build` automatically builds `telegram.wasm` via `build.rs`
 - The built binary is in `.gitignore` and is not committed
 - CI should run `cargo build` (or `./scripts/build-all.sh`) to produce releases
 
-**Reproducible build:**
+**Prerequisites:**
 ```bash
-cargo build --release
+rustup target add wasm32-wasip2
+cargo install wasm-tools --locked   # optional; fallback copies raw WASM if unavailable
 ```
 
-Prerequisites: `rustup target add wasm32-wasip2`, `cargo install wasm-tools` (optional; fallback copies raw WASM if unavailable).
+### Build All Channels
 
-### Telegram Channel (Manual Build)
+The easiest way to build everything (all WASM channels + main binary):
 
 ```bash
-# Add WASM target if needed
-rustup target add wasm32-wasip2
+./scripts/build-all.sh
+```
 
-# Build Telegram channel
+This script:
+1. Discovers all channels in `channels-src/`
+2. Uses each channel's `build.sh` if present, otherwise runs the generic build pipeline
+3. Deploys `.wasm` + `.capabilities.json` to `~/.thinclaw/channels/`
+4. Builds the main ThinClaw binary
+
+For air-gapped builds with all WASM extensions embedded:
+```bash
+./scripts/build-all.sh --bundled
+```
+
+### Single Channel Build
+
+To build a specific channel individually:
+
+```bash
+# Channels with a build.sh (Telegram, Slack):
 ./channels-src/telegram/build.sh
 
-# Install (or use ironclaw onboard to install bundled channel)
-mkdir -p ~/.ironclaw/channels
-cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
-```
-
-**Note**: The main IronClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
-
-### Other Channels
-
-```bash
-# Build the WASM component
-cd channels-src/my-channel
+# Channels without a build.sh (WhatsApp, Discord):
+cd channels-src/whatsapp
 cargo build --release --target wasm32-wasip2
+wasm-tools component new target/wasm32-wasip2/release/whatsapp_channel.wasm -o whatsapp.wasm 2>/dev/null \
+  || cp target/wasm32-wasip2/release/whatsapp_channel.wasm whatsapp.wasm
+wasm-tools strip whatsapp.wasm -o whatsapp.wasm
 
-# Deploy to ~/.ironclaw/channels/
-cp target/wasm32-wasip2/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
-cp my-channel.capabilities.json ~/.ironclaw/channels/
+# Deploy to ~/.thinclaw/channels/
+cp whatsapp.wasm whatsapp.capabilities.json ~/.thinclaw/channels/
 ```
+
+**Note**: The main ThinClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
 
 ## Host Functions Available
 
@@ -380,6 +392,46 @@ if sender.is_bot {
 }
 ```
 
+## Message Formatting
+
+LLMs output standard Markdown, but each messaging platform has its own formatting syntax. Channels should convert Markdown to platform-native format in `on_respond` **before** splitting into chunks.
+
+### Built-in Converters
+
+| Channel | Function | Conversions |
+|---------|----------|-------------|
+| **Telegram** | `markdown_to_telegram_html()` | MD → HTML, `parse_mode=HTML` |
+| **Slack** | `markdown_to_slack_mrkdwn()` | `**bold**` → `*bold*`, `[text](url)` → `<url\|text>`, `# Heading` → `*Heading*` |
+| **WhatsApp** | `markdown_to_whatsapp()` | `**bold**` → `*bold*`, `[text](url)` → `text (url)`, `# Heading` → `*Heading*` |
+| **Discord** | Pass-through | Discord natively supports Markdown |
+
+### Implementation Pattern
+
+```rust
+fn on_respond(response: AgentResponse) -> Result<(), String> {
+    let metadata: MyMetadata = serde_json::from_str(&response.metadata_json)?;
+
+    // 1. Convert Markdown to platform format
+    let formatted = markdown_to_my_platform(&response.content);
+
+    // 2. Split into platform-sized chunks (AFTER formatting)
+    let chunks = split_message(&formatted, MAX_MESSAGE_LENGTH);
+
+    // 3. Send each chunk
+    for chunk in &chunks {
+        send_message(&metadata, chunk)?;
+    }
+    Ok(())
+}
+```
+
+### Key Rules
+
+- **Convert before splitting** — Platform-specific char limits apply to the _formatted_ output, not raw Markdown
+- **Preserve code blocks** — Never convert formatting inside ``` fences or backtick spans
+- **Preserve inline code** — Content inside backticks passes through unchanged
+- **Graceful degradation** — If a platform doesn't support a feature (e.g., WhatsApp headings), convert to the nearest equivalent (bold text)
+
 ## Testing
 
 Add tests in the same file:
@@ -402,6 +454,11 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: MyMessageMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(meta.chat_id, parsed.chat_id);
+    }
+
+    #[test]
+    fn test_formatting_conversion() {
+        assert_eq!(markdown_to_my_platform("**bold**"), "*bold*");
     }
 }
 ```

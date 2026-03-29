@@ -44,6 +44,7 @@ SLACK_ALLOW_FROM=C1234567890,D0987654321
 - Auto-reconnect with exponential backoff
 - Bot's own messages are ignored
 - Message splitting for responses >4000 characters
+- Rich formatting (Markdown auto-converted to Slack mrkdwn: bold, links, headings)
 - Agent progress messages forwarded to Slack
 - Health check via `auth.test`
 

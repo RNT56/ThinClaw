@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Channel-aware message formatting: Markdown auto-converted to platform-native format for Telegram (HTML), Slack (mrkdwn), and WhatsApp (bold/italic text)
+- WhatsApp reply threading: responses appear as replies to the original message via Cloud API `context.message_id`
+- Comprehensive `build-all.sh` script: auto-discovers and builds all WASM channels, deploys to `~/.thinclaw/channels/`
+- Unit tests for `markdown_to_slack_mrkdwn()` converter (bold, strikethrough, links, headings, code blocks, mixed formatting)
+
+### Fixed
+
+- WebUI settings page now uses full browser width like other pages (removed `max-width: 800px` constraint)
+- WhatsApp `reply_to_message` config was parsed but unused; now wired to the Cloud API `context` field
+
+### Changed
+
+- Updated channel documentation: added Message Formatting section, WhatsApp entry, and `build-all.sh` usage
+- Rebranded `docs/BUILDING_CHANNELS.md` from IronClaw to ThinClaw, fixed `~/.ironclaw/` paths
+
 ## [0.13.2](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.2) - 2026-03-28
 
 ### Added
