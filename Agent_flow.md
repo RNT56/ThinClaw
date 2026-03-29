@@ -1,7 +1,7 @@
-# IronClaw Agent Flow
+# ThinClaw Agent Flow
 
-> **Last updated:** 2026-03-13  
-> **Source of truth:** `src/main.rs`, `src/app.rs`, `src/bootstrap.rs`, `src/wizard/mod.rs`,  
+> **Last updated:** 2026-03-29
+> **Source of truth:** `src/main.rs`, `src/app.rs`, `src/bootstrap.rs`, `src/wizard/mod.rs`,
 > `src/setup/wizard.rs`, `src/workspace/mod.rs`, `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs`
 
 ---
@@ -21,12 +21,13 @@
 11. [Background Tasks](#11-background-tasks)
 12. [Scrappy (Tauri) Embedding](#12-scrappy-tauri-embedding)
 13. [Appendix: Complete First-Run Timeline](#13-appendix-complete-first-run-timeline)
+14. [Agent Autonomy — Internal Reasoning & Progress Updates](#14-agent-autonomy--internal-reasoning--progress-updates)
 
 ---
 
 ## 1. Overview
 
-IronClaw is a personal AI agent that runs as a standalone binary or embedded inside
+ThinClaw is a personal AI agent that runs as a standalone binary or embedded inside
 a macOS Tauri app (Scrappy). The boot process has three major layers:
 
 1. **Infrastructure setup** — database, encryption, LLM connection, tool registry
@@ -35,7 +36,7 @@ a macOS Tauri app (Scrappy). The boot process has three major layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     IronClaw Boot                           │
+│                     ThinClaw Boot                           │
 │                                                             │
 │  ┌──────────┐  ┌──────────────┐  ┌───────────────────────┐  │
 │  │ Bootstrap │→│  AppBuilder  │→│  Agent::run()          │  │
@@ -54,26 +55,33 @@ a macOS Tauri app (Scrappy). The boot process has three major layers:
 ## 2. Filesystem Layout
 
 ```
-~/.ironclaw/                          ← User-level IronClaw directory
+~/.thinclaw/                          ← User-level ThinClaw directory
 ├── .env                              ← Bootstrap env vars (DATABASE_URL, etc.)
-│                                       Priority: env vars > ./.env > ~/.ironclaw/.env
+│                                       Priority: env vars > ./.env > ~/.thinclaw/.env
 ├── config.toml                       ← Optional TOML config overlay
-├── ironclaw.db                       ← libSQL database (default backend)
+├── thinclaw.db                       ← libSQL database (default backend)
 │                                       Contains: settings, sessions, workspace docs, secrets
 ├── skills/                           ← User-level skills (SkillTrust::Trusted)
 │   └── my-skill/SKILL.md
 ├── tools/                            ← WASM tool binaries (.wasm files)
 │   └── dev/                          ← Dev tools from build artifacts
-├── wasm-channels/                    ← WASM channel binaries
-│   └── telegram.wasm
+├── channels/                         ← WASM channel binaries
+│   ├── telegram.wasm
+│   ├── slack.wasm
+│   ├── whatsapp.wasm
+│   └── *.capabilities.json
+├── projects/                         ← Docker sandbox project bind-mounts
+├── logs/                             ← Service logs (daemon.stdout/stderr.log)
 ├── tts/                              ← Generated TTS audio output
+├── audio/                            ← Voice/audio capture temp files
 ├── memory_hygiene_state.json         ← Cadence tracker for auto-cleanup
+├── telegram-*.json                   ← Telegram pairing and allowlist state
 ├── settings.json.migrated            ← Legacy config (renamed after migration)
 ├── bootstrap.json.migrated           ← Legacy bootstrap (renamed after migration)
 └── mcp-servers.json.migrated         ← Legacy MCP config (renamed after migration)
 ```
 
-**Source:** `src/bootstrap.rs` — `ironclaw_env_path()` returns `~/.ironclaw/.env`
+**Source:** `src/bootstrap.rs` — `thinclaw_env_path()` returns `~/.thinclaw/.env`
 
 ---
 
@@ -85,7 +93,7 @@ Settings are resolved in order (highest priority wins):
 |----------|--------|-------------|---------|
 | 1 (highest) | **Explicit env vars** | Always | `export LLM_BACKEND=openai` |
 | 2 | **`./.env` (CWD)** | `dotenvy::dotenv()` | Project-level overrides |
-| 3 | **`~/.ironclaw/.env`** | `bootstrap::load_ironclaw_env()` | `DATABASE_URL` |
+| 3 | **`~/.thinclaw/.env`** | `bootstrap::load_thinclaw_env()` | `DATABASE_URL` |
 | 4 | **`config.toml`** | `Config::apply_toml_overlay()` | Structured config |
 | 5 | **Injected secrets** | Phase 2 (`inject_llm_keys_from_secrets`) | API keys from Keychain |
 | 6 | **Database settings** | Phase 1 (`Config::from_db()`) | Wizard-set values |
@@ -101,7 +109,7 @@ Settings are resolved in order (highest priority wins):
 
 ### 4.1 First-Run Detection
 
-When IronClaw starts, `check_onboard_needed()` runs two checks:
+When ThinClaw starts, `check_onboard_needed()` runs two checks:
 
 ```rust
 // src/main.rs:1233+
@@ -135,7 +143,7 @@ each step, so if step 6 fails, steps 1–5 are saved and won't be re-asked on re
 | 8 | **Docker Sandbox** | Enable sandboxed code execution containers |
 | 9 | **Background Tasks** | Configure heartbeat interval and notifications |
 
-After the final step, the wizard writes `ONBOARD_COMPLETED=true` to `~/.ironclaw/.env`
+After the final step, the wizard writes `ONBOARD_COMPLETED=true` to `~/.thinclaw/.env`
 so it won't run again.
 
 ### 4.3 QuickStart vs Advanced
@@ -151,7 +159,7 @@ On first run, if legacy files exist they are automatically migrated:
 
 | Legacy File | Migration Target | What Happens |
 |------------|-----------------|-------------|
-| `bootstrap.json` | `~/.ironclaw/.env` | Extracts `DATABASE_URL`, writes `.env`, renames to `.migrated` |
+| `bootstrap.json` | `~/.thinclaw/.env` | Extracts `DATABASE_URL`, writes `.env`, renames to `.migrated` |
 | `settings.json` | DB `settings` table | Calls `Settings::to_db_map()`, stores in DB, renames to `.migrated` |
 | `mcp-servers.json` | DB `mcp_servers` key | Stores raw JSON in DB settings, renames to `.migrated` |
 | `session.json` | DB `nearai.session_token` | Stores in DB settings, renames to `.migrated` |
@@ -177,7 +185,7 @@ src/main.rs:258-265
 ```rust
 // src/main.rs (early bootstrap, before AppBuilder)
 let _ = dotenvy::dotenv();                              // Load ./.env
-ironclaw::bootstrap::load_ironclaw_env();               // Load ~/.ironclaw/.env
+thinclaw::bootstrap::load_thinclaw_env();               // Load ~/.thinclaw/.env
 let config = Config::from_env_with_toml(toml_path)?;    // Env + optional TOML
 let log_broadcaster = Arc::new(LogBroadcaster::new());  // For WebLogLayer
 init_tracing(Arc::clone(&log_broadcaster));             // Structured logging
@@ -210,7 +218,7 @@ After secrets are available:
 Builds the LLM provider chain with decorator layers:
 
 ```
-Base Provider (OpenAI / Anthropic / Ollama / OpenAI-compatible)
+Base Provider (OpenAI / Anthropic / Ollama / OpenAI-compatible / Gemini / llama.cpp)
   └── Retry (exponential backoff)
       └── Smart Routing (latency-based model selection)
           └── Failover (primary → fallback provider)
@@ -221,24 +229,30 @@ Base Provider (OpenAI / Anthropic / Ollama / OpenAI-compatible)
 Optionally creates a **cheap LLM** (e.g. `gpt-4o-mini`) for lightweight tasks
 like heartbeat checks, routing decisions, and evaluation.
 
+Also builds the **Provider Vault** — a runtime-configurable set of LLM providers
+managed via the WebUI, with encrypted API key storage and hot-swap.
+
 ### Phase 4: `init_tools()`
 
 - Creates **SafetyLayer** (content filtering, PII detection, policy checks)
 - Creates **ToolRegistry** with credential injection support
-- Registers **builtin tools**: file, search, web, calculator, canvas, browser
-- Creates **embedding provider** (OpenAI or Ollama)
+- Registers **builtin tools**: file, search, web, calculator, canvas, browser, agent_think, emit_user_message
+- Creates **embedding provider** (OpenAI, Ollama, or Gemini)
 - Creates **Workspace** (DB-backed, with embeddings if available)
 - Registers **memory tools**: `memory_write`, `memory_read`, `memory_search`, `memory_list`, `memory_delete`
 - Registers **builder tool** (if sandbox is enabled)
+- Registers **subagent tools**: `spawn_subagent`, `list_subagents`, `cancel_subagent`
+- Creates **MediaPipeline** (image, audio, video, PDF extraction and routing)
 
 ### Phase 5: `init_extensions()`
 
-- Creates **WASM tool runtime** and loads `.wasm` tools from `~/.ironclaw/tools/`
+- Creates **WASM tool runtime** and loads `.wasm` tools from `~/.thinclaw/tools/`
 - Loads dev tools from `tools/dev/` build artifacts
 - Connects to configured **MCP servers** (concurrent startup, with auth token injection)
 - Loads **extension catalog** (registry entries for in-chat discovery)
 - Creates **ExtensionManager** (enables search/install/activate within conversations)
 - Registers **TTS tool** (OpenAI text-to-speech)
+- Sets up **Claude Code** delegation (Docker sandbox with per-job auth tokens)
 
 ### Post-Build: Assembly
 
@@ -341,54 +355,6 @@ Write things down. Mental notes do not survive restarts.
 - When in doubt, ask
 ```
 
-#### `USER.md`
-```markdown
-# User Context
-
-- **Name:**
-- **Timezone:**
-- **Preferences:**
-
-The agent will fill this in as it learns about you.
-You can also edit this directly to provide context upfront.
-```
-
-#### `MEMORY.md`
-```markdown
-# Memory
-
-Long-term notes, decisions, and facts worth remembering across sessions.
-
-The agent appends here during conversations. Curate periodically:
-remove stale entries, consolidate duplicates, keep it concise.
-This file is loaded into the system prompt, so brevity matters.
-```
-
-#### `HEARTBEAT.md`
-```markdown
-# Heartbeat Checklist
-
-<!-- Keep this file empty to skip heartbeat API calls.
-     Add tasks below when you want the agent to check something periodically.
-
-     Rotate through these checks 2-4 times per day:
-     - [ ] Check for urgent messages
-     - [ ] Review upcoming calendar events
-     - [ ] Check project status or CI builds
-
-     Stay quiet during 23:00-08:00 user-local time unless urgent.
-     If nothing needs attention, reply HEARTBEAT_OK.
-
-     Proactive work you can do without asking:
-     - Organize and curate MEMORY.md (remove stale, consolidate dupes)
-     - Update daily logs with session summaries
-     - Clean up context/ documents that are outdated
--->
-```
-
-The heartbeat seed is **comment-only** by design — the heartbeat runner treats it as
-"effectively empty" and skips the LLM call until the user adds real tasks.
-
 ### 6.3 Identity Document Protection
 
 Files marked as **identity documents** get special handling:
@@ -410,8 +376,9 @@ and user preferences survive cleanup passes.
 
 The user can edit workspace files through:
 - **Chat**: "Update my SOUL.md to add a preference for..." → agent uses `memory_write` tool
-- **CLI**: `ironclaw memory write SOUL.md "new content"`
-- **Scrappy UI**: Could expose a Settings → Personality editor calling `memory_read`/`memory_write`
+- **CLI**: `thinclaw memory write SOUL.md "new content"`
+- **Web UI**: Memory browser in the Gateway web interface
+- **Scrappy UI**: Settings → Personality editor calling `memory_read`/`memory_write`
 
 **Source:** `src/workspace/mod.rs:947+` — `seed_if_empty()`
 
@@ -456,6 +423,9 @@ pub async fn system_prompt_for_context(&self, is_group_chat: bool) -> Result<Str
         }
     }
 
+    // 4. Inject active channel names
+    parts.push(format!("## Active Channels\n\n{}", active_channels.join(", ")));
+
     Ok(parts.join("\n\n---\n\n"))
 }
 ```
@@ -495,6 +465,11 @@ pub async fn system_prompt_for_context(&self, is_group_chat: bool) -> Result<Str
 
 ## Yesterday's Notes          ← from daily/YYYY-MM-DD.md
 (session notes from yesterday)
+
+---
+
+## Active Channels            ← injected at runtime
+(list of currently active channel names)
 ```
 
 ### Group Chat Privacy
@@ -521,10 +496,12 @@ if config.channels.signal.is_some() { channels.add(SignalChannel::new()); }
 if config.channels.discord.is_some() { channels.add(DiscordChannel::new()); }
 if config.channels.imessage.is_some() { channels.add(IMessageChannel::new()); }
 if config.channels.gmail.is_some() { channels.add(GmailChannel::new()); }
+if config.channels.apple_mail.is_some() { channels.add(AppleMailChannel::new()); }
 if config.channels.wasm_channels_enabled { setup_wasm_channels(); }
+// WASM channels: Telegram, Slack, WhatsApp (auto-discovered from ~/.thinclaw/channels/)
 
 // 3. Skills discovery
-let registry = SkillRegistry::new(~/.ironclaw/skills/)
+let registry = SkillRegistry::new(~/.thinclaw/skills/)
     .with_installed_dir(installed_dir);
 registry.discover_all().await;  // Discover: Workspace > User > Installed
 
@@ -533,20 +510,25 @@ if let Some(bridge) = tool_bridge {
     tools.register(create_bridged_tools(bridge));
 }
 
-// 5. Construct the agent
+// 5. Agent registry (multi-agent routing)
+let agent_registry = AgentRegistry::new(workspace.clone());
+let agent_router = AgentRouter::new(agent_registry);
+
+// 6. Construct the agent
 let agent = Agent::new(
     agent_config,
-    AgentDeps { store, llm, cheap_llm, safety, tools, workspace, ... },
+    AgentDeps { store, llm, cheap_llm, safety, tools, workspace, media_pipeline, ... },
     channels,
     heartbeat_config,
     hygiene_config,
     routine_config,
     context_manager,
     session_manager,
+    agent_router,
 );
 
-// 6. Start web gateway + webhook server
-// 7. Enter main loop
+// 7. Start web gateway + webhook server
+// 8. Enter main loop
 agent.run().await
 ```
 
@@ -563,7 +545,7 @@ pub async fn run(self) -> Result<(), Error> {
     let mut message_stream = self.channels.start_all().await?;
 
     // 2. Start background tasks (self-repair, session pruning, heartbeat,
-    //    hygiene, cron routines, backfill embeddings)
+    //    hygiene, cron routines, backfill embeddings, health monitor)
     let bg = self.start_background_tasks().await;
 
     // 3. Start config file watcher
@@ -573,7 +555,13 @@ pub async fn run(self) -> Result<(), Error> {
     // 4. Fire BeforeAgentStart hook
     self.hooks().run(&HookEvent::AgentStart { ... }).await?;
 
-    // 5. Main message loop
+    // 5. Execute BOOT.md hook (runs on every startup)
+    self.run_boot_hook().await;
+
+    // 6. Execute BOOTSTRAP.md hook (first run only, deletes file after)
+    self.run_bootstrap_hook().await;
+
+    // 7. Main message loop
     loop {
         let message = tokio::select! {
             _ = ctrl_c() => break,                    // Graceful shutdown
@@ -597,7 +585,7 @@ pub async fn run(self) -> Result<(), Error> {
         // Check event triggers (cheap regex match, fires async routines if matched)
     }
 
-    // 6. Shutdown: cancel background tasks, close channels
+    // 8. Shutdown: cancel background tasks, close channels
 }
 ```
 
@@ -611,7 +599,7 @@ When a message arrives, `handle_message()` runs this pipeline:
 IncomingMessage arrives from any channel
 │
 ├── 1. Parse submission type (SubmissionParser::parse)
-│       → UserInput, SystemCommand(/status, /job), Undo, Redo,
+│       → UserInput, SystemCommand(/status, /job, /model, /restart), Undo, Redo,
 │         Interrupt, Compact, Clear, NewThread, Heartbeat,
 │         Summarize, Suggest, Quit, SwitchThread, Resume,
 │         ExecApproval, ApprovalResponse
@@ -633,7 +621,12 @@ IncomingMessage arrives from any channel
 ├── 7. Route by submission type:
 │   │
 │   ├── UserInput → process_user_input()
-│   │   ├── Extract media attachments (images, PDFs, audio → text)
+│   │   ├── Extract media attachments (MediaPipeline)
+│   │   │   ├── Images → base64 encode → LLM vision input
+│   │   │   ├── Audio → Whisper transcription → text
+│   │   │   ├── Video → ffmpeg keyframe extraction → vision input
+│   │   │   ├── PDFs/Docs → text extraction → context
+│   │   │   └── Stickers → WebP/TGS conversion → image
 │   │   ├── Check thread state (Processing → reject, Idle → proceed)
 │   │   ├── Safety validation (input content checks)
 │   │   ├── Safety policy checks (block/allow rules)
@@ -660,8 +653,15 @@ IncomingMessage arrives from any channel
 │       → Suppress silent replies (group chat "nothing to say")
 │       → Format approval prompts (tools needing user confirmation)
 │
-└── 9. Hook: BeforeOutbound (modify/suppress response)
-        → Send response back through the originating channel
+├── 9. Channel-aware formatting
+│       → Telegram: Markdown → HTML (markdown_to_telegram_html)
+│       → Slack: Markdown → mrkdwn (markdown_to_slack_mrkdwn)
+│       → WhatsApp: Markdown → WhatsApp text (markdown_to_whatsapp)
+│       → Discord: pass-through (native Markdown support)
+│       → Others: plain text
+│
+└── 10. Hook: BeforeOutbound (modify/suppress response)
+         → Send response back through the originating channel
 ```
 
 ### Agentic Tool Loop
@@ -700,6 +700,9 @@ Build messages (system prompt + thread history + user input)
 | **Cron routines** | Configurable cron expressions | Runs scheduled routines (e.g. daily summary, inbox check) |
 | **Embedding backfill** | Once at startup | Generates embeddings for unembedded document chunks |
 | **Config watcher** | Filesystem events | Watches `config.toml` for changes, logs reload notification |
+| **Channel health monitor** | Periodic | Checks channel health, auto-restarts with failure tracking + cooldown |
+| **Zombie reaper** | Every 60s | Aborts stuck routine tasks exceeding max duration |
+| **Docker orphan cleanup** | Once at startup | Kills orphaned `thinclaw-worker` containers from previous crashes |
 
 **Source:** `src/agent/agent_loop.rs` (background task setup, before `run()`)
 
@@ -707,7 +710,7 @@ Build messages (system prompt + thread history + user input)
 
 ## 12. Scrappy (Tauri) Embedding
 
-When Scrappy embeds IronClaw, the flow differs slightly:
+When Scrappy embeds ThinClaw, the flow differs slightly:
 
 ### What Scrappy Provides
 
@@ -733,7 +736,7 @@ When Scrappy embeds IronClaw, the flow differs slightly:
 
 ```
 Scrappy::main()
-├── Create config from settings + IronClaw env
+├── Create config from settings + ThinClaw env
 ├── AppBuilder::new(config, flags, None, log_broadcaster)
 │   .with_secrets_store(keychain_store)      // macOS Keychain
 │   .with_tool_bridge(sensor_bridge)         // Camera/mic/screen
@@ -756,11 +759,11 @@ Scrappy::main()
 ## 13. Appendix: Complete First-Run Timeline
 
 ```
-User runs `ironclaw` for the first time
+User runs `thinclaw` for the first time
 │
 ├── Phase 0: Early Bootstrap
 │   ├── dotenvy::dotenv()                    ← Load ./.env (usually doesn't exist)
-│   ├── bootstrap::load_ironclaw_env()       ← Load ~/.ironclaw/.env (doesn't exist)
+│   ├── bootstrap::load_thinclaw_env()       ← Load ~/.thinclaw/.env (doesn't exist)
 │   └── check_onboard_needed() → "First run"
 │
 ├── Setup Wizard (9 interactive steps)
@@ -780,14 +783,14 @@ User runs `ironclaw` for the first time
 │   ├── Step 5: Embeddings
 │   │   └── Enable semantic search (OpenAI or Ollama)
 │   ├── Step 6: Channels
-│   │   └── Configure Telegram, Signal, HTTP, Discord, etc.
+│   │   └── Configure Telegram, Signal, HTTP, Discord, WhatsApp, etc.
 │   ├── Step 7: Extensions
 │   │   └── Install WASM tools from registry
 │   ├── Step 8: Docker Sandbox
 │   │   └── Enable sandboxed code execution
 │   ├── Step 9: Heartbeat
 │   │   └── Configure background task interval
-│   └── Writes ONBOARD_COMPLETED=true to ~/.ironclaw/.env
+│   └── Writes ONBOARD_COMPLETED=true to ~/.thinclaw/.env
 │
 ├── AppBuilder::build_all()
 │   ├── Phase 1: init_database()
@@ -800,17 +803,20 @@ User runs `ironclaw` for the first time
 │   │   ├── Create SecretsCrypto
 │   │   └── Inject API keys into config
 │   ├── Phase 3: init_llm()
-│   │   └── Build provider chain (retry, routing, failover, cache)
+│   │   ├── Build provider chain (retry, routing, failover, cache)
+│   │   └── Build Provider Vault (runtime-configurable)
 │   ├── Phase 4: init_tools()
 │   │   ├── Create SafetyLayer
-│   │   ├── Register builtin tools
+│   │   ├── Register builtin tools + agent control tools
 │   │   ├── Create embedding provider
-│   │   ├── Create Workspace
-│   │   └── Register memory tools
+│   │   ├── Create Workspace + MediaPipeline
+│   │   ├── Register memory tools
+│   │   └── Register subagent tools
 │   ├── Phase 5: init_extensions()
 │   │   ├── Load WASM tools
 │   │   ├── Connect to MCP servers
-│   │   └── Create ExtensionManager
+│   │   ├── Create ExtensionManager
+│   │   └── Set up Claude Code delegation
 │   └── Post-build:
 │       ├── workspace.seed_if_empty()        ← Creates 7 identity files
 │       │   ├── README.md
@@ -824,16 +830,17 @@ User runs `ironclaw` for the first time
 │
 ├── Channel Setup
 │   ├── Create ChannelManager
-│   ├── Add configured channels (REPL, Telegram, etc.)
-│   └── Load WASM channels + webhook routes
+│   ├── Add configured channels (REPL, Telegram, Discord, Signal, etc.)
+│   ├── Load WASM channels (Telegram, Slack, WhatsApp) + webhook routes
+│   └── Set up channel-aware message formatting converters
 │
 ├── Skills Discovery
-│   ├── Scan ~/.ironclaw/skills/          (Trusted)
+│   ├── Scan ~/.thinclaw/skills/          (Trusted)
 │   ├── Scan <workspace>/skills/          (Trusted)
 │   └── Scan <installed>/skills/          (Installed — read-only tools)
 │
 ├── Agent Construction
-│   └── Agent::new(config, deps, channels, heartbeat, hygiene, routines)
+│   └── Agent::new(config, deps, channels, heartbeat, hygiene, routines, agent_router)
 │
 ├── Web Gateway + Webhook Server (if HTTP channel enabled)
 │
@@ -844,14 +851,20 @@ User runs `ironclaw` for the first time
     │   ├── Session pruning (10 min)
     │   ├── Heartbeat (hourly)
     │   ├── Memory hygiene (12h)
-    │   └── Cron routines
+    │   ├── Cron routines
+    │   ├── Channel health monitor
+    │   ├── Zombie reaper (60s)
+    │   └── Docker orphan cleanup (once)
     ├── Config file watcher
     ├── Fire BeforeAgentStart hook
+    ├── Execute BOOT.md hook (broadcast greeting to preferred channel)
+    ├── Execute BOOTSTRAP.md hook (first run only)
     │
     └── Enter message loop
         ├── First message arrives
         │   └── system_prompt_for_context() loads:
         │       AGENTS.md + SOUL.md + USER.md + IDENTITY.md + MEMORY.md
+        │       + active channel names
         │       → Assembled into the system prompt
         └── Agent is now fully operational ✅
 ```
@@ -904,7 +917,7 @@ and then continues the agentic loop as if a normal tool had completed.
 
 **Message types:** `progress` · `warning` · `question` · `interim_result`
 
-**Source:** `src/tools/builtin/agent_control.rs` — `EmitUserMessageTool`  
+**Source:** `src/tools/builtin/agent_control.rs` — `EmitUserMessageTool`
 **Dispatcher interception:** `src/agent/dispatcher.rs` — `run_agentic_loop()`
 
 ### Dispatcher Interception
@@ -930,7 +943,8 @@ Each channel renders `AgentMessage` differently:
 | **Signal** | Sent as a real Signal message with emoji prefix |
 | **Slack** | Sent via `chat.postMessage` with emoji prefix |
 | **Telegram** | Forwarded by WASM/send_status layer with `[agent_message:]` prefix |
-| **Discord** | Silently dropped (catch-all `_ => {}`) — could be improved later |
+| **Discord** | Sent as a Discord message |
+| **WhatsApp** | Sent via Cloud API as a text message |
 | **Gmail** | Silently dropped (email is async by nature) |
 
 ### Multi-Step Work Pattern
