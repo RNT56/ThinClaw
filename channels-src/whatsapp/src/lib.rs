@@ -439,8 +439,11 @@ impl Guest for WhatsAppChannel {
             "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         });
 
+        // Convert standard Markdown → WhatsApp text format
+        let wa_content = markdown_to_whatsapp(&response.content);
+
         // Split content into chunks that fit WhatsApp's 4096 char limit
-        let chunks = split_message(&response.content, WHATSAPP_MAX_MESSAGE_LENGTH);
+        let chunks = split_message(&wa_content, WHATSAPP_MAX_MESSAGE_LENGTH);
 
         for (i, chunk) in chunks.iter().enumerate() {
             let payload = serde_json::json!({
@@ -1030,6 +1033,244 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 // Export the component
 export!(WhatsAppChannel);
+
+// ============================================================================
+// Markdown → WhatsApp Format Converter
+// ============================================================================
+
+/// Convert standard Markdown (as produced by LLMs) to WhatsApp text format.
+///
+/// WhatsApp supports limited formatting in text messages:
+/// - Bold: `*text*` (not `**text**`)
+/// - Italic: `_text_` (same as Markdown)
+/// - Strikethrough: `~text~` (not `~~text~~`)
+/// - Monospace: `` ```text``` `` (triple backtick blocks)
+/// - Inline code: `` `code` `` (single backtick, same)
+/// - No link syntax, no headings, no blockquotes
+fn markdown_to_whatsapp(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_code_block = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+
+        // Track fenced code blocks — pass through unchanged
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        if in_code_block {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Convert heading lines: "# Heading" → "*Heading*" (bold)
+        if let Some(heading_text) = parse_wa_heading(trimmed) {
+            let leading_ws: &str = &line[..line.len() - trimmed.len()];
+            result.push_str(leading_ws);
+            result.push('*');
+            result.push_str(heading_text);
+            result.push('*');
+            result.push('\n');
+            continue;
+        }
+
+        // Convert blockquote prefix: "> text" → "text" (strip prefix)
+        let effective_line = if trimmed.starts_with("> ") {
+            let leading_ws: &str = &line[..line.len() - trimmed.len()];
+            let mut s = String::from(leading_ws);
+            s.push_str(&trimmed[2..]);
+            s
+        } else if trimmed == ">" {
+            String::new()
+        } else {
+            line.to_string()
+        };
+
+        // Process inline formatting
+        let converted = convert_inline_whatsapp(&effective_line);
+        result.push_str(&converted);
+        result.push('\n');
+    }
+
+    // Remove trailing newline added by the loop
+    if result.ends_with('\n') && !input.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Parse a heading line, returning the heading text without the `#` prefix.
+fn parse_wa_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+/// Convert inline Markdown formatting on a single line to WhatsApp format.
+fn convert_inline_whatsapp(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < len {
+        // Skip inline code (don't convert inside backticks)
+        if chars[i] == '`' {
+            out.push('`');
+            i += 1;
+            while i < len && chars[i] != '`' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                out.push('`');
+                i += 1;
+            }
+            continue;
+        }
+
+        // Convert Markdown links [text](url) → "text (url)"
+        if chars[i] == '[' {
+            if let Some((text, url, end)) = parse_wa_link(&chars, i) {
+                out.push_str(&text);
+                out.push_str(" (");
+                out.push_str(&url);
+                out.push(')');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert ~~strikethrough~~ → ~strikethrough~
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if let Some((content, end)) = extract_wa_delimited(&chars, i, '~', 2) {
+                out.push('~');
+                out.push_str(&content);
+                out.push('~');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert **bold** → *bold*
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some((content, end)) = extract_wa_delimited(&chars, i, '*', 2) {
+                out.push('*');
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert __bold/italic__ → *bold/italic* (WhatsApp doesn't distinguish)
+        if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
+            if let Some((content, end)) = extract_wa_delimited(&chars, i, '_', 2) {
+                out.push('*');
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        // Single _italic_ and single *bold* pass through unchanged
+        // (WhatsApp natively supports both)
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Parse a Markdown link `[text](url)` starting at position `start`.
+fn parse_wa_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if chars[start] != '[' {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut text = String::new();
+    let mut depth = 1;
+    while i < chars.len() && depth > 0 {
+        if chars[i] == '[' {
+            depth += 1;
+        } else if chars[i] == ']' {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        text.push(chars[i]);
+        i += 1;
+    }
+    if depth != 0 || i >= chars.len() {
+        return None;
+    }
+    i += 1; // skip ]
+    if i >= chars.len() || chars[i] != '(' {
+        return None;
+    }
+    i += 1; // skip (
+    let mut url = String::new();
+    while i < chars.len() && chars[i] != ')' {
+        url.push(chars[i]);
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    i += 1; // skip )
+    Some((text, url, i))
+}
+
+/// Extract content between `count` instances of `delimiter` character.
+fn extract_wa_delimited(chars: &[char], start: usize, delimiter: char, count: usize) -> Option<(String, usize)> {
+    let len = chars.len();
+    for j in 0..count {
+        if start + j >= len || chars[start + j] != delimiter {
+            return None;
+        }
+    }
+    let content_start = start + count;
+    if content_start >= len {
+        return None;
+    }
+    let mut i = content_start;
+    while i + count - 1 < len {
+        let mut found = true;
+        for j in 0..count {
+            if chars[i + j] != delimiter {
+                found = false;
+                break;
+            }
+        }
+        if found {
+            let content: String = chars[content_start..i].iter().collect();
+            if !content.is_empty() {
+                return Some((content, i + count));
+            }
+        }
+        i += 1;
+    }
+    None
+}
 
 /// WhatsApp limits messages to 4096 characters.
 /// https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages

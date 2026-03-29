@@ -716,7 +716,9 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        let chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LENGTH);
+        // Convert standard Markdown (from LLM output) to Telegram-safe HTML
+        let html_content = markdown_to_telegram_html(&response.content);
+        let chunks = split_message(&html_content, TELEGRAM_MAX_MESSAGE_LENGTH);
 
         for (i, chunk) in chunks.iter().enumerate() {
             // Only the first chunk is a reply to the original message
@@ -726,13 +728,13 @@ impl Guest for TelegramChannel {
                 None
             };
 
-            // Try sending with Markdown first; fall back to plain text if Telegram
-            // can't parse the entities (e.g. model leaked <tool_call> with underscores).
+            // Try sending with HTML first; fall back to plain text if Telegram
+            // can't parse the entities.
             let result = send_message(
                 metadata.chat_id,
                 chunk,
                 reply_to,
-                Some("Markdown"),
+                Some("HTML"),
             );
 
             match result {
@@ -751,11 +753,14 @@ impl Guest for TelegramChannel {
                 Err(SendError::ParseEntities(detail)) => {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
-                        &format!("Markdown parse failed ({}), retrying as plain text", detail),
+                        &format!("HTML parse failed ({}), retrying as plain text", detail),
                     );
+                    // Fall back to original plain-text content for this chunk
+                    let plain_chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LENGTH);
+                    let plain_chunk = plain_chunks.get(i).map(|s| s.as_str()).unwrap_or(chunk);
                     send_message(
                         metadata.chat_id,
-                        chunk,
+                        plain_chunk,
                         reply_to,
                         None,
                     )
@@ -1017,6 +1022,211 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 }
 
 // ============================================================================
+// Markdown → Telegram HTML Conversion
+// ============================================================================
+
+/// Sentinel used to protect unmatched `**` from the `*` handler.
+const SENTINEL_STAR: &str = "\u{FFFE}\u{FFFE}";
+/// Sentinel for unmatched `__`.
+const SENTINEL_UNDER: &str = "\u{FFFF}\u{FFFF}";
+
+/// Convert standard Markdown (as emitted by LLMs) to Telegram-safe HTML.
+///
+/// Telegram supports: `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`,
+/// `<a href>`, `<blockquote>`, `<tg-spoiler>`.
+///
+/// Handles:
+/// - `**bold**` / `__bold__`  → `<b>bold</b>`
+/// - `*italic*` / `_italic_` → `<i>italic</i>`
+/// - `` `inline code` ``     → `<code>inline code</code>`
+/// - ` ```lang\ncode``` `    → `<pre><code class="language-lang">code</code></pre>`
+/// - `# Heading`             → `<b>Heading</b>`
+/// - `[text](url)`           → `<a href="url">text</a>`
+/// - `~~strikethrough~~`     → `<s>strikethrough</s>`
+/// - `> blockquote`          → `<blockquote>text</blockquote>`
+/// - HTML special chars      → escaped (`<`, `>`, `&`)
+fn markdown_to_telegram_html(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + md.len() / 4);
+    let lines: Vec<&str> = md.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        // ── Fenced code blocks ──────────────────────────────────────
+        if line.trim_start().starts_with("```") {
+            let lang = line.trim_start().trim_start_matches('`').trim();
+            let mut code_lines = Vec::new();
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                code_lines.push(lines[i]);
+                i += 1;
+            }
+            if i < lines.len() {
+                i += 1;
+            }
+            let code_text = escape_html(&code_lines.join("\n"));
+            if lang.is_empty() {
+                out.push_str(&format!("<pre><code>{code_text}</code></pre>\n"));
+            } else {
+                out.push_str(&format!(
+                    "<pre><code class=\"language-{lang}\">{code_text}</code></pre>\n"
+                ));
+            }
+            continue;
+        }
+
+        // ── Blockquotes ─────────────────────────────────────────────
+        if line.starts_with("> ") || line == ">" {
+            let mut bq_lines = Vec::new();
+            while i < lines.len()
+                && (lines[i].starts_with("> ") || lines[i] == ">")
+            {
+                let content = lines[i].strip_prefix("> ").unwrap_or(
+                    lines[i].strip_prefix(">").unwrap_or(lines[i]),
+                );
+                bq_lines.push(content);
+                i += 1;
+            }
+            let inner = bq_lines
+                .iter()
+                .map(|l| format_inline(&escape_html(l)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push_str(&format!("<blockquote>{inner}</blockquote>\n"));
+            continue;
+        }
+
+        // ── Headings (# ... ######) → bold line ─────────────────────
+        if let Some(heading) = strip_heading(line) {
+            let escaped = escape_html(heading);
+            let formatted = format_inline(&escaped);
+            out.push_str(&format!("<b>{formatted}</b>\n"));
+            i += 1;
+            continue;
+        }
+
+        // ── Regular line → inline formatting ────────────────────────
+        let escaped = escape_html(line);
+        let formatted = format_inline(&escaped);
+        out.push_str(&formatted);
+        out.push('\n');
+        i += 1;
+    }
+
+    if out.ends_with('\n') {
+        out.truncate(out.len() - 1);
+    }
+    out
+}
+
+/// Escape HTML special characters for Telegram.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Apply inline Markdown formatting to an already-HTML-escaped string.
+fn format_inline(s: &str) -> String {
+    let mut result = String::from(s);
+
+    result = replace_inline_pairs(&result, "`", "<code>", "</code>", None);
+    result = replace_inline_pairs(&result, "**", "<b>", "</b>", Some(SENTINEL_STAR));
+    result = replace_inline_pairs(&result, "__", "<b>", "</b>", Some(SENTINEL_UNDER));
+    result = replace_inline_pairs(&result, "~~", "<s>", "</s>", None);
+    result = replace_inline_pairs(&result, "*", "<i>", "</i>", None);
+    result = replace_inline_pairs(&result, "_", "<i>", "</i>", None);
+    result = convert_links(&result);
+
+    result = result.replace(SENTINEL_STAR, "**");
+    result = result.replace(SENTINEL_UNDER, "__");
+
+    result
+}
+
+/// Replace matched pairs of a delimiter with open/close HTML tags.
+fn replace_inline_pairs(
+    s: &str,
+    delim: &str,
+    open_tag: &str,
+    close_tag: &str,
+    unmatched_sentinel: Option<&str>,
+) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut open = true;
+
+    while let Some(pos) = rest.find(delim) {
+        let before = &rest[..pos];
+        out.push_str(before);
+        rest = &rest[pos + delim.len()..];
+
+        if open {
+            if rest.contains(delim) {
+                out.push_str(open_tag);
+                open = false;
+            } else {
+                out.push_str(unmatched_sentinel.unwrap_or(delim));
+            }
+        } else {
+            out.push_str(close_tag);
+            open = true;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Convert Markdown links `[text](url)` to `<a href="url">text</a>`.
+fn convert_links(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+
+    while let Some(bracket_open) = rest.find('[') {
+        out.push_str(&rest[..bracket_open]);
+        let after_open = &rest[bracket_open + 1..];
+
+        if let Some(bracket_close) = after_open.find(']') {
+            let link_text = &after_open[..bracket_close];
+            let after_close = &after_open[bracket_close + 1..];
+
+            if after_close.starts_with('(') {
+                if let Some(paren_close) = after_close.find(')') {
+                    let url = &after_close[1..paren_close];
+                    out.push_str(&format!("<a href=\"{url}\">{link_text}</a>"));
+                    rest = &after_close[paren_close + 1..];
+                    continue;
+                }
+            }
+
+            out.push('[');
+            rest = after_open;
+        } else {
+            out.push('[');
+            rest = after_open;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Strip a Markdown heading prefix (`# ` through `###### `) and return the text.
+fn strip_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if hashes <= 6 {
+            let rest = &trimmed[hashes..];
+            if rest.starts_with(' ') {
+                return Some(rest[1..].trim());
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
 // Webhook Management
 // ============================================================================
 
@@ -1136,16 +1346,16 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
 // Pairing Reply
 // ============================================================================
 
-/// Send a pairing code message to a chat. Used when an unknown user DMs the bot.
+/// Send a pairing code message to a chat. Uses HTML formatting for the inline code.
 fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: `thinclaw pairing approve telegram {}`",
-            code
+            "To pair with this bot, run: <code>thinclaw pairing approve telegram {}</code>",
+            escape_html(code)
         ),
         None,
-        Some("Markdown"),
+        Some("HTML"),
     )
     .map(|_| ())
     .map_err(|e| e.to_string())

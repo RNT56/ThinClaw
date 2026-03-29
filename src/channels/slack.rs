@@ -424,12 +424,15 @@ impl Channel for SlackChannel {
             .and_then(|v| v.as_str())
             .or_else(|| msg.metadata.get("ts").and_then(|v| v.as_str()));
 
+        // Convert standard Markdown → Slack mrkdwn
+        let mrkdwn_content = markdown_to_slack_mrkdwn(&response.content);
+
         let bot_token = self.config.bot_token.expose_secret();
         Self::post_message(
             &self.client,
             bot_token,
             channel,
-            &response.content,
+            &mrkdwn_content,
             thread_ts,
         )
         .await
@@ -458,7 +461,7 @@ impl Channel for SlackChannel {
                 "interim_result" => "📋 ",
                 _ => "💬 ",
             };
-            let text = format!("{}{}", prefix, content);
+            let text = format!("{}{}", prefix, markdown_to_slack_mrkdwn(&content));
             let bot_token = self.config.bot_token.expose_secret();
             let _ = Self::post_message(&self.client, bot_token, channel, &text, thread_ts).await;
         }
@@ -482,7 +485,8 @@ impl Channel for SlackChannel {
             return Ok(());
         }
         let bot_token = self.config.bot_token.expose_secret();
-        Self::post_message(&self.client, bot_token, user_id, &response.content, None).await
+        let mrkdwn_content = markdown_to_slack_mrkdwn(&response.content);
+        Self::post_message(&self.client, bot_token, user_id, &mrkdwn_content, None).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -541,6 +545,219 @@ fn split_message(text: &str) -> Vec<String> {
     chunks
 }
 
+// ── Markdown → Slack mrkdwn Converter ────────────────────────────────
+
+/// Convert standard Markdown (as produced by LLMs) to Slack's mrkdwn format.
+///
+/// Key differences from standard Markdown:
+/// - Bold: `**text**` → `*text*`
+/// - Strikethrough: `~~text~~` → `~text~`
+/// - Links: `[text](url)` → `<url|text>`
+/// - Headings: `# Heading` → `*Heading*` (bold, since Slack has no headings)
+/// - Italic `_text_`, code `` `code` ``, code blocks ` ```...``` `,
+///   and blockquotes `>` pass through unchanged.
+fn markdown_to_slack_mrkdwn(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_code_block = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if in_code_block {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Convert heading lines
+        if let Some(heading_text) = slack_parse_heading(trimmed) {
+            let leading_ws = &line[..line.len() - trimmed.len()];
+            result.push_str(leading_ws);
+            result.push('*');
+            result.push_str(heading_text);
+            result.push('*');
+            result.push('\n');
+            continue;
+        }
+
+        let converted = slack_convert_inline(line);
+        result.push_str(&converted);
+        result.push('\n');
+    }
+
+    if result.ends_with('\n') && !input.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+fn slack_parse_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+fn slack_convert_inline(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '`' {
+            out.push('`');
+            i += 1;
+            while i < len && chars[i] != '`' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                out.push('`');
+                i += 1;
+            }
+            continue;
+        }
+
+        if chars[i] == '[' {
+            if let Some((text, url, end)) = slack_parse_link(&chars, i) {
+                out.push('<');
+                out.push_str(&url);
+                out.push('|');
+                out.push_str(&text);
+                out.push('>');
+                i = end;
+                continue;
+            }
+        }
+
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if let Some((content, end)) = slack_extract_delimited(&chars, i, '~', 2) {
+                out.push('~');
+                out.push_str(&content);
+                out.push('~');
+                i = end;
+                continue;
+            }
+        }
+
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some((content, end)) = slack_extract_delimited(&chars, i, '*', 2) {
+                out.push('*');
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
+            if let Some((content, end)) = slack_extract_delimited(&chars, i, '_', 2) {
+                out.push('*');
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn slack_parse_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if chars[start] != '[' {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut text = String::new();
+    let mut depth = 1;
+    while i < chars.len() && depth > 0 {
+        match chars[i] {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        text.push(chars[i]);
+        i += 1;
+    }
+    if depth != 0 || i >= chars.len() {
+        return None;
+    }
+    i += 1;
+    if i >= chars.len() || chars[i] != '(' {
+        return None;
+    }
+    i += 1;
+    let mut url = String::new();
+    while i < chars.len() && chars[i] != ')' {
+        url.push(chars[i]);
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    i += 1;
+    Some((text, url, i))
+}
+
+fn slack_extract_delimited(
+    chars: &[char],
+    start: usize,
+    delimiter: char,
+    count: usize,
+) -> Option<(String, usize)> {
+    let len = chars.len();
+    for j in 0..count {
+        if start + j >= len || chars[start + j] != delimiter {
+            return None;
+        }
+    }
+    let content_start = start + count;
+    if content_start >= len {
+        return None;
+    }
+    let mut i = content_start;
+    while i + count - 1 < len {
+        let mut found = true;
+        for j in 0..count {
+            if chars[i + j] != delimiter {
+                found = false;
+                break;
+            }
+        }
+        if found {
+            let content: String = chars[content_start..i].iter().collect();
+            if !content.is_empty() {
+                return Some((content, i + count));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +786,78 @@ mod tests {
         let chunks = split_message(&text);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), 3900);
+    }
+
+    #[test]
+    fn test_mrkdwn_bold() {
+        assert_eq!(
+            markdown_to_slack_mrkdwn("**hello world**"),
+            "*hello world*"
+        );
+    }
+
+    #[test]
+    fn test_mrkdwn_double_underscore_bold() {
+        assert_eq!(
+            markdown_to_slack_mrkdwn("__bold text__"),
+            "*bold text*"
+        );
+    }
+
+    #[test]
+    fn test_mrkdwn_strikethrough() {
+        assert_eq!(
+            markdown_to_slack_mrkdwn("~~deleted~~"),
+            "~deleted~"
+        );
+    }
+
+    #[test]
+    fn test_mrkdwn_link() {
+        assert_eq!(
+            markdown_to_slack_mrkdwn("[Google](https://google.com)"),
+            "<https://google.com|Google>"
+        );
+    }
+
+    #[test]
+    fn test_mrkdwn_heading() {
+        assert_eq!(markdown_to_slack_mrkdwn("# Hello"), "*Hello*");
+        assert_eq!(markdown_to_slack_mrkdwn("## Sub"), "*Sub*");
+        assert_eq!(markdown_to_slack_mrkdwn("### Deep"), "*Deep*");
+    }
+
+    #[test]
+    fn test_mrkdwn_code_block_preserved() {
+        let input = "```rust\nlet x = **bold**;\n```";
+        let output = markdown_to_slack_mrkdwn(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_mrkdwn_inline_code_preserved() {
+        assert_eq!(
+            markdown_to_slack_mrkdwn("use `**not bold**` here"),
+            "use `**not bold**` here"
+        );
+    }
+
+    #[test]
+    fn test_mrkdwn_mixed() {
+        let input = "**Bold** and _italic_ with [link](http://ex.com)";
+        let expected = "*Bold* and _italic_ with <http://ex.com|link>";
+        assert_eq!(markdown_to_slack_mrkdwn(input), expected);
+    }
+
+    #[test]
+    fn test_mrkdwn_plain_text_passthrough() {
+        let input = "Just plain text.";
+        assert_eq!(markdown_to_slack_mrkdwn(input), input);
+    }
+
+    #[test]
+    fn test_mrkdwn_blockquote_passthrough() {
+        let input = "> quoted text";
+        assert_eq!(markdown_to_slack_mrkdwn(input), input);
     }
 }

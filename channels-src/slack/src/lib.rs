@@ -263,13 +263,16 @@ impl Guest for SlackChannel {
 
         let thread_ts = response.thread_id.or(metadata.thread_ts);
 
+        // Convert standard Markdown → Slack mrkdwn format
+        let mrkdwn_content = markdown_to_slack_mrkdwn(&response.content);
+
         // Headers for Slack API
         let headers = serde_json::json!({
             "Content-Type": "application/json"
         });
 
         // Split content into chunks that fit Slack's 4000 char limit
-        let chunks = split_message(&response.content, SLACK_MAX_MESSAGE_LENGTH);
+        let chunks = split_message(&mrkdwn_content, SLACK_MAX_MESSAGE_LENGTH);
 
         for (i, chunk) in chunks.iter().enumerate() {
             let mut payload = serde_json::json!({
@@ -667,6 +670,244 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 // Export the component
 export!(SlackChannel);
+
+// ============================================================================
+// Markdown → Slack mrkdwn Converter
+// ============================================================================
+
+/// Convert standard Markdown (as produced by LLMs) to Slack's mrkdwn format.
+///
+/// Key differences from standard Markdown:
+/// - Bold: `**text**` → `*text*`
+/// - Strikethrough: `~~text~~` → `~text~`
+/// - Links: `[text](url)` → `<url|text>`
+/// - Headings: `# Heading` → `*Heading*` (bold, since Slack has no headings)
+/// - Italic `_text_`, code `` `code` ``, code blocks ` ```...``` `,
+///   and blockquotes `>` pass through unchanged.
+fn markdown_to_slack_mrkdwn(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut in_code_block = false;
+
+    for line in input.lines() {
+        // Track fenced code blocks — don't convert inside them
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        if in_code_block {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+
+        // Convert heading lines: "# Heading" → "*Heading*"
+        if let Some(heading_text) = parse_heading(trimmed) {
+            let leading_ws: &str = &line[..line.len() - trimmed.len()];
+            result.push_str(leading_ws);
+            result.push('*');
+            result.push_str(heading_text);
+            result.push('*');
+            result.push('\n');
+            continue;
+        }
+
+        // Process inline formatting on this line
+        let converted = convert_inline_slack(line);
+        result.push_str(&converted);
+        result.push('\n');
+    }
+
+    // Remove trailing newline added by the loop
+    if result.ends_with('\n') && !input.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Parse a heading line, returning the heading text without the `#` prefix.
+/// Supports `#` through `######`.
+fn parse_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    // Count consecutive '#' at start
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    // Must be followed by a space or be empty
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+/// Convert inline Markdown formatting on a single line to Slack mrkdwn.
+fn convert_inline_slack(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < len {
+        // Skip inline code (don't convert inside backticks)
+        if chars[i] == '`' {
+            out.push('`');
+            i += 1;
+            while i < len && chars[i] != '`' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                out.push('`');
+                i += 1;
+            }
+            continue;
+        }
+
+        // Convert Markdown links [text](url) → <url|text>
+        if chars[i] == '[' {
+            if let Some((text, url, end)) = parse_md_link(&chars, i) {
+                out.push('<');
+                out.push_str(&url);
+                out.push('|');
+                out.push_str(&text);
+                out.push('>');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert ~~strikethrough~~ → ~strikethrough~
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if let Some((content, end)) = extract_delimited(&chars, i, '~', 2) {
+                out.push('~');
+                out.push_str(&content);
+                out.push('~');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert **bold** → *bold*  (must check before single *)
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some((content, end)) = extract_delimited(&chars, i, '*', 2) {
+                out.push('*');
+                // Recursively convert inner content (handles nested italic etc.)
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        // Convert __bold__ → *bold*
+        if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
+            if let Some((content, end)) = extract_delimited(&chars, i, '_', 2) {
+                out.push('*');
+                out.push_str(&content);
+                out.push('*');
+                i = end;
+                continue;
+            }
+        }
+
+        // Single * italic — leave as-is for Slack (Slack uses * for bold,
+        // but single * between non-space chars renders as bold in Slack too).
+        // Single _ italic — passes through unchanged (Slack native italic).
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Parse a Markdown link `[text](url)` starting at position `start`.
+/// Returns (text, url, end_position) or None.
+fn parse_md_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if chars[start] != '[' {
+        return None;
+    }
+    // Find closing ]
+    let mut i = start + 1;
+    let mut text = String::new();
+    let mut depth = 1;
+    while i < chars.len() && depth > 0 {
+        if chars[i] == '[' {
+            depth += 1;
+        } else if chars[i] == ']' {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        text.push(chars[i]);
+        i += 1;
+    }
+    if depth != 0 || i >= chars.len() {
+        return None;
+    }
+    i += 1; // skip ]
+    // Expect (
+    if i >= chars.len() || chars[i] != '(' {
+        return None;
+    }
+    i += 1; // skip (
+    let mut url = String::new();
+    while i < chars.len() && chars[i] != ')' {
+        url.push(chars[i]);
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    i += 1; // skip )
+    Some((text, url, i))
+}
+
+/// Extract content between `count` instances of `delimiter` character.
+/// E.g., with delimiter='*' and count=2, matches `**content**`.
+/// Returns (content, end_position_after_closing_delimiter) or None.
+fn extract_delimited(chars: &[char], start: usize, delimiter: char, count: usize) -> Option<(String, usize)> {
+    let len = chars.len();
+    // Check opening delimiter
+    for j in 0..count {
+        if start + j >= len || chars[start + j] != delimiter {
+            return None;
+        }
+    }
+    let content_start = start + count;
+    if content_start >= len {
+        return None;
+    }
+    // Find closing delimiter sequence
+    let mut i = content_start;
+    while i + count - 1 < len {
+        let mut found = true;
+        for j in 0..count {
+            if chars[i + j] != delimiter {
+                found = false;
+                break;
+            }
+        }
+        if found {
+            let content: String = chars[content_start..i].iter().collect();
+            if !content.is_empty() {
+                return Some((content, i + count));
+            }
+        }
+        i += 1;
+    }
+    None
+}
 
 /// Slack limits messages to ~4000 characters.
 /// https://api.slack.com/reference/surfaces/formatting#characters
