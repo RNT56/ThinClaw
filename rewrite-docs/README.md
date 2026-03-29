@@ -27,7 +27,7 @@ file describes how a specific OpenClaw module should be implemented in Rust.
 
 | Need | Go to |
 |------|-------|
-| IronClaw development guide | [`../CLAUDE.md`](../CLAUDE.md) |
+| ThinClaw development guide | [`../CLAUDE.md`](../CLAUDE.md) |
 | Agent boot/runtime flow | [`../Agent_flow.md`](../Agent_flow.md) |
 | Feature parity matrix | [`../FEATURE_PARITY.md`](../FEATURE_PARITY.md) |
 | Module specs | `../src/tools/README.md`, `../src/workspace/README.md`, `../src/setup/README.md` |

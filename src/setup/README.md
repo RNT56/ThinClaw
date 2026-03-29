@@ -36,7 +36,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 1. Parse CLI args
 2. If Command::Onboard  → load .env, run wizard, exit
 3. If Command::Run or no command:
-   a. Load .env files (dotenvy::dotenv() then load_ironclaw_env())
+   a. Load .env files (dotenvy::dotenv() then load_thinclaw_env())
    b. check_onboard_needed() → run wizard if needed
    c. Config::from_env()     → build config from env vars
    d. ... rest of agent startup
@@ -141,7 +141,7 @@ SECRETS_MASTER_KEY env var set?
 On macOS, `security_framework::get_generic_password()` can trigger TWO
 system dialogs:
 1. "Enter your password to unlock the keychain" (keychain locked)
-2. "Allow ironclaw to access this keychain item" (per-app authorization)
+2. "Allow thinclaw to access this keychain item" (per-app authorization)
 
 This is OS-level behavior we cannot prevent. To minimize pain:
 
@@ -695,10 +695,10 @@ On remote/VPS servers without a desktop environment, use providers that
 authenticate via API keys (Anthropic, OpenAI, OpenRouter, Tinfoil) rather
 than browser-based OAuth flows.
 
-For custom OAuth callbacks, set `IRONCLAW_OAUTH_CALLBACK_URL` to a
+For custom OAuth callbacks, set `THINCLAW_OAUTH_CALLBACK_URL` to a
 publicly accessible URL:
 ```bash
-export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
+export THINCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
 ```
 
 The `callback_url()` function in `oauth_defaults.rs` checks this env var

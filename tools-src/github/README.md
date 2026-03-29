@@ -1,4 +1,4 @@
-# GitHub Tool for IronClaw
+# GitHub Tool for ThinClaw
 
 WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 
@@ -17,7 +17,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 3. Store the token:
 
    ```
-   ironclaw secret set github_token YOUR_TOKEN
+   thinclaw secret set github_token YOUR_TOKEN
    ```
 
 ## Usage Examples
@@ -28,7 +28,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "get_repo",
   "owner": "nearai",
-  "repo": "ironclaw"
+  "repo": "thinclaw"
 }
 ```
 
@@ -38,7 +38,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "list_issues",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "state": "open",
   "limit": 10
 }
@@ -50,7 +50,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "create_issue",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "title": "Bug: Something is broken",
   "body": "Detailed description...",
   "labels": ["bug", "help wanted"]
@@ -63,7 +63,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "list_pull_requests",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "state": "open",
   "limit": 5
 }
@@ -75,7 +75,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "create_pr_review",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "pr_number": 42,
   "body": "LGTM! Great work.",
   "event": "APPROVE"
@@ -88,7 +88,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "get_file_content",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "path": "README.md",
   "ref": "main"
 }
@@ -100,7 +100,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "trigger_workflow",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "workflow_id": "ci.yml",
   "ref": "main",
   "inputs": {
@@ -115,7 +115,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "get_workflow_runs",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "limit": 5
 }
 ```
@@ -126,7 +126,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 {
   "action": "get_workflow_runs",
   "owner": "nearai",
-  "repo": "ironclaw",
+  "repo": "thinclaw",
   "limit": 5,
   "page": 2
 }
@@ -155,7 +155,7 @@ Invalid event: 'INVALID'. Must be one of: APPROVE, REQUEST_CHANGES, COMMENT
 ### Missing Token
 
 ```text
-GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>...
+GitHub token not found in secret store. Set it with: thinclaw secret set github_token <token>...
 ```
 
 ## Troubleshooting
@@ -169,7 +169,7 @@ GitHub token not found in secret store. Set it with: ironclaw secret set github_
 ### "GitHub API error 401: Bad credentials"
 
 - The token might be invalid or expired.
-- Update the token: `ironclaw secret set github_token NEW_TOKEN`.
+- Update the token: `thinclaw secret set github_token NEW_TOKEN`.
 
 ### Rate Limiting
 
