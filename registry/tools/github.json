@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/github-wasm32-wasip2.tar.gz",
-      "sha256": "5bd0e713cb69f0c3fe9582dff9646e2b408f13148ac9372a1924920e50e0b69b"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.3/github-wasm32-wasip2.tar.gz",
+      "sha256": "d6482e222fa89514ebfaa4b4423ef96030e50758c566089b87c7d2f2c5694bf3"
     }
   },
   "auth_summary": {

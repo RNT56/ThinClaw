@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.2/whatsapp-wasm32-wasip2.tar.gz",
-      "sha256": "5140c03cc2c3f168229c65603a701b27d79926f99c599031e7350a24d760d939"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.3/whatsapp-wasm32-wasip2.tar.gz",
+      "sha256": "053ff70fe6e9c506e99eae81b0f05e98467182f8f26e349976bc24058a143142"
     }
   },
   "auth_summary": {
