@@ -341,8 +341,12 @@ impl Guest for WhatsAppChannel {
             ),
         );
 
-        // Persist api_version in workspace so on_respond() can read it
+        // Persist config in workspace so on_respond() can read it
         let _ = channel_host::workspace_write("channels/whatsapp/api_version", &config.api_version);
+        let _ = channel_host::workspace_write(
+            "channels/whatsapp/reply_to_message",
+            if config.reply_to_message { "true" } else { "false" },
+        );
 
         // Persist permission config for handle_message
         if let Some(ref owner_id) = config.owner_id {
@@ -445,8 +449,13 @@ impl Guest for WhatsAppChannel {
         // Split content into chunks that fit WhatsApp's 4096 char limit
         let chunks = split_message(&wa_content, WHATSAPP_MAX_MESSAGE_LENGTH);
 
+        // Check if reply threading is enabled
+        let reply_to_message = channel_host::workspace_read("channels/whatsapp/reply_to_message")
+            .map(|s| s == "true")
+            .unwrap_or(true);
+
         for (i, chunk) in chunks.iter().enumerate() {
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
                 "to": metadata.sender_phone,
@@ -456,6 +465,14 @@ impl Guest for WhatsAppChannel {
                     "body": chunk
                 }
             });
+
+            // Add reply context on the first chunk so the response threads
+            // under the original message in the WhatsApp UI
+            if reply_to_message && i == 0 {
+                payload["context"] = serde_json::json!({
+                    "message_id": metadata.message_id
+                });
+            }
 
             let payload_bytes = serde_json::to_vec(&payload)
                 .map_err(|e| format!("Failed to serialize payload: {}", e))?;
