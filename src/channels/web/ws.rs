@@ -618,6 +618,7 @@ mod tests {
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
+            channel_manager: None,
         }
     }
 }

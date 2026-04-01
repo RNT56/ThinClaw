@@ -378,6 +378,15 @@ impl SessionManager {
             }
         }
 
+        // Clean up workspace locks for pruned users (IC-002)
+        // Without this, per-user locks accumulate forever in multi-user deployments.
+        {
+            let mut locks = self.workspace_locks.write().await;
+            for user_id in &stale_users {
+                locks.remove(user_id);
+            }
+        }
+
         if count > 0 {
             tracing::info!(
                 "Pruned {} stale session(s) (idle > {}s)",

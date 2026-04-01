@@ -29,6 +29,10 @@ pub struct ChannelsConfig {
     pub wasm_channels_enabled: bool,
     /// Telegram owner user ID. When set, the bot only responds to this user.
     pub telegram_owner_id: Option<i64>,
+    /// Telegram stream mode fallback for Wasm Channel.
+    pub telegram_stream_mode: Option<String>,
+    /// Discord stream mode fallback for Wasm Channel.
+    pub discord_stream_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,9 +214,11 @@ impl ChannelsConfig {
                     message: format!("must be an integer: {e}"),
                 })?
                 .or(settings.channels.telegram_owner_id),
+            telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?.or(settings.channels.telegram_stream_mode.clone()),
+            discord_stream_mode: optional_env("DISCORD_STREAM_MODE")?.or(settings.channels.discord_stream_mode.clone()),
             telegram: Self::resolve_telegram(settings)?,
             slack: Self::resolve_slack()?,
-            discord: Self::resolve_discord()?,
+            discord: Self::resolve_discord(settings)?,
             gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
             imessage: Self::resolve_imessage()?,
@@ -283,6 +289,7 @@ impl ChannelsConfig {
             .unwrap_or_default();
 
         let stream_mode = optional_env("TELEGRAM_STREAM_MODE")?
+            .or(settings.channels.telegram_stream_mode.clone())
             .map(|s| StreamMode::from_str_value(&s))
             .unwrap_or_default();
 
@@ -416,7 +423,7 @@ impl ChannelsConfig {
         }))
     }
 
-    fn resolve_discord() -> Result<Option<DiscordChannelConfig>, ConfigError> {
+    fn resolve_discord(settings: &Settings) -> Result<Option<DiscordChannelConfig>, ConfigError> {
         let bot_token = match optional_env("DISCORD_BOT_TOKEN")? {
             Some(t) => SecretString::from(t),
             None => return Ok(None),
@@ -434,6 +441,7 @@ impl ChannelsConfig {
             .unwrap_or_default();
 
         let stream_mode = optional_env("DISCORD_STREAM_MODE")?
+            .or(settings.channels.discord_stream_mode.clone())
             .map(|s| StreamMode::from_str_value(&s))
             .unwrap_or_default();
 

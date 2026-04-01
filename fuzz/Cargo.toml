@@ -1,0 +1,31 @@
+[package]
+name = "thinclaw-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+thinclaw = { path = "..", features = ["full"] }
+
+# Prevent this crate from interfering with the workspace
+[workspace]
+
+[[bin]]
+name = "fuzz_sanitizer"
+path = "fuzz_targets/fuzz_sanitizer.rs"
+
+[[bin]]
+name = "fuzz_leak_detector"
+path = "fuzz_targets/fuzz_leak_detector.rs"
+
+[[bin]]
+name = "fuzz_validator"
+path = "fuzz_targets/fuzz_validator.rs"
+
+[[bin]]
+name = "fuzz_credential_detect"
+path = "fuzz_targets/fuzz_credential_detect.rs"

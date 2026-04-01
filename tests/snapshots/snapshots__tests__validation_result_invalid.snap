@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+assertion_line: 44
+expression: result
+---
+is_valid: false
+errors:
+  - field: content
+    message: Input too long
+    code: TooLong
+warnings: []

@@ -1,6 +1,6 @@
 # ThinClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-25 23:00 CET
+> **Last reconciled:** 2026-03-29 15:30 CET
 
 This document tracks feature parity between ThinClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -69,11 +69,11 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
-| WhatsApp | ✅ | 🚧 | P1 | WASM channel compiled, needs Baileys bridge for Web mode |
-| Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
-| Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST (`channels/discord.rs`) + WASM webhook channel |
+| WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — text, media (image/audio/video/document/sticker), reply threading, DM pairing, markdown→WhatsApp formatting, message chunking |
+| Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |
+| Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST ([`src/channels/discord.rs`](src/channels/discord.rs)) + WASM interactions channel (slash commands) |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
-| Slack | ✅ | ✅ | - | WASM tool |
+| Slack | ✅ | ✅ | - | WASM channel (Events API webhook). Native dead code (`slack.rs`) removed. |
 | iMessage | ✅ | ✅ | P3 | `IMessageChannel` (720 LOC) + `IMessageConfig` startup wiring ([`src/channels/imessage_wiring.rs`](src/channels/imessage_wiring.rs)) |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools |
@@ -93,11 +93,12 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
-| Forum topic creation | ✅ | ✅ | `message_thread_id` pass-through for forum groups; replies target correct topic |
+| Forum topic creation | ✅ | ✅ | `message_thread_id` pass-through for forum groups; replies target correct topic. WASM channel extracts + propagates thread ID in metadata |
 | channel_post support | ✅ | ✅ | Channel posts received via `channel_post` update + `sender_chat` for identification |
 | User message reactions | ✅ | ✅ | `TgMessageReaction` + `TgReactionType` parsing; emojis surfaced in `IncomingMessage` metadata |
 | sendPoll | ✅ | ✅ | `send_poll()` helper: question, options, anonymous/multiple-answer flags; wired to `Channel::poll()` trait |
 | Cron/heartbeat topic targeting | ✅ | ✅ | `HEARTBEAT_NOTIFY_TOPIC_ID` config + `message_thread_id` injection in broadcast metadata |
+| sendMessage+editMessageText streaming | ✅ | ✅ | Host-side streaming via `sendMessage` (first chunk) + `editMessageText` (subsequent). Markdown→HTML conversion on host side. Persistent draft across tool-call iterations. Enabled via `/api/settings/telegram_stream_mode` with hot-reload or `TELEGRAM_STREAM_MODE=edit` env var. |
 
 ### Discord-Specific Features (since Feb 2025)
 
@@ -112,7 +113,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
 | Streaming draft replies | ✅ | ✅ | End-to-end: StreamMode + DraftReplyState + `respond_with_tools_streaming` + agent loop integration |
-| Configurable stream modes | ✅ | ✅ | `DISCORD_STREAM_MODE` + `TELEGRAM_STREAM_MODE` env vars; ChannelManager delegation |
+| Configurable stream modes | ✅ | ✅ | Hot-reload via `/api/settings` REST API (`telegram_stream_mode`); `ChannelManager` runtime delegation without restart |
 | Thread ownership | ✅ | ✅ | `SessionManager::set_thread_owner` + `AgentRouter::claim_thread` (first-responder wins) |
 
 ### Channel Features
@@ -311,8 +312,13 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Tool plugins | ✅ | ✅ | WASM tools |
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
 | Provider plugins | ✅ | ✅ | `ProviderPlugin` trait + capabilities ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
-| Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |
+| Plugin CLI (`install`, `list`) | ✅ | ✅ | `registry list/install/install-defaults` subcommands ([`src/cli/registry.rs`](src/cli/registry.rs)) |
+| Plugin CLI (`search`) | ✅ | ✅ | `registry search <query>` — full-text search across name, description, keywords |
+| Plugin CLI (`remove`) | ✅ | ✅ | `registry remove <name>` — deletes `.wasm` + `.capabilities.json` from channels/tools dir |
 | ClawHub registry | ✅ | ✅ | `ClawHubConfig` + `CatalogCache` with TTL, search, merge ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs)) |
+| Channel hot-reload | ❌ | ✅ | `ChannelWatcher` polls `~/.thinclaw/channels/` for `.wasm` changes; auto-loads/reloads/removes channels ([`src/channels/wasm/channel_watcher.rs`](src/channels/wasm/channel_watcher.rs)) |
+| REST API (extensions) | ❌ | ✅ | Full CRUD: `GET /api/extensions`, `POST install`, `POST activate`, `DELETE remove`, `GET/POST setup` |
+| MCP server integration | ✅ | ✅ | Full MCP client with OAuth 2.1, stdio + HTTP transport, session management ([`src/tools/mcp/`](src/tools/mcp/)) |
 | `before_agent_start` hook | ✅ | ✅ | `HookPoint::BeforeAgentStart` — fires before agent main loop, can reject startup |
 | `before_message_write` hook | ✅ | ✅ | `HookPoint::BeforeMessageWrite` — fires before channel write, can modify/suppress |
 | `llm_input`/`llm_output` hooks | ✅ | ✅ | Before/after hook pipeline with priority ordering ([`src/llm/llm_hooks.rs`](src/llm/llm_hooks.rs)) |
@@ -437,7 +443,8 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 
 | Feature | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions |
+| Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions, costs |
+| Cost Dashboard (WebUI) | ❌ | ✅ | - | Dedicated Costs tab: daily spend with budget progress bar, total tokens, active models, actions/hr summary cards + per-model horizontal bar chart (input/output split) + model breakdown table with cost shares and totals. Wired to `/api/gateway/status` with `budget_limit_usd` + `hourly_action_limit` from `CostGuard` ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Channel status view | ✅ | ✅ | P2 | `ChannelStatusView` with per-channel state machine, table/JSON format ([`src/channels/status_view.rs`](src/channels/status_view.rs)) |
 | Agent management | ✅ | ✅ | P3 | CLI: `agents list/add/remove/show/set-default`; `AgentRouter` dispatch pipeline |
 | Model selection | ✅ | ✅ | - | TUI only |
@@ -651,7 +658,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | **Remote deploy wizard** | `RemoteDeployWizard.tsx` — deploy agent to remote infrastructure | ✅ Scrappy-only |
 | **Inference mode tabs** | `InferenceModeTab.tsx` — local / cloud / hybrid mode selection | ✅ Scrappy-only |
 | **Persona system** | `PersonaTab.tsx`, `PersonalizationTab.tsx` — custom AI personas | ✅ Scrappy-only |
-| **Web search with progress** | `web_search` tool with `WebSearchBubble` progress events | ✅ Scrappy-only |
+| **Web search with progress** | `web_search` tool with `WebSearchBubble` progress events | ✅ Scrappy-only | `brave-search` WASM tool available in `tools-src/brave-search/` — `web_search` + `news_search` actions, API key via CLI (`thinclaw tool auth brave-search`) or WebUI inline auth prompt; hot-reloads after key entry |
 | **RAG pipeline** | `rag.rs` — document ingestion, chunking, vector retrieval | ✅ Scrappy-only |
 | **Secrets management** | `SecretsTab.tsx` — macOS Keychain integration for API keys | ✅ Scrappy-only |
 | **Settings system** | 10+ settings tabs (Chat Provider, Engine, Storage, MCP, Gateway, etc.) | ✅ Scrappy-only |
@@ -669,7 +676,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | ThinClaw Gap | Priority | Scrappy Impact When Shipped |
 |-------------|----------|----------------------------|
 | **Multimodal media pipeline** | ✅ Done | Telegram/channel → binary download → rig-core multimodal. Frontend rendering for images/PDFs/audio in chat bubbles |
-| **WhatsApp channel** | P4 | QR pairing flow + WhatsApp card in `OpenClawChannels.tsx` |
+| **WhatsApp channel** | ✅ Done | Cloud API webhook — text, media, DM pairing, reply threading, formatting |
 | **APNs push pipeline** | Deferred | iOS push wake — needs Apple Developer cert infra |
 
 ### 19.2 Future Considerations
@@ -824,8 +831,8 @@ running inside Scrappy.
 - ❌ Matrix channel — E2EE stub
 - ✅ Telegram: forum topic creation + `message_thread_id` threading
 - ✅ Telegram: `channel_post` support + `sender_chat` identification
-- ✅ Streaming draft replies — End-to-end: `respond_with_tools_streaming` in Reasoning, agent loop integration in dispatcher, DraftReplyState send-then-edit, Discord + Telegram `send_draft`
-- ✅ Per-channel stream mode config — `DISCORD_STREAM_MODE` + `TELEGRAM_STREAM_MODE` env vars; `ChannelManager::stream_mode()` + `send_draft()` delegation
+- ✅ Streaming draft replies — End-to-end: `respond_with_tools_streaming` in Reasoning, agent loop integration in dispatcher, DraftReplyState send-then-edit with HTML formatting, persistent draft across tool-call iterations, spawn-handle race-condition hardening, Discord + Telegram `send_draft`
+- ✅ Per-channel stream mode config — Hot-reloadable WebUI `/api/settings` integration (`telegram_stream_mode`) or env vars; `ChannelManager::set_channel_stream_mode()` runtime delegation
 - ✅ Telegram: user message reactions — `TgMessageReaction` parsing with emoji/custom emoji support, surfaced in `IncomingMessage` metadata
 - ✅ Telegram: sendPoll — `send_poll()` helper with question, options, anonymous/multiple-answer flags; wired to `Channel::poll()` trait
 - ✅ Telegram: set_message_reaction — `set_message_reaction()` helper; wired to `Channel::react()` trait
@@ -902,7 +909,7 @@ running inside Scrappy.
 
 ### P4 - Postponed
 - ❌ Slack channel (native implementation — currently WASM tool)
-- ❌ WhatsApp channel (Baileys Web, echo detection)
+- ✅ WhatsApp channel — WASM Cloud API channel (1449 LOC, [`channels-src/whatsapp/src/lib.rs`](channels-src/whatsapp/src/lib.rs)) with text/media/document/sticker, DM pairing, reply threading, markdown formatting, 3 tests
 - ✅ iMessage channel — `IMessageChannel` (720 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics, 23 tests
 - ❌ Other messaging platforms (LINE, Feishu/Lark, Google Chat, MS Teams, Twitch)
 
@@ -915,6 +922,37 @@ running inside Scrappy.
 
 ### P7 - Sprint 15 (Gmail + Routing) — ✅ Fully Complete
 > Gmail PKCE OAuth (G1-G3), routing CRUD (R1-R2) — all tasks complete on both ThinClaw and Scrappy sides.
+
+---
+
+## Engineering Infrastructure (IronClaw Parity)
+
+> Added in v0.14 sprint to close engineering gaps vs IronClaw.
+
+| Feature | IronClaw | ThinClaw | Notes |
+|---------|----------|----------|-------|
+| Dependency auditing (`cargo-deny`) | ✅ | ✅ | `deny.toml` — CVE, license, ban, source checks |
+| Code coverage (Codecov) | ✅ | ✅ | `codecov.yml` — 60% project / 70% patch targets |
+| Complexity guardrails (`clippy.toml`) | ✅ | ✅ | cognitive-complexity 15, too-many-lines 100 |
+| Feature flag restructuring (light default) | ✅ | ✅ | `default = ["light"]`; `docs/BUILD_PROFILES.md` |
+| Document extraction (pdf-extract) | ✅ | ✅ | `document-extraction` feature flag; PDF/DOCX/PPTX/XLSX |
+| Document extraction middleware | ✅ | ✅ | `DocumentExtractor` wired into `MediaPipeline`; auto-routes `Document` type attachments |
+| `extract_document` agent tool | ✅ | ✅ | Built-in tool: URL fetch or base64 → text extraction (PDF/DOCX/PPTX/XLSX/text) |
+| Timezone handling (chrono-tz) | ✅ | ✅ | `src/timezone.rs` — priority chain, system detection |
+| PG TLS (tokio-postgres-rustls) | ✅ | ✅ | Auto-negotiate prefer semantics; wired into `Store::new()` pool creation |
+| HMAC webhook signing | ✅ | ✅ | `src/hooks/webhook_signing.rs` — sign + verify |
+| ed25519 manifest signing | ✅ | ✅ | `src/extensions/signing.rs` — verify + hex helpers |
+| Musl static builds | ✅ | ✅ | 7 dist targets including musl (aarch64 + x86_64) |
+| Fuzz testing | ✅ | ✅ | 4 targets (sanitizer, leak, validator, credential), CI-integrated |
+| Benchmarks (criterion) | ✅ | ✅ | 2 bench targets (`safety_sanitize`, `safety_pipeline`) |
+| Snapshot testing (insta) | ✅ | ✅ | 8 snapshot tests: Settings, Validation, MediaType, Timezone, Errors, Tool schema |
+| Tenant isolation (compile-time) | ✅ | ❌ | IronClaw: `TenantScope` — deferred (ThinClaw is single-user) |
+| Psychographic profiling | ✅ | ✅ | `PsychographicProfile` (9-dimension analysis) + `profile_evolution` (weekly cron prompt) + tiered system prompt injection (confidence-gated: skip <0.3, basics 0.3–0.6, full >0.6). [`src/profile.rs`](src/profile.rs), [`src/profile_evolution.rs`](src/profile_evolution.rs), [`src/workspace/workspace_core.rs`](src/workspace/workspace_core.rs) |
+| SIGHUP hot-reload | ✅ | ✅ | Unix SIGHUP handler: refresh secrets overlay, reload `Config` from DB, two-phase TCP listener swap for zero-downtime webhook rebind. [`src/main.rs`](src/main.rs), [`src/channels/webhook_server.rs`](src/channels/webhook_server.rs) |
+| WASM channel persistence | ✅ | ✅ | Active WASM channels serialized to DB `settings` on activation; auto-reactivated on restart. [`src/extensions/manager.rs`](src/extensions/manager.rs), [`src/main.rs`](src/main.rs) |
+| TOOLS.md workspace seeding | ✅ | ✅ | `paths::TOOLS` constant; tool descriptions seeded to workspace during bootstrap. [`src/workspace/document.rs`](src/workspace/document.rs) |
+
+### Owner: ThinClaw Agent
 
 ---
 

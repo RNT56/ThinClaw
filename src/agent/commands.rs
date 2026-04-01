@@ -228,13 +228,16 @@ impl Agent {
             ));
         };
 
-        let runner = crate::agent::HeartbeatRunner::new(
+        let mut runner = crate::agent::HeartbeatRunner::new(
             crate::agent::HeartbeatConfig::default(),
             crate::workspace::hygiene::HygieneConfig::default(),
             workspace.clone(),
             self.llm().clone(),
             self.safety().clone(),
         );
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            runner = runner.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
 
         match runner.check_heartbeat().await {
             crate::agent::HeartbeatResult::Ok => Ok(SubmissionResult::ok_with_message(
@@ -294,7 +297,10 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Thread Summary:\n\n{}",
@@ -342,7 +348,10 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.5);
 
-        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Suggested Next Steps:\n\n{}",

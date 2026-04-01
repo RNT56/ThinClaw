@@ -91,6 +91,7 @@ impl GlobalSession {
 
         if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
             entry.value = value.into();
+            entry.source_channel = channel.into();
             entry.updated_at = now;
         } else {
             if self.entries.len() >= self.config.max_entries {
@@ -188,6 +189,7 @@ mod tests {
 
         let entry = session.get("status").unwrap();
         assert_eq!(entry.value, "deployed");
+        assert_eq!(entry.source_channel, "discord"); // Updated to last updater
         assert_eq!(session.len(), 1); // No duplicate
     }
 

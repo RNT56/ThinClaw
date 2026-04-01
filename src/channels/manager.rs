@@ -135,6 +135,42 @@ impl ChannelManager {
         Ok(())
     }
 
+    /// Hot-remove a channel from a running agent.
+    ///
+    /// Shuts down the channel and removes it from the channels map.
+    /// The channel's stream task will end naturally when the channel is dropped.
+    pub async fn hot_remove(&self, name: &str) -> Result<(), ChannelError> {
+        let channel = self.channels.write().await.remove(name);
+
+        if let Some(channel) = channel {
+            if let Err(e) = channel.shutdown().await {
+                tracing::warn!(channel = %name, error = %e, "Error shutting down hot-removed channel");
+            }
+
+            // Clean up counters
+            self.counters.write().await.remove(name);
+
+            // Emit channel status change event
+            {
+                let guard = self.sse_tx.read().await;
+                if let Some(ref tx) = *guard {
+                    let _ =
+                        tx.send(crate::channels::web::types::SseEvent::ChannelStatusChange {
+                            channel: name.to_string(),
+                            status: "removed".to_string(),
+                            message: Some(format!("Channel '{}' removed", name)),
+                        });
+                }
+            }
+
+            tracing::info!(channel = %name, "Hot-removed channel");
+            Ok(())
+        } else {
+            tracing::debug!(channel = %name, "Channel not found for hot-remove (may not have been active)");
+            Ok(())
+        }
+    }
+
     /// Start all channels and return a merged stream of messages.
     ///
     /// Also merges the injection channel so background tasks can push messages
@@ -388,6 +424,95 @@ impl ChannelManager {
         } else {
             Ok(None)
         }
+    }
+
+    /// Update the stream mode for a specific channel at runtime.
+    ///
+    /// This allows the WebUI to change telegram streaming mode without restart.
+    pub async fn set_channel_stream_mode(
+        &self,
+        channel_name: &str,
+        mode: crate::channels::StreamMode,
+    ) {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.set_stream_mode(mode).await;
+        } else {
+            tracing::debug!(
+                channel = %channel_name,
+                "Cannot set stream mode: channel not found"
+            );
+        }
+    }
+
+    /// Restart a channel in-place: shutdown → re-start → merge new stream.
+    ///
+    /// The channel stays registered in the map so `respond()`/`broadcast()`
+    /// continue to work. Only the underlying transport is recycled.
+    ///
+    /// Used by `ChannelHealthMonitor` for auto-restart after consecutive failures.
+    pub async fn restart_channel(&self, name: &str) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(name) else {
+            return Err(ChannelError::SendFailed {
+                name: name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+
+        // Shutdown the old transport (best-effort).
+        if let Err(e) = channel.shutdown().await {
+            tracing::warn!(
+                channel = %name,
+                error = %e,
+                "Error shutting down channel during restart (continuing)"
+            );
+        }
+
+        // Re-start to get a fresh stream.
+        let stream = channel.start().await.map_err(|e| {
+            tracing::error!(channel = %name, error = %e, "Failed to restart channel");
+            e
+        })?;
+
+        // Drop the read guard before spawning (we don't need it anymore).
+        drop(channels);
+
+        // Forward the new stream through inject_tx.
+        let tx = self.inject_tx.clone();
+        let spawn_name = name.to_string();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(msg) = stream.next().await {
+                if tx.send(msg).await.is_err() {
+                    tracing::warn!(
+                        channel = %spawn_name,
+                        "Inject channel closed, stopping restarted channel"
+                    );
+                    break;
+                }
+            }
+            tracing::info!(channel = %spawn_name, "Restarted channel stream ended");
+        });
+
+        // Emit channel status change event.
+        {
+            let guard = self.sse_tx.read().await;
+            if let Some(ref tx) = *guard {
+                let _ = tx.send(crate::channels::web::types::SseEvent::ChannelStatusChange {
+                    channel: name.to_string(),
+                    status: "online".to_string(),
+                    message: Some(format!("Channel '{}' restarted", name)),
+                });
+            }
+        }
+
+        // Reset error counter on successful restart.
+        self.counters.write().await.remove(name);
+
+        tracing::info!(channel = %name, "Channel restarted successfully");
+        Ok(())
     }
 }
 

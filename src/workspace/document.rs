@@ -33,6 +33,8 @@ pub mod paths {
     pub const BOOT: &str = "BOOT.md";
     /// Tool catalogue / notes per environment (agent discovers available tools here).
     pub const TOOLS: &str = "TOOLS.md";
+    /// Psychographic profile (JSON, auto-generated during onboarding, evolved weekly).
+    pub const PROFILE: &str = "context/profile.json";
 }
 
 /// A memory document stored in the database.

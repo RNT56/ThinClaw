@@ -3917,3 +3917,363 @@ mark {
   }
 }
 
+/* ===== Cost Dashboard ===== */
+
+.costs-container {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.costs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.costs-header h2 {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.costs-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.costs-last-updated {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+/* Summary cards row */
+.costs-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.cost-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.2s, transform 0.15s;
+}
+
+.cost-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+
+.cost-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.cost-card.accent::before { background: linear-gradient(90deg, #34d399, #10b981); }
+.cost-card.blue::before { background: linear-gradient(90deg, #60a5fa, #3b82f6); }
+.cost-card.purple::before { background: linear-gradient(90deg, #a78bfa, #7c3aed); }
+.cost-card.amber::before { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+
+.cost-card-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.cost-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+
+.cost-card-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
+/* Budget progress bar */
+.cost-budget-bar {
+  margin-top: 12px;
+  background: var(--bg);
+  border-radius: 4px;
+  height: 6px;
+  overflow: hidden;
+}
+
+.cost-budget-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease, background 0.3s;
+}
+
+.cost-budget-fill.ok { background: linear-gradient(90deg, #34d399, #10b981); }
+.cost-budget-fill.warn { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.cost-budget-fill.danger { background: linear-gradient(90deg, #ef4444, #dc2626); }
+
+/* Body grid */
+.costs-body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.costs-body h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text);
+}
+
+/* Chart area */
+.costs-chart-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+}
+
+.costs-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 60px;
+}
+
+.chart-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chart-bar-label {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text);
+  min-width: 140px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.chart-bar-track {
+  flex: 1;
+  background: var(--bg);
+  border-radius: 4px;
+  height: 24px;
+  overflow: hidden;
+  position: relative;
+}
+
+.chart-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  min-width: 2px;
+}
+
+.chart-bar-fill-inner {
+  display: flex;
+  gap: 4px;
+  height: 100%;
+}
+
+.chart-bar-input {
+  height: 100%;
+  border-radius: 4px 0 0 4px;
+  transition: width 0.6s ease;
+}
+
+.chart-bar-output {
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  transition: width 0.6s ease;
+}
+
+.chart-bar-value {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-secondary);
+  min-width: 70px;
+  text-align: right;
+}
+
+/* Chart legend */
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  justify-content: flex-end;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.chart-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+/* Table */
+.costs-table-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+}
+
+.costs-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.costs-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.costs-table th:nth-child(n+2) {
+  text-align: right;
+}
+
+.costs-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.costs-table td:nth-child(n+2) {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.costs-table tbody tr {
+  transition: background 0.15s;
+}
+
+.costs-table tbody tr:hover {
+  background: var(--bg-tertiary);
+}
+
+.costs-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.costs-table tfoot td {
+  font-weight: 700;
+  border-top: 2px solid var(--border);
+  padding-top: 12px;
+  color: var(--text);
+}
+
+.cost-model-name {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.cost-model-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+.cost-share-bar {
+  display: inline-block;
+  height: 4px;
+  border-radius: 2px;
+  vertical-align: middle;
+  margin-right: 6px;
+  transition: width 0.4s ease;
+}
+
+/* Footer */
+.costs-footer {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.costs-footer p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.costs-footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.costs-footer a:hover {
+  text-decoration: underline;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .costs-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .chart-bar-label {
+    min-width: 80px;
+    max-width: 100px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 480px) {
+  .costs-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .costs-container {
+    padding: 16px;
+  }
+}

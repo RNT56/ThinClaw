@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+assertion_line: 112
+expression: display
+---
+- "Channel telegram failed to start: timeout"
+- "Failed to send response on channel slack: rate limited"

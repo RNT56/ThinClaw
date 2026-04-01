@@ -3,6 +3,7 @@
 //! Tracks agent and device online status via periodic beacons.
 //! Supports system-level presence for multi-agent coordination.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -112,12 +113,21 @@ impl PresenceTracker {
     pub fn prune_stale(&mut self, now_epoch_secs: u64) -> usize {
         let before = self.entries.len();
         self.entries.retain(|_, beacon| {
-            // Parse timestamp as epoch seconds for comparison
-            if let Ok(ts) = beacon.timestamp.parse::<u64>() {
-                now_epoch_secs.saturating_sub(ts) < self.timeout_secs
+            // Try RFC 3339 first (documented format), then fall back to raw epoch seconds.
+            let epoch_secs = if let Ok(dt) = beacon.timestamp.parse::<DateTime<Utc>>() {
+                dt.timestamp() as u64
+            } else if let Ok(ts) = beacon.timestamp.parse::<u64>() {
+                ts
             } else {
-                true // Keep entries with non-numeric timestamps
-            }
+                // Unparseable timestamp — keep the entry and warn.
+                tracing::warn!(
+                    entity_id = %beacon.entity_id,
+                    timestamp = %beacon.timestamp,
+                    "Cannot parse presence beacon timestamp, keeping entry"
+                );
+                return true;
+            };
+            now_epoch_secs.saturating_sub(epoch_secs) < self.timeout_secs
         });
         before - self.entries.len()
     }
@@ -185,11 +195,38 @@ mod tests {
     }
 
     #[test]
-    fn test_prune_stale() {
+    fn test_prune_stale_epoch() {
         let mut tracker = PresenceTracker::new(60);
         tracker.update(test_beacon("old", PresenceStatus::Online));
         let pruned = tracker.prune_stale(2000);
         assert_eq!(pruned, 1);
+    }
+
+    #[test]
+    fn test_prune_stale_rfc3339() {
+        let mut tracker = PresenceTracker::new(60);
+        let mut beacon = test_beacon("agent-1", PresenceStatus::Online);
+        // Set an RFC 3339 timestamp that is old relative to the reference.
+        beacon.timestamp = "2020-01-01T00:00:00Z".to_string();
+        tracker.update(beacon);
+
+        // Reference in 2026 — beacon is years old, well past the 60s timeout.
+        let now_2026 = 1_775_000_000; // ~mid 2026
+        let pruned = tracker.prune_stale(now_2026);
+        assert_eq!(pruned, 1, "RFC 3339 beacon should have been pruned");
+    }
+
+    #[test]
+    fn test_prune_stale_rfc3339_recent_kept() {
+        let mut tracker = PresenceTracker::new(60);
+        let mut beacon = test_beacon("agent-1", PresenceStatus::Online);
+        // Set a recent RFC 3339 timestamp.
+        beacon.timestamp = chrono::Utc::now().to_rfc3339();
+        tracker.update(beacon);
+
+        let now = chrono::Utc::now().timestamp() as u64;
+        let pruned = tracker.prune_stale(now);
+        assert_eq!(pruned, 0, "Recent RFC 3339 beacon should be kept");
     }
 
     #[test]

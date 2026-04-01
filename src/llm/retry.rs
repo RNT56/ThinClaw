@@ -213,6 +213,26 @@ impl LlmProvider for RetryProvider {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.inner.calculate_cost(input_tokens, output_tokens)
     }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        // Streaming doesn't support retry (can't restart mid-stream).
+        // Forward directly to inner provider's native streaming.
+        self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        self.inner.complete_stream_with_tools(request).await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
 }
 
 #[cfg(test)]

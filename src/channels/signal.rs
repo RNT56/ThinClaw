@@ -1103,6 +1103,20 @@ fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Vec<MediaCont
             continue;
         }
 
+        // Prevent path traversal via malicious attachment IDs.
+        // The att_id comes from signal-cli SSE (network input).
+        if att_id.contains('/')
+            || att_id.contains('\\')
+            || att_id.contains("..")
+            || att_id.is_empty()
+        {
+            tracing::warn!(
+                id = %att_id,
+                "Signal: rejecting attachment with suspicious path characters"
+            );
+            continue;
+        }
+
         let path = attachment_dir.join(att_id);
         if !path.exists() {
             tracing::debug!(

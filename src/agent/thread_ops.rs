@@ -120,7 +120,7 @@ impl Agent {
     ) -> Result<SubmissionResult, Error> {
         // ── Media attachment handling ────────────────────────────────
         // Images/audio/video → multimodal: attached to ChatMessage for vision/audio LLMs
-        // PDFs/unknown → text extraction: prepended to the user content
+        // PDFs/documents/unknown → text extraction: prepended to the user content
         let (multimodal_attachments, text_extract_attachments): (Vec<_>, Vec<_>) = message
             .attachments
             .iter()
@@ -276,7 +276,10 @@ impl Agent {
                     )
                     .await;
 
-                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                let mut compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                if let Some(ref tracker) = self.deps.cost_tracker {
+                    compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
+                }
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
@@ -392,8 +395,10 @@ impl Agent {
         }
 
         // Complete, fail, or request approval
+        let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
         match result {
-            Ok(AgenticLoopResult::Response(response)) => {
+            Ok(AgenticLoopResult::Response(response))
+            | Ok(AgenticLoopResult::Streamed(response)) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -442,7 +447,11 @@ impl Agent {
                     )
                     .await;
 
-                Ok(SubmissionResult::response(response))
+                if was_streamed {
+                    Ok(SubmissionResult::Streamed(response))
+                } else {
+                    Ok(SubmissionResult::response(response))
+                }
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
                 // Store pending approval in thread and update state
@@ -659,7 +668,10 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+        let mut compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
         match compactor
             .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
@@ -1176,8 +1188,10 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
+            let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response(response))
+                | Ok(AgenticLoopResult::Streamed(response)) => {
                     thread.complete_turn(&response);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
@@ -1190,7 +1204,11 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
-                    Ok(SubmissionResult::response(response))
+                    if was_streamed {
+                        Ok(SubmissionResult::Streamed(response))
+                    } else {
+                        Ok(SubmissionResult::response(response))
+                    }
                 }
                 Ok(AgenticLoopResult::NeedApproval {
                     pending: new_pending,

@@ -5,6 +5,7 @@ exclude = [
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "fuzz",
     "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",
@@ -19,7 +20,7 @@ exclude = [
 
 [package]
 name = "thinclaw"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -135,6 +136,9 @@ sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
 subtle = "2"  # Constant-time comparisons for token validation
+hmac = "0.12"  # HMAC-SHA256 for webhook signing
+ed25519-dalek = { version = "2", features = ["std"] }
+hex = "0.4"
 
 # Multi-provider LLM support
 rig-core = "0.30"
@@ -167,6 +171,19 @@ unicode-width = "0.2.2"
 textwrap = "0.16.2"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
+# Document extraction (feature gated)
+pdf-extract = { version = "0.7", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+
+# Timezone handling
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
+
+# PostgreSQL TLS (feature gated, pulled in by postgres feature)
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
+rustls-native-certs = { version = "0.8", optional = true }
+
 # QR code rendering for terminal pairing
 qrcode = "0.14"
 
@@ -188,24 +205,33 @@ tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
+criterion = "0.5"
+insta = { version = "1", features = ["json", "yaml"] }
 
 [build-dependencies]
 serde_json = "1"
 
 [features]
-default = ["full"]
-# Desktop embedding (Tauri) — minimal footprint, no heavy runtime modules
-desktop = ["libsql", "html-to-markdown", "repl"]
-# Individual runtime modules
+# Default: lightweight build — core agent + databases + HTML/doc tools.
+# Use --features full for everything. See docs/BUILD_PROFILES.md
+default = ["light"]
+# Lightweight build — no web gateway, no tunnel, no Docker, no voice.
+light = [
+    "postgres",
+    "libsql",
+    "html-to-markdown",
+    "document-extraction",
+]
+# Desktop embedding (Tauri/Scrappy) — minimal footprint
+desktop = ["libsql", "html-to-markdown", "document-extraction", "repl"]
+# Individual runtime modules (can be combined with light)
 web-gateway = []
 repl = []
 tunnel = []
 docker-sandbox = []
-# Everything — equivalent to pre-feature-flag behavior
+# Everything — full-featured agent with all capabilities
 full = [
-    "postgres",
-    "libsql",
-    "html-to-markdown",
+    "light",
     "web-gateway",
     "repl",
     "tunnel",
@@ -214,6 +240,9 @@ full = [
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
     "dep:postgres-types",
     "dep:refinery",
     "dep:pgvector",
@@ -222,6 +251,8 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+# Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
+document-extraction = ["dep:pdf-extract", "dep:zip"]
 # Embed all WASM extensions into the binary for air-gapped / zero-network deployments.
 # Extensions are extracted to ~/.thinclaw/{tools,channels}/ on first install.
 # Increases binary size by ~6-13 MB but requires no network access.
@@ -233,6 +264,14 @@ voice = ["dep:cpal"]
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
+
+[[bench]]
+name = "safety_sanitize"
+harness = false
+
+[[bench]]
+name = "safety_pipeline"
+harness = false
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -250,7 +289,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)
@@ -266,7 +305,9 @@ cache-builds = true
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"

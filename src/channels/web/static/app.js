@@ -1128,6 +1128,7 @@ function switchTab(tab) {
   }
   if (tab === 'skills') loadSkills();
   if (tab === 'providers') loadProviders();
+  if (tab === 'costs') loadCostDashboard();
   if (tab === 'settings') loadSettings();
 }
 
@@ -3058,6 +3059,199 @@ document.getElementById('gateway-status-trigger').addEventListener('mouseleave',
   document.getElementById('gateway-popover').classList.remove('visible');
 });
 
+// --- Cost Dashboard ---
+
+var MODEL_COLORS = [
+  '#34d399', '#60a5fa', '#a78bfa', '#fbbf24', '#f472b6',
+  '#fb923c', '#38bdf8', '#c084fc', '#4ade80', '#f87171',
+];
+
+function loadCostDashboard() {
+  apiFetch('/api/gateway/status').then(function(data) {
+    renderCostSummary(data);
+    renderCostChart(data);
+    renderCostTable(data);
+    var ts = document.getElementById('costs-last-updated');
+    if (ts) ts.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  }).catch(function(err) {
+    var summary = document.getElementById('costs-summary');
+    if (summary) summary.innerHTML = '<div class="empty-state">Failed to load cost data: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderCostSummary(data) {
+  var el = document.getElementById('costs-summary');
+  if (!el) return;
+
+  var dailyCost = data.daily_cost != null ? parseFloat(data.daily_cost) : 0;
+  var actionsHr = data.actions_this_hour || 0;
+  var models = data.model_usage || [];
+
+  var totalInput = 0, totalOutput = 0, totalCost = 0;
+  for (var i = 0; i < models.length; i++) {
+    totalInput += models[i].input_tokens || 0;
+    totalOutput += models[i].output_tokens || 0;
+    totalCost += parseFloat(models[i].cost) || 0;
+  }
+  var totalTokens = totalInput + totalOutput;
+
+  // Daily spend card with optional budget bar
+  var spendHtml = '<div class="cost-card accent">'
+    + '<div class="cost-card-label">Spent Today</div>'
+    + '<div class="cost-card-value">' + formatCost(String(dailyCost)) + '</div>'
+    + '<div class="cost-card-sub">' + formatTokenCount(totalInput) + ' in / ' + formatTokenCount(totalOutput) + ' out</div>';
+
+  // Budget progress bar — shown when server reports a daily limit
+  if (data.budget_limit_usd) {
+    var budgetUsd = parseFloat(data.budget_limit_usd);
+    var pct = budgetUsd > 0 ? Math.min(100, (dailyCost / budgetUsd) * 100) : 0;
+    var budgetClass = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok';
+    spendHtml += '<div class="cost-budget-bar"><div class="cost-budget-fill ' + budgetClass + '" style="width:' + pct.toFixed(1) + '%"></div></div>'
+      + '<div class="cost-card-sub">Budget: ' + formatCost(data.budget_limit_usd) + ' (' + pct.toFixed(0) + '% used)</div>';
+  }
+  spendHtml += '</div>';
+
+  // Total tokens card
+  var tokensHtml = '<div class="cost-card blue">'
+    + '<div class="cost-card-label">Total Tokens</div>'
+    + '<div class="cost-card-value">' + formatTokenCount(totalTokens) + '</div>'
+    + '<div class="cost-card-sub">' + formatTokenCount(totalInput) + ' input · ' + formatTokenCount(totalOutput) + ' output</div>'
+    + '</div>';
+
+  // Active models card
+  var modelsHtml = '<div class="cost-card purple">'
+    + '<div class="cost-card-label">Active Models</div>'
+    + '<div class="cost-card-value">' + models.length + '</div>'
+    + '<div class="cost-card-sub">' + (models.length > 0 ? escapeHtml(shortModelName(models[0].model)) + (models.length > 1 ? ' + ' + (models.length - 1) + ' more' : '') : 'No usage yet') + '</div>'
+    + '</div>';
+
+  // Actions/hour card
+  var actionsSubText = 'LLM calls in the last 60 minutes';
+  if (data.hourly_action_limit) {
+    actionsSubText = actionsHr + ' of ' + data.hourly_action_limit + ' allowed per hour';
+  }
+  var actionsHtml = '<div class="cost-card amber">'
+    + '<div class="cost-card-label">Actions / Hour</div>'
+    + '<div class="cost-card-value">' + actionsHr + '</div>'
+    + '<div class="cost-card-sub">' + actionsSubText + '</div>'
+    + '</div>';
+
+  el.innerHTML = spendHtml + tokensHtml + modelsHtml + actionsHtml;
+}
+
+function renderCostChart(data) {
+  var el = document.getElementById('costs-chart');
+  if (!el) return;
+
+  var models = data.model_usage || [];
+  if (models.length === 0) {
+    el.innerHTML = '<div class="empty-state">No token usage to display yet.</div>';
+    return;
+  }
+
+  // Sort by total tokens descending
+  models.sort(function(a, b) {
+    return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+  });
+
+  var maxTokens = (models[0].input_tokens || 0) + (models[0].output_tokens || 0);
+  if (maxTokens === 0) maxTokens = 1;
+
+  var html = '';
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    var inp = m.input_tokens || 0;
+    var out = m.output_tokens || 0;
+    var total = inp + out;
+    var pct = (total / maxTokens) * 100;
+    var inpPct = total > 0 ? (inp / total) * pct : 0;
+    var outPct = total > 0 ? (out / total) * pct : 0;
+    var color = MODEL_COLORS[i % MODEL_COLORS.length];
+    var colorDark = color + '99'; // 60% opacity for output
+
+    html += '<div class="chart-bar-row">'
+      + '<div class="chart-bar-label" title="' + escapeHtml(m.model) + '">' + escapeHtml(shortModelName(m.model)) + '</div>'
+      + '<div class="chart-bar-track">'
+      + '<div class="chart-bar-fill-inner" style="width:' + pct.toFixed(1) + '%;display:flex">'
+      + '<div class="chart-bar-input" style="width:' + (total > 0 ? (inp/total*100).toFixed(1) : 0) + '%;background:' + color + '"></div>'
+      + '<div class="chart-bar-output" style="width:' + (total > 0 ? (out/total*100).toFixed(1) : 0) + '%;background:' + colorDark + '"></div>'
+      + '</div>'
+      + '</div>'
+      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(m.cost) + '</div>'
+      + '</div>';
+  }
+
+  // Legend
+  html += '<div class="chart-legend">'
+    + '<div class="chart-legend-item"><div class="chart-legend-swatch" style="background:#34d399"></div>Input</div>'
+    + '<div class="chart-legend-item"><div class="chart-legend-swatch" style="background:#34d39999"></div>Output</div>'
+    + '</div>';
+
+  el.innerHTML = html;
+}
+
+function renderCostTable(data) {
+  var tbody = document.getElementById('costs-tbody');
+  var empty = document.getElementById('costs-empty');
+  var table = document.getElementById('costs-table');
+  if (!tbody) return;
+
+  var models = data.model_usage || [];
+
+  if (models.length === 0) {
+    if (table) table.style.display = 'none';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+
+  if (table) table.style.display = '';
+  if (empty) empty.style.display = 'none';
+
+  // Sort by cost descending
+  models.sort(function(a, b) {
+    return (parseFloat(b.cost) || 0) - (parseFloat(a.cost) || 0);
+  });
+
+  var totalInput = 0, totalOutput = 0, totalCost = 0;
+  for (var i = 0; i < models.length; i++) {
+    totalInput += models[i].input_tokens || 0;
+    totalOutput += models[i].output_tokens || 0;
+    totalCost += parseFloat(models[i].cost) || 0;
+  }
+  var totalTokens = totalInput + totalOutput;
+
+  var html = '';
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    var inp = m.input_tokens || 0;
+    var out = m.output_tokens || 0;
+    var cost = parseFloat(m.cost) || 0;
+    var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
+    var color = MODEL_COLORS[i % MODEL_COLORS.length];
+
+    html += '<tr>'
+      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name">' + escapeHtml(shortModelName(m.model)) + '</span></td>'
+      + '<td>' + formatTokenCount(inp) + '</td>'
+      + '<td>' + formatTokenCount(out) + '</td>'
+      + '<td>' + formatTokenCount(inp + out) + '</td>'
+      + '<td>' + formatCost(m.cost) + '</td>'
+      + '<td><span class="cost-share-bar" style="width:' + Math.max(2, share * 0.6) + 'px;background:' + color + '"></span>' + share.toFixed(1) + '%</td>'
+      + '</tr>';
+  }
+
+  // Footer totals row
+  html += '</tbody><tfoot><tr>'
+    + '<td>Total</td>'
+    + '<td>' + formatTokenCount(totalInput) + '</td>'
+    + '<td>' + formatTokenCount(totalOutput) + '</td>'
+    + '<td>' + formatTokenCount(totalTokens) + '</td>'
+    + '<td>' + formatCost(String(totalCost)) + '</td>'
+    + '<td>100%</td>'
+    + '</tr></tfoot>';
+
+  tbody.innerHTML = html;
+}
+
 // --- TEE attestation ---
 
 let teeInfo = null;
@@ -3664,6 +3858,7 @@ const SETTINGS_SCHEMA = {
     icon: '📱',
     fields: [
       { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
+      { key: 'channels.telegram_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
     ]
   },
   'Channels — Signal': {
@@ -3683,6 +3878,7 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.discord_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Discord channel' },
       { key: 'channels.discord_guild_id', label: 'Guild ID', type: 'text', desc: 'Restrict to single server (optional)', nullable: true },
       { key: 'channels.discord_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated channel IDs (empty = all)', nullable: true },
+      { key: 'channels.discord_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
     ]
   },
   'Channels — Slack': {
@@ -4126,6 +4322,27 @@ function renderSettingField(field) {
       if (val !== currentValue) saveSetting(field.key, val);
     });
     controlWrap.appendChild(input);
+  } else if (field.type === 'select') {
+    const select = document.createElement('select');
+    select.className = 'setting-input';
+    
+    // Add options
+    for (const opt of field.options || []) {
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.label;
+      select.appendChild(option);
+    }
+    
+    // Force lowercase for matching in case of typed differences
+    const cValStr = currentValue != null ? String(currentValue).toLowerCase() : '';
+    select.value = cValStr;
+    
+    select.addEventListener('change', () => {
+      const val = select.value === '' && field.nullable ? null : select.value;
+      saveSetting(field.key, val);
+    });
+    controlWrap.appendChild(select);
   } else {
     const input = document.createElement('input');
     input.type = 'text';

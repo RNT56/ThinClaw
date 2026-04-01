@@ -61,10 +61,12 @@ async fn start_test_server() -> (
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
         routine_engine: None,
+        secrets_store: None,
+        channel_manager: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string())
+    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string(), vec![])
         .await
         .expect("Failed to start test server");
 

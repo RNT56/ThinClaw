@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 /// Result of validating input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationResult {
     /// Whether the input is valid.
     pub is_valid: bool,
@@ -54,7 +54,7 @@ impl Default for ValidationResult {
 }
 
 /// A validation error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ValidationError {
     /// Field or aspect that failed validation.
     pub field: String,
@@ -65,7 +65,7 @@ pub struct ValidationError {
 }
 
 /// Error codes for validation errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum ValidationErrorCode {
     Empty,
     TooLong,

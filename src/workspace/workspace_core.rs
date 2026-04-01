@@ -450,6 +450,52 @@ impl Workspace {
             }
         }
 
+        // 2b. Tiered psychographic profile injection
+        //
+        // Injects user personality and preferences from context/profile.json
+        // using confidence-gated tiers:
+        //   - confidence < 0.3 → skip (too speculative)
+        //   - confidence 0.3-0.6 → basics only (name, communication, cohort)
+        //   - confidence > 0.6 → full profile summary
+        if let Ok(doc) = self.read(paths::PROFILE).await
+            && !doc.content.is_empty()
+        {
+            match serde_json::from_str::<crate::profile::PsychographicProfile>(&doc.content) {
+                Ok(profile) if profile.is_populated() => {
+                    let confidence = profile.confidence;
+                    if confidence >= 0.6 {
+                        // Full profile injection
+                        let summary = profile.to_user_md();
+                        parts.push(format!("## User Profile\n\n{}", cap_chars(&summary, FILE_MAX_CHARS)));
+                    } else if confidence >= 0.3 {
+                        // Basics only — just name, communication style, cohort
+                        let mut basics = Vec::new();
+                        if !profile.preferred_name.is_empty() {
+                            basics.push(format!("**Name**: {}", profile.preferred_name));
+                        }
+                        basics.push(format!(
+                            "**Communication**: {} tone, {} detail, {} formality",
+                            profile.communication.tone,
+                            profile.communication.detail_level,
+                            profile.communication.formality,
+                        ));
+                        if profile.cohort.cohort != crate::profile::UserCohort::Other {
+                            basics.push(format!(
+                                "**User type**: {} ({}% confidence)",
+                                profile.cohort.cohort, profile.cohort.confidence
+                            ));
+                        }
+                        parts.push(format!("## User Profile (preliminary)\n\n{}", basics.join("\n")));
+                    }
+                    // confidence < 0.3: skip injection entirely
+                }
+                Ok(_) => {} // not populated
+                Err(e) => {
+                    tracing::debug!("Failed to parse profile.json for system prompt: {}", e);
+                }
+            }
+        }
+
         // 3. Context manifest (what's available, not the content itself)
         if !is_group_chat {
             let manifest = self.context_manifest().await?;

@@ -262,7 +262,7 @@ impl StreamMode {
     /// Parse from a string value (env var or config).
     pub fn from_str_value(s: &str) -> Self {
         match s.to_lowercase().trim() {
-            "edit" | "edit_first" | "editfirst" => Self::EditFirst,
+            "edit" | "edit_first" | "editfirst" | "fulledit" | "full_edit" => Self::EditFirst,
             "status" | "status_line" | "statusline" => Self::StatusLine,
             _ => Self::None,
         }
@@ -397,6 +397,14 @@ pub trait Channel: Send + Sync {
     /// Default: StreamMode::None (no streaming drafts).
     fn stream_mode(&self) -> StreamMode {
         StreamMode::None
+    }
+
+    /// Update the stream mode at runtime (e.g., from WebUI settings).
+    ///
+    /// Default implementation does nothing. Channels that support runtime
+    /// stream mode changes (e.g., WASM Telegram) should override this.
+    async fn set_stream_mode(&self, _mode: StreamMode) {
+        // No-op by default
     }
 
     /// Check if the channel is healthy.

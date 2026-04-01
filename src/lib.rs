@@ -50,6 +50,8 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod db;
+#[cfg(feature = "document-extraction")]
+pub mod document_extraction;
 pub mod error;
 pub mod estimation;
 pub mod evaluation;
@@ -68,6 +70,8 @@ pub mod tui;
 // future pass.
 pub mod orchestrator;
 pub mod pairing;
+pub mod profile;
+pub mod profile_evolution;
 pub mod qr_pairing;
 pub mod registry;
 pub mod safety;
@@ -81,6 +85,7 @@ pub mod skills;
 pub mod tailscale;
 pub mod talk_mode;
 pub mod tauri_commands;
+pub mod timezone;
 pub mod tools;
 pub mod tracing_fmt;
 // NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`

@@ -164,6 +164,8 @@ pub struct GatewayState {
     pub restart_requested: std::sync::atomic::AtomicBool,
     /// Secrets store for Provider Vault API (key management).
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// Channel manager for hot-reloading channel settings (e.g., stream mode).
+    pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
 }
 
 /// Start the gateway HTTP server.
@@ -1848,6 +1850,11 @@ async fn extensions_list_handler(
                     "installed".to_string()
                 } else if ext.active && ext.name == "telegram" {
                     // Telegram: check pairing status (end-to-end setup via web UI).
+                    // If the allowFrom list is non-empty, at least one user completed
+                    // the pairing flow.  Otherwise, the channel may still be functional
+                    // via TELEGRAM_OWNER_ID auto-pair — since ext.active is true the
+                    // channel *is* running and accepting messages from the owner, so
+                    // we report "active" either way.
                     let has_paired = pairing_store
                         .read_allow_from(&ext.name)
                         .map(|list| !list.is_empty())
@@ -1855,10 +1862,16 @@ async fn extensions_list_handler(
                     if has_paired {
                         "active".to_string()
                     } else {
-                        "pairing".to_string()
+                        // Channel is loaded and running (ext.active == true).
+                        // The owner can already chat via TELEGRAM_OWNER_ID;
+                        // additional users can be added through pairing later.
+                        "active".to_string()
                     }
+                } else if ext.active {
+                    // Non-Telegram WASM channel that is authenticated and running.
+                    "active".to_string()
                 } else {
-                    // Authenticated but not fully active (or non-Telegram).
+                    // Authenticated but not yet activated.
                     "configured".to_string()
                 })
             } else {
@@ -3087,6 +3100,15 @@ async fn settings_set_handler(
         _ => None,
     };
 
+    // Extract stream mode for hot-reload
+    // The WebUI sends keys with "channels." prefix (e.g., "channels.telegram_stream_mode")
+    // but we also accept the bare key for backwards compatibility.
+    let stream_mode_update: Option<(&'static str, crate::channels::StreamMode)> = match key.as_str() {
+        "telegram_stream_mode" | "channels.telegram_stream_mode" => Some(("telegram", body.value.as_str().map(crate::channels::StreamMode::from_str_value).unwrap_or_default())),
+        "discord_stream_mode" | "channels.discord_stream_mode" => Some(("discord", body.value.as_str().map(crate::channels::StreamMode::from_str_value).unwrap_or_default())),
+        _ => None,
+    };
+
     store
         .set_setting(&state.user_id, &key, &body.value)
         .await
@@ -3095,11 +3117,17 @@ async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Hot-reload Claude Code settings into the job manager so the next
-    // container spawn picks up the new value without requiring a restart.
+    // Hot-reload Claude Code settings into the job manager
     if let (Some(jm), Some((model, max_turns))) = (state.job_manager.clone(), cc_update) {
         tokio::spawn(async move {
             jm.update_claude_code_settings(model, max_turns).await;
+        });
+    }
+
+    // Hot-reload stream mode into the running channel.
+    if let (Some(cm), Some((channel_name, mode))) = (state.channel_manager.clone(), stream_mode_update) {
+        tokio::spawn(async move {
+            cm.set_channel_stream_mode(channel_name, mode).await;
         });
     }
 
@@ -3173,7 +3201,7 @@ async fn gateway_status_handler(
 
     let uptime_secs = state.startup_time.elapsed().as_secs();
 
-    let (daily_cost, actions_this_hour, model_usage) = if let Some(ref cg) = state.cost_guard {
+    let (daily_cost, actions_this_hour, model_usage, budget_limit_usd, hourly_action_limit) = if let Some(ref cg) = state.cost_guard {
         let cost = cg.daily_spend().await;
         let actions = cg.actions_this_hour().await;
         let usage = cg.model_usage().await;
@@ -3186,9 +3214,11 @@ async fn gateway_status_handler(
                 cost: format!("{:.6}", tokens.cost),
             })
             .collect();
-        (Some(format!("{:.4}", cost)), Some(actions), Some(models))
+        let budget = cg.daily_budget_cents().map(|c| format!("{:.2}", c as f64 / 100.0));
+        let rate_limit = cg.hourly_action_limit();
+        (Some(format!("{:.4}", cost)), Some(actions), Some(models), budget, rate_limit)
     } else {
-        (None, None, None)
+        (None, None, None, None, None)
     };
 
     Json(GatewayStatusResponse {
@@ -3199,6 +3229,8 @@ async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
+        budget_limit_usd,
+        hourly_action_limit,
     })
 }
 
@@ -3222,6 +3254,10 @@ struct GatewayStatusResponse {
     actions_this_hour: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_usage: Option<Vec<ModelUsageEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_limit_usd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hourly_action_limit: Option<u64>,
 }
 
 #[cfg(test)]

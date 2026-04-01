@@ -26,6 +26,7 @@ pub mod plugin_interfaces;
 pub mod plugin_manifest;
 pub mod plugin_routes;
 pub mod registry;
+pub mod signing;
 
 pub use discovery::OnlineDiscovery;
 pub use manager::ExtensionManager;

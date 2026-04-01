@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+assertion_line: 95
+expression: display
+---
+- "Connection pool error: connection refused"
+- "Query failed: syntax error"
+- "Migration failed: version mismatch"
+- "Serialization error: invalid json"

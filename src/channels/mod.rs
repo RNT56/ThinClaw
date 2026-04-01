@@ -1,7 +1,17 @@
 //! Multi-channel input system.
 //!
-//! Channels receive messages from external sources (CLI, HTTP, etc.)
-//! and convert them to a unified message format for the agent to process.
+//! Channels receive messages from external sources and convert them to a
+//! unified message format for the agent to process. ThinClaw uses a
+//! **hybrid architecture**:
+//!
+//! - **Native Rust**: Discord (Gateway WS), Signal, Gmail, Nostr,
+//!   iMessage, Apple Mail, REPL, HTTP, Gateway — for persistent
+//!   connections, local filesystem access, and full `Channel` trait.
+//! - **WASM sandboxed**: Telegram, WhatsApp, Slack, Discord
+//!   (interactions) — for stateless webhook/polling channels with
+//!   credential isolation.
+//!
+//! See `docs/CHANNEL_ARCHITECTURE.md` for decision rationale.
 //!
 //! # Architecture
 //!
@@ -9,11 +19,15 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │                         ChannelManager                              │
 //! │                                                                     │
-//! │   ┌──────────────┐   ┌─────────────┐   ┌─────────────┐             │
-//! │   │ ReplChannel  │   │ HttpChannel │   │ WasmChannel │   ...       │
-//! │   └──────┬───────┘   └──────┬──────┘   └──────┬──────┘             │
-//! │          │                 │                 │                      │
-//! │          └─────────────────┴─────────────────┘                      │
+//! │  Native Channels              WASM Channels (sandboxed)             │
+//! │  ┌──────────────┐             ┌──────────────────────┐              │
+//! │  │ DiscordCh    │             │ WasmChannel:telegram │              │
+//! │  │ SignalCh     │             │ WasmChannel:whatsapp │              │
+//! │  │ GmailCh      │             │ WasmChannel:slack    │              │
+//! │  │ NostrCh      │             │ WasmChannel:discord  │              │
+//! │  │ ReplCh  ...  │             └──────────┬───────────┘              │
+//! │  └──────┬───────┘                        │                          │
+//! │         └────────────────────────────────┘                          │
 //! │                            │                                        │
 //! │                   select_all (futures)                              │
 //! │                            │                                        │
@@ -48,9 +62,7 @@ pub mod reaction_machine;
 mod repl;
 pub mod self_message;
 mod signal;
-mod slack;
 pub mod status_view;
-mod telegram;
 pub mod tool_stream;
 pub mod wasm;
 pub mod web;
@@ -75,7 +87,5 @@ pub use nostr::NostrChannel;
 pub use repl::ReplChannel;
 pub use self_message::{SelfMessageConfig, TrustedMetadata};
 pub use signal::SignalChannel;
-pub use slack::SlackChannel;
-pub use telegram::TelegramChannel;
 pub use web::GatewayChannel;
 pub use webhook_server::{WebhookServer, WebhookServerConfig};

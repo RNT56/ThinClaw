@@ -406,6 +406,10 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub telegram_owner_id: Option<i64>,
 
+    /// Telegram progressive message streaming mode (e.g. "edit" or "status").
+    #[serde(default)]
+    pub telegram_stream_mode: Option<String>,
+
     // === Discord ===
     /// Whether Discord channel is enabled.
     #[serde(default)]
@@ -422,6 +426,10 @@ pub struct ChannelSettings {
     /// Discord allowed channel IDs (comma-separated, empty = all).
     #[serde(default)]
     pub discord_allow_from: Option<String>,
+
+    /// Discord progressive message streaming mode (e.g. "edit" or "status").
+    #[serde(default)]
+    pub discord_stream_mode: Option<String>,
 
     // === Slack ===
     /// Whether Slack channel is enabled.

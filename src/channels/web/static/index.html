@@ -45,6 +45,7 @@
       <button data-tab="extensions">Extensions</button>
       <button data-tab="skills">Skills</button>
       <button data-tab="providers">Providers</button>
+      <button data-tab="costs">Costs</button>
       <button data-tab="settings">Settings</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
@@ -273,6 +274,46 @@
         </div>
         <div class="providers-content" id="providers-content">
           <div class="settings-loading">Loading providers...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Costs Tab -->
+    <div class="tab-panel" id="tab-costs">
+      <div class="costs-container">
+        <div class="costs-header">
+          <h2>💰 Cost Dashboard</h2>
+          <div class="costs-header-actions">
+            <span class="costs-last-updated" id="costs-last-updated"></span>
+            <button class="btn-ext" onclick="loadCostDashboard()" title="Refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="costs-summary" id="costs-summary"></div>
+        <div class="costs-body">
+          <div class="costs-chart-section">
+            <h3>Token Usage by Model</h3>
+            <div class="costs-chart" id="costs-chart"></div>
+          </div>
+          <div class="costs-table-section">
+            <h3>Model Breakdown</h3>
+            <table class="costs-table" id="costs-table">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Input Tokens</th>
+                  <th>Output Tokens</th>
+                  <th>Total Tokens</th>
+                  <th>Cost</th>
+                  <th>Share</th>
+                </tr>
+              </thead>
+              <tbody id="costs-tbody"></tbody>
+            </table>
+            <div class="empty-state" id="costs-empty" style="display:none">No usage data yet. Costs will appear here after the first LLM call.</div>
+          </div>
+        </div>
+        <div class="costs-footer">
+          <p>Costs are tracked since last restart. Daily budget and rate limits can be configured in <a href="#" onclick="event.preventDefault(); switchTab('settings')">Settings</a> → Safety.</p>
         </div>
       </div>
     </div>

@@ -383,7 +383,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Channel setup ──────────────────────────────────────────────────
 
-    let channels = ChannelManager::new();
+    let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
     #[allow(clippy::type_complexity)]
@@ -391,6 +391,8 @@ async fn main() -> anyhow::Result<()> {
         Arc<WasmChannelRuntime>,
         Arc<PairingStore>,
         Arc<WasmChannelRouter>,
+        Arc<thinclaw::channels::wasm::WasmChannelLoader>,
+        std::path::PathBuf,
     )> = None;
 
     // Create CLI channel
@@ -432,6 +434,8 @@ async fn main() -> anyhow::Result<()> {
                 result.wasm_channel_runtime,
                 result.pairing_store,
                 result.wasm_channel_router,
+                result.wasm_channel_loader,
+                result.channels_dir,
             ));
             for (name, channel) in result.channels {
                 channel_names.push(name);
@@ -647,25 +651,26 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Start the unified webhook server if any routes were registered.
-    let mut webhook_server = if !webhook_routes.is_empty() {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
-        if addr.ip().is_unspecified() {
-            tracing::warn!(
-                "Webhook server is binding to {} — it will be reachable from all network interfaces. \
-                 Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
-                addr.ip()
-            );
-        }
-        let mut server = WebhookServer::new(WebhookServerConfig { addr });
-        for routes in webhook_routes {
-            server.add_routes(routes);
-        }
-        server.start().await?;
-        Some(server)
-    } else {
-        None
-    };
+    let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> =
+        if !webhook_routes.is_empty() {
+            let addr = webhook_server_addr
+                .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+            if addr.ip().is_unspecified() {
+                tracing::warn!(
+                    "Webhook server is binding to {} — it will be reachable from all network interfaces. \
+                     Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
+                    addr.ip()
+                );
+            }
+            let mut server = WebhookServer::new(WebhookServerConfig { addr });
+            for routes in webhook_routes {
+                server.add_routes(routes);
+            }
+            server.start().await?;
+            Some(Arc::new(tokio::sync::Mutex::new(server)))
+        } else {
+            None
+        };
 
     // Register lifecycle hooks.
     let active_tool_names = components.tools.list().await;
@@ -710,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Gateway channel ────────────────────────────────────────────────
 
+    #[cfg(feature = "repl")]
     let mut gateway_url: Option<String> = None;
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<thinclaw::channels::web::types::SseEvent>,
@@ -748,10 +754,11 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref ss) = components.secrets_store {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }
+        gw = gw.with_channel_manager(Arc::clone(&channels));
         // Mount WASM channel webhook routes on the gateway so they are
         // reachable through the public tunnel URL. We create a second
         // Router instance since axum::Router is not Clone.
-        if let Some((_, _, ref wasm_router)) = wasm_channel_runtime_state {
+        if let Some((_, _, ref wasm_router, _, _)) = wasm_channel_runtime_state {
             let gateway_webhook_routes = thinclaw::channels::wasm::router::create_wasm_channel_router(
                 Arc::clone(wasm_router),
                 components.extension_manager.as_ref().map(Arc::clone),
@@ -772,12 +779,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        gateway_url = Some(format!(
-            "http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        ));
+        #[cfg(feature = "repl")]
+        {
+            gateway_url = Some(format!(
+                "http://{}:{}/?token={}",
+                gw_config.host,
+                gw_config.port,
+                gw.auth_token()
+            ));
+        }
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
@@ -793,15 +803,15 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Boot screen ────────────────────────────────────────────────────
 
-    let boot_tool_count = components.tools.count();
-    let boot_llm_model = components.llm.model_name().to_string();
-    let boot_cheap_model = components
-        .cheap_llm
-        .as_ref()
-        .map(|c| c.model_name().to_string());
-
     #[cfg(feature = "repl")]
     if config.channels.cli.enabled && cli.message.is_none() {
+        let boot_tool_count = components.tools.count();
+        let boot_llm_model = components.llm.model_name().to_string();
+        let boot_cheap_model = components
+            .cheap_llm
+            .as_ref()
+            .map(|c| c.model_name().to_string());
+
         let boot_info = thinclaw::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             agent_name: config.agent.name.clone(),
@@ -841,26 +851,180 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Run the agent ──────────────────────────────────────────────────
 
-    let channels = Arc::new(channels);
-
     // Wire up channel runtime for hot-activation of WASM channels.
-    if let Some(ref ext_mgr) = components.extension_manager
-        && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
-    {
-        ext_mgr
-            .set_channel_runtime(
-                Arc::clone(&channels),
-                rt,
-                ps,
-                router,
-                config.channels.telegram_owner_id,
-            )
-            .await;
-        tracing::info!("Channel runtime wired into extension manager for hot-activation");
+    // Also capture the loader & channels_dir for the hot-reload watcher.
+    let mut wasm_watcher_state: Option<(
+        Arc<thinclaw::channels::wasm::WasmChannelLoader>,
+        std::path::PathBuf,
+    )> = None;
+
+    if let Some((rt, ps, router, loader, channels_dir)) = wasm_channel_runtime_state.take() {
+        // Always capture for the watcher — it works without an extension manager.
+        wasm_watcher_state = Some((Arc::clone(&loader), channels_dir));
+
+        // Wire the runtime into the extension manager if available.
+        if let Some(ref ext_mgr) = components.extension_manager {
+            ext_mgr
+                .set_channel_runtime(
+                    Arc::clone(&channels),
+                    rt,
+                    ps,
+                    router,
+                    config.channels.telegram_owner_id,
+                )
+                .await;
+            tracing::info!("Channel runtime wired into extension manager for hot-activation");
+
+            // Auto-activate persisted WASM channels that weren't loaded from disk.
+            let persisted = ext_mgr.load_persisted_active_channels().await;
+            let active_at_startup: std::collections::HashSet<String> =
+                loaded_wasm_channel_names.iter().cloned().collect();
+            for name in &persisted {
+                if active_at_startup.contains(name) {
+                    continue;
+                }
+                match ext_mgr.activate(name).await {
+                    Ok(_) => {
+                        tracing::debug!(channel = %name, "Auto-activated persisted WASM channel");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %name,
+                            error = %e,
+                            "Failed to auto-activate persisted WASM channel"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Clone the SSE sender for the routine engine before the extension manager consumes it.
     let routine_sse_sender = sse_sender.clone();
+
+    // ── SIGHUP hot-reload handler (Unix only) ──────────────────────────
+    #[cfg(unix)]
+    {
+        let sighup_webhook_server = webhook_server.clone();
+        let sighup_store: Option<Arc<dyn thinclaw::db::Database>> =
+            components.db.as_ref().map(Arc::clone);
+        let sighup_secrets = components.secrets_store.clone();
+        let sighup_owner_id = "default".to_string();
+
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to register SIGHUP handler: {}", e);
+                    return;
+                }
+            };
+
+            loop {
+                sighup.recv().await;
+                tracing::info!("SIGHUP received — reloading HTTP webhook config");
+
+                // 1. Refresh secrets overlay (thread-safe, no unsafe set_var)
+                if let Some(ref secrets) = sighup_secrets {
+                    thinclaw::config::refresh_secrets(secrets.as_ref(), &sighup_owner_id).await;
+                }
+
+                // 2. Reload config from DB (or env fallback)
+                let new_config = match &sighup_store {
+                    Some(store) => {
+                        thinclaw::config::Config::from_db(store.as_ref(), &sighup_owner_id).await
+                    }
+                    None => thinclaw::config::Config::from_env().await,
+                };
+                let new_config = match new_config {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("SIGHUP config reload failed: {}", e);
+                        continue;
+                    }
+                };
+
+                // 3. Check HTTP channel config
+                let new_http = match new_config.channels.http {
+                    Some(c) => c,
+                    None => {
+                        tracing::warn!("SIGHUP: HTTP channel no longer configured, skipping");
+                        continue;
+                    }
+                };
+
+                // 4. Two-phase listener swap if address changed
+                let new_addr: std::net::SocketAddr =
+                    match format!("{}:{}", new_http.host, new_http.port).parse() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::error!("SIGHUP: invalid addr: {}", e);
+                            continue;
+                        }
+                    };
+
+                if let Some(ref ws_arc) = sighup_webhook_server {
+                    let (old_addr, router) = {
+                        let ws = ws_arc.lock().await;
+                        (ws.current_addr(), ws.merged_router_clone())
+                    };
+
+                    if old_addr != new_addr {
+                        tracing::info!(
+                            "SIGHUP: HTTP addr {} -> {}, restarting listener",
+                            old_addr,
+                            new_addr
+                        );
+                        if let Some(app) = router {
+                            // Phase 1: bind new listener outside the lock
+                            match tokio::net::TcpListener::bind(new_addr).await {
+                                Ok(listener) => {
+                                    // Phase 2: swap under lock
+                                    let (old_tx, old_handle) = {
+                                        let mut ws = ws_arc.lock().await;
+                                        ws.install_listener(new_addr, listener, app)
+                                    };
+                                    // Phase 3: shut down old listener outside lock
+                                    if let Some(tx) = old_tx {
+                                        let _ = tx.send(());
+                                    }
+                                    if let Some(handle) = old_handle {
+                                        let _ = handle.await;
+                                    }
+                                    tracing::info!(
+                                        "SIGHUP: webhook server restarted on {}",
+                                        new_addr
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("SIGHUP: bind failed on {}: {}", new_addr, e);
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::info!("SIGHUP: HTTP addr unchanged ({}), config refreshed", old_addr);
+                    }
+                }
+            }
+        });
+        tracing::info!("SIGHUP hot-reload handler registered (send `kill -HUP` to reload HTTP webhook config)");
+    }
+
+    // ── WASM channel hot-reload watcher ─────────────────────────────────
+    if let Some((loader, channels_dir)) = wasm_watcher_state {
+        use thinclaw::channels::wasm::channel_watcher::ChannelWatcher;
+
+        let watcher = ChannelWatcher::new(
+            channels_dir,
+            loader,
+            Arc::clone(&channels),
+        );
+        watcher.seed_from_dir().await;
+        watcher.start().await;
+        tracing::info!("WASM channel hot-reload watcher started (new/modified/deleted .wasm files auto-detected)");
+        // Watcher runs until the process exits (task is aborted on shutdown).
+    }
 
     // Wire SSE sender into channel manager for ChannelStatusChange events.
     if let Some(ref sender) = sse_sender {
@@ -884,7 +1048,7 @@ async fn main() -> anyhow::Result<()> {
             thinclaw::agent::SubagentConfig::default(),
         );
 
-        // Wire store + SSE for routine run finalization by subagents
+        // Wire store + SSE + cost tracker for routine run finalization by subagents
         let mut executor = executor;
         if let Some(ref db) = components.db {
             executor = executor.with_store(Arc::clone(db));
@@ -892,6 +1056,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref sender) = routine_sse_sender {
             executor = executor.with_sse_tx(sender.clone());
         }
+        executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
 
         let executor = std::sync::Arc::new(executor);
 
@@ -990,8 +1155,8 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Shutdown ────────────────────────────────────────────────────────
 
-    if let Some(ref mut server) = webhook_server {
-        server.shutdown().await;
+    if let Some(ref server) = webhook_server {
+        server.lock().await.shutdown().await;
     }
 
     if let Some(tunnel) = active_tunnel {

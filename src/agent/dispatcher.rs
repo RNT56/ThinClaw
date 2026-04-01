@@ -25,8 +25,12 @@ pub(crate) use super::dispatcher_helpers::{
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
-    /// Completed with a response.
+    /// Completed with a response (needs to be sent to channel by caller).
     Response(String),
+    /// Completed and response was already streamed to the channel via
+    /// progressive edits (sendMessage + editMessageText).  Caller should
+    /// NOT send it again — only persist and update thread state.
+    Streamed(String),
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
@@ -155,9 +159,15 @@ impl Agent {
 
         let active_channel_names = self.channels.channel_names().await;
 
+        // Capture the routed model name for cost tracking, thinking config, etc.
+        // When smart routing selects the cheap model, this differs from
+        // self.llm().active_model_name() (which always returns the primary).
+        let routed_model_name = routed_llm.active_model_name();
+        let routed_cost_per_token = routed_llm.cost_per_token();
+
         let mut reasoning = Reasoning::new(routed_llm, self.safety().clone())
             .with_channel(message.channel.clone())
-            .with_model_name(self.llm().active_model_name())
+            .with_model_name(routed_model_name.clone())
             .with_group_chat(is_group_chat)
             .with_active_channels(active_channel_names)
             .with_workspace_mode(
@@ -210,6 +220,15 @@ impl Agent {
         let mut last_applied_model_override: Option<String> = None;
         // Store the original LLM so we can restore it when the override is reset.
         let original_llm = reasoning.current_llm();
+
+        // ── Persistent draft state for streaming ────────────────────
+        // Lives outside the loop so a streamed message survives across
+        // tool-call iterations. This prevents creating a new Telegram
+        // message on each loop pass and ensures the ✦ indicator is
+        // properly cleaned up when tool calls interrupt streaming.
+        let persistent_draft: Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -419,22 +438,6 @@ impl Agent {
                     }
                 }
 
-                // Bug 9 fix: reset the flush flag ONLY when the hard cap fires AND
-                // messages have actually been dropped (a new compaction cycle begins).
-                // Previously the reset fired in the same iteration as the flush when
-                // messages jumped from flush_threshold to > max_ctx in one step,
-                // allowing a second flush immediately on the next iteration.
-                //
-                // We check this BEFORE the flush guard so that if context_messages
-                // crossed the cap AND the threshold in this very iteration, we correctly
-                // reset the flag for the NEW compaction window rather than incorrectly
-                // re-arming it after firing and resetting in the same pass.
-                if context_messages.len() > max_ctx {
-                    // Only reset if the flush hasn't fired in THIS iteration yet.
-                    // The flag was already set to true above if we just fired, so this
-                    // check doesn't accidentally prevent the reset on the next cycle.
-                    memory_flush_fired = false;
-                }
             }
 
             // Inject a nudge message when approaching the iteration limit so the
@@ -469,6 +472,16 @@ impl Agent {
                 );
                 context_messages = systems;
                 context_messages.extend(rest.into_iter().skip(skip));
+
+                // Bug 9 fix (revised): reset the flush flag AFTER the hard cap
+                // actually drops messages so a new compaction cycle can trigger
+                // a fresh flush. Previously the reset fired in the same scope
+                // as the flush trigger (before truncation), which allowed a
+                // double-flush when messages jumped from the 80% threshold
+                // past max_ctx in a single iteration.
+                if skip > 0 {
+                    memory_flush_fired = false;
+                }
             }
             // ── Tool-result pruning ─────────────────────────────────────
             // Strip old tool results from context before the LLM call.
@@ -535,8 +548,10 @@ impl Agent {
             // Call LLM with current context; force_text drops tools to guarantee a
             // text response on the final iteration.
             let thinking = {
-                let model_name = self.llm().active_model_name();
-                let (enabled, budget) = self.config.resolve_thinking_for_model(&model_name);
+                // Use the routed model name (not always the primary) so thinking
+                // config is resolved for the model that will actually handle the
+                // request — e.g. a cheap model that doesn't support thinking.
+                let (enabled, budget) = self.config.resolve_thinking_for_model(&routed_model_name);
                 if enabled {
                     crate::llm::ThinkingConfig::Enabled {
                         budget_tokens: budget,
@@ -599,18 +614,16 @@ impl Agent {
                     }
                     Ok(crate::hooks::HookOutcome::Reject { reason }) => {
                         tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
-                        return Err(crate::error::Error::from(
-                            crate::error::ChannelError::StartupFailed {
-                                name: "hook".into(),
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected {
                                 reason: format!("BeforeLlmInput hook rejected: {}", reason),
                             },
                         ));
                     }
                     Err(crate::hooks::HookError::Rejected { reason }) => {
                         tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
-                        return Err(crate::error::Error::from(
-                            crate::error::ChannelError::StartupFailed {
-                                name: "hook".into(),
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected {
                                 reason: format!("BeforeLlmInput hook rejected: {}", reason),
                             },
                         ));
@@ -646,22 +659,41 @@ impl Agent {
                 let metadata = message.metadata.clone();
                 let mode = channel_stream_mode;
 
-                // Draft state tracks the in-progress message
-                let draft = Arc::new(tokio::sync::Mutex::new(
-                    crate::channels::DraftReplyState::new(&channel_name),
-                ));
+                // Initialise a per-iteration draft. If there's a persistent
+                // draft from a previous tool-call iteration, reuse its
+                // message_id so edits land on the same Telegram message.
+                let draft = {
+                    let prev = persistent_draft.lock().await;
+                    let mut new_draft = crate::channels::DraftReplyState::new(&channel_name);
+                    if let Some(ref prev_draft) = *prev {
+                        // Carry over the Telegram message_id so we edit
+                        // the existing message instead of sending a new one.
+                        new_draft.message_id = prev_draft.message_id.clone();
+                        new_draft.posted = prev_draft.posted;
+                    }
+                    Arc::new(tokio::sync::Mutex::new(new_draft))
+                };
                 let draft_for_stream = Arc::clone(&draft);
+
+                // Collect spawn handles so we can await them before the
+                // final edit, preventing a race where a late intermediate
+                // edit re-adds the ✦ indicator after we removed it.
+                let spawn_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+                    Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                let spawn_handles_for_stream = Arc::clone(&spawn_handles);
 
                 let stream_result = reasoning
                     .respond_with_tools_streaming(&context, move |chunk: &str| {
-                        // Fire-and-forget draft update (we're in a sync FnMut callback)
                         let channels = Arc::clone(&channels);
                         let ch_name = channel_name.clone();
                         let md = metadata.clone();
                         let draft_ref = Arc::clone(&draft_for_stream);
                         let chunk_owned = chunk.to_string();
+                        let handles_ref = Arc::clone(&spawn_handles_for_stream);
 
-                        tokio::spawn(async move {
+                        // We must spawn because we're in a sync FnMut callback.
+                        // But we collect the handle so we can await it later.
+                        let handle = tokio::spawn(async move {
                             let mut d = draft_ref.lock().await;
                             let should_send = d.append(&chunk_owned);
                             if should_send {
@@ -688,22 +720,74 @@ impl Agent {
                                 }
                             }
                         });
+
+                        // Best-effort: try to register the handle. If the
+                        // mutex is contended we skip — the final drain will
+                        // still catch most in-flight tasks.
+                        if let Ok(mut handles) = handles_ref.try_lock() {
+                            handles.push(handle);
+                        }
                     })
                     .await;
 
-                // Send final draft with complete text (remove typing indicator)
+                // Drain all in-flight spawn handles before the final edit.
+                // This prevents a late intermediate edit from re-adding ✦
+                // after the final edit removed it.
                 {
-                    let d = draft.lock().await;
-                    if d.posted && !d.accumulated.is_empty() {
-                        let _ = self
-                            .channels
-                            .send_draft(&message.channel, &d, &message.metadata)
-                            .await;
+                    let mut handles = spawn_handles.lock().await;
+                    for h in handles.drain(..) {
+                        let _ = h.await;
                     }
                 }
 
+                // Send final draft with complete text (remove typing indicator)
+                let was_streamed = {
+                    let d = draft.lock().await;
+                    if d.posted && !d.accumulated.is_empty() {
+                        // Final edit: remove the ✦ indicator by sending
+                        // the raw accumulated text.
+                        let mut final_draft =
+                            crate::channels::DraftReplyState::new(&message.channel);
+                        final_draft.accumulated = d.accumulated.clone();
+                        final_draft.message_id = d.message_id.clone();
+                        final_draft.posted = true;
+                        let _ = self
+                            .channels
+                            .send_draft(&message.channel, &final_draft, &message.metadata)
+                            .await;
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                // Persist the draft state for the next loop iteration.
+                // If the LLM returns ToolCalls, the next iteration will
+                // reuse the message_id to edit the same Telegram message.
+                {
+                    let d = draft.lock().await;
+                    let mut persist = persistent_draft.lock().await;
+                    *persist = Some(crate::channels::DraftReplyState {
+                        message_id: d.message_id.clone(),
+                        channel_id: d.channel_id.clone(),
+                        accumulated: d.accumulated.clone(),
+                        last_edit_at: d.last_edit_at,
+                        posted: d.posted,
+                    });
+                }
+
                 match stream_result {
-                    Ok(output) => output,
+                    Ok(output) => {
+                        // If the response was already streamed via
+                        // sendMessage + editMessageText, tag it so the
+                        // caller skips the duplicate respond() call.
+                        if was_streamed {
+                            if let crate::llm::RespondResult::Text(ref text) = output.result {
+                                return Ok(AgenticLoopResult::Streamed(text.clone()));
+                            }
+                        }
+                        output
+                    }
                     Err(e) => return Err(e.into()),
                 }
             } else {
@@ -750,7 +834,9 @@ impl Agent {
             };
 
             // Record cost and track token usage
-            let model_name = self.llm().active_model_name();
+            // Use routed model name for accurate cost tracking when smart
+            // routing selects the cheap model instead of the primary.
+            let model_name = routed_model_name.clone();
 
             // ── Fire AfterLlmOutput hook ──────────────────────────────
             {
@@ -774,18 +860,16 @@ impl Agent {
                     }
                     Ok(crate::hooks::HookOutcome::Reject { reason }) => {
                         tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
-                        return Err(crate::error::Error::from(
-                            crate::error::ChannelError::StartupFailed {
-                                name: "hook".into(),
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected {
                                 reason: format!("AfterLlmOutput hook rejected: {}", reason),
                             },
                         ));
                     }
                     Err(crate::hooks::HookError::Rejected { reason }) => {
                         tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
-                        return Err(crate::error::Error::from(
-                            crate::error::ChannelError::StartupFailed {
-                                name: "hook".into(),
+                        return Err(crate::error::Error::Hook(
+                            crate::hooks::HookError::Rejected {
                                 reason: format!("AfterLlmOutput hook rejected: {}", reason),
                             },
                         ));
@@ -795,13 +879,15 @@ impl Agent {
                     }
                 }
             }
+            // Use the routed provider's cost_per_token for accurate cost
+            // tracking when smart routing selects the cheap model.
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
-                    Some(self.llm().cost_per_token()),
+                    Some(routed_cost_per_token),
                 )
                 .await;
             tracing::debug!(

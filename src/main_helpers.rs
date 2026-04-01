@@ -185,6 +185,10 @@ pub(crate) struct WasmChannelSetup {
     pub(crate) wasm_channel_runtime: Arc<WasmChannelRuntime>,
     pub(crate) pairing_store: Arc<PairingStore>,
     pub(crate) wasm_channel_router: Arc<WasmChannelRouter>,
+    /// Loader for hot-reload (shared with channel watcher).
+    pub(crate) wasm_channel_loader: Arc<WasmChannelLoader>,
+    /// Directory being watched for WASM channels.
+    pub(crate) channels_dir: std::path::PathBuf,
 }
 
 /// Load WASM channels and register their webhook routes.
@@ -202,7 +206,8 @@ pub(crate) async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
+    let loader = Arc::new(WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store)));
+    let channels_dir = config.channels.wasm_channels_dir.clone();
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)
@@ -265,11 +270,29 @@ pub(crate) async fn setup_wasm_channels(
                 );
             }
 
-            // Inject owner_id for Telegram so the bot only responds to the bound user.
-            if channel_name == "telegram"
-                && let Some(owner_id) = config.channels.telegram_owner_id
-            {
-                config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+            // Inject owner_id and stream_mode for Telegram so the bot only responds to the bound user.
+            if channel_name == "telegram" {
+                if let Some(owner_id) = config.channels.telegram_owner_id {
+                    config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+                }
+
+                let stream_mode = std::env::var("TELEGRAM_STREAM_MODE")
+                    .ok()
+                    .or(config.channels.telegram_stream_mode.clone())
+                    .unwrap_or_default();
+                
+                if !stream_mode.is_empty() {
+                    config_updates.insert("stream_mode".to_string(), serde_json::json!(stream_mode));
+                }
+            } else if channel_name == "discord" {
+                let stream_mode = std::env::var("DISCORD_STREAM_MODE")
+                    .ok()
+                    .or(config.channels.discord_stream_mode.clone())
+                    .unwrap_or_default();
+                
+                if !stream_mode.is_empty() {
+                    config_updates.insert("stream_mode".to_string(), serde_json::json!(stream_mode));
+                }
             }
 
             if !config_updates.is_empty() {
@@ -342,6 +365,8 @@ pub(crate) async fn setup_wasm_channels(
         wasm_channel_runtime: runtime,
         pairing_store,
         wasm_channel_router: wasm_router,
+        wasm_channel_loader: loader,
+        channels_dir,
     })
 }
 

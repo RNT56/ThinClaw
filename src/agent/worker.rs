@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::llm::cost_tracker::CostTracker;
+
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -22,6 +24,7 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
+use crate::workspace::Workspace;
 
 /// Shared dependencies for worker execution.
 ///
@@ -44,6 +47,14 @@ pub struct WorkerDeps {
     pub routine_name: Option<String>,
     /// Routine run ID for correlation.
     pub routine_run_id: Option<String>,
+    /// Workspace for loading identity files (SOUL.md, IDENTITY.md, USER.md).
+    /// When present, the worker injects the agent's identity into its system
+    /// prompt, ensuring consistent personality across chat and autonomous jobs.
+    pub workspace: Option<Arc<Workspace>>,
+    /// Optional shared cost tracker — receives entries from every LLM call in
+    /// this worker. Without this, autonomous worker costs are invisible to the
+    /// Cost Dashboard.
+    pub cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
 }
 
 /// Worker that executes a single job.
@@ -166,11 +177,39 @@ impl Worker {
         // Get job context
         let job_ctx = self.context_manager().get_context(self.job_id).await?;
 
-        // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        // Load workspace identity (SOUL.md, IDENTITY.md, USER.md, psychographic profile).
+        // Without this, autonomous jobs execute as a generic agent without personality.
+        let identity_block = if let Some(ref ws) = self.deps.workspace {
+            match ws.system_prompt_for_context(false).await {
+                Ok(prompt) if !prompt.is_empty() => Some(prompt),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::debug!("Could not load workspace identity for worker: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Create reasoning engine with identity
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        if let Some(ref prompt) = identity_block {
+            reasoning = reasoning.with_system_prompt(prompt.clone());
+        }
+        // Wire cost tracker so worker LLM calls appear in the Cost Dashboard
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
+        }
 
         // Build initial reasoning context (tool definitions refreshed each iteration in execution_loop)
         let mut reason_ctx = ReasoningContext::new().with_job(&job_ctx.description);
+
+        // Build system message with identity context
+        let identity_section = identity_block
+            .as_deref()
+            .map(|id| format!("\n\n---\n\n{}", id))
+            .unwrap_or_default();
 
         // Add system message
         reason_ctx.messages.push(ChatMessage::system(format!(
@@ -191,8 +230,8 @@ to see them directly.
 You can also use the `canvas` tool to display rich structured content (tables, panels, etc.) \
 in the user's UI.
 
-Report when the job is complete or if you encounter issues you cannot resolve."#,
-            job_ctx.title, job_ctx.description
+Report when the job is complete or if you encounter issues you cannot resolve.{identity}"#,
+            job_ctx.title, job_ctx.description, identity = identity_section
         )));
 
         // Main execution loop with timeout
@@ -1575,6 +1614,8 @@ mod tests {
             sse_tx: None,
             routine_name: None,
             routine_run_id: None,
+            workspace: None,
+            cost_tracker: None,
         };
 
         Worker::new(job_id, deps)

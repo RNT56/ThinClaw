@@ -155,6 +155,14 @@ impl Agent {
         if let Some(ref sender) = deps.sse_sender {
             scheduler = scheduler.with_sse_sender(sender.clone());
         }
+        // Wire workspace so workers get agent identity (SOUL.md, IDENTITY.md, etc.)
+        if let Some(ref ws) = deps.workspace {
+            scheduler = scheduler.with_workspace(Arc::clone(ws));
+        }
+        // Wire cost tracker so autonomous worker LLM calls appear in the Cost Dashboard
+        if let Some(ref tracker) = deps.cost_tracker {
+            scheduler = scheduler.with_cost_tracker(Arc::clone(tracker));
+        }
         let scheduler = Arc::new(scheduler);
 
         // Use provided agent router or create a default one.
@@ -1393,6 +1401,13 @@ impl Agent {
                 } else {
                     Ok(Some(content))
                 }
+            }
+            SubmissionResult::Streamed(_content) => {
+                // Response was already sent to the channel via progressive
+                // streaming edits (sendMessage + editMessageText).
+                // Return empty string so the caller skips respond().
+                tracing::debug!("Response already streamed to channel — skipping respond()");
+                Ok(Some(String::new()))
             }
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),

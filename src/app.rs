@@ -275,9 +275,13 @@ impl AppBuilder {
             }
         }
 
-        // Fire-and-forget housekeeping — no need to block startup.
-        let db_cleanup = db.clone();
-        tokio::spawn(async move {
+        // Housekeeping — run cleanup BEFORE returning so stale routine_runs
+        // from previous sessions are cleared before the routine engine starts.
+        // Previously this was fire-and-forget (tokio::spawn), which caused a
+        // race: the routine engine's check_concurrent() would see stale
+        // 'running' records and skip routines until the reaper eventually ran.
+        {
+            let db_cleanup = db.clone();
             if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
                 tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
             }
@@ -286,7 +290,7 @@ impl AppBuilder {
                 Ok(n) => tracing::info!("Cleaned up {} orphaned RUNNING routine runs", n),
                 Err(e) => tracing::warn!("Failed to cleanup stale routine runs: {}", e),
             }
-        });
+        }
 
         self.db = Some(db);
         Ok(())
@@ -411,6 +415,7 @@ impl AppBuilder {
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
+        cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
     ) -> Result<
         (
             Arc<SafetyLayer>,
@@ -515,6 +520,7 @@ impl AppBuilder {
                     Some(self.config.builder.to_builder_config()),
                     builder_base_dir,
                     builder_working_dir,
+                    cost_tracker.clone(),
                 )
                 .await;
             tracing::info!("Builder mode enabled");
@@ -871,7 +877,26 @@ impl AppBuilder {
         self.init_secrets().await?;
 
         let (llm, cheap_llm) = self.init_llm()?;
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+
+        // Create the shared cost tracker early (before init_tools) so the
+        // builder tool's iterative LLM loop can be cost-tracked from the start.
+        let cost_tracker = {
+            let mut tracker = CostTracker::new(BudgetConfig::default());
+
+            // Restore persisted entries from the ThinClaw DB.
+            if let Some(ref db) = self.db {
+                match db.get_setting("default", "cost_entries").await {
+                    Ok(Some(json)) => tracker.from_json(&json),
+                    Ok(None) => tracing::debug!("[cost] No persisted cost entries in DB"),
+                    Err(e) => tracing::warn!("[cost] Failed to load cost entries from DB: {}", e),
+                }
+            }
+
+            Arc::new(tokio::sync::Mutex::new(tracker))
+        };
+
+        let (safety, tools, embeddings, workspace) =
+            self.init_tools(&llm, Some(Arc::clone(&cost_tracker))).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -960,22 +985,6 @@ impl AppBuilder {
         };
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
-
-        // Create the shared cost tracker (budget limits from config/env).
-        let cost_tracker = {
-            let mut tracker = CostTracker::new(BudgetConfig::default());
-
-            // Restore persisted entries from the ThinClaw DB.
-            if let Some(ref db) = self.db {
-                match db.get_setting("default", "cost_entries").await {
-                    Ok(Some(json)) => tracker.from_json(&json),
-                    Ok(None) => tracing::debug!("[cost] No persisted cost entries in DB"),
-                    Err(e) => tracing::warn!("[cost] Failed to load cost entries from DB: {}", e),
-                }
-            }
-
-            Arc::new(tokio::sync::Mutex::new(tracker))
-        };
 
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {

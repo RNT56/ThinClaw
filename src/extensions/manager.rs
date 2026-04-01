@@ -185,6 +185,53 @@ impl ExtensionManager {
         active.extend(names);
     }
 
+    /// Persist the set of active channel names to the settings store.
+    ///
+    /// Saved under key `activated_channels` so channels auto-activate on restart.
+    async fn persist_active_channels(&self) {
+        let Some(ref store) = self.store else {
+            return;
+        };
+        let names: Vec<String> = self
+            .active_channel_names
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect();
+        let value = serde_json::json!(names);
+        if let Err(e) = store
+            .set_setting(&self.user_id, "activated_channels", &value)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to persist activated_channels setting");
+        }
+    }
+
+    /// Load previously activated channel names from the settings store.
+    ///
+    /// Returns channel names that were activated in a prior session so they can
+    /// be auto-activated at startup.
+    pub async fn load_persisted_active_channels(&self) -> Vec<String> {
+        let Some(ref store) = self.store else {
+            return Vec::new();
+        };
+        match store.get_setting(&self.user_id, "activated_channels").await {
+            Ok(Some(value)) => match serde_json::from_value(value) {
+                Ok(names) => names,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to deserialize activated_channels");
+                    Vec::new()
+                }
+            },
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load activated_channels setting");
+                Vec::new()
+            }
+        }
+    }
+
     /// Set the SSE broadcast sender for pushing extension status events to the web UI.
     pub async fn set_sse_sender(
         &self,
@@ -653,7 +700,7 @@ impl ExtensionManager {
                 }
 
                 Ok(format!(
-                    "Removed channel '{}'. Restart ThinClaw for the change to take effect.",
+                    "Removed channel '{}'. The hot-reload watcher will unload it automatically.",
                     name
                 ))
             }
@@ -2111,11 +2158,12 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        // Mark as active
+        // Mark as active and persist
         self.active_channel_names
             .write()
             .await
             .insert(channel_name.clone());
+        self.persist_active_channels().await;
 
         tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
 

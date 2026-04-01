@@ -377,6 +377,29 @@ impl LlmProvider for FailoverProvider {
             .calculate_cost(input_tokens, output_tokens)
     }
 
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        // For streaming, we don't attempt failover mid-stream.
+        // Use the last-used (or primary) provider directly.
+        let idx = self.last_used.load(Ordering::Relaxed);
+        self.providers[idx].complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        let idx = self.last_used.load(Ordering::Relaxed);
+        self.providers[idx].complete_stream_with_tools(request).await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        let idx = self.last_used.load(Ordering::Relaxed);
+        self.providers[idx].supports_streaming()
+    }
+
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         if let Some(provider_idx) = self.take_bound_provider_for_current_task() {
             return self.providers[provider_idx].effective_model_name(requested_model);

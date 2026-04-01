@@ -147,9 +147,11 @@ impl SmartRoutingProvider {
             return true;
         }
 
-        // Very short response from cheap model likely means it didn't have enough
-        // information to produce a useful answer
-        if content.len() < 30 {
+        // Very short response from cheap model likely means incomplete/truncated
+        // output. Note: legitimate short answers like "Yes." or "42" are only
+        // 3–4 chars; we use 10 chars as the cutoff to avoid escalating those
+        // while still catching single-word fragments or error stubs.
+        if content.len() < 10 {
             return true;
         }
 
@@ -364,6 +366,26 @@ impl LlmProvider for SmartRoutingProvider {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.primary.calculate_cost(input_tokens, output_tokens)
     }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        // Streaming always uses primary model (interactive streaming
+        // is used for complex, user-facing responses).
+        self.primary.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        self.primary.complete_stream_with_tools(request).await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.primary.supports_streaming()
+    }
 }
 
 #[cfg(test)]
@@ -487,14 +509,27 @@ mod tests {
 
     #[test]
     fn detects_uncertain_short_response() {
+        // A response containing a hard refusal pattern is always uncertain,
+        // regardless of length.
         let response = CompletionResponse {
-            content: "I'm not sure.".to_string(),
+            content: "I'm not able to complete that request.".to_string(),
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
+
+        // A short response like "Hmm" (< 10 chars) is also uncertain
+        // due to the length check.
+        let short = CompletionResponse {
+            content: "Hmm".to_string(),
+            thinking_content: None,
+            input_tokens: 10,
+            output_tokens: 1,
+            finish_reason: crate::llm::FinishReason::Stop,
+        };
+        assert!(SmartRoutingProvider::response_is_uncertain(&short));
     }
 
     #[test]
@@ -511,8 +546,9 @@ mod tests {
 
     #[test]
     fn short_response_is_uncertain() {
-        // Bug 7: very short responses (< 30 chars) from the cheap model are
+        // Very short responses (< 10 chars) from the cheap model are
         // considered uncertain and escalated to the primary model.
+        // "Yes." at 4 chars is below the threshold.
         let response = CompletionResponse {
             content: "Yes.".to_string(),
             thinking_content: None,
@@ -521,6 +557,16 @@ mod tests {
             finish_reason: crate::llm::FinishReason::Stop,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
+
+        // But a 20-char response like "The capital is Rome." is NOT uncertain.
+        let longer = CompletionResponse {
+            content: "The capital is Rome.".to_string(),
+            thinking_content: None,
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: crate::llm::FinishReason::Stop,
+        };
+        assert!(!SmartRoutingProvider::response_is_uncertain(&longer));
     }
 
     #[test]
@@ -634,9 +680,9 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_escalates_on_uncertain_response() {
-        // Cheap model returns an uncertain response
+        // Cheap model returns a response with a hard refusal pattern
         let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
-        let cheap = Arc::new(StubLlm::new("I'm not sure about that.").with_model_name("cheap"));
+        let cheap = Arc::new(StubLlm::new("I'm not able to complete that request.").with_model_name("cheap"));
 
         let router = SmartRoutingProvider::new(
             primary.clone(),

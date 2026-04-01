@@ -141,14 +141,36 @@ impl ChannelHealthMonitor {
                                         "Attempting channel restart"
                                     );
 
-                                    // We can't directly restart here since we need
-                                    // the channel instance. Instead, we log the intent.
-                                    // Real restart would require ChannelManager to expose
-                                    // a restart(name) method.
-                                    tracing::info!(
-                                        channel = %name,
-                                        "Channel restart requested (requires ChannelManager.restart())"
-                                    );
+                                    // Drop the states lock before the async restart call
+                                    // to avoid holding it across an await point.
+                                    let restart_name = name.clone();
+                                    drop(states_lock);
+
+                                    match manager.restart_channel(&restart_name).await {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                channel = %restart_name,
+                                                "Channel restarted successfully"
+                                            );
+                                            // Reset failure counter on success.
+                                            let mut reacquired = states.write().await;
+                                            if let Some(s) = reacquired.get_mut(&restart_name) {
+                                                s.consecutive_failures = 0;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                channel = %restart_name,
+                                                error = %e,
+                                                "Channel restart failed"
+                                            );
+                                        }
+                                    }
+
+                                    // Re-enter the loop — states_lock was dropped.
+                                    // Skip remaining channels this cycle; next tick
+                                    // will process them.
+                                    break;
                                 } else if state.restart_attempts >= config.max_restart_attempts {
                                     tracing::error!(
                                         channel = %name,

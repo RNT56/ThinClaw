@@ -69,6 +69,10 @@ struct TelegramMessage {
     /// Chat the message belongs to.
     chat: TelegramChat,
 
+    /// Forum topic thread ID (for supergroups with Topics enabled).
+    /// https://core.telegram.org/bots/api#message → message_thread_id
+    message_thread_id: Option<i64>,
+
     /// Message text.
     text: Option<String>,
 
@@ -318,6 +322,11 @@ struct TelegramMessageMetadata {
 
     /// Whether this is a private (DM) chat.
     is_private: bool,
+
+    /// Forum topic thread ID (for supergroups with Topics enabled).
+    /// When present, all replies must include this to target the correct topic.
+    #[serde(default)]
+    message_thread_id: Option<i64>,
 }
 
 /// Channel configuration injected by host.
@@ -716,17 +725,23 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "on_respond: chat_id={}, message_thread_id={:?}, is_private={}, metadata_json={}",
+                metadata.chat_id, metadata.message_thread_id, metadata.is_private, response.metadata_json
+            ),
+        );
+
         // Convert standard Markdown (from LLM output) to Telegram-safe HTML
         let html_content = markdown_to_telegram_html(&response.content);
         let chunks = split_message(&html_content, TELEGRAM_MAX_MESSAGE_LENGTH);
 
         for (i, chunk) in chunks.iter().enumerate() {
-            // Only the first chunk is a reply to the original message
-            let reply_to = if i == 0 {
-                Some(metadata.message_id)
-            } else {
-                None
-            };
+            // Unconditionally set reply_to = None. If we reply_to a message directly, Telegram
+            // clients implicitly group it into a sub-thread 'Replies' view which isolates the
+            // conversation from the main flow. Passing None keeps it in the active chat/topic.
+            let reply_to = None;
 
             // Try sending with HTML first; fall back to plain text if Telegram
             // can't parse the entities.
@@ -735,6 +750,7 @@ impl Guest for TelegramChannel {
                 chunk,
                 reply_to,
                 Some("HTML"),
+                metadata.message_thread_id,
             );
 
             match result {
@@ -763,6 +779,7 @@ impl Guest for TelegramChannel {
                         plain_chunk,
                         reply_to,
                         None,
+                        metadata.message_thread_id,
                     )
                     .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
                 }
@@ -794,10 +811,14 @@ impl Guest for TelegramChannel {
         match action {
             TelegramStatusAction::Typing => {
                 // POST /sendChatAction with action "typing"
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "chat_id": metadata.chat_id,
                     "action": "typing"
                 });
+
+                if let Some(thread_id) = metadata.message_thread_id {
+                    payload["message_thread_id"] = serde_json::json!(thread_id);
+                }
 
                 let payload_bytes = match serde_json::to_vec(&payload) {
                     Ok(b) => b,
@@ -826,7 +847,7 @@ impl Guest for TelegramChannel {
             TelegramStatusAction::Notify(prompt) => {
                 // Send user-visible status updates for actionable events.
                 if let Err(first_err) =
-                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None)
+                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None, metadata.message_thread_id)
                 {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
@@ -836,7 +857,7 @@ impl Guest for TelegramChannel {
                         ),
                     );
 
-                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None) {
+                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None, metadata.message_thread_id) {
                         channel_host::log(
                             channel_host::LogLevel::Debug,
                             &format!(
@@ -889,6 +910,7 @@ fn send_message(
     text: &str,
     reply_to_message_id: Option<i64>,
     parse_mode: Option<&str>,
+    message_thread_id: Option<i64>,
 ) -> Result<i64, SendError> {
     let mut payload = serde_json::json!({
         "chat_id": chat_id,
@@ -906,6 +928,11 @@ fn send_message(
 
     if let Some(mode) = parse_mode {
         payload["parse_mode"] = serde_json::Value::String(mode.to_string());
+    }
+
+    // Thread targeting for forum topics
+    if let Some(thread_id) = message_thread_id {
+        payload["message_thread_id"] = serde_json::json!(thread_id);
     }
 
     let payload_bytes = serde_json::to_vec(&payload)
@@ -1356,6 +1383,7 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
         ),
         None,
         Some("HTML"),
+        None, // Pairing replies don't target a specific thread
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
@@ -1525,6 +1553,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        message_thread_id: message.message_thread_id,
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -1556,20 +1585,29 @@ fn handle_message(message: TelegramMessage) {
     };
 
     // Emit the message to the agent
+    // Use message_thread_id as the thread_id for forum topic threading
+    channel_host::log(
+        channel_host::LogLevel::Info,
+        &format!(
+            "handle_message: chat_id={}, message_id={}, message_thread_id={:?}, is_private={}, chat_type={}",
+            message.chat.id, message.message_id, message.message_thread_id, is_private, message.chat.chat_type
+        ),
+    );
+
     channel_host::emit_message(&EmittedMessage {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
         content: content_to_emit,
-        thread_id: None, // Telegram doesn't have threads in the same way
+        thread_id: message.message_thread_id.map(|id| id.to_string()),
         metadata_json,
         attachments,
     });
 
     channel_host::log(
-        channel_host::LogLevel::Debug,
+        channel_host::LogLevel::Info,
         &format!(
-            "Emitted message from user {} in chat {} (attachments: {})",
-            from.id, message.chat.id, media_descriptors.len()
+            "Emitted message from user {} in chat {} (thread: {:?}, attachments: {})",
+            from.id, message.chat.id, message.message_thread_id, media_descriptors.len()
         ),
     );
 }

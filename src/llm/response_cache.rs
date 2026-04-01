@@ -134,6 +134,34 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
         }
     }
 
+    // Include thinking config so requests with different reasoning budgets
+    // (or enabled vs disabled) produce distinct cache keys.
+    hasher.update(b"|thinking:");
+    match request.thinking {
+        crate::llm::ThinkingConfig::Disabled => hasher.update(b"off"),
+        crate::llm::ThinkingConfig::Enabled { budget_tokens } => {
+            hasher.update(b"on:");
+            hasher.update(budget_tokens.to_le_bytes());
+        }
+    }
+
+    // Include metadata so requests with different thread/context IDs
+    // don't collide.
+    if !request.metadata.is_empty() {
+        hasher.update(b"|meta:");
+        // Sort keys for deterministic ordering.
+        let mut keys: Vec<&String> = request.metadata.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(val) = request.metadata.get(key) {
+                hasher.update(key.as_bytes());
+                hasher.update(b"=");
+                hasher.update(val.as_bytes());
+                hasher.update(b"\x00");
+            }
+        }
+    }
+
     format!("{:x}", hasher.finalize())
 }
 
@@ -231,6 +259,26 @@ impl LlmProvider for CachedProvider {
 
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
         self.inner.set_model(model)
+    }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        // Streaming responses can't be cached (consumed incrementally).
+        // Bypass the cache and forward to the inner provider's native streaming.
+        self.inner.complete_stream(request).await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        self.inner.complete_stream_with_tools(request).await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
     }
 }
 

@@ -11,6 +11,8 @@ mod canvas;
 mod device_info;
 mod discord_actions;
 mod echo;
+#[cfg(feature = "document-extraction")]
+mod extract_document;
 pub mod extension_tools;
 mod file;
 mod http;
@@ -37,6 +39,8 @@ pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
+#[cfg(feature = "document-extraction")]
+pub use extract_document::ExtractDocumentTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };

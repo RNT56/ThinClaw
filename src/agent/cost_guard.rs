@@ -246,6 +246,16 @@ impl CostGuard {
     pub async fn model_usage(&self) -> HashMap<String, ModelTokens> {
         self.model_tokens.lock().await.clone()
     }
+
+    /// Configured daily budget in cents, if any.
+    pub fn daily_budget_cents(&self) -> Option<u64> {
+        self.config.max_cost_per_day_cents
+    }
+
+    /// Configured hourly action limit, if any.
+    pub fn hourly_action_limit(&self) -> Option<u64> {
+        self.config.max_actions_per_hour
+    }
 }
 
 /// Convert a Decimal USD amount to whole cents (truncated).

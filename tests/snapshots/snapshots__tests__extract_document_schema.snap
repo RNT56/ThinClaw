@@ -1,0 +1,26 @@
+---
+source: tests/snapshots.rs
+assertion_line: 80
+expression: schema
+---
+{
+  "properties": {
+    "data": {
+      "description": "Base64-encoded document data (use when you already have the file bytes). Must be paired with 'mime_type'.",
+      "type": "string"
+    },
+    "filename": {
+      "description": "Original filename (used for type detection when MIME is ambiguous)",
+      "type": "string"
+    },
+    "mime_type": {
+      "description": "MIME type of the document (e.g. 'application/pdf'). Required when using 'data'. Auto-detected for URLs.",
+      "type": "string"
+    },
+    "url": {
+      "description": "URL of the document to download and extract text from. Provide either 'url' OR both 'data' and 'mime_type'.",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}

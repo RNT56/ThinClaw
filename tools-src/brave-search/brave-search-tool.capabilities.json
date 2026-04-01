@@ -1,0 +1,42 @@
+{
+  "http": {
+    "allowlist": [
+      {
+        "host": "api.search.brave.com",
+        "path_prefix": "/res/v1/",
+        "methods": ["GET"]
+      }
+    ],
+    "credentials": {
+      "brave_search_api_key": {
+        "secret_name": "brave_search_api_key",
+        "location": {
+          "type": "header",
+          "name": "X-Subscription-Token"
+        },
+        "host_patterns": [
+          "api.search.brave.com"
+        ]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 20,
+      "requests_per_hour": 2000
+    }
+  },
+  "secrets": {
+    "allowed_names": [
+      "brave_search_api_key"
+    ]
+  },
+  "auth": {
+    "secret_name": "brave_search_api_key",
+    "display_name": "Brave Search",
+    "instructions": "Get a free API key (2,000 queries/month free tier) from the Brave Search API dashboard.",
+    "setup_url": "https://brave.com/search/api/",
+    "token_hint": "Starts with 'BSA' (e.g. BSAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)",
+    "env_var": "BRAVE_SEARCH_API_KEY",
+    "provider": "brave-search"
+  }
+}
+

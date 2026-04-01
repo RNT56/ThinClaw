@@ -99,6 +99,7 @@ impl GatewayChannel {
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
+            channel_manager: None,
         });
 
         Self {
@@ -136,6 +137,7 @@ impl GatewayChannel {
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: self.state.secrets_store.clone(),
+            channel_manager: self.state.channel_manager.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -250,6 +252,12 @@ impl GatewayChannel {
         store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
     ) -> Self {
         self.rebuild_state(|s| s.secrets_store = Some(store));
+        self
+    }
+
+    /// Inject the channel manager for runtime channel setting changes.
+    pub fn with_channel_manager(mut self, cm: Arc<crate::channels::ChannelManager>) -> Self {
+        self.rebuild_state(|s| s.channel_manager = Some(cm));
         self
     }
 

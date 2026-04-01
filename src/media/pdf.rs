@@ -43,12 +43,32 @@ impl PdfExtractor {
         self
     }
 
-    /// Extract text from PDF data using a simple stream-based approach.
+    /// Extract text from PDF data.
+    ///
+    /// When the `document-extraction` feature is enabled, uses `pdf-extract`
+    /// crate first (better for complex PDFs with CMap encodings). Falls back
+    /// to the built-in BT/ET stream parser.
+    fn extract_text_from_pdf(data: &[u8]) -> Result<String, MediaExtractError> {
+        // Try pdf-extract crate first when available (handles CMap, fonts, page ordering)
+        #[cfg(feature = "document-extraction")]
+        {
+            if let Ok(text) = crate::document_extraction::extractors::extract_pdf(data) {
+                if !text.trim().is_empty() {
+                    return Ok(text);
+                }
+            }
+        }
+
+        // Fallback: built-in BT/ET parser
+        Self::extract_text_builtin(data)
+    }
+
+    /// Built-in lightweight PDF text extraction via BT/ET stream parsing.
     ///
     /// This scans for BT...ET text blocks and extracts Tj/TJ string operands.
     /// Works for most simple PDFs. Complex PDFs with CMap encodings or
     /// reordered pages may not extract perfectly.
-    fn extract_text_from_pdf(data: &[u8]) -> Result<String, MediaExtractError> {
+    fn extract_text_builtin(data: &[u8]) -> Result<String, MediaExtractError> {
         // Validate PDF magic
         if data.len() < 5 || &data[0..5] != b"%PDF-" {
             return Err(MediaExtractError::ExtractionFailed {

@@ -42,7 +42,14 @@ jobs:
           done
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - name: Run Tests
-        run: cargo test --all-features -- --nocapture
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        run: cargo llvm-cov --all-features --codecov --output-path codecov.json -- --nocapture
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          file: codecov.json
+          fail_ci_if_error: false
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture

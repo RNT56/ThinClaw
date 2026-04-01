@@ -91,6 +91,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "update_agent",
     "remove_agent",
     "message_agent",
+    "extract_document",
 ];
 
 /// Registry of available tools.
@@ -302,17 +303,23 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(http));
 
+        // Document extraction tool (when feature is enabled)
+        #[cfg(feature = "document-extraction")]
+        self.register_sync(Arc::new(
+            crate::tools::builtin::ExtractDocumentTool,
+        ));
+
         tracing::info!("Registered {} built-in tools", self.count());
     }
 
-    /// Register only orchestrator-domain tools (safe for the main process).
+    /// Register tools available in the orchestrator process.
     ///
-    /// This registers tools that don't touch the filesystem or run shell commands:
-    /// echo, time, json, http. Use this when `allow_local_tools = false` and
-    /// container-domain tools should only be available inside sandboxed containers.
+    /// Currently delegates to `register_builtin_tools()`, which registers all
+    /// non-filesystem built-in tools (echo, time, json, http, browser, etc.).
+    /// Container-domain tools (shell, file ops) are registered separately via
+    /// `register_container_tools()` / `register_dev_tools()`.
     pub fn register_orchestrator_tools(&self) {
         self.register_builtin_tools();
-        // register_builtin_tools already only registers orchestrator-domain tools
     }
 
     /// Register container-domain tools (filesystem, shell, code).
@@ -609,6 +616,7 @@ impl ToolRegistry {
         config: Option<BuilderConfig>,
         base_dir: Option<std::path::PathBuf>,
         working_dir: Option<std::path::PathBuf>,
+        cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     ) {
         // Register dev tools respecting workspace sandbox config.
         // Previously this always called register_dev_tools() (= None, None),
@@ -616,15 +624,18 @@ impl ToolRegistry {
         self.register_dev_tools_with_config(base_dir, working_dir);
 
         // Create the builder (arg order: config, llm, safety, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        let mut builder = LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
             safety,
             Arc::clone(self),
-        ));
+        );
+        if let Some(tracker) = cost_tracker {
+            builder = builder.with_cost_tracker(tracker);
+        }
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::new(builder))))
             .await;
 
         tracing::info!("Registered software builder tool");

@@ -167,6 +167,9 @@ pub struct SubagentExecutor {
     store: Option<Arc<dyn crate::db::Database>>,
     /// Optional SSE broadcast sender for routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Optional shared cost tracker for sub-agent LLM calls.
+    cost_tracker:
+        Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl SubagentExecutor {
@@ -192,6 +195,7 @@ impl SubagentExecutor {
             result_tx,
             store: None,
             sse_tx: None,
+            cost_tracker: None,
         };
         (executor, result_rx)
     }
@@ -205,6 +209,15 @@ impl SubagentExecutor {
     /// Set the SSE broadcast sender for routine lifecycle events.
     pub fn with_sse_tx(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
         self.sse_tx = Some(tx);
+        self
+    }
+
+    /// Set the cost tracker so sub-agent LLM calls are visible in the Cost Dashboard.
+    pub fn with_cost_tracker(
+        mut self,
+        tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
+    ) -> Self {
+        self.cost_tracker = Some(tracker);
         self
     }
 
@@ -301,9 +314,10 @@ impl SubagentExecutor {
         let agent_name = name.clone();
         let agent_task = task.clone();
 
-        // Clone store + sse_tx for routine finalization inside spawned task
+        // Clone store + sse_tx + cost_tracker for routine finalization inside spawned task
         let store_for_task = self.store.clone();
         let sse_tx_for_task = self.sse_tx.clone();
+        let cost_tracker_for_task = self.cost_tracker.clone();
 
         // Emit SubagentSpawned event
         let _ = channels
@@ -338,6 +352,7 @@ impl SubagentExecutor {
                     max_iterations,
                     allowed.as_deref(),
                     &id.to_string(),
+                    cost_tracker_for_task.clone(),
                 ),
             )
             .await;
@@ -628,6 +643,7 @@ async fn run_subagent_loop(
     max_iterations: usize,
     allowed_tools: Option<&[String]>,
     agent_id: &str,
+    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
 
@@ -647,8 +663,12 @@ async fn run_subagent_loop(
         None => all_defs,
     };
 
-    let reasoning =
+    let mut reasoning =
         Reasoning::new(llm, safety.clone()).with_system_prompt(system_prompt.to_string());
+    // Wire cost tracker so sub-agent LLM calls appear in the Cost Dashboard
+    if let Some(ref tracker) = cost_tracker {
+        reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
+    }
 
     for iteration in 0..max_iterations {
         // Check cancellation

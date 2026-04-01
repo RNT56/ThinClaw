@@ -1,0 +1,33 @@
+{
+  "name": "brave-search",
+  "display_name": "Brave Search",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Privacy-respecting web and news search powered by Brave Search API. Gives the agent the ability to search the web for current information.",
+  "keywords": [
+    "search",
+    "web",
+    "news",
+    "brave",
+    "internet"
+  ],
+  "source": {
+    "dir": "tools-src/brave-search",
+    "capabilities": "brave-search-tool.capabilities.json",
+    "crate_name": "brave-search-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Brave Search",
+    "secrets": [
+      "brave_search_api_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://brave.com/search/api/"
+  },
+  "tags": [
+    "default",
+    "search"
+  ]
+}

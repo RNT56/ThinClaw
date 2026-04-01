@@ -57,10 +57,15 @@ pub struct Scheduler {
     hooks: Arc<HookRegistry>,
     /// Optional SSE sender propagated to routine-spawned workers.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Workspace for identity injection into workers.
+    workspace: Option<Arc<crate::workspace::Workspace>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
     subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
+    /// Optional shared cost tracker for worker LLM calls.
+    cost_tracker:
+        Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl Scheduler {
@@ -83,14 +88,31 @@ impl Scheduler {
             store,
             hooks,
             sse_tx: None,
+            workspace: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
+            cost_tracker: None,
         }
     }
 
     /// Attach an SSE broadcast sender so routine-spawned workers can emit lifecycle events.
     pub fn with_sse_sender(mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) -> Self {
         self.sse_tx = Some(tx);
+        self
+    }
+
+    /// Attach a workspace so workers can load agent identity (SOUL.md, etc.).
+    pub fn with_workspace(mut self, ws: Arc<crate::workspace::Workspace>) -> Self {
+        self.workspace = Some(ws);
+        self
+    }
+
+    /// Attach a cost tracker so worker LLM calls are visible in the Cost Dashboard.
+    pub fn with_cost_tracker(
+        mut self,
+        tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
+    ) -> Self {
+        self.cost_tracker = Some(tracker);
         self
     }
 
@@ -299,6 +321,8 @@ impl Scheduler {
                 sse_tx: self.sse_tx.clone(),
                 routine_name: Some(routine_name),
                 routine_run_id: Some(routine_run_id),
+                workspace: self.workspace.clone(),
+                cost_tracker: self.cost_tracker.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -382,6 +406,8 @@ impl Scheduler {
                 sse_tx: self.sse_tx.clone(),
                 routine_name: Some(routine_name),
                 routine_run_id: Some(routine_run_id),
+                workspace: self.workspace.clone(),
+                cost_tracker: self.cost_tracker.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -465,6 +491,8 @@ impl Scheduler {
                 sse_tx: None,
                 routine_name: None,
                 routine_run_id: None,
+                workspace: self.workspace.clone(),
+                cost_tracker: self.cost_tracker.clone(),
             };
             let worker = Worker::new(job_id, deps);
 

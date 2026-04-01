@@ -48,7 +48,10 @@ use crate::channels::wasm::host::{
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    StreamMode,
+};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
@@ -561,6 +564,11 @@ pub struct WasmChannel {
     /// In-memory workspace store persisting writes across callback invocations.
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
+
+    /// Stream mode for progressive message rendering via sendMessageDraft.
+    /// Configured via TELEGRAM_STREAM_MODE env var or DB setting. Default: None.
+    /// Wrapped in RwLock for runtime hot-reload via WebUI settings.
+    stream_mode: std::sync::RwLock<StreamMode>,
 }
 
 impl WasmChannel {
@@ -574,6 +582,19 @@ impl WasmChannel {
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
+
+        // Read stream mode from env for Telegram and Discord channels
+        let stream_mode = if prepared.name == "telegram" {
+            std::env::var("TELEGRAM_STREAM_MODE")
+                .map(|v| StreamMode::from_str_value(&v))
+                .unwrap_or_default()
+        } else if prepared.name == "discord" {
+            std::env::var("DISCORD_STREAM_MODE")
+                .map(|v| StreamMode::from_str_value(&v))
+                .unwrap_or_default()
+        } else {
+            StreamMode::None
+        };
 
         Self {
             name,
@@ -592,6 +613,7 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            stream_mode: std::sync::RwLock::new(stream_mode),
         }
     }
 
@@ -600,6 +622,13 @@ impl WasmChannel {
     /// Merges the provided values into the existing config JSON.
     /// Call this before `start()` to inject runtime values like tunnel_url.
     pub async fn update_config(&self, updates: HashMap<String, serde_json::Value>) {
+        if let Some(mode) = updates.get("stream_mode").and_then(|v| v.as_str()) {
+            let parsed = StreamMode::from_str_value(mode);
+            if let Ok(mut g) = self.stream_mode.write() {
+                *g = parsed;
+            }
+        }
+
         let mut config_guard = self.config_json.write().await;
 
         // Parse existing config
@@ -1409,6 +1438,14 @@ impl WasmChannel {
                 // Cancel any existing typing task
                 self.cancel_typing_task().await;
 
+                // Diagnostic: log the metadata to verify message_thread_id propagation
+                tracing::info!(
+                    channel = %self.name,
+                    metadata = %metadata,
+                    thread_id = ?metadata.get("message_thread_id"),
+                    "handle_status_update: Thinking with metadata"
+                );
+
                 // Fire once immediately
                 if let Err(e) = self.call_on_status(&status, metadata).await {
                     tracing::debug!(
@@ -2026,6 +2063,191 @@ impl Channel for WasmChannel {
         self.handle_status_update(status, metadata).await
     }
 
+    fn stream_mode(&self) -> StreamMode {
+        *self.stream_mode.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn set_stream_mode(&self, mode: StreamMode) {
+        if let Ok(mut g) = self.stream_mode.write() {
+            *g = mode;
+        }
+        tracing::info!(
+            channel = %self.name,
+            mode = ?mode,
+            "Stream mode updated at runtime"
+        );
+    }
+
+    async fn send_draft(
+        &self,
+        draft: &DraftReplyState,
+        metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        // Only Telegram channels support streaming via edit
+        if self.name != "telegram" {
+            return Ok(None);
+        }
+
+        // Extract chat_id and optional message_thread_id from metadata
+        let chat_id = metadata.get("chat_id").and_then(|v| v.as_i64());
+        let message_thread_id = metadata.get("message_thread_id").and_then(|v| v.as_i64());
+
+        let Some(chat_id) = chat_id else {
+            tracing::debug!("send_draft: no chat_id in metadata, skipping");
+            return Ok(None);
+        };
+
+        // Get bot token from credentials
+        let creds = self.credentials.read().await;
+        let token = creds.get("TELEGRAM_BOT_TOKEN").cloned();
+        drop(creds);
+
+        let Some(token) = token else {
+            tracing::debug!("send_draft: no TELEGRAM_BOT_TOKEN in credentials, skipping");
+            return Ok(None);
+        };
+
+        let client = reqwest::Client::new();
+
+        // Strategy: sendMessage (first call) → editMessageText (subsequent)
+        // This is the standard, reliable approach for streaming in Telegram.
+        // sendMessageDraft is unreliable (RANDOM_ID_INVALID errors).
+        if !draft.posted {
+            // ── First chunk: send a new message ──────────────────────────
+            let html = super::telegram_html::markdown_to_telegram_html(&draft.accumulated);
+            let mut payload = serde_json::json!({
+                "chat_id": chat_id,
+                "text": html,
+                "parse_mode": "HTML",
+            });
+
+            if let Some(thread_id) = message_thread_id {
+                payload["message_thread_id"] = serde_json::json!(thread_id);
+            }
+
+            let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+
+            match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    if !status.is_success() {
+                        tracing::warn!(
+                            channel = %self.name,
+                            status = %status,
+                            body = %body,
+                            "send_draft: initial sendMessage failed"
+                        );
+                        return Ok(None);
+                    }
+
+                    // Extract message_id from the Telegram response
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(msg_id) = parsed
+                            .get("result")
+                            .and_then(|r| r.get("message_id"))
+                            .and_then(|v| v.as_i64())
+                        {
+                            tracing::debug!(
+                                channel = %self.name,
+                                chat_id = chat_id,
+                                message_id = msg_id,
+                                thread_id = ?message_thread_id,
+                                text_len = draft.accumulated.len(),
+                                "send_draft: initial message sent"
+                            );
+                            // Return the message_id as string so DraftReplyState can
+                            // track it for subsequent editMessageText calls
+                            return Ok(Some(msg_id.to_string()));
+                        }
+                    }
+                    tracing::warn!("send_draft: could not extract message_id from sendMessage response");
+                    Ok(None)
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        channel = %self.name,
+                        error = %e,
+                        "send_draft: sendMessage HTTP request failed (non-fatal)"
+                    );
+                    Ok(None)
+                }
+            }
+        } else {
+            // ── Subsequent chunks: edit the existing message ─────────────
+            let Some(ref msg_id_str) = draft.message_id else {
+                // No message_id to edit — skip
+                return Ok(None);
+            };
+
+            let msg_id: i64 = match msg_id_str.parse() {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            };
+
+            let html = super::telegram_html::markdown_to_telegram_html(&draft.accumulated);
+            let payload = serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": html,
+                "parse_mode": "HTML",
+            });
+
+            let url = format!("https://api.telegram.org/bot{}/editMessageText", token);
+
+            match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        // 400 "message is not modified" is expected when text hasn't
+                        // changed enough — treat as non-fatal
+                        if body.contains("message is not modified") {
+                            return Ok(Some(msg_id_str.clone()));
+                        }
+                        tracing::debug!(
+                            channel = %self.name,
+                            status = %status,
+                            body = %body,
+                            "send_draft: editMessageText failed (non-fatal)"
+                        );
+                        return Ok(Some(msg_id_str.clone()));
+                    }
+                    tracing::trace!(
+                        channel = %self.name,
+                        chat_id = chat_id,
+                        message_id = msg_id,
+                        text_len = draft.accumulated.len(),
+                        "send_draft: message edited"
+                    );
+                    Ok(Some(msg_id_str.clone()))
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        channel = %self.name,
+                        error = %e,
+                        "send_draft: editMessageText HTTP request failed (non-fatal)"
+                    );
+                    Ok(Some(msg_id_str.clone()))
+                }
+            }
+        }
+    }
+
     async fn health_check(&self) -> Result<(), ChannelError> {
         // Check if we have an active message sender
         if self.message_tx.read().await.is_some() {
@@ -2196,6 +2418,22 @@ impl Channel for SharedWasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         self.inner.send_status(status, metadata).await
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        self.inner.stream_mode()
+    }
+
+    async fn set_stream_mode(&self, mode: StreamMode) {
+        self.inner.set_stream_mode(mode).await
+    }
+
+    async fn send_draft(
+        &self,
+        draft: &DraftReplyState,
+        metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        self.inner.send_draft(draft, metadata).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {

@@ -101,6 +101,8 @@ pub struct HeartbeatRunner {
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
+    /// Shared cost tracker so heartbeat LLM calls appear in the Cost Dashboard.
+    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl HeartbeatRunner {
@@ -120,12 +122,22 @@ impl HeartbeatRunner {
             safety,
             response_tx: None,
             consecutive_failures: 0,
+            cost_tracker: None,
         }
     }
 
     /// Set the response channel for notifications.
     pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
         self.response_tx = Some(tx);
+        self
+    }
+
+    /// Attach a shared cost tracker so heartbeat LLM calls are recorded.
+    pub fn with_cost_tracker(
+        mut self,
+        tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
+    ) -> Self {
+        self.cost_tracker = Some(tracker);
         self
     }
 
@@ -276,7 +288,10 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let mut reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        if let Some(ref tracker) = self.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
         let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
@@ -426,10 +441,14 @@ pub fn spawn_heartbeat(
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
+    }
+    if let Some(tracker) = cost_tracker {
+        runner = runner.with_cost_tracker(tracker);
     }
 
     tokio::spawn(async move {

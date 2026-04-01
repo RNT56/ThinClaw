@@ -23,6 +23,12 @@ pub enum RegistryCommand {
         verbose: bool,
     },
 
+    /// Search extensions by query (matches name, description, keywords)
+    Search {
+        /// Search query (e.g. "messaging", "slack", "email")
+        query: String,
+    },
+
     /// Show detailed information about an extension or bundle
     Info {
         /// Extension or bundle name (e.g. "slack", "google", "tools/gmail")
@@ -53,6 +59,12 @@ pub enum RegistryCommand {
         #[arg(long)]
         build: bool,
     },
+
+    /// Remove an installed extension
+    Remove {
+        /// Extension name (e.g. "slack", "telegram")
+        name: String,
+    },
 }
 
 /// Run a registry command.
@@ -76,6 +88,7 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
         RegistryCommand::List { kind, tag, verbose } => {
             cmd_list(&catalog, kind.as_deref(), tag.as_deref(), verbose)
         }
+        RegistryCommand::Search { query } => cmd_search(&catalog, &query),
         RegistryCommand::Info { name } => cmd_info(&catalog, &name),
         RegistryCommand::Install { name, force, build } => {
             cmd_install(&catalog, &repo_root, &name, force, build).await
@@ -83,6 +96,7 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
         RegistryCommand::InstallDefaults { force, build } => {
             cmd_install(&catalog, &repo_root, "default", force, build).await
         }
+        RegistryCommand::Remove { name } => cmd_remove(&name).await,
     }
 }
 
@@ -302,4 +316,67 @@ async fn cmd_install(
     }
 
     Ok(())
+}
+
+fn cmd_search(catalog: &RegistryCatalog, query: &str) -> anyhow::Result<()> {
+    let query_lower = query.to_lowercase();
+    let manifests = catalog.list(None, None);
+
+    let matches: Vec<_> = manifests
+        .iter()
+        .filter(|m| {
+            m.name.to_lowercase().contains(&query_lower)
+                || m.description.to_lowercase().contains(&query_lower)
+                || m.keywords.iter().any(|k| k.to_lowercase().contains(&query_lower))
+        })
+        .collect();
+
+    if matches.is_empty() {
+        println!("No extensions matching '{}'.", query);
+        return Ok(());
+    }
+
+    println!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND");
+    println!("{}", "-".repeat(60));
+
+    for m in &matches {
+        println!("{:<20} {:<8} {}", m.name, m.kind, m.description);
+    }
+
+    println!("\n{} result(s) for '{}'.", matches.len(), query);
+    Ok(())
+}
+
+async fn cmd_remove(name: &str) -> anyhow::Result<()> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+    // Check channels dir
+    let channels_dir = home.join(".thinclaw/channels");
+    let wasm_path = channels_dir.join(format!("{}.wasm", name));
+    let caps_path = channels_dir.join(format!("{}.capabilities.json", name));
+
+    if wasm_path.exists() {
+        tokio::fs::remove_file(&wasm_path).await?;
+        let _ = tokio::fs::remove_file(&caps_path).await;
+        println!("Removed channel '{}'.", name);
+        return Ok(());
+    }
+
+    // Check tools dir
+    let tools_dir = home.join(".thinclaw/tools");
+    let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+    let tool_caps = tools_dir.join(format!("{}.capabilities.json", name));
+
+    if tool_wasm.exists() {
+        tokio::fs::remove_file(&tool_wasm).await?;
+        let _ = tokio::fs::remove_file(&tool_caps).await;
+        println!("Removed tool '{}'.", name);
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Extension '{}' not found in ~/.thinclaw/channels/ or ~/.thinclaw/tools/.",
+        name
+    );
 }

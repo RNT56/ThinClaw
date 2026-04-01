@@ -1,0 +1,30 @@
+name: Fuzz
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_sanitizer
+          - fuzz_leak_detector
+          - fuzz_validator
+          - fuzz_credential_detect
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Run fuzzer (5 min)
+        run: cd fuzz && cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300

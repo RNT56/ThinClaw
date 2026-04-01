@@ -27,7 +27,7 @@ pub use leak_detector::{
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
-pub use validator::{ValidationResult, Validator};
+pub use validator::{ValidationError, ValidationErrorCode, ValidationResult, Validator};
 
 use crate::config::SafetyConfig;
 

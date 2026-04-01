@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+assertion_line: 61
+expression: display
+---
+- image
+- pdf
+- audio
+- video
+- document
+- unknown

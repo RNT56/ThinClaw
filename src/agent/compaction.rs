@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use tokio::sync::Mutex;
 
 use crate::agent::context_monitor::{CompactionStrategy, ContextBreakdown};
 use crate::agent::session::Thread;
@@ -35,12 +36,27 @@ pub struct CompactionResult {
 pub struct ContextCompactor {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
+    /// Shared cost tracker so compaction LLM calls appear in the Cost Dashboard.
+    cost_tracker: Option<Arc<Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl ContextCompactor {
     /// Create a new context compactor.
     pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
-        Self { llm, safety }
+        Self {
+            llm,
+            safety,
+            cost_tracker: None,
+        }
+    }
+
+    /// Attach a shared cost tracker so compaction LLM calls are recorded.
+    pub fn with_cost_tracker(
+        mut self,
+        tracker: Arc<Mutex<crate::llm::cost_tracker::CostTracker>>,
+    ) -> Self {
+        self.cost_tracker = Some(tracker);
+        self
     }
 
     /// Compact a thread's context using the given strategy.
@@ -233,7 +249,10 @@ Be brief but capture all important details. Use bullet points."#,
             .with_max_tokens(1024)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let mut reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        if let Some(ref tracker) = self.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
+        }
         let (text, usage) = reasoning.complete(request).await?;
 
         // Log compaction LLM usage for cost awareness (Bug 30).

@@ -10,6 +10,8 @@ pub enum MediaType {
     Pdf,
     Audio,
     Video,
+    /// Office documents (DOCX, PPTX, XLSX) and plain text files.
+    Document,
     Unknown,
 }
 
@@ -25,6 +27,8 @@ impl MediaType {
             Self::Audio
         } else if mime.starts_with("video/") {
             Self::Video
+        } else if is_document_mime(&mime) {
+            Self::Document
         } else {
             Self::Unknown
         }
@@ -37,6 +41,10 @@ impl MediaType {
             "pdf" => Self::Pdf,
             "wav" | "mp3" | "m4a" | "ogg" | "flac" | "aac" | "wma" | "opus" => Self::Audio,
             "mp4" | "avi" | "mkv" | "mov" | "webm" | "flv" => Self::Video,
+            "docx" | "pptx" | "xlsx" | "txt" | "csv" | "json" | "xml" | "yaml" | "yml"
+            | "toml" | "md" | "markdown" | "rs" | "py" | "js" | "ts" | "go" | "java" | "c"
+            | "cpp" | "h" | "rb" | "sh" | "sql" | "html" | "css" | "ini" | "cfg" | "conf"
+            | "log" => Self::Document,
             _ => Self::Unknown,
         }
     }
@@ -58,6 +66,7 @@ impl fmt::Display for MediaType {
             Self::Pdf => write!(f, "pdf"),
             Self::Audio => write!(f, "audio"),
             Self::Video => write!(f, "video"),
+            Self::Document => write!(f, "document"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -173,12 +182,17 @@ pub struct MediaPipeline {
 impl MediaPipeline {
     /// Create a new pipeline with default extractors.
     pub fn new() -> Self {
+        let mut extractors: Vec<Box<dyn MediaExtractor>> = vec![
+            Box::new(super::image::ImageExtractor::new()),
+            Box::new(super::pdf::PdfExtractor::new()),
+            Box::new(super::audio::AudioExtractor::new()),
+        ];
+
+        #[cfg(feature = "document-extraction")]
+        extractors.push(Box::new(super::document::DocumentExtractor::new()));
+
         Self {
-            extractors: vec![
-                Box::new(super::image::ImageExtractor::new()),
-                Box::new(super::pdf::PdfExtractor::new()),
-                Box::new(super::audio::AudioExtractor::new()),
-            ],
+            extractors,
             max_size: 50 * 1024 * 1024, // 50 MB
         }
     }
@@ -232,6 +246,23 @@ impl Default for MediaPipeline {
     }
 }
 
+/// Check if a MIME type represents a document format extractable by the
+/// document_extraction module.
+fn is_document_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime == "application/json"
+        || mime == "application/xml"
+        || mime == "application/javascript"
+        || mime == "application/x-yaml"
+        || mime == "application/toml"
+        || mime
+            == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || mime
+            == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        || mime
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
+
 /// Guess MIME type from a filename's extension.
 fn guess_mime_from_extension(filename: &str) -> String {
     let ext = Path::new(filename)
@@ -262,6 +293,18 @@ fn guess_mime_from_extension(filename: &str) -> String {
         "mkv" => "video/x-matroska",
         "mov" => "video/quicktime",
         "webm" => "video/webm",
+        // Document types
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "txt" | "md" | "markdown" | "csv" | "log" => "text/plain",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html",
+        "yaml" | "yml" => "application/x-yaml",
+        "toml" | "ini" | "cfg" | "conf" => "text/plain",
+        "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "rb" | "sh"
+        | "sql" | "css" => "text/plain",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -278,7 +321,8 @@ mod tests {
         assert_eq!(MediaType::from_mime("application/pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_mime("audio/mp3"), MediaType::Audio);
         assert_eq!(MediaType::from_mime("video/mp4"), MediaType::Video);
-        assert_eq!(MediaType::from_mime("application/json"), MediaType::Unknown);
+        assert_eq!(MediaType::from_mime("application/json"), MediaType::Document);
+        assert_eq!(MediaType::from_mime("text/plain"), MediaType::Document);
     }
 
     #[test]
@@ -287,7 +331,9 @@ mod tests {
         assert_eq!(MediaType::from_extension("PDF"), MediaType::Pdf);
         assert_eq!(MediaType::from_extension("mp3"), MediaType::Audio);
         assert_eq!(MediaType::from_extension("mp4"), MediaType::Video);
-        assert_eq!(MediaType::from_extension("txt"), MediaType::Unknown);
+        assert_eq!(MediaType::from_extension("txt"), MediaType::Document);
+        assert_eq!(MediaType::from_extension("docx"), MediaType::Document);
+        assert_eq!(MediaType::from_extension("csv"), MediaType::Document);
     }
 
     #[test]

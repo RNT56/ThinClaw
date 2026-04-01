@@ -353,6 +353,11 @@ pub enum SubmissionResult {
         content: String,
     },
 
+    /// Turn completed and response was already streamed to the channel
+    /// via progressive edits (sendMessage + editMessageText).
+    /// Caller should NOT send it again via respond().
+    Streamed(String),
+
     /// Need approval before continuing.
     NeedApproval {
         /// ID of the approval request.

@@ -299,6 +299,48 @@ impl LlmProvider for CircuitBreakerProvider {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.inner.calculate_cost(input_tokens, output_tokens)
     }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        self.check_allowed().await?;
+        // Record success/failure on the initial connection attempt.
+        // Mid-stream errors can't be tracked (the stream is consumed by the
+        // caller), but connection-level failures should still count toward
+        // the circuit breaker threshold.
+        match self.inner.complete_stream(request).await {
+            Ok(stream) => {
+                self.record_success().await;
+                Ok(stream)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+        self.check_allowed().await?;
+        match self.inner.complete_stream_with_tools(request).await {
+            Ok(stream) => {
+                self.record_success().await;
+                Ok(stream)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
 }
 
 #[cfg(test)]

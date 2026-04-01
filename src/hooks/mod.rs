@@ -18,6 +18,7 @@ pub mod bootstrap;
 pub mod bundled;
 pub mod hook;
 pub mod registry;
+pub mod webhook_signing;
 
 pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
 pub use bundled::{

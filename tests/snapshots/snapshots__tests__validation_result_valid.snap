@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+assertion_line: 30
+expression: result
+---
+is_valid: true
+errors: []
+warnings: []

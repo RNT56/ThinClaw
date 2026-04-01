@@ -130,7 +130,26 @@ fn estimate_message_tokens(message: &ChatMessage) -> usize {
     // Add overhead for role and structure
     let overhead = 4; // ~4 tokens for role and message structure
 
-    (word_count as f64 * TOKENS_PER_WORD) as usize + overhead
+    let text_tokens = (word_count as f64 * TOKENS_PER_WORD) as usize + overhead;
+
+    // Estimate tokens for multimodal attachments.
+    // Image tokens vary by resolution, but roughly:
+    //   - LLM APIs base64-encode images (~4/3x inflation)
+    //   - Tokenizers average ~1 token per 4 characters of base64
+    //   - So ~1 token per 3 bytes of raw image data
+    //   - Plus fixed overhead per image (~85 tokens for metadata/framing)
+    let attachment_tokens: usize = message
+        .attachments
+        .iter()
+        .map(|att| {
+            let raw_bytes = att.size();
+            let base64_chars = raw_bytes * 4 / 3;
+            let image_tokens = base64_chars / 4; // ~1 token per 4 chars
+            image_tokens + 85 // per-image overhead
+        })
+        .sum();
+
+    text_tokens + attachment_tokens
 }
 
 /// Estimate tokens for raw text.

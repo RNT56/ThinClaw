@@ -1,4 +1,4 @@
-> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`../CLAUDE.md`](../CLAUDE.md) for current documentation.
+> ⛔ **ARCHIVED** — This is a historical migration guide from the OpenClaw→IronClaw rewrite (early 2026). It does NOT reflect the current codebase. See [`docs/EXTENSION_SYSTEM.md`](../docs/EXTENSION_SYSTEM.md) for the current extension architecture, and [`docs/CHANNEL_ARCHITECTURE.md`](../docs/CHANNEL_ARCHITECTURE.md) for the hybrid channel design.
 
 ---
 

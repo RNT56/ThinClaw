@@ -50,9 +50,36 @@ impl Store {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let pool = {
+            // Try TLS first ("prefer" semantics) — uses system CA roots.
+            // Falls back to NoTls if TLS negotiation fails (e.g. local dev PG without certs).
+            let tls_result = (|| -> Result<_, Box<dyn std::error::Error>> {
+                let certs = rustls_native_certs::load_native_certs();
+                let mut root_store = rustls::RootCertStore::empty();
+                for cert in certs.certs {
+                    root_store.add(cert)?;
+                }
+                let tls_config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+                let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+                Ok(cfg.create_pool(Some(Runtime::Tokio1), tls)?)
+            })();
+
+            match tls_result {
+                Ok(pool) => {
+                    tracing::debug!("PostgreSQL pool created with TLS (prefer mode)");
+                    pool
+                }
+                Err(tls_err) => {
+                    tracing::debug!(
+                        "TLS pool creation failed ({tls_err}), falling back to NoTls"
+                    );
+                    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                        .map_err(|e| DatabaseError::Pool(e.to_string()))?
+                }
+            }
+        };
 
         // Test connection
         let _ = pool.get().await?;

@@ -80,12 +80,14 @@
 
 mod bundled;
 mod capabilities;
+pub mod channel_watcher;
 mod error;
 mod host;
 mod loader;
 pub mod router;
 mod runtime;
 mod schema;
+pub(crate) mod telegram_html;
 mod wrapper;
 
 // Core types
