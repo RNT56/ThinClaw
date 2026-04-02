@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.3/telegram-mtproto-wasm32-wasip2.tar.gz",
-      "sha256": "657ce008f8272e1c20f5455e0cbcb639f611f666f4de8af024cfedc5c20c73a8"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.5/telegram-mtproto-wasm32-wasip2.tar.gz",
+      "sha256": "5484c03dc37eebc77aafad807661d8d62bee2d48dd878a235a19786c1ba1eda5"
     }
   },
   "auth_summary": {
