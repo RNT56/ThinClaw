@@ -547,10 +547,7 @@ impl Tool for MessageAgentTool {
             if let Ok(memory) = ws.read("MEMORY.md").await {
                 let content = memory.content.trim();
                 if !content.is_empty() {
-                    context_parts.push(format!(
-                        "\n--- Your Memory (MEMORY.md) ---\n{}",
-                        content
-                    ));
+                    context_parts.push(format!("\n--- Your Memory (MEMORY.md) ---\n{}", content));
                 }
             }
         }

@@ -213,10 +213,8 @@ mod tests {
 
     #[test]
     fn test_decode_base64_valid() {
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            b"Hello, World!",
-        );
+        let encoded =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"Hello, World!");
         let decoded = decode_base64(&encoded).unwrap();
         assert_eq!(decoded, b"Hello, World!");
     }

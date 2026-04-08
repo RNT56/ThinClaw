@@ -3,8 +3,8 @@
 use crate::settings::KeySource;
 use crate::setup::prompts::{confirm, print_info, print_success};
 
-use super::{SetupError, SetupWizard};
 use super::helpers::capitalize_first;
+use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
@@ -149,6 +149,10 @@ impl SetupWizard {
 
         println!("  Agent: {}", self.settings.agent.name);
 
+        if let Some(ref tz) = self.settings.user_timezone {
+            println!("  Timezone: {}", tz);
+        }
+
         if let Some(ref cheap_model) = self.settings.providers.cheap_model {
             println!("  Smart routing: {} (cheap)", cheap_model);
         }
@@ -266,7 +270,10 @@ impl SetupWizard {
                      sudo ln -sf {} /usr/local/bin/thinclaw\n  \
                      Or: export PATH=\"{}:$PATH\"",
                     current_exe.display(),
-                    current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                    current_exe
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
                 ));
             }
             return;
@@ -279,7 +286,10 @@ impl SetupWizard {
             print_info(&format!(
                 "Tip: add thinclaw to your PATH:\n  \
                  export PATH=\"{}:$PATH\"",
-                current_exe.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                current_exe
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
             ));
             return;
         }
@@ -297,8 +307,13 @@ impl SetupWizard {
 
         // Need elevated permissions — ask
         println!();
-        print_info("thinclaw is not on your PATH. Create a symlink so you can run it from anywhere?");
-        match confirm("Create /usr/local/bin/thinclaw symlink (requires sudo)?", true) {
+        print_info(
+            "thinclaw is not on your PATH. Create a symlink so you can run it from anywhere?",
+        );
+        match confirm(
+            "Create /usr/local/bin/thinclaw symlink (requires sudo)?",
+            true,
+        ) {
             Ok(true) => {
                 let status = std::process::Command::new("sudo")
                     .args(["ln", "-sf"])

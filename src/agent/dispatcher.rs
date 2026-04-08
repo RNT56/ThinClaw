@@ -14,7 +14,9 @@ use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{
+    ChatMessage, Reasoning, ReasoningContext, RespondOutput, RespondResult, ToolDefinition,
+};
 
 // Helper functions extracted to dispatcher_helpers.rs
 use super::dispatcher_helpers::compact_messages_for_retry;
@@ -36,6 +38,86 @@ pub(super) enum AgenticLoopResult {
         /// The pending approval request to store.
         pending: PendingApproval,
     },
+}
+
+#[derive(Clone)]
+struct LlmTurnOptions {
+    force_text: bool,
+    thinking: crate::llm::ThinkingConfig,
+    stream_to_user: bool,
+    emit_progress_status: bool,
+    emit_thinking_status: bool,
+    planning_mode: bool,
+    max_output_tokens: Option<u32>,
+}
+
+struct LlmTurnResult {
+    output: RespondOutput,
+    streamed_text: bool,
+}
+
+const TOOL_PHASE_SYNTHESIS_PROMPT: &str = "Provide the final user-facing answer using the conversation and any tool results above. Do not call tools in this phase.";
+const TOOL_PHASE_NO_TOOLS_SENTINEL: &str = "NO_TOOLS_NEEDED";
+const TOOL_PHASE_PLANNING_PROMPT: &str = "Planner mode: decide which tools to call next. If tools are needed, call them directly. If no more tools are needed, do not draft the final answer here. Reply with only: NO_TOOLS_NEEDED";
+const TOOL_PHASE_PLANNING_MAX_TOKENS: u32 = 512;
+const STUCK_LOOP_FINALIZATION_PROMPT: &str = "STOP. You have called the same tool repeatedly without making progress. Do NOT call any more tools. Summarize what you have done so far and provide your best answer with the information you already have.";
+const TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE: &str =
+    "I was unable to prepare the final answer cleanly. Please try again.";
+const STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE: &str =
+    "I was unable to make further progress. Please try rephrasing your request.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPhaseTextOutcome {
+    NoToolsSignal,
+    PrimaryFinalText,
+    PrimaryNeedsFinalization,
+}
+
+fn is_tool_phase_no_tools_signal(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == TOOL_PHASE_NO_TOOLS_SENTINEL
+        || trimmed.starts_with(TOOL_PHASE_NO_TOOLS_SENTINEL)
+            && trimmed.len() <= TOOL_PHASE_NO_TOOLS_SENTINEL.len() + 4
+            && trimmed[TOOL_PHASE_NO_TOOLS_SENTINEL.len()..]
+                .chars()
+                .all(|c| c.is_whitespace() || c.is_ascii_punctuation())
+}
+
+fn tool_phase_synthesis_enabled(
+    runtime_status: Option<&crate::llm::runtime_manager::RuntimeStatus>,
+    has_cheap_llm: bool,
+    force_text: bool,
+    has_available_tools: bool,
+    override_active: bool,
+) -> bool {
+    let Some(runtime_status) = runtime_status else {
+        return false;
+    };
+
+    !force_text
+        && has_available_tools
+        && has_cheap_llm
+        && runtime_status.cheap_model.is_some()
+        && !override_active
+        && runtime_status.routing_enabled
+        && runtime_status.routing_mode == crate::settings::RoutingMode::CheapSplit
+        && runtime_status.tool_phase_synthesis_enabled
+}
+
+fn classify_tool_phase_text(
+    text: &str,
+    finish_reason: crate::llm::FinishReason,
+) -> ToolPhaseTextOutcome {
+    match finish_reason {
+        crate::llm::FinishReason::Stop if is_tool_phase_no_tools_signal(text) => {
+            ToolPhaseTextOutcome::NoToolsSignal
+        }
+        crate::llm::FinishReason::Stop => ToolPhaseTextOutcome::PrimaryFinalText,
+        crate::llm::FinishReason::Length
+        | crate::llm::FinishReason::Unknown
+        | crate::llm::FinishReason::ContentFilter
+        | crate::llm::FinishReason::ToolUse => ToolPhaseTextOutcome::PrimaryNeedsFinalization,
+    }
 }
 
 impl Agent {
@@ -76,86 +158,89 @@ impl Agent {
         // Select and prepare active skills (if skills system is enabled)
         let active_skills = self.select_active_skills(&message.content).await;
 
-        // Build skill context block — announce skills compactly (Phase 3: lazy loading).
-        // Instead of injecting full SKILL.md content, list names + descriptions.
-        // The agent uses `skill_read` to load full instructions on demand.
-        let skill_context = if !active_skills.is_empty() {
-            let mut context_parts = Vec::new();
-            for skill in &active_skills {
-                tracing::info!(
-                    skill_name = skill.name(),
-                    skill_version = skill.version(),
-                    trust = %skill.trust,
-                    "Skill activated"
-                );
+        // Collect the full skill directory (all loaded skills, not just matched ones).
+        // This powers the always-on ## Skills section so the agent always knows
+        // what skills are installed, even when none keyword-matched this message.
+        let all_skills = self.collect_all_skills().await;
 
-                context_parts.push(format!(
-                    "- **{}** (v{}, {}): {}",
-                    skill.name(),
-                    skill.version(),
-                    skill.trust,
-                    skill.manifest.description,
-                ));
+        // Build skill context block.
+        //
+        // Structure:
+        //   ## Skills
+        //
+        //   [### Active Skills — only when prefilter matched something]
+        //   - **name** (vX, trust): description
+        //   ...
+        //   Use `skill_read` to load full instructions.
+        //
+        //   [### Available Skills — always present when any skills are loaded]
+        //   name, name, name   ← compact directory
+        //   If a task might benefit from a listed skill, use `skill_read` to check it.
+        let skill_context = if !all_skills.is_empty() {
+            let mut parts: Vec<String> = Vec::new();
+
+            // Active skills section (prefilter matches) — only when there are matches
+            if !active_skills.is_empty() {
+                parts.push("### Active Skills".to_string());
+                for skill in &active_skills {
+                    tracing::info!(
+                        skill_name = skill.name(),
+                        skill_version = skill.version(),
+                        trust = %skill.trust,
+                        "Skill activated"
+                    );
+                    parts.push(format!(
+                        "- **{}** (v{}, {}): {}",
+                        skill.name(),
+                        skill.version(),
+                        skill.trust,
+                        skill.manifest.description,
+                    ));
+                }
+                parts.push(
+                    "\nUse `skill_read` with the skill name to load full instructions before using a skill.".to_string()
+                );
             }
-            context_parts.push(
-                "\nUse `skill_read` with the skill name to load full instructions before using a skill.".to_string()
-            );
-            Some(context_parts.join("\n"))
+
+            // Always-on skill directory — one entry per skill with name + description.
+            // Active skills are excluded (already listed in detail above).
+            // Descriptions allow the agent to evaluate relevance without calling
+            // skill_read blindly on every available skill.
+            let active_names: std::collections::HashSet<&str> =
+                active_skills.iter().map(|s| s.name()).collect();
+            let inactive_skills: Vec<&(String, String)> = all_skills
+                .iter()
+                .filter(|(name, _)| !active_names.contains(name.as_str()))
+                .collect();
+
+            if !inactive_skills.is_empty() {
+                let mut dir_lines = vec!["### Available Skills".to_string()];
+                for (name, desc) in &inactive_skills {
+                    dir_lines.push(format!("- **{}**: {}", name, desc));
+                }
+                if active_skills.is_empty() {
+                    dir_lines.push(
+                        "\nIf a task would benefit from one of these skills, use `skill_read` to load its full instructions first.".to_string()
+                    );
+                } else {
+                    dir_lines.push(
+                        "\nOther skills above may also be relevant — use `skill_read` to explore their instructions.".to_string()
+                    );
+                }
+                parts.push(dir_lines.join("\n"));
+            } else if !active_skills.is_empty() {
+                // All loaded skills are already active — nothing extra to show
+                parts.push("### Available Skills\n(all installed skills are already active)".to_string());
+            }
+
+            Some(parts.join("\n"))
         } else {
             None
         };
 
-        // ── Smart routing: select LLM provider BEFORE Reasoning is constructed ──
-        // Bug 3 fix: previously the selected provider was computed but the result
-        // was never used — Reasoning always received self.llm(). We now pick the
-        // provider first so Reasoning is initialized with the correct backend.
-        let routed_llm: Arc<dyn crate::llm::LlmProvider> =
-            if let Some(ref policy_lock) = self.deps.routing_policy {
-                let policy = policy_lock.read().await;
-                if policy.is_enabled() && policy.rule_count() > 0 {
-                    let est_tokens: u32 = initial_messages
-                        .iter()
-                        .map(|m| (m.estimated_chars() / 4) as u32)
-                        .sum();
-                    let ctx = crate::llm::routing_policy::RoutingContext {
-                        estimated_input_tokens: est_tokens,
-                        has_vision: message
-                            .attachments
-                            .iter()
-                            .any(|a| a.mime_type.starts_with("image/")),
-                        has_tools: self.deps.tools.count() > 0,
-                        requires_streaming: false,
-                        budget_usd: None,
-                    };
-                    let selected = policy.select_provider(&ctx);
-                    let current = self.llm().active_model_name();
-                    if selected != current {
-                        let cheap = self.cheap_llm();
-                        if cheap.active_model_name() == selected {
-                            tracing::info!(
-                                current_provider = %current,
-                                selected_provider = %selected,
-                                est_tokens = est_tokens,
-                                "Smart routing: switching to cheap model"
-                            );
-                            Arc::clone(cheap)
-                        } else {
-                            // Selected model name doesn't match cheap_llm — graceful fallback
-                            tracing::info!(
-                                selected_provider = %selected,
-                                "Smart routing: selected provider not available, using primary"
-                            );
-                            self.llm().clone()
-                        }
-                    } else {
-                        self.llm().clone()
-                    }
-                } else {
-                    self.llm().clone()
-                }
-            } else {
-                self.llm().clone()
-            };
+        // Request-time provider routing now happens inside the runtime LLM wrapper,
+        // which sees the full canonical provider config and live-reload state.
+        let routed_llm: Arc<dyn crate::llm::LlmProvider> = self.llm().clone();
 
         let active_channel_names = self.channels.channel_names().await;
 
@@ -163,11 +248,16 @@ impl Agent {
         // When smart routing selects the cheap model, this differs from
         // self.llm().active_model_name() (which always returns the primary).
         let routed_model_name = routed_llm.active_model_name();
-        let routed_cost_per_token = routed_llm.cost_per_token();
 
         let mut reasoning = Reasoning::new(routed_llm, self.safety().clone())
             .with_channel(message.channel.clone())
             .with_model_name(routed_model_name.clone())
+            .with_cheap_model_name(
+                self.deps
+                    .cheap_llm
+                    .as_ref()
+                    .map(|llm| llm.active_model_name()),
+            )
             .with_group_chat(is_group_chat)
             .with_active_channels(active_channel_names)
             .with_workspace_mode(
@@ -243,44 +333,53 @@ impl Agent {
 
             // ── Agent-driven model override (llm_select tool) ────────────
             // If the agent called `llm_select` on a previous iteration, the
-            // shared model_override will be Some. Create a new provider from
-            // the catalog and swap it into Reasoning so subsequent LLM calls
-            // use the agent's chosen model. We track the last applied spec to
-            // avoid recreating the provider on every iteration.
+            // shared model_override will be Some. Wrap the current routed LLM
+            // so subsequent calls carry a per-request model override that the
+            // live runtime can resolve across catalog and non-catalog backends.
             if let Some(ref override_lock) = self.deps.model_override {
                 let current_override = override_lock.read().await.clone();
                 let current_spec = current_override.as_ref().map(|mo| mo.model_spec.clone());
                 if current_spec != last_applied_model_override {
                     if let Some(ref mo) = current_override {
                         let new_model = &mo.model_spec;
-                        if let Some((provider_slug, model_name)) = new_model.split_once('/') {
-                            match crate::llm::provider_factory::create_provider_for_catalog_entry(
-                                provider_slug,
-                                model_name,
-                            ) {
-                                Ok(new_provider) => {
-                                    tracing::info!(
-                                        to = %new_model,
-                                        reason = mo.reason.as_deref().unwrap_or("agent decision"),
-                                        "Agent-driven model switch via llm_select"
-                                    );
-                                    reasoning.swap_llm(new_provider);
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        model = %new_model,
-                                        error = %e,
-                                        "Failed to create provider for agent model override, keeping current"
-                                    );
-                                }
-                            }
+                        let provider_slug = new_model
+                            .split_once('/')
+                            .map(|(provider, _)| provider)
+                            .unwrap_or("");
+                        if crate::tools::builtin::llm_tools::is_runtime_supported_provider_slug(
+                            provider_slug,
+                        ) {
+                            tracing::info!(
+                                to = %new_model,
+                                reason = mo.reason.as_deref().unwrap_or("agent decision"),
+                                "Agent-driven model switch via llm_select"
+                            );
+                            reasoning.swap_llm(
+                                crate::tools::builtin::llm_tools::wrap_model_spec_override(
+                                    original_llm.clone(),
+                                    new_model.clone(),
+                                ),
+                            );
+                            last_applied_model_override = current_spec;
+                        } else {
+                            tracing::warn!(
+                                model = %new_model,
+                                "Failed to apply agent model override because the provider slug is unsupported"
+                            );
+                            *override_lock.write().await = None;
+                            reasoning.swap_llm(original_llm.clone());
+                            context_messages.push(ChatMessage::system(format!(
+                                "Runtime note: requested model override '{}' could not be activated and was cleared because the provider slug is unsupported.",
+                                new_model
+                            )));
+                            last_applied_model_override = None;
                         }
                     } else {
                         // Override was reset — swap back to the original provider.
                         tracing::info!("Agent model override reset — restoring primary");
                         reasoning.swap_llm(original_llm.clone());
+                        last_applied_model_override = None;
                     }
-                    last_applied_model_override = current_spec;
                 }
             }
 
@@ -437,7 +536,6 @@ impl Agent {
                         }
                     }
                 }
-
             }
 
             // Inject a nudge message when approaching the iteration limit so the
@@ -472,6 +570,13 @@ impl Agent {
                 );
                 context_messages = systems;
                 context_messages.extend(rest.into_iter().skip(skip));
+
+                // Re-sanitize immediately after cap truncation: the cap may have
+                // dropped an assistant(tool_calls) message while keeping its
+                // downstream Tool result messages, creating orphaned tool roles.
+                // Running sanitize_tool_messages here converts them to user messages
+                // before the LLM call, preventing HTTP 400 errors.
+                crate::llm::sanitize_tool_messages(&mut context_messages);
 
                 // Bug 9 fix (revised): reset the flush flag AFTER the hard cap
                 // actually drops messages so a new compaction cycle can trigger
@@ -545,32 +650,6 @@ impl Agent {
                 tool_defs
             };
 
-            // Call LLM with current context; force_text drops tools to guarantee a
-            // text response on the final iteration.
-            let thinking = {
-                // Use the routed model name (not always the primary) so thinking
-                // config is resolved for the model that will actually handle the
-                // request — e.g. a cheap model that doesn't support thinking.
-                let (enabled, budget) = self.config.resolve_thinking_for_model(&routed_model_name);
-                if enabled {
-                    crate::llm::ThinkingConfig::Enabled {
-                        budget_tokens: budget,
-                    }
-                } else {
-                    crate::llm::ThinkingConfig::Disabled
-                }
-            };
-            let mut context = ReasoningContext::new()
-                .with_messages(context_messages.clone())
-                .with_tools(tool_defs)
-                .with_metadata({
-                    let mut m = std::collections::HashMap::new();
-                    m.insert("thread_id".to_string(), thread_id.to_string());
-                    m
-                });
-            context.force_text = force_text;
-            context.thinking = thinking;
-
             if force_text {
                 tracing::info!(
                     iteration,
@@ -578,391 +657,153 @@ impl Agent {
                 );
             }
 
-            // ── Fire BeforeLlmInput hook ───────────────────────────────
-            {
-                let last_user_msg = context_messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == crate::llm::Role::User)
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default();
-                let system_msg = context_messages
-                    .iter()
-                    .find(|m| m.role == crate::llm::Role::System)
-                    .map(|m| m.content.clone());
-                let event = crate::hooks::HookEvent::LlmInput {
-                    model: self.llm().active_model_name(),
-                    system_message: system_msg,
-                    user_message: last_user_msg,
-                    message_count: context_messages.len(),
-                    user_id: message.user_id.clone(),
-                };
-                match self.hooks().run(&event).await {
-                    Ok(crate::hooks::HookOutcome::Continue { modified }) => {
-                        if let Some(new_content) = modified {
-                            // Replace the last user message with the modified content
-                            if let Some(last) = context_messages
-                                .iter_mut()
-                                .rev()
-                                .find(|m| m.role == crate::llm::Role::User)
-                            {
-                                last.content = new_content;
-                            }
-                            // Rebuild context with modified messages
-                            context = context.with_messages(context_messages.clone());
-                        }
-                    }
-                    Ok(crate::hooks::HookOutcome::Reject { reason }) => {
-                        tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
-                        return Err(crate::error::Error::Hook(
-                            crate::hooks::HookError::Rejected {
-                                reason: format!("BeforeLlmInput hook rejected: {}", reason),
-                            },
-                        ));
-                    }
-                    Err(crate::hooks::HookError::Rejected { reason }) => {
-                        tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
-                        return Err(crate::error::Error::Hook(
-                            crate::hooks::HookError::Rejected {
-                                reason: format!("BeforeLlmInput hook rejected: {}", reason),
-                            },
-                        ));
-                    }
-                    Err(err) => {
-                        tracing::warn!("BeforeLlmInput hook error (fail-open): {}", err);
-                    }
-                }
-            }
+            let runtime_status = self
+                .deps
+                .llm_runtime
+                .as_ref()
+                .map(|runtime| runtime.status());
+            let use_tool_phase_synthesis = tool_phase_synthesis_enabled(
+                runtime_status.as_ref(),
+                self.deps.cheap_llm.is_some(),
+                force_text,
+                !tool_defs.is_empty(),
+                last_applied_model_override.is_some(),
+            );
+            let tool_phase_primary_thinking_enabled = runtime_status
+                .as_ref()
+                .map(|status| status.tool_phase_primary_thinking_enabled)
+                .unwrap_or(true);
 
-            // ── Choose streaming vs non-streaming LLM call ─────────────
-            let channel_stream_mode = self.channels.stream_mode(&message.channel).await;
-            let use_streaming = channel_stream_mode != crate::channels::StreamMode::None;
-
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::Thinking(if use_streaming {
-                        "Streaming response...".into()
-                    } else {
-                        "Calling LLM...".into()
-                    }),
-                    &message.metadata,
+            let phase_one_model_name = reasoning.current_llm().active_model_name();
+            let phase_one_turn = self
+                .execute_llm_turn(
+                    &mut reasoning,
+                    &mut context_messages,
+                    tool_defs,
+                    thread_id,
+                    message,
+                    &persistent_draft,
+                    &original_llm,
+                    &mut last_applied_model_override,
+                    LlmTurnOptions {
+                        force_text,
+                        thinking: if !use_tool_phase_synthesis
+                            || tool_phase_primary_thinking_enabled
+                        {
+                            self.thinking_config_for_model(&phase_one_model_name)
+                        } else {
+                            crate::llm::ThinkingConfig::Disabled
+                        },
+                        stream_to_user: !use_tool_phase_synthesis,
+                        emit_progress_status: !use_tool_phase_synthesis,
+                        emit_thinking_status: !use_tool_phase_synthesis,
+                        planning_mode: use_tool_phase_synthesis,
+                        max_output_tokens: use_tool_phase_synthesis
+                            .then_some(TOOL_PHASE_PLANNING_MAX_TOKENS),
+                    },
                 )
-                .await;
+                .await?;
 
-            let llm_start = std::time::Instant::now();
-            let output = if use_streaming {
-                // Streaming path: forward text chunks to channel as draft edits
-                let channels = Arc::clone(&self.channels);
-                let channel_name = message.channel.clone();
-                let metadata = message.metadata.clone();
-                let mode = channel_stream_mode;
+            let phase_one_finish_reason = phase_one_turn.output.finish_reason;
+            let phase_one_streamed_text = phase_one_turn.streamed_text;
 
-                // Initialise a per-iteration draft. If there's a persistent
-                // draft from a previous tool-call iteration, reuse its
-                // message_id so edits land on the same Telegram message.
-                let draft = {
-                    let prev = persistent_draft.lock().await;
-                    let mut new_draft = crate::channels::DraftReplyState::new(&channel_name);
-                    if let Some(ref prev_draft) = *prev {
-                        // Carry over the Telegram message_id so we edit
-                        // the existing message instead of sending a new one.
-                        new_draft.message_id = prev_draft.message_id.clone();
-                        new_draft.posted = prev_draft.posted;
-                    }
-                    Arc::new(tokio::sync::Mutex::new(new_draft))
-                };
-                let draft_for_stream = Arc::clone(&draft);
-
-                // Collect spawn handles so we can await them before the
-                // final edit, preventing a race where a late intermediate
-                // edit re-adds the ✦ indicator after we removed it.
-                let spawn_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
-                    Arc::new(tokio::sync::Mutex::new(Vec::new()));
-                let spawn_handles_for_stream = Arc::clone(&spawn_handles);
-
-                let stream_result = reasoning
-                    .respond_with_tools_streaming(&context, move |chunk: &str| {
-                        let channels = Arc::clone(&channels);
-                        let ch_name = channel_name.clone();
-                        let md = metadata.clone();
-                        let draft_ref = Arc::clone(&draft_for_stream);
-                        let chunk_owned = chunk.to_string();
-                        let handles_ref = Arc::clone(&spawn_handles_for_stream);
-
-                        // We must spawn because we're in a sync FnMut callback.
-                        // But we collect the handle so we can await it later.
-                        let handle = tokio::spawn(async move {
-                            let mut d = draft_ref.lock().await;
-                            let should_send = d.append(&chunk_owned);
-                            if should_send {
-                                let display = match mode {
-                                    crate::channels::StreamMode::StatusLine => {
-                                        let word_count = d.accumulated.split_whitespace().count();
-                                        format!("✦ Generating... ({} words)", word_count)
-                                    }
-                                    _ => d.display_text(),
+            match phase_one_turn.output.result {
+                RespondResult::Text(text) => {
+                    if use_tool_phase_synthesis {
+                        match classify_tool_phase_text(&text, phase_one_finish_reason) {
+                            ToolPhaseTextOutcome::NoToolsSignal => {
+                                let Some(cheap_llm) = self.deps.cheap_llm.clone() else {
+                                    tracing::warn!(
+                                        "Tool-phase synthesis was enabled without a cheap_llm handle; returning primary response"
+                                    );
+                                    return Ok(AgenticLoopResult::Response(text));
                                 };
 
-                                // Create a temporary draft with display text for sending
-                                let mut send_draft =
-                                    crate::channels::DraftReplyState::new(&ch_name);
-                                send_draft.accumulated = display;
-                                send_draft.message_id = d.message_id.clone();
-                                send_draft.posted = d.posted;
+                                let cheap_model_name = cheap_llm.active_model_name();
+                                let mut synthesis_reasoning =
+                                    reasoning.fork_with_llm(cheap_llm.clone());
+                                let mut synthesis_messages = context_messages.clone();
+                                synthesis_messages
+                                    .push(ChatMessage::system(TOOL_PHASE_SYNTHESIS_PROMPT));
 
-                                match channels.send_draft(&ch_name, &send_draft, &md).await {
-                                    Ok(msg_id) => d.mark_sent(msg_id),
-                                    Err(e) => {
-                                        tracing::debug!("Draft edit failed (non-fatal): {}", e);
+                                let synthesis_turn = self
+                                    .execute_llm_turn(
+                                        &mut synthesis_reasoning,
+                                        &mut synthesis_messages,
+                                        Vec::new(),
+                                        thread_id,
+                                        message,
+                                        &persistent_draft,
+                                        &cheap_llm,
+                                        &mut last_applied_model_override,
+                                        LlmTurnOptions {
+                                            force_text: true,
+                                            thinking: self
+                                                .thinking_config_for_model(&cheap_model_name),
+                                            stream_to_user: true,
+                                            emit_progress_status: true,
+                                            emit_thinking_status: true,
+                                            planning_mode: false,
+                                            max_output_tokens: None,
+                                        },
+                                    )
+                                    .await?;
+                                let synthesis_streamed_text = synthesis_turn.streamed_text;
+                                let synthesis_finish_reason = synthesis_turn.output.finish_reason;
+
+                                match synthesis_turn.output.result {
+                                    RespondResult::Text(synthesized)
+                                        if synthesis_finish_reason
+                                            == crate::llm::FinishReason::Stop =>
+                                    {
+                                        return Ok(self.agentic_result_from_text(
+                                            synthesis_streamed_text,
+                                            synthesized,
+                                        ));
+                                    }
+                                    RespondResult::Text(text) => {
+                                        tracing::warn!(
+                                            finish_reason = ?synthesis_finish_reason,
+                                            text_len = text.len(),
+                                            "Tool-phase synthesis produced non-final text"
+                                        );
+                                        return Ok(AgenticLoopResult::Response(
+                                            TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE.to_string(),
+                                        ));
+                                    }
+                                    RespondResult::ToolCalls { .. } => {
+                                        tracing::warn!(
+                                            "Tool-phase synthesis unexpectedly returned tool calls"
+                                        );
+                                        return Ok(AgenticLoopResult::Response(
+                                            TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE.to_string(),
+                                        ));
                                     }
                                 }
                             }
-                        });
-
-                        // Best-effort: try to register the handle. If the
-                        // mutex is contended we skip — the final drain will
-                        // still catch most in-flight tasks.
-                        if let Ok(mut handles) = handles_ref.try_lock() {
-                            handles.push(handle);
-                        }
-                    })
-                    .await;
-
-                // Drain all in-flight spawn handles before the final edit.
-                // This prevents a late intermediate edit from re-adding ✦
-                // after the final edit removed it.
-                {
-                    let mut handles = spawn_handles.lock().await;
-                    for h in handles.drain(..) {
-                        let _ = h.await;
-                    }
-                }
-
-                // Send final draft with complete text (remove typing indicator)
-                let was_streamed = {
-                    let d = draft.lock().await;
-                    if d.posted && !d.accumulated.is_empty() {
-                        // Final edit: remove the ✦ indicator by sending
-                        // the raw accumulated text.
-                        let mut final_draft =
-                            crate::channels::DraftReplyState::new(&message.channel);
-                        final_draft.accumulated = d.accumulated.clone();
-                        final_draft.message_id = d.message_id.clone();
-                        final_draft.posted = true;
-                        let _ = self
-                            .channels
-                            .send_draft(&message.channel, &final_draft, &message.metadata)
-                            .await;
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                // Persist the draft state for the next loop iteration.
-                // If the LLM returns ToolCalls, the next iteration will
-                // reuse the message_id to edit the same Telegram message.
-                {
-                    let d = draft.lock().await;
-                    let mut persist = persistent_draft.lock().await;
-                    *persist = Some(crate::channels::DraftReplyState {
-                        message_id: d.message_id.clone(),
-                        channel_id: d.channel_id.clone(),
-                        accumulated: d.accumulated.clone(),
-                        last_edit_at: d.last_edit_at,
-                        posted: d.posted,
-                    });
-                }
-
-                match stream_result {
-                    Ok(output) => {
-                        // If the response was already streamed via
-                        // sendMessage + editMessageText, tag it so the
-                        // caller skips the duplicate respond() call.
-                        if was_streamed {
-                            if let crate::llm::RespondResult::Text(ref text) = output.result {
-                                return Ok(AgenticLoopResult::Streamed(text.clone()));
+                            ToolPhaseTextOutcome::PrimaryFinalText => {
+                                return Ok(
+                                    self.agentic_result_from_text(phase_one_streamed_text, text)
+                                );
+                            }
+                            ToolPhaseTextOutcome::PrimaryNeedsFinalization => {
+                                return self
+                                    .finalize_primary_text_only(
+                                        &mut reasoning,
+                                        &mut context_messages,
+                                        thread_id,
+                                        message,
+                                        &persistent_draft,
+                                        &original_llm,
+                                        &mut last_applied_model_override,
+                                        TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                    )
+                                    .await;
                             }
                         }
-                        output
                     }
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
-                // Non-streaming path (original)
-                match reasoning.respond_with_tools(&context).await {
-                    Ok(output) => output,
-                    Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
-                        tracing::warn!(
-                            used,
-                            limit,
-                            iteration,
-                            "Context length exceeded, compacting messages and retrying"
-                        );
 
-                        // Compact: keep system messages + last user message + current turn
-                        context_messages = compact_messages_for_retry(&context_messages);
-
-                        // Rebuild context with compacted messages
-                        let mut retry_context = ReasoningContext::new()
-                            .with_messages(context_messages.clone())
-                            .with_tools(if force_text {
-                                Vec::new()
-                            } else {
-                                context.available_tools.clone()
-                            })
-                            .with_metadata(context.metadata.clone());
-                        retry_context.force_text = force_text;
-
-                        reasoning
-                            .respond_with_tools(&retry_context)
-                            .await
-                            .map_err(|retry_err| {
-                                tracing::error!(
-                                    original_used = used,
-                                    original_limit = limit,
-                                    retry_error = %retry_err,
-                                    "Retry after auto-compaction also failed"
-                                );
-                                crate::error::Error::from(retry_err)
-                            })?
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            };
-
-            // Record cost and track token usage
-            // Use routed model name for accurate cost tracking when smart
-            // routing selects the cheap model instead of the primary.
-            let model_name = routed_model_name.clone();
-
-            // ── Fire AfterLlmOutput hook ──────────────────────────────
-            {
-                let output_text = match &output.result {
-                    crate::llm::RespondResult::Text(t) => t.clone(),
-                    crate::llm::RespondResult::ToolCalls { content, .. } => {
-                        content.clone().unwrap_or_default()
-                    }
-                };
-                let event = crate::hooks::HookEvent::LlmOutput {
-                    model: model_name.clone(),
-                    content: output_text,
-                    input_tokens: output.usage.input_tokens,
-                    output_tokens: output.usage.output_tokens,
-                    user_id: message.user_id.clone(),
-                };
-                match self.hooks().run(&event).await {
-                    Ok(crate::hooks::HookOutcome::Continue { .. }) => {
-                        // AfterLlmOutput modifications are informational —
-                        // the output struct is already committed.
-                    }
-                    Ok(crate::hooks::HookOutcome::Reject { reason }) => {
-                        tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
-                        return Err(crate::error::Error::Hook(
-                            crate::hooks::HookError::Rejected {
-                                reason: format!("AfterLlmOutput hook rejected: {}", reason),
-                            },
-                        ));
-                    }
-                    Err(crate::hooks::HookError::Rejected { reason }) => {
-                        tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
-                        return Err(crate::error::Error::Hook(
-                            crate::hooks::HookError::Rejected {
-                                reason: format!("AfterLlmOutput hook rejected: {}", reason),
-                            },
-                        ));
-                    }
-                    Err(err) => {
-                        tracing::warn!("AfterLlmOutput hook error (fail-open): {}", err);
-                    }
-                }
-            }
-            // Use the routed provider's cost_per_token for accurate cost
-            // tracking when smart routing selects the cheap model.
-            let call_cost = self
-                .cost_guard()
-                .record_llm_call(
-                    &model_name,
-                    output.usage.input_tokens,
-                    output.usage.output_tokens,
-                    Some(routed_cost_per_token),
-                )
-                .await;
-            tracing::debug!(
-                "LLM call used {} input + {} output tokens (${:.6})",
-                output.usage.input_tokens,
-                output.usage.output_tokens,
-                call_cost,
-            );
-
-            // Record latency for smart routing (LowestLatency rule)
-            if let Some(ref policy_lock) = self.deps.routing_policy {
-                let latency_ms = llm_start.elapsed().as_millis() as f64;
-                policy_lock
-                    .write()
-                    .await
-                    .record_latency(&model_name, latency_ms);
-            }
-
-            // Emit cost alert SSE event when approaching/exceeding budget
-            if let Some(ref sse_tx) = self.deps.sse_sender
-                && let Some(limit_cents) = self.config.max_cost_per_day_cents
-            {
-                use rust_decimal::prelude::ToPrimitive;
-                let daily_spend = self.cost_guard().daily_spend().await;
-                let spent_usd = daily_spend.to_f64().unwrap_or(0.0);
-                let limit_usd = limit_cents as f64 / 100.0;
-                let pct = if limit_usd > 0.0 {
-                    spent_usd / limit_usd * 100.0
-                } else {
-                    0.0
-                };
-                if pct >= 100.0 {
-                    let _ = sse_tx.send(crate::channels::web::types::SseEvent::CostAlert {
-                        alert_type: "exceeded".to_string(),
-                        current_cost_usd: spent_usd,
-                        limit_usd,
-                        message: Some(format!(
-                            "Daily budget exceeded: ${:.2} of ${:.2}",
-                            spent_usd, limit_usd,
-                        )),
-                    });
-                } else if pct >= 80.0 {
-                    let _ = sse_tx.send(crate::channels::web::types::SseEvent::CostAlert {
-                        alert_type: "warning".to_string(),
-                        current_cost_usd: spent_usd,
-                        limit_usd,
-                        message: Some(format!(
-                            "Approaching daily budget: ${:.2} of ${:.2} ({:.0}%)",
-                            spent_usd, limit_usd, pct,
-                        )),
-                    });
-                }
-            }
-
-            // Emit extended thinking content if present
-            if let Some(ref thinking_text) = output.thinking_content
-                && !thinking_text.is_empty()
-            {
-                tracing::debug!(
-                    thinking_len = thinking_text.len(),
-                    "LLM returned extended thinking content"
-                );
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Thinking(format!("[Reasoning]\n{}", thinking_text)),
-                        &message.metadata,
-                    )
-                    .await;
-            }
-
-            match output.result {
-                RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response(text));
+                    return Ok(self.agentic_result_from_text(phase_one_streamed_text, text));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -997,24 +838,20 @@ impl Agent {
                             "Stuck loop detected — forcing text-only response"
                         );
                         // Give the LLM one last chance with a strong nudge and no tools
-                        context_messages.push(ChatMessage::system(
-                            "STOP. You have called the same tool repeatedly without making progress. \
-                             Do NOT call any more tools. Summarize what you have done so far and \
-                             provide your best answer with the information you already have.",
-                        ));
-                        let mut final_context = ReasoningContext::new()
-                            .with_messages(context_messages.clone())
-                            .with_tools(Vec::new()); // No tools available
-                        final_context.force_text = true;
-                        let final_output = reasoning.respond_with_tools(&final_context).await?;
-                        if let RespondResult::Text(text) = final_output.result {
-                            return Ok(AgenticLoopResult::Response(text));
-                        }
-                        // If it still somehow returns tool_calls (shouldn't happen with
-                        // empty tools + force_text), return an error message.
-                        return Ok(AgenticLoopResult::Response(
-                            "I was unable to make further progress. Please try rephrasing your request.".to_string()
-                        ));
+                        context_messages.push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
+
+                        return self
+                            .finalize_primary_text_only(
+                                &mut reasoning,
+                                &mut context_messages,
+                                thread_id,
+                                message,
+                                &persistent_draft,
+                                &original_llm,
+                                &mut last_applied_model_override,
+                                STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE,
+                            )
+                            .await;
                     }
 
                     if consecutive_same_calls == STUCK_WARN_THRESHOLD {
@@ -1529,9 +1366,7 @@ impl Agent {
                                     && let Ok(ref output) = tool_result
                                     && let Ok(parsed) =
                                         serde_json::from_str::<serde_json::Value>(output)
-                                    && parsed
-                                        .get("a2a_request")
-                                        .and_then(|v| v.as_bool())
+                                    && parsed.get("a2a_request").and_then(|v| v.as_bool())
                                         == Some(true)
                                 {
                                     let target_id = parsed
@@ -1550,9 +1385,8 @@ impl Agent {
                                         .get("target_system_prompt")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
-                                    let target_model = parsed
-                                        .get("target_model")
-                                        .and_then(|v| v.as_str());
+                                    let target_model =
+                                        parsed.get("target_model").and_then(|v| v.as_str());
                                     let timeout_secs = parsed
                                         .get("timeout_secs")
                                         .and_then(|v| v.as_u64())
@@ -1571,35 +1405,27 @@ impl Agent {
                                             };
 
                                         let exec_result = executor
-                                            .spawn(
-                                                request,
-                                                &message.channel,
-                                                &message.metadata,
-                                            )
+                                            .spawn(request, &message.channel, &message.metadata)
                                             .await;
 
                                         tool_result = match exec_result {
-                                            Ok(result) => Ok(
-                                                serde_json::json!({
-                                                    "a2a_response": true,
-                                                    "from_agent": target_id,
-                                                    "from_display_name": target_name,
-                                                    "response": result.response,
-                                                    "success": result.success,
-                                                    "iterations": result.iterations,
-                                                    "duration_ms": result.duration_ms,
-                                                })
-                                                .to_string(),
-                                            ),
-                                            Err(e) => Ok(
-                                                serde_json::json!({
-                                                    "a2a_response": true,
-                                                    "from_agent": target_id,
-                                                    "error": e.to_string(),
-                                                    "success": false,
-                                                })
-                                                .to_string(),
-                                            ),
+                                            Ok(result) => Ok(serde_json::json!({
+                                                "a2a_response": true,
+                                                "from_agent": target_id,
+                                                "from_display_name": target_name,
+                                                "response": result.response,
+                                                "success": result.success,
+                                                "iterations": result.iterations,
+                                                "duration_ms": result.duration_ms,
+                                            })
+                                            .to_string()),
+                                            Err(e) => Ok(serde_json::json!({
+                                                "a2a_response": true,
+                                                "from_agent": target_id,
+                                                "error": e.to_string(),
+                                                "success": false,
+                                            })
+                                            .to_string()),
                                         };
                                     } else {
                                         tool_result = Ok(serde_json::json!({
@@ -1708,6 +1534,537 @@ impl Agent {
         }
     }
 
+    fn thinking_config_for_model(&self, model_name: &str) -> crate::llm::ThinkingConfig {
+        let (enabled, budget) = self.config.resolve_thinking_for_model(model_name);
+        if enabled {
+            crate::llm::ThinkingConfig::Enabled {
+                budget_tokens: budget,
+            }
+        } else {
+            crate::llm::ThinkingConfig::Disabled
+        }
+    }
+
+    fn build_turn_context(
+        &self,
+        context_messages: &[ChatMessage],
+        available_tools: Vec<ToolDefinition>,
+        thread_id: Uuid,
+        options: &LlmTurnOptions,
+    ) -> ReasoningContext {
+        let mut messages = context_messages.to_vec();
+        if options.planning_mode {
+            messages.push(ChatMessage::system(TOOL_PHASE_PLANNING_PROMPT));
+        }
+        let mut context = ReasoningContext::new()
+            .with_messages(messages)
+            .with_tools(available_tools)
+            .with_metadata({
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("thread_id".to_string(), thread_id.to_string());
+                metadata
+            });
+        context.force_text = options.force_text;
+        context.thinking = options.thinking;
+        context.max_output_tokens = options.max_output_tokens;
+        context
+    }
+
+    fn agentic_result_from_text(&self, streamed_text: bool, text: String) -> AgenticLoopResult {
+        if streamed_text {
+            AgenticLoopResult::Streamed(text)
+        } else {
+            AgenticLoopResult::Response(text)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_primary_text_only(
+        &self,
+        reasoning: &mut Reasoning,
+        context_messages: &mut Vec<ChatMessage>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
+        original_llm: &Arc<dyn crate::llm::LlmProvider>,
+        last_applied_model_override: &mut Option<String>,
+        fallback_response: &'static str,
+    ) -> Result<AgenticLoopResult, Error> {
+        let final_model_name = reasoning.current_llm().active_model_name();
+        let final_turn = self
+            .execute_llm_turn(
+                reasoning,
+                context_messages,
+                Vec::new(),
+                thread_id,
+                message,
+                persistent_draft,
+                original_llm,
+                last_applied_model_override,
+                LlmTurnOptions {
+                    force_text: true,
+                    thinking: self.thinking_config_for_model(&final_model_name),
+                    stream_to_user: true,
+                    emit_progress_status: true,
+                    emit_thinking_status: true,
+                    planning_mode: false,
+                    max_output_tokens: None,
+                },
+            )
+            .await?;
+
+        let final_finish_reason = final_turn.output.finish_reason;
+        let final_streamed_text = final_turn.streamed_text;
+
+        match final_turn.output.result {
+            RespondResult::Text(text) if final_finish_reason == crate::llm::FinishReason::Stop => {
+                Ok(self.agentic_result_from_text(final_streamed_text, text))
+            }
+            RespondResult::Text(text) => {
+                tracing::warn!(
+                    finish_reason = ?final_finish_reason,
+                    text_len = text.len(),
+                    "Primary finalization produced non-final text; returning fallback response"
+                );
+                Ok(AgenticLoopResult::Response(fallback_response.to_string()))
+            }
+            RespondResult::ToolCalls { .. } => {
+                tracing::warn!(
+                    "Primary finalization unexpectedly returned tool calls; returning fallback response"
+                );
+                Ok(AgenticLoopResult::Response(fallback_response.to_string()))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_llm_turn(
+        &self,
+        reasoning: &mut Reasoning,
+        context_messages: &mut Vec<ChatMessage>,
+        available_tools: Vec<ToolDefinition>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
+        original_llm: &Arc<dyn crate::llm::LlmProvider>,
+        last_applied_model_override: &mut Option<String>,
+        options: LlmTurnOptions,
+    ) -> Result<LlmTurnResult, Error> {
+        let request_model_name = reasoning.current_llm().active_model_name();
+        let mut context = self.build_turn_context(
+            context_messages,
+            available_tools.clone(),
+            thread_id,
+            &options,
+        );
+
+        // ── Fire BeforeLlmInput hook ───────────────────────────────
+        {
+            let last_user_msg = context_messages
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::llm::Role::User)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let system_msg = context_messages
+                .iter()
+                .find(|m| m.role == crate::llm::Role::System)
+                .map(|m| m.content.clone());
+            let event = crate::hooks::HookEvent::LlmInput {
+                model: request_model_name,
+                system_message: system_msg,
+                user_message: last_user_msg,
+                message_count: context_messages.len(),
+                user_id: message.user_id.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Ok(crate::hooks::HookOutcome::Continue { modified }) => {
+                    if let Some(new_content) = modified {
+                        if let Some(last) = context_messages
+                            .iter_mut()
+                            .rev()
+                            .find(|m| m.role == crate::llm::Role::User)
+                        {
+                            last.content = new_content;
+                        }
+                        context = self.build_turn_context(
+                            context_messages,
+                            available_tools.clone(),
+                            thread_id,
+                            &options,
+                        );
+                    }
+                }
+                Ok(crate::hooks::HookOutcome::Reject { reason }) => {
+                    tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
+                    return Err(crate::error::Error::Hook(
+                        crate::hooks::HookError::Rejected {
+                            reason: format!("BeforeLlmInput hook rejected: {}", reason),
+                        },
+                    ));
+                }
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::info!(reason = %reason, "BeforeLlmInput hook rejected LLM call");
+                    return Err(crate::error::Error::Hook(
+                        crate::hooks::HookError::Rejected {
+                            reason: format!("BeforeLlmInput hook rejected: {}", reason),
+                        },
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeLlmInput hook error (fail-open): {}", err);
+                }
+            }
+        }
+
+        let channel_stream_mode = if options.stream_to_user {
+            self.channels.stream_mode(&message.channel).await
+        } else {
+            crate::channels::StreamMode::None
+        };
+        let use_streaming =
+            options.stream_to_user && channel_stream_mode != crate::channels::StreamMode::None;
+
+        if options.emit_progress_status {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Thinking(if use_streaming {
+                        "Streaming response...".into()
+                    } else {
+                        "Calling LLM...".into()
+                    }),
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        let llm_start = std::time::Instant::now();
+        let mut recovered_from_override_failure = false;
+        let mut streamed_text = false;
+        let output = loop {
+            let attempt: Result<crate::llm::RespondOutput, crate::error::Error> = if use_streaming {
+                let channels = Arc::clone(&self.channels);
+                let channel_name = message.channel.clone();
+                let mode = channel_stream_mode;
+
+                let draft = {
+                    let prev = persistent_draft.lock().await;
+                    let mut new_draft = crate::channels::DraftReplyState::new(&channel_name);
+                    if let Some(ref prev_draft) = *prev {
+                        new_draft.message_id = prev_draft.message_id.clone();
+                        new_draft.posted = prev_draft.posted;
+                    }
+                    Arc::new(tokio::sync::Mutex::new(new_draft))
+                };
+
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(64);
+                let consumer_draft = Arc::clone(&draft);
+                let consumer_channels = Arc::clone(&channels);
+                let consumer_ch_name = message.channel.clone();
+                let consumer_md = message.metadata.clone();
+
+                let consumer_handle = tokio::spawn(async move {
+                    while let Some(chunk) = chunk_rx.recv().await {
+                        let mut d = consumer_draft.lock().await;
+                        let should_send = d.append(&chunk);
+                        if should_send {
+                            let display = match mode {
+                                crate::channels::StreamMode::StatusLine => {
+                                    let word_count = d.accumulated.split_whitespace().count();
+                                    format!("✦ Generating... ({} words)", word_count)
+                                }
+                                _ => d.display_text(),
+                            };
+
+                            let mut send_draft =
+                                crate::channels::DraftReplyState::new(&consumer_ch_name);
+                            send_draft.accumulated = display;
+                            send_draft.message_id = d.message_id.clone();
+                            send_draft.posted = d.posted;
+
+                            match consumer_channels
+                                .send_draft(&consumer_ch_name, &send_draft, &consumer_md)
+                                .await
+                            {
+                                Ok(msg_id) => d.mark_sent(msg_id),
+                                Err(crate::error::ChannelError::MessageTooLong { .. }) => {
+                                    tracing::info!(
+                                        "Streaming overflow detected, will fall back to on_respond()"
+                                    );
+                                    d.overflow = true;
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Draft edit failed (non-fatal): {}", e);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let stream_result = reasoning
+                    .respond_with_tools_streaming(&context, move |chunk: &str| {
+                        let _ = chunk_tx.try_send(chunk.to_string());
+                    })
+                    .await;
+
+                let _ = consumer_handle.await;
+
+                let was_streamed = {
+                    let d = draft.lock().await;
+                    if d.overflow {
+                        if let Some(ref msg_id) = d.message_id {
+                            tracing::info!(
+                                msg_id = %msg_id,
+                                "Deleting partial streaming message before fallback"
+                            );
+                            let _ = self
+                                .channels
+                                .delete_message(&message.channel, msg_id, &message.metadata)
+                                .await;
+                        }
+                        false
+                    } else if d.posted && !d.accumulated.is_empty() {
+                        let mut final_draft =
+                            crate::channels::DraftReplyState::new(&message.channel);
+                        final_draft.accumulated = d.accumulated.clone();
+                        final_draft.message_id = d.message_id.clone();
+                        final_draft.posted = true;
+
+                        let final_edit_ok = self
+                            .channels
+                            .send_draft(&message.channel, &final_draft, &message.metadata)
+                            .await
+                            .is_ok();
+
+                        if !final_edit_ok {
+                            tracing::warn!(
+                                "Final streaming edit failed, falling back to on_respond()"
+                            );
+                            if let Some(ref msg_id) = d.message_id {
+                                let _ = self
+                                    .channels
+                                    .delete_message(&message.channel, msg_id, &message.metadata)
+                                    .await;
+                            }
+                        }
+                        final_edit_ok
+                    } else {
+                        false
+                    }
+                };
+
+                {
+                    let d = draft.lock().await;
+                    let mut persist = persistent_draft.lock().await;
+                    *persist = Some(crate::channels::DraftReplyState {
+                        message_id: d.message_id.clone(),
+                        channel_id: d.channel_id.clone(),
+                        accumulated: d.accumulated.clone(),
+                        last_edit_at: d.last_edit_at,
+                        posted: d.posted,
+                        overflow: d.overflow,
+                    });
+                }
+
+                match stream_result {
+                    Ok(output) => {
+                        streamed_text =
+                            was_streamed && matches!(&output.result, RespondResult::Text(_));
+                        Ok(output)
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            } else {
+                match reasoning.respond_with_tools(&context).await {
+                    Ok(output) => Ok(output),
+                    Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
+                        tracing::warn!(
+                            used,
+                            limit,
+                            "Context length exceeded, compacting messages and retrying"
+                        );
+
+                        *context_messages = compact_messages_for_retry(context_messages);
+
+                        let retry_context = self.build_turn_context(
+                            context_messages,
+                            available_tools.clone(),
+                            thread_id,
+                            &options,
+                        );
+
+                        reasoning
+                            .respond_with_tools(&retry_context)
+                            .await
+                            .map_err(|retry_err| {
+                                tracing::error!(
+                                    original_used = used,
+                                    original_limit = limit,
+                                    retry_error = %retry_err,
+                                    "Retry after auto-compaction also failed"
+                                );
+                                crate::error::Error::from(retry_err)
+                            })
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            };
+
+            match attempt {
+                Ok(output) => break output,
+                Err(err) => {
+                    if !recovered_from_override_failure
+                        && let Some(ref override_lock) = self.deps.model_override
+                        && let Some(failed_override) = override_lock.write().await.take()
+                    {
+                        tracing::warn!(
+                            model = %failed_override.model_spec,
+                            error = %err,
+                            "Runtime model override failed; resetting to previous provider and retrying once"
+                        );
+                        reasoning.swap_llm(original_llm.clone());
+                        *last_applied_model_override = None;
+                        context_messages.push(ChatMessage::system(format!(
+                            "Runtime note: model override '{}' failed and has been reset to the previous working model. Do not retry this override in this conversation unless the user explicitly asks again. Error: {}",
+                            failed_override.model_spec, err
+                        )));
+                        context = self.build_turn_context(
+                            context_messages,
+                            available_tools.clone(),
+                            thread_id,
+                            &options,
+                        );
+                        recovered_from_override_failure = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        };
+
+        let active_llm = reasoning.current_llm();
+        let active_model_name = active_llm.active_model_name();
+        let model_name = output
+            .routed_model_name
+            .clone()
+            .unwrap_or_else(|| active_model_name.clone());
+
+        // ── Fire AfterLlmOutput hook ──────────────────────────────
+        {
+            let output_text = match &output.result {
+                crate::llm::RespondResult::Text(t) => t.clone(),
+                crate::llm::RespondResult::ToolCalls { content, .. } => {
+                    content.clone().unwrap_or_default()
+                }
+            };
+            let event = crate::hooks::HookEvent::LlmOutput {
+                model: model_name.clone(),
+                content: output_text,
+                input_tokens: output.usage.input_tokens,
+                output_tokens: output.usage.output_tokens,
+                user_id: message.user_id.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Ok(crate::hooks::HookOutcome::Continue { .. }) => {}
+                Ok(crate::hooks::HookOutcome::Reject { reason }) => {
+                    tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
+                    return Err(crate::error::Error::Hook(
+                        crate::hooks::HookError::Rejected {
+                            reason: format!("AfterLlmOutput hook rejected: {}", reason),
+                        },
+                    ));
+                }
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
+                    return Err(crate::error::Error::Hook(
+                        crate::hooks::HookError::Rejected {
+                            reason: format!("AfterLlmOutput hook rejected: {}", reason),
+                        },
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!("AfterLlmOutput hook error (fail-open): {}", err);
+                }
+            }
+        }
+
+        // NOTE: Cost recording into CostTracker + CostGuard is handled
+        // by the UsageTrackingProvider decorator that wraps the LLM.
+        // We only need to check budget thresholds here for SSE alerts.
+        tracing::debug!(
+            "LLM call used {} input + {} output tokens",
+            output.usage.input_tokens,
+            output.usage.output_tokens,
+        );
+
+        if let Some(ref policy_lock) = self.deps.routing_policy {
+            let latency_ms = llm_start.elapsed().as_millis() as f64;
+            if let Ok(mut policy) = policy_lock.write() {
+                policy.record_latency(&model_name, latency_ms);
+            }
+        }
+
+        if let Some(ref sse_tx) = self.deps.sse_sender
+            && let Some(limit_cents) = self.config.max_cost_per_day_cents
+        {
+            use rust_decimal::prelude::ToPrimitive;
+            let daily_spend = self.cost_guard().daily_spend().await;
+            let spent_usd = daily_spend.to_f64().unwrap_or(0.0);
+            let limit_usd = limit_cents as f64 / 100.0;
+            let pct = if limit_usd > 0.0 {
+                spent_usd / limit_usd * 100.0
+            } else {
+                0.0
+            };
+            if pct >= 100.0 {
+                let _ = sse_tx.send(crate::channels::web::types::SseEvent::CostAlert {
+                    alert_type: "exceeded".to_string(),
+                    current_cost_usd: spent_usd,
+                    limit_usd,
+                    message: Some(format!(
+                        "Daily budget exceeded: ${:.2} of ${:.2}",
+                        spent_usd, limit_usd,
+                    )),
+                });
+            } else if pct >= 80.0 {
+                let _ = sse_tx.send(crate::channels::web::types::SseEvent::CostAlert {
+                    alert_type: "warning".to_string(),
+                    current_cost_usd: spent_usd,
+                    limit_usd,
+                    message: Some(format!(
+                        "Approaching daily budget: ${:.2} of ${:.2} ({:.0}%)",
+                        spent_usd, limit_usd, pct,
+                    )),
+                });
+            }
+        }
+
+        if options.emit_thinking_status
+            && let Some(ref thinking_text) = output.thinking_content
+            && !thinking_text.is_empty()
+        {
+            tracing::debug!(
+                thinking_len = thinking_text.len(),
+                "LLM returned extended thinking content"
+            );
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Thinking(format!("[Reasoning]\n{}", thinking_text)),
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        Ok(LlmTurnResult {
+            output,
+            streamed_text,
+        })
+    }
+
     /// Execute a tool for chat (without full job context).
     pub(super) async fn execute_chat_tool(
         &self,
@@ -1716,5 +2073,1144 @@ impl Agent {
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
         execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Arc;
+    use std::sync::LazyLock;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    use super::{
+        STUCK_LOOP_FINALIZATION_PROMPT, TOOL_PHASE_NO_TOOLS_SENTINEL,
+        TOOL_PHASE_PLANNING_MAX_TOKENS, TOOL_PHASE_PLANNING_PROMPT, TOOL_PHASE_SYNTHESIS_PROMPT,
+        classify_tool_phase_text, is_tool_phase_no_tools_signal, tool_phase_synthesis_enabled,
+    };
+    use crate::agent::agent_loop::{Agent, AgentDeps};
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::session::Session;
+    use crate::channels::{
+        Channel, ChannelManager, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse,
+        StatusUpdate, StreamMode,
+    };
+    use crate::config::{AgentConfig, Config, SafetyConfig, SkillsConfig, inject_bridge_vars};
+    use crate::context::ContextManager;
+    use crate::error::{ChannelError, LlmError};
+    use crate::hooks::HookRegistry;
+    use crate::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+        ThinkingConfig, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::safety::SafetyLayer;
+    use crate::settings::{ProviderModelSlots, ProvidersSettings, RoutingMode};
+    use crate::tools::{ApprovalRequirement, Tool, ToolOutput, ToolRegistry};
+
+    static CONFIG_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        messages: Vec<ChatMessage>,
+        tool_names: Vec<String>,
+        max_tokens: Option<u32>,
+        thinking: ThinkingConfig,
+    }
+
+    #[derive(Debug, Clone)]
+    enum ScriptedResult {
+        Text(String),
+        ToolCalls {
+            content: Option<String>,
+            tool_calls: Vec<ToolCall>,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedResponse {
+        result: ScriptedResult,
+        finish_reason: FinishReason,
+        thinking_content: Option<String>,
+    }
+
+    impl ScriptedResponse {
+        fn text(text: impl Into<String>, finish_reason: FinishReason) -> Self {
+            Self {
+                result: ScriptedResult::Text(text.into()),
+                finish_reason,
+                thinking_content: None,
+            }
+        }
+
+        fn text_with_thinking(
+            text: impl Into<String>,
+            finish_reason: FinishReason,
+            thinking: impl Into<String>,
+        ) -> Self {
+            Self {
+                result: ScriptedResult::Text(text.into()),
+                finish_reason,
+                thinking_content: Some(thinking.into()),
+            }
+        }
+
+        fn tool_calls(tool_calls: Vec<ToolCall>, finish_reason: FinishReason) -> Self {
+            Self {
+                result: ScriptedResult::ToolCalls {
+                    content: None,
+                    tool_calls,
+                },
+                finish_reason,
+                thinking_content: None,
+            }
+        }
+    }
+
+    struct ScriptedLlm {
+        model_name: String,
+        responses: Mutex<VecDeque<ScriptedResponse>>,
+        requests: Mutex<Vec<CapturedRequest>>,
+    }
+
+    impl ScriptedLlm {
+        fn new(model_name: impl Into<String>, responses: Vec<ScriptedResponse>) -> Self {
+            Self {
+                model_name: model_name.into(),
+                responses: Mutex::new(VecDeque::from(responses)),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn requests(&self) -> Vec<CapturedRequest> {
+            self.requests.lock().await.clone()
+        }
+
+        async fn response_count(&self) -> usize {
+            self.requests.lock().await.len()
+        }
+
+        async fn pop_response(&self) -> ScriptedResponse {
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .expect("scripted llm ran out of queued responses")
+        }
+
+        async fn record_request(
+            &self,
+            messages: Vec<ChatMessage>,
+            tool_names: Vec<String>,
+            max_tokens: Option<u32>,
+            thinking: ThinkingConfig,
+        ) {
+            self.requests.lock().await.push(CapturedRequest {
+                messages,
+                tool_names,
+                max_tokens,
+                thinking,
+            });
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ScriptedLlm {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.record_request(
+                request.messages,
+                Vec::new(),
+                request.max_tokens,
+                request.thinking,
+            )
+            .await;
+
+            let response = self.pop_response().await;
+            match response.result {
+                ScriptedResult::Text(content) => Ok(CompletionResponse {
+                    content,
+                    provider_model: Some(self.model_name.clone()),
+                    cost_usd: Some(0.0),
+                    thinking_content: response.thinking_content,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    finish_reason: response.finish_reason,
+                }),
+                ScriptedResult::ToolCalls { .. } => {
+                    panic!("complete() received a tool-call scripted response");
+                }
+            }
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.record_request(
+                request.messages,
+                request.tools.iter().map(|tool| tool.name.clone()).collect(),
+                request.max_tokens,
+                request.thinking,
+            )
+            .await;
+
+            let response = self.pop_response().await;
+            match response.result {
+                ScriptedResult::Text(content) => Ok(ToolCompletionResponse {
+                    content: Some(content),
+                    provider_model: Some(self.model_name.clone()),
+                    cost_usd: Some(0.0),
+                    tool_calls: Vec::new(),
+                    thinking_content: response.thinking_content,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    finish_reason: response.finish_reason,
+                }),
+                ScriptedResult::ToolCalls {
+                    content,
+                    tool_calls,
+                } => Ok(ToolCompletionResponse {
+                    content,
+                    provider_model: Some(self.model_name.clone()),
+                    cost_usd: Some(0.0),
+                    tool_calls,
+                    thinking_content: response.thinking_content,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    finish_reason: response.finish_reason,
+                }),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum RecordedChannelEvent {
+        Status(StatusUpdate),
+        Draft(String),
+        Deleted,
+        Response,
+    }
+
+    #[derive(Clone)]
+    struct RecordingChannel {
+        name: String,
+        stream_mode: StreamMode,
+        events: Arc<Mutex<Vec<RecordedChannelEvent>>>,
+    }
+
+    impl RecordingChannel {
+        fn new(name: impl Into<String>, stream_mode: StreamMode) -> Self {
+            Self {
+                name: name.into(),
+                stream_mode,
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn events(&self) -> Vec<RecordedChannelEvent> {
+            self.events.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl Channel for RecordingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.events
+                .lock()
+                .await
+                .push(RecordedChannelEvent::Response);
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            status: StatusUpdate,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), ChannelError> {
+            self.events
+                .lock()
+                .await
+                .push(RecordedChannelEvent::Status(status));
+            Ok(())
+        }
+
+        async fn send_draft(
+            &self,
+            draft: &DraftReplyState,
+            _metadata: &serde_json::Value,
+        ) -> Result<Option<String>, ChannelError> {
+            self.events
+                .lock()
+                .await
+                .push(RecordedChannelEvent::Draft(draft.accumulated.clone()));
+            Ok(Some("draft-id".to_string()))
+        }
+
+        async fn delete_message(
+            &self,
+            _message_id: &str,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), ChannelError> {
+            self.events.lock().await.push(RecordedChannelEvent::Deleted);
+            Ok(())
+        }
+
+        fn stream_mode(&self) -> StreamMode {
+            self.stream_mode
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    struct TestTool {
+        name: String,
+        approval: ApprovalRequirement,
+        result: String,
+    }
+
+    impl TestTool {
+        fn new(
+            name: impl Into<String>,
+            approval: ApprovalRequirement,
+            result: impl Into<String>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                approval,
+                result: result.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for TestTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "Test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<ToolOutput, crate::tools::ToolError> {
+            Ok(ToolOutput::text(
+                self.result.clone(),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            self.approval
+        }
+    }
+
+    fn runtime_status(
+        routing_mode: RoutingMode,
+        cheap_model: Option<&str>,
+        enabled: bool,
+    ) -> crate::llm::runtime_manager::RuntimeStatus {
+        crate::llm::runtime_manager::RuntimeStatus {
+            revision: 1,
+            last_error: None,
+            primary_model: "openai_compatible/primary-model".to_string(),
+            cheap_model: cheap_model.map(str::to_string),
+            routing_enabled: true,
+            routing_mode,
+            tool_phase_synthesis_enabled: enabled,
+            tool_phase_primary_thinking_enabled: true,
+            primary_provider: Some("openai_compatible".to_string()),
+            fallback_chain: Vec::new(),
+        }
+    }
+
+    async fn make_runtime_manager(
+        tool_phase_synthesis_enabled: bool,
+        tool_phase_primary_thinking_enabled: bool,
+    ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
+        let _guard = CONFIG_ENV_LOCK.lock().await;
+        inject_bridge_vars(HashMap::from([
+            ("LLM_BACKEND".to_string(), "openai_compatible".to_string()),
+            (
+                "LLM_BASE_URL".to_string(),
+                "http://localhost:12345/v1".to_string(),
+            ),
+            ("LLM_MODEL".to_string(), "primary-model".to_string()),
+        ]));
+        let config = Config::from_env().await.expect("config should load");
+        crate::config::clear_bridge_vars();
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("primary-model".to_string()),
+            cheap_model: Some("openai_compatible/cheap-model".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::CheapSplit,
+            tool_phase_synthesis_enabled,
+            tool_phase_primary_thinking_enabled,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("primary-model".to_string()),
+                cheap: Some("cheap-model".to_string()),
+            },
+        );
+
+        crate::llm::runtime_manager::LlmRuntimeManager::new(
+            config,
+            providers,
+            None,
+            None,
+            "test-user",
+            None,
+        )
+        .expect("runtime manager should build")
+    }
+
+    async fn make_test_agent(
+        primary_llm: Arc<dyn LlmProvider>,
+        cheap_llm: Option<Arc<dyn LlmProvider>>,
+        tools: Arc<ToolRegistry>,
+        llm_runtime: Option<Arc<crate::llm::runtime_manager::LlmRuntimeManager>>,
+        stream_mode: StreamMode,
+        thinking_enabled: bool,
+        max_tool_iterations: usize,
+    ) -> (Agent, RecordingChannel) {
+        let recording_channel = RecordingChannel::new("test", stream_mode);
+        let channels = Arc::new(ChannelManager::new());
+        channels.add(Box::new(recording_channel.clone())).await;
+
+        let deps = AgentDeps {
+            store: None,
+            llm: primary_llm,
+            cheap_llm,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_sender: None,
+            agent_router: None,
+            agent_registry: None,
+            canvas_store: None,
+            subagent_executor: None,
+            cost_tracker: None,
+            response_cache: None,
+            llm_runtime,
+            routing_policy: None,
+            model_override: None,
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations,
+                max_context_messages: 200,
+                thinking_enabled,
+                thinking_budget_tokens: 128,
+                auto_approve_tools: false,
+                model_thinking_overrides: HashMap::new(),
+                workspace_mode: "unrestricted".to_string(),
+                workspace_root: None,
+                notify_channel: None,
+            },
+            deps,
+            channels,
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        (agent, recording_channel)
+    }
+
+    async fn make_session_and_thread() -> (Arc<Mutex<Session>>, Uuid) {
+        let session = Arc::new(Mutex::new(Session::new("user-1")));
+        let thread_id = {
+            let mut guard = session.lock().await;
+            let thread = guard.create_thread();
+            thread.start_turn("test request");
+            thread.id
+        };
+        (session, thread_id)
+    }
+
+    async fn register_tool(
+        registry: &Arc<ToolRegistry>,
+        name: &str,
+        approval: ApprovalRequirement,
+        result: &str,
+    ) {
+        registry
+            .register(Arc::new(TestTool::new(name, approval, result)))
+            .await;
+    }
+
+    fn count_prompt(messages: &[ChatMessage], prompt: &str) -> usize {
+        messages.iter().filter(|msg| msg.content == prompt).count()
+    }
+
+    fn contains_prompt(messages: &[ChatMessage], prompt: &str) -> bool {
+        count_prompt(messages, prompt) > 0
+    }
+
+    fn tool_call(name: &str) -> ToolCall {
+        ToolCall {
+            id: format!("call_{}", name),
+            name: name.to_string(),
+            arguments: serde_json::json!({ "query": "demo" }),
+        }
+    }
+
+    #[test]
+    fn tool_phase_requires_cheap_split_with_real_cheap_model() {
+        let status = runtime_status(RoutingMode::CheapSplit, Some("openai/gpt-5.4-mini"), true);
+
+        assert!(tool_phase_synthesis_enabled(
+            Some(&status),
+            true,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn tool_phase_is_disabled_without_cheap_model() {
+        let status = runtime_status(RoutingMode::CheapSplit, None, true);
+
+        assert!(!tool_phase_synthesis_enabled(
+            Some(&status),
+            true,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn tool_phase_is_disabled_outside_cheap_split() {
+        let status = runtime_status(RoutingMode::Policy, Some("openai/gpt-5.4-mini"), true);
+
+        assert!(!tool_phase_synthesis_enabled(
+            Some(&status),
+            true,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn tool_phase_signal_requires_explicit_sentinel() {
+        assert!(is_tool_phase_no_tools_signal("NO_TOOLS_NEEDED"));
+        assert!(is_tool_phase_no_tools_signal("NO_TOOLS_NEEDED."));
+        assert!(!is_tool_phase_no_tools_signal("No tools needed."));
+        assert!(!is_tool_phase_no_tools_signal(
+            "Here is the final answer for the user."
+        ));
+    }
+
+    #[test]
+    fn tool_phase_text_classification_prefers_finish_reason() {
+        assert_eq!(
+            classify_tool_phase_text("NO_TOOLS_NEEDED", FinishReason::Stop),
+            super::ToolPhaseTextOutcome::NoToolsSignal
+        );
+        assert_eq!(
+            classify_tool_phase_text("Primary answer", FinishReason::Stop),
+            super::ToolPhaseTextOutcome::PrimaryFinalText
+        );
+        assert_eq!(
+            classify_tool_phase_text("Truncated answer", FinishReason::Length),
+            super::ToolPhaseTextOutcome::PrimaryNeedsFinalization
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_phase_runs_cheap_synthesis_only_after_explicit_no_tools_signal() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![
+                ScriptedResponse::tool_calls(vec![tool_call("test_tool")], FinishReason::ToolUse),
+                ScriptedResponse::text_with_thinking(
+                    TOOL_PHASE_NO_TOOLS_SENTINEL,
+                    FinishReason::Stop,
+                    "hidden planner thought",
+                ),
+            ],
+        ));
+        let cheap = Arc::new(ScriptedLlm::new(
+            "cheap-model",
+            vec![ScriptedResponse::text_with_thinking(
+                "Cheap final answer",
+                FinishReason::Stop,
+                "visible synthesis thought",
+            )],
+        ));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "test_tool",
+            ApprovalRequirement::Never,
+            "tool output",
+        )
+        .await;
+        let (agent, channel) = make_test_agent(
+            primary.clone(),
+            Some(cheap.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::EditFirst,
+            true,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Streamed(text) => assert_eq!(text, "Cheap final answer"),
+            other => panic!(
+                "expected streamed result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert_eq!(cheap.response_count().await, 1);
+
+        let primary_requests = primary.requests().await;
+        assert_eq!(primary_requests.len(), 2);
+        assert_eq!(
+            primary_requests
+                .iter()
+                .map(|req| req.max_tokens)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(TOOL_PHASE_PLANNING_MAX_TOKENS),
+                Some(TOOL_PHASE_PLANNING_MAX_TOKENS)
+            ]
+        );
+        assert!(
+            primary_requests
+                .iter()
+                .all(|req| count_prompt(&req.messages, TOOL_PHASE_PLANNING_PROMPT) == 1)
+        );
+
+        let cheap_requests = cheap.requests().await;
+        assert_eq!(cheap_requests.len(), 1);
+        assert_eq!(cheap_requests[0].tool_names.len(), 0);
+        assert_eq!(cheap_requests[0].max_tokens, Some(4096));
+        assert!(contains_prompt(
+            &cheap_requests[0].messages,
+            TOOL_PHASE_SYNTHESIS_PROMPT
+        ));
+        assert!(!contains_prompt(
+            &cheap_requests[0].messages,
+            TOOL_PHASE_PLANNING_PROMPT
+        ));
+
+        let events = channel.events().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Draft(text) if text.contains("Cheap final answer")
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Draft(text) if text.contains(TOOL_PHASE_NO_TOOLS_SENTINEL)
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Status(StatusUpdate::Thinking(text))
+                if text.contains("hidden planner thought")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Status(StatusUpdate::Thinking(text))
+                if text.contains("visible synthesis thought")
+        )));
+    }
+
+    #[tokio::test]
+    async fn tool_phase_direct_primary_text_skips_cheap_follow_up() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![ScriptedResponse::text(
+                "Primary final answer",
+                FinishReason::Stop,
+            )],
+        ));
+        let cheap = Arc::new(ScriptedLlm::new("cheap-model", vec![]));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "test_tool",
+            ApprovalRequirement::Never,
+            "tool output",
+        )
+        .await;
+        let (agent, channel) = make_test_agent(
+            primary.clone(),
+            Some(cheap.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => assert_eq!(text, "Primary final answer"),
+            other => panic!(
+                "expected response result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert_eq!(cheap.response_count().await, 0);
+        let primary_requests = primary.requests().await;
+        assert_eq!(primary_requests.len(), 1);
+        assert_eq!(
+            primary_requests[0].max_tokens,
+            Some(TOOL_PHASE_PLANNING_MAX_TOKENS)
+        );
+        assert!(contains_prompt(
+            &primary_requests[0].messages,
+            TOOL_PHASE_PLANNING_PROMPT
+        ));
+        assert!(
+            channel
+                .events()
+                .await
+                .iter()
+                .all(|event| !matches!(event, RecordedChannelEvent::Draft(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_planner_text_runs_primary_finalization_without_cheap() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![
+                ScriptedResponse::text("Truncated planner answer", FinishReason::Length),
+                ScriptedResponse::text("Primary finalized answer", FinishReason::Stop),
+            ],
+        ));
+        let cheap = Arc::new(ScriptedLlm::new("cheap-model", vec![]));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "test_tool",
+            ApprovalRequirement::Never,
+            "tool output",
+        )
+        .await;
+        let (agent, _) = make_test_agent(
+            primary.clone(),
+            Some(cheap.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => {
+                assert_eq!(text, "Primary finalized answer")
+            }
+            other => panic!(
+                "expected response result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert_eq!(cheap.response_count().await, 0);
+        let primary_requests = primary.requests().await;
+        assert_eq!(primary_requests.len(), 2);
+        assert_eq!(
+            primary_requests[0].max_tokens,
+            Some(TOOL_PHASE_PLANNING_MAX_TOKENS)
+        );
+        assert_eq!(primary_requests[1].max_tokens, Some(4096));
+        assert!(!contains_prompt(
+            &primary_requests[1].messages,
+            TOOL_PHASE_PLANNING_PROMPT
+        ));
+        assert!(primary_requests[1].tool_names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_text_iteration_does_not_run_tool_phase_synthesis() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![ScriptedResponse::text(
+                "Forced final answer",
+                FinishReason::Stop,
+            )],
+        ));
+        let cheap = Arc::new(ScriptedLlm::new("cheap-model", vec![]));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "test_tool",
+            ApprovalRequirement::Never,
+            "tool output",
+        )
+        .await;
+        let (agent, _) = make_test_agent(
+            primary.clone(),
+            Some(cheap.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            1,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => assert_eq!(text, "Forced final answer"),
+            other => panic!(
+                "expected response result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert_eq!(cheap.response_count().await, 0);
+        let primary_requests = primary.requests().await;
+        assert_eq!(primary_requests.len(), 1);
+        assert!(primary_requests[0].tool_names.is_empty());
+        assert!(!contains_prompt(
+            &primary_requests[0].messages,
+            TOOL_PHASE_PLANNING_PROMPT
+        ));
+        assert!(!contains_prompt(
+            &primary_requests[0].messages,
+            TOOL_PHASE_SYNTHESIS_PROMPT
+        ));
+        assert_eq!(primary_requests[0].max_tokens, Some(4096));
+    }
+
+    #[tokio::test]
+    async fn stuck_loop_recovery_uses_primary_finalization_only() {
+        let mut responses = Vec::new();
+        for _ in 0..5 {
+            responses.push(ScriptedResponse::tool_calls(
+                vec![tool_call("loop_tool")],
+                FinishReason::ToolUse,
+            ));
+        }
+        responses.push(ScriptedResponse::text(
+            "Recovered on primary",
+            FinishReason::Stop,
+        ));
+
+        let primary = Arc::new(ScriptedLlm::new("primary-model", responses));
+        let cheap = Arc::new(ScriptedLlm::new("cheap-model", vec![]));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "loop_tool",
+            ApprovalRequirement::Never,
+            "loop result",
+        )
+        .await;
+        let (agent, _) = make_test_agent(
+            primary.clone(),
+            Some(cheap.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            20,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => assert_eq!(text, "Recovered on primary"),
+            other => panic!(
+                "expected response result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        assert_eq!(cheap.response_count().await, 0);
+        let primary_requests = primary.requests().await;
+        assert_eq!(primary_requests.len(), 6);
+        let final_request = primary_requests.last().expect("final request should exist");
+        assert!(contains_prompt(
+            &final_request.messages,
+            STUCK_LOOP_FINALIZATION_PROMPT
+        ));
+        assert!(final_request.tool_names.is_empty());
+        assert!(!contains_prompt(
+            &final_request.messages,
+            TOOL_PHASE_SYNTHESIS_PROMPT
+        ));
+    }
+
+    #[tokio::test]
+    async fn planner_thinking_toggle_only_changes_hidden_primary_phase() {
+        async fn run_case(
+            primary_planning_thinking_enabled: bool,
+        ) -> (Vec<CapturedRequest>, Vec<CapturedRequest>) {
+            let primary = Arc::new(ScriptedLlm::new(
+                "primary-model",
+                vec![ScriptedResponse::text(
+                    TOOL_PHASE_NO_TOOLS_SENTINEL,
+                    FinishReason::Stop,
+                )],
+            ));
+            let cheap = Arc::new(ScriptedLlm::new(
+                "cheap-model",
+                vec![ScriptedResponse::text("Cheap reply", FinishReason::Stop)],
+            ));
+            let runtime = make_runtime_manager(true, primary_planning_thinking_enabled).await;
+            let tools = Arc::new(ToolRegistry::new());
+            register_tool(
+                &tools,
+                "test_tool",
+                ApprovalRequirement::Never,
+                "tool output",
+            )
+            .await;
+            let (agent, _) = make_test_agent(
+                primary.clone(),
+                Some(cheap.clone()),
+                tools,
+                Some(runtime),
+                StreamMode::None,
+                true,
+                10,
+            )
+            .await;
+            let (session, thread_id) = make_session_and_thread().await;
+            let message = IncomingMessage::new("test", "user-1", "help");
+
+            let _ = agent
+                .run_agentic_loop(
+                    &message,
+                    session,
+                    thread_id,
+                    vec![ChatMessage::user("help")],
+                )
+                .await
+                .expect("agentic loop should succeed");
+
+            (primary.requests().await, cheap.requests().await)
+        }
+
+        let (primary_enabled, cheap_enabled) = run_case(true).await;
+        let (primary_disabled, cheap_disabled) = run_case(false).await;
+
+        assert!(matches!(
+            primary_enabled[0].thinking,
+            ThinkingConfig::Enabled { .. }
+        ));
+        assert!(matches!(
+            primary_disabled[0].thinking,
+            ThinkingConfig::Disabled
+        ));
+        assert!(matches!(
+            cheap_enabled[0].thinking,
+            ThinkingConfig::Enabled { .. }
+        ));
+        assert!(matches!(
+            cheap_disabled[0].thinking,
+            ThinkingConfig::Enabled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_approval_context_does_not_persist_planning_prompt() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![ScriptedResponse::tool_calls(
+                vec![tool_call("approval_tool")],
+                FinishReason::ToolUse,
+            )],
+        ));
+        let cheap = Arc::new(ScriptedLlm::new("cheap-model", vec![]));
+        let runtime = make_runtime_manager(true, true).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "approval_tool",
+            ApprovalRequirement::Always,
+            "approval tool output",
+        )
+        .await;
+        let (agent, _) = make_test_agent(
+            primary,
+            Some(cheap),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::NeedApproval { pending } => {
+                assert!(!contains_prompt(
+                    &pending.context_messages,
+                    TOOL_PHASE_PLANNING_PROMPT
+                ));
+                assert!(!contains_prompt(
+                    &pending.context_messages,
+                    TOOL_PHASE_SYNTHESIS_PROMPT
+                ));
+            }
+            other => panic!(
+                "expected approval result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 }

@@ -95,11 +95,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_file() {
-        let content = MediaContent::new(
-            br#"{"key": "value"}"#.to_vec(),
-            "application/json",
-        )
-        .with_filename("data.json".to_string());
+        let content = MediaContent::new(br#"{"key": "value"}"#.to_vec(), "application/json")
+            .with_filename("data.json".to_string());
         let extractor = DocumentExtractor::new();
         let result = extractor.extract_text(&content).unwrap();
         assert!(result.contains("key"));

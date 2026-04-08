@@ -51,6 +51,18 @@ impl<M: CompletionModel> RigAdapter<M> {
     }
 }
 
+fn requested_model_matches_active_model(requested_model: &str, active_model: &str) -> bool {
+    let requested_model = requested_model.trim();
+    if requested_model == active_model {
+        return true;
+    }
+
+    requested_model
+        .rsplit_once('/')
+        .map(|(_, model)| model == active_model)
+        .unwrap_or(false)
+}
+
 // -- Type conversion helpers --
 
 /// Normalize a JSON Schema for OpenAI strict mode compliance.
@@ -239,12 +251,14 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 let multimodal_attachments: Vec<_> = msg
                     .attachments
                     .iter()
-                    .filter(|a| matches!(
-                        a.media_type,
-                        crate::media::MediaType::Image
-                        | crate::media::MediaType::Audio
-                        | crate::media::MediaType::Video
-                    ))
+                    .filter(|a| {
+                        matches!(
+                            a.media_type,
+                            crate::media::MediaType::Image
+                                | crate::media::MediaType::Audio
+                                | crate::media::MediaType::Video
+                        )
+                    })
                     .collect();
 
                 if multimodal_attachments.is_empty() {
@@ -266,10 +280,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                             }
                             crate::media::MediaType::Audio => {
                                 let media_type = mime_to_rig_audio_type(&att.mime_type);
-                                parts.push(UserContent::audio(
-                                    att.to_base64(),
-                                    media_type,
-                                ));
+                                parts.push(UserContent::audio(att.to_base64(), media_type));
                             }
                             crate::media::MediaType::Video => {
                                 let media_type = mime_to_rig_video_type(&att.mime_type);
@@ -387,7 +398,6 @@ fn mime_to_rig_video_type(mime: &str) -> Option<rig::message::VideoMediaType> {
     }
 }
 
-
 /// Responses-style providers require a non-empty tool call ID.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     match raw.map(str::trim).filter(|id| !id.is_empty()) {
@@ -441,8 +451,13 @@ fn extract_response(
                 text_parts.push(t.text.clone());
             }
             AssistantContent::ToolCall(tc) => {
+                let safe_id = if tc.id.trim().is_empty() {
+                    format!("call_{}", uuid::Uuid::new_v4().simple())
+                } else {
+                    tc.id.clone()
+                };
                 tool_calls.push(IronToolCall {
-                    id: tc.id.clone(),
+                    id: safe_id,
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                 });
@@ -550,7 +565,7 @@ where
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
+            && !requested_model_matches_active_model(requested_model, self.model_name.as_str())
         {
             tracing::warn!(
                 requested_model = requested_model,
@@ -592,12 +607,22 @@ where
 
         let (text, _tool_calls, thinking, finish) =
             extract_response(&response.choice, &response.usage);
+        let input_tokens = saturate_u32(response.usage.input_tokens);
+        let output_tokens = saturate_u32(response.usage.output_tokens);
+        let cost_usd = {
+            use rust_decimal::prelude::ToPrimitive;
+            self.calculate_cost(input_tokens, output_tokens)
+                .to_f64()
+                .unwrap_or(0.0)
+        };
 
         Ok(CompletionResponse {
             content: text.unwrap_or_default(),
+            provider_model: Some(self.model_name.clone()),
+            cost_usd: Some(cost_usd),
             thinking_content: thinking,
-            input_tokens: saturate_u32(response.usage.input_tokens),
-            output_tokens: saturate_u32(response.usage.output_tokens),
+            input_tokens,
+            output_tokens,
             finish_reason: finish,
         })
     }
@@ -607,7 +632,7 @@ where
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
+            && !requested_model_matches_active_model(requested_model, self.model_name.as_str())
         {
             tracing::warn!(
                 requested_model = requested_model,
@@ -621,6 +646,41 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
+
+        // ── Diagnostic: dump message roles BEFORE conversion ──────────
+        {
+            let summary: Vec<String> = messages
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let tc_info = m
+                        .tool_calls
+                        .as_ref()
+                        .map(|tcs| {
+                            tcs.iter()
+                                .map(|tc| tc.id.clone())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default();
+                    let tcid = m.tool_call_id.as_deref().unwrap_or("");
+                    format!(
+                        "[{}] {:?} name={} tc_ids=[{}] tool_call_id={}",
+                        i,
+                        m.role,
+                        m.name.as_deref().unwrap_or("-"),
+                        tc_info,
+                        tcid,
+                    )
+                })
+                .collect();
+            tracing::info!(
+                msg_count = messages.len(),
+                "complete_with_tools: post-sanitize message dump:\n{}",
+                summary.join("\n")
+            );
+        }
+
         let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
@@ -669,12 +729,23 @@ where
             }
         }
 
+        let input_tokens = saturate_u32(response.usage.input_tokens);
+        let output_tokens = saturate_u32(response.usage.output_tokens);
+        let cost_usd = {
+            use rust_decimal::prelude::ToPrimitive;
+            self.calculate_cost(input_tokens, output_tokens)
+                .to_f64()
+                .unwrap_or(0.0)
+        };
+
         Ok(ToolCompletionResponse {
             content: text,
+            provider_model: Some(self.model_name.clone()),
+            cost_usd: Some(cost_usd),
             tool_calls,
             thinking_content: thinking,
-            input_tokens: saturate_u32(response.usage.input_tokens),
-            output_tokens: saturate_u32(response.usage.output_tokens),
+            input_tokens,
+            output_tokens,
             finish_reason: finish,
         })
     }
@@ -730,7 +801,12 @@ where
                     reason: e.to_string(),
                 })?;
 
-        Ok(rig_stream_to_chunks(streaming_resp))
+        Ok(rig_stream_to_chunks(
+            streaming_resp,
+            self.model_name.clone(),
+            self.input_cost,
+            self.output_cost,
+        ))
     }
 
     async fn complete_stream_with_tools(
@@ -742,6 +818,43 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
+
+        // ── Diagnostic: dump message roles BEFORE conversion ──────────
+        // Enables root-cause analysis of "messages with role tool must follow
+        // tool_calls" 400 errors. Remove once the protocol bug is fixed.
+        {
+            let summary: Vec<String> = messages
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let tc_info = m
+                        .tool_calls
+                        .as_ref()
+                        .map(|tcs| {
+                            tcs.iter()
+                                .map(|tc| tc.id.clone())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default();
+                    let tcid = m.tool_call_id.as_deref().unwrap_or("");
+                    format!(
+                        "[{}] {:?} name={} tc_ids=[{}] tool_call_id={}",
+                        i,
+                        m.role,
+                        m.name.as_deref().unwrap_or("-"),
+                        tc_info,
+                        tcid,
+                    )
+                })
+                .collect();
+            tracing::info!(
+                msg_count = messages.len(),
+                "complete_stream_with_tools: post-sanitize message dump:\n{}",
+                summary.join("\n")
+            );
+        }
+
         let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
@@ -768,6 +881,9 @@ where
 
         Ok(rig_stream_to_chunks_with_normalization(
             streaming_resp,
+            self.model_name.clone(),
+            self.input_cost,
+            self.output_cost,
             known_tool_names,
         ))
     }
@@ -795,6 +911,9 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 /// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream.
 fn rig_stream_to_chunks<R>(
     streaming_resp: rig::streaming::StreamingCompletionResponse<R>,
+    provider_model: String,
+    input_cost: Decimal,
+    output_cost: Decimal,
 ) -> StreamChunkStream
 where
     R: Clone
@@ -806,13 +925,22 @@ where
         + serde::de::DeserializeOwned
         + rig::completion::GetTokenUsage,
 {
-    rig_stream_to_chunks_with_normalization(streaming_resp, HashSet::new())
+    rig_stream_to_chunks_with_normalization(
+        streaming_resp,
+        provider_model,
+        input_cost,
+        output_cost,
+        HashSet::new(),
+    )
 }
 
 /// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream,
 /// normalizing tool call names against known tools.
 fn rig_stream_to_chunks_with_normalization<R>(
     mut streaming_resp: rig::streaming::StreamingCompletionResponse<R>,
+    provider_model: String,
+    input_cost: Decimal,
+    output_cost: Decimal,
     known_tool_names: HashSet<String>,
 ) -> StreamChunkStream
 where
@@ -859,8 +987,13 @@ where
                     if !known_tool_names.is_empty() {
                         name = normalize_tool_name(&name, &known_tool_names);
                     }
+                    let safe_id = if tool_call.id.trim().is_empty() {
+                        format!("call_{}", uuid::Uuid::new_v4().simple())
+                    } else {
+                        tool_call.id
+                    };
                     yield Ok(StreamChunk::ToolCall(IronToolCall {
-                        id: tool_call.id,
+                        id: safe_id,
                         name,
                         arguments: tool_call.function.arguments,
                     }));
@@ -892,9 +1025,20 @@ where
                 Ok(StreamedAssistantContent::Final(resp)) => {
                     // Extract usage if available
                     let usage = resp.token_usage().unwrap_or_default();
+                    let input_tokens = saturate_u32(usage.input_tokens);
+                    let output_tokens = saturate_u32(usage.output_tokens);
+                    let cost_usd = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (input_cost * Decimal::from(input_tokens)
+                            + output_cost * Decimal::from(output_tokens))
+                            .to_f64()
+                            .unwrap_or(0.0)
+                    };
                     yield Ok(StreamChunk::Done {
-                        input_tokens: saturate_u32(usage.input_tokens),
-                        output_tokens: saturate_u32(usage.output_tokens),
+                        provider_model: Some(provider_model.clone()),
+                        cost_usd: Some(cost_usd),
+                        input_tokens,
+                        output_tokens,
                         finish_reason: FinishReason::Stop,
                     });
                 }
@@ -920,6 +1064,22 @@ where
 mod tests {
     use super::*;
     use rig::message::Reasoning;
+
+    #[test]
+    fn requested_model_match_accepts_full_provider_spec() {
+        assert!(requested_model_matches_active_model(
+            "openai/gpt-5.4-mini",
+            "gpt-5.4-mini"
+        ));
+    }
+
+    #[test]
+    fn requested_model_match_rejects_different_model() {
+        assert!(!requested_model_matches_active_model(
+            "openai/gpt-5.4",
+            "gpt-5.4-mini"
+        ));
+    }
 
     #[test]
     fn test_convert_messages_system_to_preamble() {

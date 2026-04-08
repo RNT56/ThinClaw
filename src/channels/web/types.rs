@@ -597,6 +597,17 @@ pub struct SkillInstallRequest {
     pub name: String,
     pub url: Option<String>,
     pub content: Option<String>,
+    /// When true, removes the existing skill before installing the new version.
+    /// This enables atomic update/upgrade without requiring a separate remove call.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+/// Request to change a skill's trust level.
+#[derive(Debug, Deserialize)]
+pub struct SkillTrustRequest {
+    /// Target trust level: "trusted" or "installed".
+    pub trust: String,
 }
 
 // --- Auth Token ---

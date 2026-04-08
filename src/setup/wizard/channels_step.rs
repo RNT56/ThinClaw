@@ -11,25 +11,24 @@ use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_info, print_success,
-    secret_input, select_many,
+    confirm, input, optional_input, print_info, print_success, secret_input, select_many,
 };
 
-use super::{SetupError, SetupWizard};
 use super::helpers::{
     build_channel_options, capitalize_first, discover_wasm_channels,
     install_selected_bundled_channels, install_selected_registry_channels, mask_api_key,
 };
+use super::{SetupError, SetupWizard};
 
 #[allow(unused_imports)]
 use super::{
-    CHANNEL_INDEX_HTTP, CHANNEL_INDEX_SIGNAL, CHANNEL_INDEX_DISCORD,
-    CHANNEL_INDEX_SLACK, CHANNEL_INDEX_NOSTR, CHANNEL_INDEX_GMAIL,
+    CHANNEL_INDEX_DISCORD, CHANNEL_INDEX_GMAIL, CHANNEL_INDEX_HTTP, CHANNEL_INDEX_NOSTR,
+    CHANNEL_INDEX_SIGNAL, CHANNEL_INDEX_SLACK,
 };
 
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)]
-use super::{CHANNEL_INDEX_IMESSAGE, CHANNEL_INDEX_APPLE_MAIL};
+use super::{CHANNEL_INDEX_APPLE_MAIL, CHANNEL_INDEX_IMESSAGE};
 
 impl SetupWizard {
     pub(super) async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
@@ -164,8 +163,10 @@ impl SetupWizard {
 
     /// Step 8: Channel configuration.
     pub(super) async fn step_channels(&mut self) -> Result<(), SetupError> {
+        let secrets = self.init_secrets_context().await.ok();
+
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel(&self.settings) {
+        match setup_tunnel(&self.settings, secrets.as_ref()).await {
             Ok(tunnel_settings) => {
                 self.settings.tunnel = tunnel_settings;
             }
@@ -294,23 +295,15 @@ impl SetupWizard {
             discovered_channels = discover_wasm_channels(&channels_dir).await;
         }
 
-        // Determine if we need secrets context
         let needs_secrets = selected.contains(&CHANNEL_INDEX_HTTP)
             || selected.contains(&CHANNEL_INDEX_DISCORD)
             || selected.contains(&CHANNEL_INDEX_SLACK)
             || !selected_wasm_channels.is_empty();
-        let secrets = if needs_secrets {
-            match self.init_secrets_context().await {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    print_info(&format!("Secrets not available: {}", e));
-                    print_info("Channel tokens must be set via environment variables.");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        if needs_secrets && secrets.is_none() {
+            print_info(
+                "Secrets not available. Channel tokens must be set via environment variables.",
+            );
+        }
 
         // HTTP channel
         if selected.contains(&CHANNEL_INDEX_HTTP) {
@@ -319,9 +312,11 @@ impl SetupWizard {
                 let result = setup_http(ctx).await?;
                 self.settings.channels.http_enabled = result.enabled;
                 self.settings.channels.http_port = Some(result.port);
+                self.settings.channels.http_host = Some(result.host);
             } else {
                 self.settings.channels.http_enabled = true;
                 self.settings.channels.http_port = Some(8080);
+                self.settings.channels.http_host = Some("0.0.0.0".to_string());
                 print_info("HTTP webhook enabled on port 8080 (set HTTP_WEBHOOK_SECRET in env)");
             }
         } else {
@@ -396,7 +391,8 @@ impl SetupWizard {
                     print_info(&format!("Could not store token in secrets: {}", e));
                 }
             }
-            self.settings.channels.discord_bot_token = Some(token);
+            self.settings.channels.discord_bot_token =
+                if secrets.is_some() { None } else { Some(token) };
 
             let guild_id =
                 optional_input("Guild ID (restrict to single server, blank = all)", None)
@@ -420,6 +416,7 @@ impl SetupWizard {
             print_success("Discord channel configured");
         } else {
             self.settings.channels.discord_enabled = false;
+            self.settings.channels.discord_bot_token = None;
         }
 
         // Slack channel
@@ -496,8 +493,13 @@ impl SetupWizard {
                     print_info(&format!("Could not store app token in secrets: {}", e));
                 }
             }
-            self.settings.channels.slack_bot_token = Some(bot_token);
-            self.settings.channels.slack_app_token = Some(app_token);
+            if secrets.is_some() {
+                self.settings.channels.slack_bot_token = None;
+                self.settings.channels.slack_app_token = None;
+            } else {
+                self.settings.channels.slack_bot_token = Some(bot_token);
+                self.settings.channels.slack_app_token = Some(app_token);
+            }
 
             let allow_from = optional_input(
                 "Allowed Slack channel/DM IDs (comma-separated, blank = all)",
@@ -514,6 +516,8 @@ impl SetupWizard {
             print_success("Slack channel configured");
         } else {
             self.settings.channels.slack_enabled = false;
+            self.settings.channels.slack_bot_token = None;
+            self.settings.channels.slack_app_token = None;
         }
 
         // Nostr channel
@@ -626,8 +630,12 @@ impl SetupWizard {
             print_info("Apple Mail uses the native macOS Mail.app Envelope Index database.");
             print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
             print_info("Make sure Mail.app is configured and signed into your account.");
-            print_info("⚠️  IMPORTANT: If you leave this blank, ANY email sender can give instructions to your agent.");
-            print_info("   For security, specify your email address(es) so only you can control it via email.");
+            print_info(
+                "⚠️  IMPORTANT: If you leave this blank, ANY email sender can give instructions to your agent.",
+            );
+            print_info(
+                "   For security, specify your email address(es) so only you can control it via email.",
+            );
             println!();
 
             let allow_from = optional_input(
@@ -641,20 +649,20 @@ impl SetupWizard {
                 }
             }
 
-            let poll_interval =
-                optional_input("Polling interval in seconds", Some("10")).map_err(SetupError::Io)?;
+            let poll_interval = optional_input("Polling interval in seconds", Some("10"))
+                .map_err(SetupError::Io)?;
             if let Some(ref pi) = poll_interval {
                 if let Ok(n) = pi.parse::<u64>() {
                     self.settings.channels.apple_mail_poll_interval = Some(n);
                 }
             }
 
-            let unread_only = confirm("Only process unread messages?", true)
-                .map_err(SetupError::Io)?;
+            let unread_only =
+                confirm("Only process unread messages?", true).map_err(SetupError::Io)?;
             self.settings.channels.apple_mail_unread_only = unread_only;
 
-            let mark_as_read = confirm("Mark messages as read after processing?", true)
-                .map_err(SetupError::Io)?;
+            let mark_as_read =
+                confirm("Mark messages as read after processing?", true).map_err(SetupError::Io)?;
             self.settings.channels.apple_mail_mark_as_read = mark_as_read;
 
             self.settings.channels.apple_mail_enabled = true;

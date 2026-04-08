@@ -42,6 +42,8 @@
 //! See the [`wasm`] module for details.
 
 pub mod ack_reaction;
+#[cfg(target_os = "macos")]
+mod apple_mail;
 pub mod canvas_gateway;
 mod channel;
 mod discord;
@@ -51,8 +53,6 @@ pub mod gmail_wiring;
 pub mod group_priming;
 pub mod health_monitor;
 mod http;
-#[cfg(target_os = "macos")]
-mod apple_mail;
 #[cfg(target_os = "macos")]
 mod imessage;
 pub mod imessage_wiring;
@@ -68,6 +68,8 @@ pub mod wasm;
 pub mod web;
 mod webhook_server;
 
+#[cfg(target_os = "macos")]
+pub use apple_mail::{AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running};
 pub use channel::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,
@@ -76,10 +78,6 @@ pub use discord::DiscordChannel;
 pub use gmail::GmailChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
-#[cfg(target_os = "macos")]
-pub use apple_mail::{
-    AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running,
-};
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::ChannelManager;

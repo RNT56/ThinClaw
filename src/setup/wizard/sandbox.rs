@@ -1,5 +1,6 @@
 //! Sandbox wizard steps: Docker sandbox and Claude Code.
 
+use secrecy::SecretString;
 
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_info, print_success,
@@ -7,7 +8,68 @@ use crate::setup::prompts::{
 
 use super::{SetupError, SetupWizard};
 
+const ANTHROPIC_PROVIDER_SECRET_NAME: &str = "llm_anthropic_api_key";
+
 impl SetupWizard {
+    pub(super) fn enable_anthropic_provider_for_claude_code_key(&mut self) {
+        self.ensure_provider_enabled("anthropic");
+        self.ensure_provider_slot_defaults("anthropic");
+    }
+
+    async fn maybe_link_claude_code_api_key_to_anthropic_provider(
+        &mut self,
+        api_key: &str,
+    ) -> Result<(), SetupError> {
+        let trimmed = api_key.trim();
+        if trimmed.is_empty() || self.has_saved_secret(ANTHROPIC_PROVIDER_SECRET_NAME).await {
+            return Ok(());
+        }
+
+        println!();
+        print_info(
+            "ThinClaw can also reuse this Anthropic API key for the general Anthropic provider.",
+        );
+        print_info(
+            "That makes it available in Provider Vault, the WebUI, and normal Anthropic model routing.",
+        );
+        println!();
+
+        if !confirm(
+            "Also save this API key for ThinClaw's Anthropic provider and WebUI?",
+            true,
+        )
+        .map_err(SetupError::Io)?
+        {
+            return Ok(());
+        }
+
+        let Ok(ctx) = self.init_secrets_context().await else {
+            print_info(
+                "Secrets store not available. Claude Code will still use the key, but Anthropic provider reuse was not persisted.",
+            );
+            return Ok(());
+        };
+
+        if let Err(e) = ctx
+            .save_secret(
+                ANTHROPIC_PROVIDER_SECRET_NAME,
+                &SecretString::from(trimmed.to_string()),
+            )
+            .await
+        {
+            print_error(&format!(
+                "Failed to save the shared Anthropic provider key: {}",
+                e
+            ));
+            print_info("Claude Code will keep using its own key source.");
+            return Ok(());
+        }
+
+        self.enable_anthropic_provider_for_claude_code_key();
+        print_success("Anthropic provider credentials saved for general use.");
+        Ok(())
+    }
+
     pub(super) async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
         // ── Part A: Local tools for the main agent ───────────────────────
         println!();
@@ -23,11 +85,8 @@ impl SetupWizard {
         print_info("and WASM-sandboxed extensions. No direct host access.");
         println!();
 
-        let allow_local = confirm(
-            "Allow ThinClaw to use local tools on your machine?",
-            false,
-        )
-        .map_err(SetupError::Io)?;
+        let allow_local = confirm("Allow ThinClaw to use local tools on your machine?", false)
+            .map_err(SetupError::Io)?;
         self.settings.agent.allow_local_tools = allow_local;
 
         if allow_local {
@@ -145,17 +204,11 @@ impl SetupWizard {
                     print_info("Building thinclaw-worker image (this may take a while)...");
 
                     // Find the repo root (where Dockerfile.worker lives)
-                    let repo_root = std::env::current_dir().unwrap_or_else(|_| {
-                        std::path::PathBuf::from(".")
-                    });
+                    let repo_root =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
                     let status = std::process::Command::new("docker")
-                        .args([
-                            "build",
-                            "-f", "Dockerfile.worker",
-                            "-t", image_name,
-                            ".",
-                        ])
+                        .args(["build", "-f", "Dockerfile.worker", "-t", image_name, "."])
                         .current_dir(&repo_root)
                         .stdin(std::process::Stdio::inherit())
                         .stdout(std::process::Stdio::inherit())
@@ -191,7 +244,6 @@ impl SetupWizard {
     }
 
     /// Step 7: Agent identity (name).
-
     pub(super) async fn step_claude_code(&mut self) -> Result<(), SetupError> {
         // Claude Code requires the Docker sandbox to be enabled
         if !self.settings.sandbox.enabled {
@@ -220,19 +272,25 @@ impl SetupWizard {
         println!();
 
         // Check existing auth sources
-        let has_env_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let env_api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
 
-        let has_keychain_key = crate::secrets::keychain::get_api_key(
+        let keychain_api_key = crate::secrets::keychain::get_api_key(
             crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
         )
         .await
-        .is_some();
+        .filter(|value| !value.trim().is_empty());
 
-        if has_env_key {
+        if let Some(api_key) = env_api_key.as_deref() {
             print_success("✓ ANTHROPIC_API_KEY found in environment. This will be used.");
-        } else if has_keychain_key {
+            self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
+                .await?;
+        } else if let Some(api_key) = keychain_api_key.as_deref() {
             print_success("✓ Anthropic API key found in OS keychain. This will be used.");
+            self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
+                .await?;
         } else if has_oauth {
             print_success("✓ Claude Code OAuth session found. This will be used.");
             print_info("  (Token from 'claude login' — typically valid for 8-12 hours)");
@@ -248,8 +306,7 @@ impl SetupWizard {
             )
             .map_err(SetupError::Io)?
             {
-                let api_key =
-                    input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
+                let api_key = input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
 
                 if api_key.starts_with("sk-ant-") {
                     match crate::secrets::keychain::store_api_key(
@@ -260,11 +317,17 @@ impl SetupWizard {
                     {
                         Ok(()) => {
                             print_success("API key stored securely in OS keychain.");
-                            print_info("It will be injected into Claude Code containers at runtime.");
+                            print_info(
+                                "It will be injected into Claude Code containers at runtime.",
+                            );
+                            self.maybe_link_claude_code_api_key_to_anthropic_provider(&api_key)
+                                .await?;
                         }
                         Err(e) => {
                             print_error(&format!("Failed to store in keychain: {}", e));
-                            print_info("You can set ANTHROPIC_API_KEY in your environment instead.");
+                            print_info(
+                                "You can set ANTHROPIC_API_KEY in your environment instead.",
+                            );
                         }
                     }
                 } else {

@@ -161,6 +161,8 @@ async fn llm_complete(
 
     Ok(Json(ProxyCompletionResponse {
         content: resp.content,
+        provider_model: resp.provider_model,
+        cost_usd: resp.cost_usd,
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,
         finish_reason: format_finish_reason(resp.finish_reason),
@@ -190,6 +192,8 @@ async fn llm_complete_with_tools(
 
     Ok(Json(ProxyToolCompletionResponse {
         content: resp.content,
+        provider_model: resp.provider_model,
+        cost_usd: resp.cost_usd,
         tool_calls: resp.tool_calls,
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,

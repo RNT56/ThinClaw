@@ -41,10 +41,11 @@ impl MediaType {
             "pdf" => Self::Pdf,
             "wav" | "mp3" | "m4a" | "ogg" | "flac" | "aac" | "wma" | "opus" => Self::Audio,
             "mp4" | "avi" | "mkv" | "mov" | "webm" | "flv" => Self::Video,
-            "docx" | "pptx" | "xlsx" | "txt" | "csv" | "json" | "xml" | "yaml" | "yml"
-            | "toml" | "md" | "markdown" | "rs" | "py" | "js" | "ts" | "go" | "java" | "c"
-            | "cpp" | "h" | "rb" | "sh" | "sql" | "html" | "css" | "ini" | "cfg" | "conf"
-            | "log" => Self::Document,
+            "docx" | "pptx" | "xlsx" | "txt" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml"
+            | "md" | "markdown" | "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h"
+            | "rb" | "sh" | "sql" | "html" | "css" | "ini" | "cfg" | "conf" | "log" => {
+                Self::Document
+            }
             _ => Self::Unknown,
         }
     }
@@ -255,12 +256,9 @@ fn is_document_mime(mime: &str) -> bool {
         || mime == "application/javascript"
         || mime == "application/x-yaml"
         || mime == "application/toml"
-        || mime
-            == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        || mime
-            == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        || mime
-            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        || mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        || mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 }
 
 /// Guess MIME type from a filename's extension.
@@ -303,8 +301,8 @@ fn guess_mime_from_extension(filename: &str) -> String {
         "html" | "htm" => "text/html",
         "yaml" | "yml" => "application/x-yaml",
         "toml" | "ini" | "cfg" | "conf" => "text/plain",
-        "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "rb" | "sh"
-        | "sql" | "css" => "text/plain",
+        "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "h" | "rb" | "sh" | "sql"
+        | "css" => "text/plain",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -321,7 +319,10 @@ mod tests {
         assert_eq!(MediaType::from_mime("application/pdf"), MediaType::Pdf);
         assert_eq!(MediaType::from_mime("audio/mp3"), MediaType::Audio);
         assert_eq!(MediaType::from_mime("video/mp4"), MediaType::Video);
-        assert_eq!(MediaType::from_mime("application/json"), MediaType::Document);
+        assert_eq!(
+            MediaType::from_mime("application/json"),
+            MediaType::Document
+        );
         assert_eq!(MediaType::from_mime("text/plain"), MediaType::Document);
     }
 

@@ -113,12 +113,23 @@ impl SetupWizard {
             env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
         }
 
+        // HTTP channel bootstrap vars
+        if self.settings.channels.http_enabled {
+            env_vars.push(("HTTP_ENABLED", "true".to_string()));
+            if let Some(ref host) = self.settings.channels.http_host {
+                env_vars.push(("HTTP_HOST", host.clone()));
+            }
+            if let Some(port) = self.settings.channels.http_port {
+                env_vars.push(("HTTP_PORT", port.to_string()));
+            }
+        }
+
         // Discord channel env vars
         if self.settings.channels.discord_enabled {
             env_vars.push(("DISCORD_ENABLED", "true".to_string()));
-        }
-        if let Some(ref token) = self.settings.channels.discord_bot_token {
-            env_vars.push(("DISCORD_BOT_TOKEN", token.clone()));
+            if let Some(ref token) = self.settings.channels.discord_bot_token {
+                env_vars.push(("DISCORD_BOT_TOKEN", token.clone()));
+            }
         }
         if let Some(ref guild_id) = self.settings.channels.discord_guild_id {
             env_vars.push(("DISCORD_GUILD_ID", guild_id.clone()));
@@ -130,12 +141,12 @@ impl SetupWizard {
         // Slack channel env vars
         if self.settings.channels.slack_enabled {
             env_vars.push(("SLACK_ENABLED", "true".to_string()));
-        }
-        if let Some(ref token) = self.settings.channels.slack_bot_token {
-            env_vars.push(("SLACK_BOT_TOKEN", token.clone()));
-        }
-        if let Some(ref token) = self.settings.channels.slack_app_token {
-            env_vars.push(("SLACK_APP_TOKEN", token.clone()));
+            if let Some(ref token) = self.settings.channels.slack_bot_token {
+                env_vars.push(("SLACK_BOT_TOKEN", token.clone()));
+            }
+            if let Some(ref token) = self.settings.channels.slack_app_token {
+                env_vars.push(("SLACK_APP_TOKEN", token.clone()));
+            }
         }
         if let Some(ref allow_from) = self.settings.channels.slack_allow_from {
             env_vars.push(("SLACK_ALLOW_FROM", allow_from.clone()));
@@ -207,7 +218,7 @@ impl SetupWizard {
 
         // Smart Routing env vars
         if let Some(ref model) = self.settings.providers.cheap_model {
-            env_vars.push(("CHEAP_MODEL", model.clone()));
+            env_vars.push(("LLM_CHEAP_MODEL", model.clone()));
         }
 
         // Web UI env vars

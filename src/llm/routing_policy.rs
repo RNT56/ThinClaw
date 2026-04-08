@@ -37,7 +37,54 @@ pub struct RoutingContext {
     pub budget_usd: Option<f64>,
 }
 
+/// A concrete route candidate that can be considered by policy rules.
+#[derive(Debug, Clone)]
+pub struct RouteCandidate {
+    pub target: String,
+    pub cost_per_m_usd: Option<f64>,
+}
+
+impl RouteCandidate {
+    pub fn new(target: impl Into<String>, cost_per_m_usd: Option<f64>) -> Self {
+        Self {
+            target: target.into(),
+            cost_per_m_usd,
+        }
+    }
+}
+
+/// Concrete routing decision produced by policy evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingDecision {
+    pub target: String,
+    pub fallbacks: Vec<String>,
+    pub matched_rule_index: Option<usize>,
+}
+
+impl RoutingDecision {
+    fn single(target: impl Into<String>, matched_rule_index: Option<usize>) -> Self {
+        Self {
+            target: target.into(),
+            fallbacks: Vec::new(),
+            matched_rule_index,
+        }
+    }
+
+    fn with_fallbacks(
+        target: impl Into<String>,
+        fallbacks: Vec<String>,
+        matched_rule_index: Option<usize>,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            fallbacks,
+            matched_rule_index,
+        }
+    }
+}
+
 /// Routing policy with ordered rules.
+#[derive(Clone)]
 pub struct RoutingPolicy {
     rules: Vec<RoutingRule>,
     default_provider: String,
@@ -154,57 +201,99 @@ impl RoutingPolicy {
     ///
     /// If smart routing is disabled, always returns the default provider.
     pub fn select_provider(&self, ctx: &RoutingContext) -> String {
-        if !self.enabled {
-            return self.default_provider.clone();
-        }
-        for rule in &self.rules {
-            if let Some(provider) = self.matches_rule(rule, ctx) {
-                return provider;
-            }
-        }
-        self.default_provider.clone()
+        self.select_decision(ctx, &[]).target
     }
 
-    fn matches_rule(&self, rule: &RoutingRule, ctx: &RoutingContext) -> Option<String> {
+    /// Select a concrete routing decision for the given context.
+    ///
+    /// `available_targets` is used by cost-aware rules to pick an actual
+    /// route instead of falling back to a placeholder alias.
+    pub fn select_decision(
+        &self,
+        ctx: &RoutingContext,
+        available_targets: &[RouteCandidate],
+    ) -> RoutingDecision {
+        if !self.enabled {
+            return RoutingDecision::single(self.default_provider.clone(), None);
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            if let Some(decision) = self.matches_rule(rule, ctx, available_targets, Some(index)) {
+                return decision;
+            }
+        }
+        RoutingDecision::single(self.default_provider.clone(), None)
+    }
+
+    fn matches_rule(
+        &self,
+        rule: &RoutingRule,
+        ctx: &RoutingContext,
+        available_targets: &[RouteCandidate],
+        matched_rule_index: Option<usize>,
+    ) -> Option<RoutingDecision> {
         match rule {
             RoutingRule::LargeContext {
                 threshold,
                 provider,
             } => {
                 if ctx.estimated_input_tokens > *threshold {
-                    Some(provider.clone())
+                    Some(RoutingDecision::single(
+                        provider.clone(),
+                        matched_rule_index,
+                    ))
                 } else {
                     None
                 }
             }
             RoutingRule::VisionContent { provider } => {
                 if ctx.has_vision {
-                    Some(provider.clone())
+                    Some(RoutingDecision::single(
+                        provider.clone(),
+                        matched_rule_index,
+                    ))
                 } else {
                     None
                 }
             }
-            RoutingRule::CostOptimized { max_cost_per_m_usd } => {
-                if let Some(budget) = ctx.budget_usd {
-                    if budget <= *max_cost_per_m_usd {
-                        Some(self.default_provider.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            RoutingRule::LowestLatency => self.latency_tracker.get_fastest(),
+            RoutingRule::CostOptimized { max_cost_per_m_usd } => available_targets
+                .iter()
+                .filter_map(|candidate| {
+                    candidate
+                        .cost_per_m_usd
+                        .map(|cost| (candidate.target.clone(), cost))
+                })
+                .filter(|(_, cost)| *cost <= *max_cost_per_m_usd)
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(target, _)| RoutingDecision::single(target, matched_rule_index)),
+            RoutingRule::LowestLatency => self
+                .latency_tracker
+                .get_fastest()
+                .map(|target| RoutingDecision::single(target, matched_rule_index)),
             RoutingRule::RoundRobin { providers } => {
                 if providers.is_empty() {
                     return None;
                 }
                 let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
-                Some(providers[idx % providers.len()].clone())
+                Some(RoutingDecision::single(
+                    providers[idx % providers.len()].clone(),
+                    matched_rule_index,
+                ))
             }
-            RoutingRule::Fallback { primary, .. } => Some(primary.clone()),
+            RoutingRule::Fallback { primary, fallbacks } => Some(RoutingDecision::with_fallbacks(
+                primary.clone(),
+                fallbacks.clone(),
+                matched_rule_index,
+            )),
         }
+    }
+
+    pub fn matches_rule_for_summary(
+        &self,
+        rule: &RoutingRule,
+        ctx: &RoutingContext,
+        available_targets: &[RouteCandidate],
+    ) -> Option<RoutingDecision> {
+        self.matches_rule(rule, ctx, available_targets, None)
     }
 
     /// Number of rules.
@@ -326,7 +415,10 @@ impl RoutingRuleSummary {
                     ),
                     RoutingRule::CostOptimized { max_cost_per_m_usd } => (
                         "cost_optimized".into(),
-                        format!("If budget ≤ ${}/M tokens", max_cost_per_m_usd),
+                        format!(
+                            "Route to the cheapest available target at or under ${}/M tokens",
+                            max_cost_per_m_usd
+                        ),
                     ),
                     RoutingRule::LowestLatency => (
                         "lowest_latency".into(),
@@ -401,9 +493,14 @@ mod tests {
         policy.add_rule(RoutingRule::CostOptimized {
             max_cost_per_m_usd: 5.0,
         });
-        let mut ctx = base_ctx();
-        ctx.budget_usd = Some(3.0);
-        assert_eq!(policy.select_provider(&ctx), "openai");
+        let decision = policy.select_decision(
+            &base_ctx(),
+            &[
+                RouteCandidate::new("primary", Some(12.0)),
+                RouteCandidate::new("cheap", Some(2.0)),
+            ],
+        );
+        assert_eq!(decision.target, "cheap");
     }
 
     #[test]
@@ -428,7 +525,9 @@ mod tests {
             primary: "main".into(),
             fallbacks: vec!["backup".into()],
         });
-        assert_eq!(policy.select_provider(&base_ctx()), "main");
+        let decision = policy.select_decision(&base_ctx(), &[]);
+        assert_eq!(decision.target, "main");
+        assert_eq!(decision.fallbacks, vec!["backup"]);
     }
 
     #[test]

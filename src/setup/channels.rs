@@ -101,6 +101,9 @@ impl SecretsContext {
     }
 }
 
+const TUNNEL_NGROK_TOKEN_SECRET: &str = "tunnel_ngrok_token";
+const TUNNEL_CF_TOKEN_SECRET: &str = "tunnel_cf_token";
+
 /// Result of Telegram setup.
 #[derive(Debug, Clone)]
 pub struct TelegramSetupResult {
@@ -361,26 +364,39 @@ async fn bind_telegram_owner_flow(
 /// This is shared across all channels that need webhook endpoints.
 /// Returns a `TunnelSettings` with provider config (managed tunnel)
 /// or a static URL.
-pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
+pub async fn setup_tunnel(
+    settings: &Settings,
+    secrets: Option<&SecretsContext>,
+) -> Result<TunnelSettings, ChannelSetupError> {
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
         println!();
         print_info("Current tunnel configuration:");
         let t = &settings.tunnel;
+        let has_ngrok_secret = if let Some(ctx) = secrets {
+            ctx.secret_exists(TUNNEL_NGROK_TOKEN_SECRET).await
+        } else {
+            false
+        };
+        let has_cf_secret = if let Some(ctx) = secrets {
+            ctx.secret_exists(TUNNEL_CF_TOKEN_SECRET).await
+        } else {
+            false
+        };
         match t.provider.as_deref() {
             Some("ngrok") => {
                 print_info("  Provider:  ngrok");
                 if let Some(ref domain) = t.ngrok_domain {
                     print_info(&format!("  Domain:    {}", domain));
                 }
-                if t.ngrok_token.is_some() {
+                if t.ngrok_token.is_some() || has_ngrok_secret {
                     print_info("  Auth:      token configured");
                 }
             }
             Some("cloudflare") => {
                 print_info("  Provider:  Cloudflare Tunnel");
-                if t.cf_token.is_some() {
+                if t.cf_token.is_some() || has_cf_secret {
                     print_info("  Auth:      token configured");
                 }
             }
@@ -440,8 +456,8 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
     let choice = select_one("Select tunnel provider:", options)?;
 
     match choice {
-        0 => setup_tunnel_ngrok(),
-        1 => setup_tunnel_cloudflare(),
+        0 => setup_tunnel_ngrok(secrets).await,
+        1 => setup_tunnel_cloudflare(secrets).await,
         2 => setup_tunnel_tailscale(),
         3 => setup_tunnel_custom(),
         4 => setup_tunnel_static(),
@@ -449,7 +465,9 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
     }
 }
 
-fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_ngrok(
+    secrets: Option<&SecretsContext>,
+) -> Result<TunnelSettings, ChannelSetupError> {
     // Check if ngrok is installed
     if !is_binary_installed("ngrok") {
         println!();
@@ -459,7 +477,10 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
         print_info("  Linux:   snap install ngrok  (or download from https://ngrok.com/download)");
         print_info("  Windows: choco install ngrok");
         println!();
-        if !confirm("Continue configuring ngrok anyway? (you can install it before starting the agent)", false)? {
+        if !confirm(
+            "Continue configuring ngrok anyway? (you can install it before starting the agent)",
+            false,
+        )? {
             return Ok(TunnelSettings::default());
         }
     }
@@ -469,6 +490,12 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 
     let token = secret_input("ngrok auth token")?;
     let domain = optional_input("Custom domain", Some("leave empty for auto-assigned"))?;
+    let ngrok_token = if let Some(ctx) = secrets {
+        ctx.save_secret(TUNNEL_NGROK_TOKEN_SECRET, &token).await?;
+        None
+    } else {
+        Some(token.expose_secret().to_string())
+    };
 
     print_success("ngrok configured. Tunnel will start automatically at boot.");
     if !is_binary_installed("ngrok") {
@@ -477,23 +504,30 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 
     Ok(TunnelSettings {
         provider: Some("ngrok".to_string()),
-        ngrok_token: Some(token.expose_secret().to_string()),
+        ngrok_token,
         ngrok_domain: domain,
         ..Default::default()
     })
 }
 
-fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_cloudflare(
+    secrets: Option<&SecretsContext>,
+) -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared is installed
     if !is_binary_installed("cloudflared") {
         println!();
         print_error("'cloudflared' binary not found in PATH.");
         print_info("Install cloudflared before starting the agent:");
         print_info("  macOS:   brew install cloudflare/cloudflare/cloudflared");
-        print_info("  Linux:   See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/");
+        print_info(
+            "  Linux:   See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        );
         print_info("  Windows: winget install Cloudflare.cloudflared");
         println!();
-        if !confirm("Continue configuring cloudflared anyway? (you can install it before starting the agent)", false)? {
+        if !confirm(
+            "Continue configuring cloudflared anyway? (you can install it before starting the agent)",
+            false,
+        )? {
             return Ok(TunnelSettings::default());
         }
     }
@@ -503,6 +537,12 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     println!();
 
     let token = secret_input("Cloudflare tunnel token")?;
+    let cf_token = if let Some(ctx) = secrets {
+        ctx.save_secret(TUNNEL_CF_TOKEN_SECRET, &token).await?;
+        None
+    } else {
+        Some(token.expose_secret().to_string())
+    };
 
     print_success("Cloudflare tunnel configured. Tunnel will start automatically at boot.");
     if !is_binary_installed("cloudflared") {
@@ -511,7 +551,7 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
 
     Ok(TunnelSettings {
         provider: Some("cloudflare".to_string()),
-        cf_token: Some(token.expose_secret().to_string()),
+        cf_token,
         ..Default::default()
     })
 }
@@ -527,7 +567,10 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
         print_info("  Linux:   curl -fsSL https://tailscale.com/install.sh | sh");
         print_info("  Windows: Download from https://tailscale.com/download/windows");
         println!();
-        if !confirm("Continue configuring Tailscale anyway? (you can install it before starting the agent)", false)? {
+        if !confirm(
+            "Continue configuring Tailscale anyway? (you can install it before starting the agent)",
+            false,
+        )? {
             return Ok(TunnelSettings::default());
         }
     }

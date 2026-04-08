@@ -1,6 +1,6 @@
 //! Main setup wizard orchestration.
 //!
-//! The wizard guides users through 19 steps, grouped by concern:
+//! The wizard guides users through 20 steps, grouped by concern:
 //!
 //! **Infrastructure**
 //! 1. Database connection
@@ -15,25 +15,26 @@
 //!
 //! **Agent Personality**
 //! 8. Agent identity (name)
+//! 9. Timezone (auto-detect + confirm)
 //!
 //! **Communication Channels**
-//! 9. Channel configuration (Telegram, Discord, Slack, Signal, etc.)
+//! 10. Channel configuration (Telegram, Discord, Slack, Signal, etc.)
 //!
 //! **Capabilities & Execution**
-//! 10. Extensions (tool installation from registry)
-//! 11. Local tools & Docker sandbox
-//! 12. Claude Code sandbox
-//! 13. Tool approval mode
+//! 11. Extensions (tool installation from registry)
+//! 12. Local tools & Docker sandbox
+//! 13. Claude Code sandbox
+//! 14. Tool approval mode
 //!
 //! **Automation**
-//! 14. Routines (scheduled tasks)
-//! 15. Skills (capability plugins)
-//! 16. Heartbeat (background tasks)
+//! 15. Routines (scheduled tasks)
+//! 16. Skills (capability plugins)
+//! 17. Heartbeat (background tasks)
 //!
 //! **Presentation & Operations**
-//! 17. Notification preferences
-//! 18. Web UI (theme, accent, branding)
-//! 19. Observability (event/metric recording)
+//! 18. Notification preferences
+//! 19. Web UI (theme, accent, branding)
+//! 20. Observability (event/metric recording)
 
 use std::sync::Arc;
 
@@ -156,7 +157,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 19;
+            let total_steps = 20;
 
             // ── Infrastructure ───────────────────────────────────────────
 
@@ -207,6 +208,11 @@ impl SetupWizard {
             self.step_fallback_providers().await?;
             self.persist_after_step().await;
 
+            // Ensure onboarding leaves the user with at least one remote
+            // provider API key even if the primary backend is local/no-auth.
+            self.ensure_onboarding_provider_api_key().await?;
+            self.persist_after_step().await;
+
             // Step 7: Embeddings
             print_step(7, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
@@ -219,66 +225,71 @@ impl SetupWizard {
             self.step_agent_identity()?;
             self.persist_after_step().await;
 
+            // Step 9: Timezone
+            print_step(9, total_steps, "Timezone");
+            self.step_timezone()?;
+            self.persist_after_step().await;
+
             // ── Communication Channels ───────────────────────────────────
 
-            // Step 9: Channel configuration
-            print_step(9, total_steps, "Channel Configuration");
+            // Step 10: Channel configuration
+            print_step(10, total_steps, "Channel Configuration");
             self.step_channels().await?;
             self.persist_after_step().await;
 
             // ── Capabilities & Execution ─────────────────────────────────
 
-            // Step 10: Extensions (tools)
-            print_step(10, total_steps, "Extensions");
+            // Step 11: Extensions (tools)
+            print_step(11, total_steps, "Extensions");
             self.step_extensions().await?;
             self.persist_after_step().await;
 
-            // Step 11: Local Tools & Docker Sandbox
-            print_step(11, total_steps, "Local Tools & Docker Sandbox");
+            // Step 12: Local Tools & Docker Sandbox
+            print_step(12, total_steps, "Local Tools & Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 12: Claude Code Sandbox
-            print_step(12, total_steps, "Claude Code Sandbox");
+            // Step 13: Claude Code Sandbox
+            print_step(13, total_steps, "Claude Code Sandbox");
             self.step_claude_code().await?;
             self.persist_after_step().await;
 
-            // Step 13: Tool Approval Mode
-            print_step(13, total_steps, "Tool Approval Mode");
+            // Step 14: Tool Approval Mode
+            print_step(14, total_steps, "Tool Approval Mode");
             self.step_tool_approval()?;
             self.persist_after_step().await;
 
             // ── Automation ───────────────────────────────────────────────
 
-            // Step 14: Routines
-            print_step(14, total_steps, "Routines (Scheduled Tasks)");
+            // Step 15: Routines
+            print_step(15, total_steps, "Routines (Scheduled Tasks)");
             self.step_routines()?;
             self.persist_after_step().await;
 
-            // Step 15: Skills
-            print_step(15, total_steps, "Skills");
+            // Step 16: Skills
+            print_step(16, total_steps, "Skills");
             self.step_skills()?;
             self.persist_after_step().await;
 
-            // Step 16: Heartbeat
-            print_step(16, total_steps, "Background Tasks");
+            // Step 17: Heartbeat
+            print_step(17, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
 
             // ── Presentation & Operations ────────────────────────────────
 
-            // Step 17: Notification Preferences
-            print_step(17, total_steps, "Notification Preferences");
+            // Step 18: Notification Preferences
+            print_step(18, total_steps, "Notification Preferences");
             self.step_notification_preferences()?;
             self.persist_after_step().await;
 
-            // Step 18: Web UI
-            print_step(18, total_steps, "Web UI");
+            // Step 19: Web UI
+            print_step(19, total_steps, "Web UI");
             self.step_web_ui()?;
             self.persist_after_step().await;
 
-            // Step 19: Observability
-            print_step(19, total_steps, "Observability");
+            // Step 20: Observability
+            print_step(20, total_steps, "Observability");
             self.step_observability()?;
             self.persist_after_step().await;
         }
@@ -384,17 +395,17 @@ impl SetupWizard {
 }
 
 // Step implementations are split into sub-modules by concern.
-mod infrastructure;
-mod llm;
+mod agent;
+mod automation;
 mod channels_step;
 mod extensions;
-mod agent;
-mod sandbox;
-mod automation;
-mod presentation;
-mod persistence;
-mod summary;
 pub(crate) mod helpers;
+mod infrastructure;
+mod llm;
+mod persistence;
+mod presentation;
+mod sandbox;
+mod summary;
 
 #[cfg(test)]
 mod tests {
@@ -404,8 +415,8 @@ mod tests {
 
     use crate::channels::wasm::{ChannelCapabilitiesFile, available_channel_names};
 
-    use super::*;
     use super::helpers::*;
+    use super::*;
 
     #[test]
     fn test_wizard_creation() {
@@ -505,6 +516,33 @@ mod tests {
             1,
             "telegram should not be duplicated"
         );
+    }
+
+    #[test]
+    fn test_claude_code_key_enable_anthropic_provider_without_changing_primary() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.providers.primary = Some("openai".to_string());
+
+        wizard.enable_anthropic_provider_for_claude_code_key();
+
+        assert_eq!(wizard.settings.providers.primary.as_deref(), Some("openai"));
+        assert!(
+            wizard
+                .settings
+                .providers
+                .enabled
+                .iter()
+                .any(|slug| slug == "anthropic")
+        );
+
+        let slots = wizard
+            .settings
+            .providers
+            .provider_models
+            .get("anthropic")
+            .expect("anthropic slots should be created");
+        assert_eq!(slots.primary.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert!(slots.cheap.is_some());
     }
 
     #[tokio::test]

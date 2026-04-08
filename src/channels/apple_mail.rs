@@ -252,11 +252,7 @@ impl AppleMailChannel {
         since_rowid: i64,
         unread_only: bool,
     ) -> Result<Vec<MailMessage>, ChannelError> {
-        let read_filter = if unread_only {
-            "AND m.read = 0"
-        } else {
-            ""
-        };
+        let read_filter = if unread_only { "AND m.read = 0" } else { "" };
 
         let query = format!(
             "SELECT m.ROWID, \
@@ -524,29 +520,24 @@ impl Channel for AppleMailChannel {
                                 msg.sender, msg.subject, msg.body
                             );
 
-                            let incoming =
-                                IncomingMessage::new(NAME, sender_email, &content).with_metadata(
-                                    serde_json::json!({
-                                        "rowid": msg.rowid,
-                                        "subject": msg.subject,
-                                        "sender": msg.sender,
-                                        "sender_email": sender_email,
-                                        "date_received": msg.date_received,
-                                        "message_id": msg.message_id,
-                                        "is_read": msg.is_read,
-                                        "channel_type": "email",
-                                    }),
-                                );
+                            let incoming = IncomingMessage::new(NAME, sender_email, &content)
+                                .with_metadata(serde_json::json!({
+                                    "rowid": msg.rowid,
+                                    "subject": msg.subject,
+                                    "sender": msg.sender,
+                                    "sender_email": sender_email,
+                                    "date_received": msg.date_received,
+                                    "message_id": msg.message_id,
+                                    "is_read": msg.is_read,
+                                    "channel_type": "email",
+                                }));
 
                             last_rowid.store(msg.rowid, Ordering::Relaxed);
 
                             // Mark as read before sending to agent
                             if mark_as_read {
-                                let _ = Self::mark_as_read_applescript(
-                                    &msg.subject,
-                                    sender_email,
-                                )
-                                .await;
+                                let _ = Self::mark_as_read_applescript(&msg.subject, sender_email)
+                                    .await;
                             }
 
                             if tx.send(incoming).await.is_err() {
@@ -684,9 +675,7 @@ pub async fn ensure_app_running(app_name: &str) -> bool {
     // Launch the app minimized (no window activation on headless)
     let result = tokio::process::Command::new("osascript")
         .arg("-e")
-        .arg(format!(
-            r#"tell application "{app_name}" to launch"#
-        ))
+        .arg(format!(r#"tell application "{app_name}" to launch"#))
         .output()
         .await;
 
@@ -736,10 +725,7 @@ mod tests {
 
     #[test]
     fn test_escape_applescript() {
-        assert_eq!(
-            escape_applescript(r#"say "hello""#),
-            r#"say \"hello\""#
-        );
+        assert_eq!(escape_applescript(r#"say "hello""#), r#"say \"hello\""#);
         assert_eq!(escape_applescript("back\\slash"), "back\\\\slash");
         assert_eq!(escape_applescript("normal"), "normal");
     }

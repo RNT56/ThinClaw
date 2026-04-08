@@ -233,11 +233,7 @@ impl ContainerJobManager {
     ///
     /// The next Claude Code container spawned will use the updated values.
     /// Already-running containers keep their current settings.
-    pub async fn update_claude_code_settings(
-        &self,
-        model: Option<String>,
-        max_turns: Option<u32>,
-    ) {
+    pub async fn update_claude_code_settings(&self, model: Option<String>, max_turns: Option<u32>) {
         if let Some(m) = model {
             *self.cc_model.write().await = m;
         }

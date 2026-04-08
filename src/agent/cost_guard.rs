@@ -100,6 +100,24 @@ impl CostGuard {
         }
     }
 
+    /// Reset all counters (daily cost, action window, model usage).
+    pub async fn reset(&self) {
+        {
+            let mut daily = self.daily_cost.lock().await;
+            daily.total = Decimal::ZERO;
+            daily.reset_date = chrono::Utc::now().date_naive();
+        }
+        self.budget_exceeded.store(false, Ordering::Relaxed);
+        {
+            let mut window = self.action_window.lock().await;
+            window.clear();
+        }
+        {
+            let mut tokens = self.model_tokens.lock().await;
+            tokens.clear();
+        }
+    }
+
     /// Check whether the next action is allowed under the configured limits.
     ///
     /// Call this BEFORE making an LLM call. Does NOT record the action yet,
@@ -148,7 +166,21 @@ impl CostGuard {
         Ok(())
     }
 
-    /// Record a completed LLM action: its token costs and the action timestamp.
+    /// Record a completed LLM action with a pre-computed total cost.
+    ///
+    /// Prefer this when the provider returned actual pricing data.
+    pub async fn record_llm_call_with_cost(
+        &self,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        total_cost: Decimal,
+    ) -> Decimal {
+        self.record_cost_internal(model, input_tokens, output_tokens, total_cost)
+            .await
+    }
+
+    /// Record a completed LLM action, computing cost from per-token rates.
     ///
     /// Call this AFTER an LLM call completes so that costs are tracked.
     ///
@@ -166,7 +198,17 @@ impl CostGuard {
             .unwrap_or_else(|| costs::model_cost(model).unwrap_or_else(costs::default_cost));
         let cost =
             input_rate * Decimal::from(input_tokens) + output_rate * Decimal::from(output_tokens);
+        self.record_cost_internal(model, input_tokens, output_tokens, cost)
+            .await
+    }
 
+    async fn record_cost_internal(
+        &self,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: Decimal,
+    ) -> Decimal {
         // Update daily cost (reset if new day)
         {
             let mut daily = self.daily_cost.lock().await;

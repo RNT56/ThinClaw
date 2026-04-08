@@ -327,7 +327,9 @@ fn cmd_search(catalog: &RegistryCatalog, query: &str) -> anyhow::Result<()> {
         .filter(|m| {
             m.name.to_lowercase().contains(&query_lower)
                 || m.description.to_lowercase().contains(&query_lower)
-                || m.keywords.iter().any(|k| k.to_lowercase().contains(&query_lower))
+                || m.keywords
+                    .iter()
+                    .any(|k| k.to_lowercase().contains(&query_lower))
         })
         .collect();
 
@@ -348,8 +350,8 @@ fn cmd_search(catalog: &RegistryCatalog, query: &str) -> anyhow::Result<()> {
 }
 
 async fn cmd_remove(name: &str) -> anyhow::Result<()> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
     // Check channels dir
     let channels_dir = home.join(".thinclaw/channels");

@@ -237,6 +237,9 @@ pub struct LoadedSkill {
     /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
     pub lowercased_tags: Vec<String>,
+    /// Pre-computed lowercased words from the skill description for broad semantic matching.
+    /// Words shorter than 3 chars are excluded. Derived at load time — do not mutate independently.
+    pub lowercased_description_words: Vec<String>,
 }
 
 impl LoadedSkill {
@@ -481,6 +484,7 @@ metadata:
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
             lowercased_tags: vec![],
+            lowercased_description_words: vec![],
         };
         assert_eq!(skill.name(), "test");
         assert_eq!(skill.version(), "1.0.0");

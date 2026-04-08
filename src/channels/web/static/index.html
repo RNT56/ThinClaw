@@ -14,6 +14,7 @@
     src="https://cdn.jsdelivr.net/npm/marked@17.0.2/lib/marked.umd.min.js"
     integrity="sha384-pN9zSKOnTZwXRtYZAu0PBPEgR2B7DOC1aeLxQ33oJ0oy5iN1we6gm57xldM2irDG"
     crossorigin="anonymous"
+    defer
   ></script>
 </head>
 <body>
@@ -38,15 +39,15 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
-      <button class="active" data-tab="chat">Chat</button>
-      <button data-tab="memory">Memory</button>
-      <button data-tab="jobs">Jobs</button>
-      <button data-tab="routines">Routines</button>
-      <button data-tab="extensions">Extensions</button>
-      <button data-tab="skills">Skills</button>
-      <button data-tab="providers">Providers</button>
-      <button data-tab="costs">Costs</button>
-      <button data-tab="settings">Settings</button>
+      <button class="active" data-tab="chat"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
+      <button data-tab="memory"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/></svg> Memory</button>
+      <button data-tab="jobs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 12-8.373 8.373a1 1 0 1 1-1.414-1.414L13.586 10.586"/><path d="m18.293 14.707 1.414-1.414a1 1 0 0 0 0-1.414l-7.586-7.586a1 1 0 0 0-1.414 0l-1.414 1.414a1 1 0 0 0 0 1.414l7.586 7.586a1 1 0 0 0 1.414 0z"/></svg> Jobs</button>
+      <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
+      <button data-tab="extensions"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg> Extensions</button>
+      <button data-tab="skills"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> Skills</button>
+      <button data-tab="providers"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Providers</button>
+      <button data-tab="costs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Costs</button>
+      <button data-tab="settings"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
@@ -120,22 +121,39 @@
 
     <!-- Jobs Tab -->
     <div class="tab-panel" id="tab-jobs">
-      <div class="jobs-container">
-        <div class="jobs-summary" id="jobs-summary"></div>
-        <table class="jobs-table" id="jobs-table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Title</th>
-              <th>Source</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="jobs-tbody"></tbody>
-        </table>
-        <div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>
+      <div class="jobs-container ui-dashboard-shell">
+        <div class="jobs-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Jobs</h2>
+            <p class="ui-panel-desc">Inspect sandbox runs, review activity, and jump into job workspaces.</p>
+          </div>
+        </div>
+        <div class="jobs-shell ui-panel-stack">
+          <div class="jobs-summary ui-panel-grid ui-panel-grid--cards" id="jobs-summary"></div>
+          <section class="ui-panel ui-panel-stack jobs-list-panel" id="jobs-list-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Recent Jobs</h3>
+                <p class="ui-panel-desc">Track status, creation time, and quick recovery actions for each run.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap" id="jobs-table-shell">
+              <table class="jobs-table ui-panel-table" id="jobs-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="jobs-empty" style="display:none">No jobs found</div>
+          </section>
+        </div>
       </div>
     </div>
 
@@ -167,100 +185,184 @@
 
     <!-- Routines Tab -->
     <div class="tab-panel" id="tab-routines">
-      <div class="routines-container">
-        <div class="routines-summary" id="routines-summary"></div>
-        <table class="routines-table" id="routines-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Trigger</th>
-              <th>Action</th>
-              <th>Last Run</th>
-              <th>Next Run</th>
-              <th>Runs</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="routines-tbody"></tbody>
-        </table>
-        <div class="empty-state" id="routines-empty" style="display:none">
-          No routines configured. Ask the assistant to create one.
+      <div class="routines-container ui-dashboard-shell">
+        <div class="routines-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Routines</h2>
+            <p class="ui-panel-desc">Monitor scheduled automations, inspect recent runs, and trigger routines on demand.</p>
+          </div>
         </div>
-        <div class="routine-detail" id="routine-detail" style="display:none"></div>
+        <div class="routines-shell ui-panel-stack">
+          <div class="routines-summary ui-panel-grid ui-panel-grid--cards" id="routines-summary"></div>
+          <section class="ui-panel ui-panel-stack routines-list-panel" id="routines-list-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Configured Routines</h3>
+                <p class="ui-panel-desc">Review schedule health, next runs, and direct actions for each routine.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap" id="routines-table-shell">
+              <table class="routines-table ui-panel-table" id="routines-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Trigger</th>
+                    <th>Action</th>
+                    <th>Last Run</th>
+                    <th>Next Run</th>
+                    <th>Runs</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="routines-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="routines-empty" style="display:none">
+              No routines configured. Ask the assistant to create one.
+            </div>
+          </section>
+          <div class="routine-detail" id="routine-detail" style="display:none"></div>
+        </div>
       </div>
     </div>
 
     <!-- Extensions Tab -->
     <div class="tab-panel" id="tab-extensions">
-      <div class="extensions-container">
-        <div class="extensions-section">
-          <h3>Installed Extensions</h3>
-          <div class="extensions-list" id="extensions-list">
+      <div class="extensions-container ui-dashboard-shell">
+        <div class="extensions-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Extensions</h2>
+            <p class="ui-panel-desc">Manage installed extensions, browse registry options, connect MCP servers, and inspect the tool surface they expose.</p>
+          </div>
+        </div>
+        <div class="extensions-shell ui-panel-stack">
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Installed Extensions</h3>
+                <p class="ui-panel-desc">Review active integrations, authentication state, and setup progress for locally available extensions.</p>
+              </div>
+            </div>
+          <div class="extensions-list ui-resource-grid" id="extensions-list">
             <div class="empty-state">Loading extensions...</div>
           </div>
-        </div>
-        <div class="extensions-section" id="available-wasm-section">
-          <h3>Available WASM Extensions</h3>
-          <div class="extensions-list" id="available-wasm-list">
-            <div class="empty-state">Loading...</div>
-          </div>
-        </div>
-        <div class="extensions-section">
-          <h3>Install WASM Extension</h3>
-          <div class="ext-install-form">
-            <input type="text" id="wasm-install-name" placeholder="Extension name">
-            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button onclick="installWasmExtension()">Install</button>
-          </div>
-        </div>
-        <div class="extensions-section">
-          <h3>MCP Servers</h3>
-          <div class="extensions-list" id="mcp-servers-list">
-            <div class="empty-state">Loading...</div>
-          </div>
-          <h4>Add Custom MCP Server</h4>
-          <div class="ext-install-form">
-            <input type="text" id="mcp-install-name" placeholder="Server name">
-            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button onclick="addMcpServer()">Add</button>
-          </div>
-        </div>
-        <div class="extensions-section">
-          <h3>Registered Tools</h3>
-          <table class="tools-table" id="tools-table">
-            <thead><tr><th>Name</th><th>Description</th></tr></thead>
-            <tbody id="tools-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>
+          </section>
+          <section class="ui-panel ui-panel-stack" id="available-wasm-section">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Available WASM Extensions</h3>
+                <p class="ui-panel-desc">Browse installable channels and tools from the bundled registry, then configure them after install when needed.</p>
+              </div>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="available-wasm-list">
+              <div class="empty-state">Loading...</div>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack extensions-install-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Install WASM Extension</h3>
+                <p class="ui-panel-desc">Install from a bundle URL when you want to add a registry entry manually or test a custom build.</p>
+              </div>
+            </div>
+            <div class="ext-install-form">
+              <input type="text" id="wasm-install-name" placeholder="Extension name">
+              <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
+              <button onclick="installWasmExtension()">Install</button>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">MCP Servers</h3>
+                <p class="ui-panel-desc">Track installed MCP connectors and add custom remote servers for tools that live outside the local gateway.</p>
+              </div>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="mcp-servers-list">
+              <div class="empty-state">Loading...</div>
+            </div>
+            <div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel-stack extensions-inline-panel">
+              <div class="ui-panel-copy">
+                <h4 class="ui-panel-title ui-panel-title--section">Add Custom MCP Server</h4>
+                <p class="ui-panel-desc">Register an HTTPS MCP endpoint directly when it is not already included in the available server list.</p>
+              </div>
+              <div class="ext-install-form">
+                <input type="text" id="mcp-install-name" placeholder="Server name">
+                <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
+                <button onclick="addMcpServer()">Add</button>
+              </div>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack extensions-tools-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Registered Tools</h3>
+                <p class="ui-panel-desc">See the current tool registry exposed to the assistant after extensions and MCP servers are loaded.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="tools-table ui-panel-table" id="tools-table">
+                <thead><tr><th>Name</th><th>Description</th></tr></thead>
+                <tbody id="tools-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="tools-empty" style="display:none">No tools registered</div>
+          </section>
         </div>
       </div>
     </div>
 
     <!-- Skills Tab -->
     <div class="tab-panel" id="tab-skills">
-      <div class="extensions-container">
-        <div class="extensions-section">
-          <h3>Search ClawHub</h3>
-          <div class="skill-search-box">
-            <input type="text" id="skill-search-input" placeholder="Search for skills...">
-            <button onclick="searchClawHub()">Search</button>
-          </div>
-          <div class="extensions-list" id="skill-search-results"></div>
-        </div>
-        <div class="extensions-section">
-          <h3>Installed Skills</h3>
-          <div class="extensions-list" id="skills-list">
-            <div class="empty-state">Loading skills...</div>
+      <div class="skills-container ui-dashboard-shell">
+        <div class="skills-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Skills</h2>
+            <p class="ui-panel-desc">Search ClawHub, review installed skills, and add new skills by URL.</p>
           </div>
         </div>
-        <div class="extensions-section">
-          <h3>Install Skill by URL</h3>
-          <div class="ext-install-form">
-            <input type="text" id="skill-install-name" placeholder="Skill name or slug">
-            <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button onclick="installSkillFromForm()">Install</button>
-          </div>
+        <div class="skills-shell ui-panel-stack">
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Search ClawHub</h3>
+                <p class="ui-panel-desc">Discover published skills and compare installed matches alongside catalog results.</p>
+              </div>
+            </div>
+            <div class="skill-search-box">
+              <input type="text" id="skill-search-input" placeholder="Search for skills...">
+              <button onclick="searchClawHub()">Search</button>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skill-search-results"></div>
+          </section>
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Installed Skills</h3>
+                <p class="ui-panel-desc">See which skills are already available locally and remove registry-installed entries.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-ext" onclick="reloadAllSkills()" title="Re-read all skill files from disk">↻ Reload All</button>
+              </div>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skills-list">
+              <div class="empty-state">Loading skills...</div>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack skills-install-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Install Skill by URL</h3>
+                <p class="ui-panel-desc">Install from a skill slug or provide a direct `SKILL.md` URL when needed.</p>
+              </div>
+            </div>
+            <div class="ext-install-form">
+              <input type="text" id="skill-install-name" placeholder="Skill name or slug">
+              <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
+              <button onclick="installSkillFromForm()">Install</button>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -269,7 +371,7 @@
     <div class="tab-panel" id="tab-providers">
       <div class="providers-container">
         <div class="providers-header">
-          <h2>🔑 Provider Vault</h2>
+          <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Provider Vault</h2>
           <p class="providers-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>
         </div>
         <div class="providers-content" id="providers-content">
@@ -281,39 +383,75 @@
     <!-- Costs Tab -->
     <div class="tab-panel" id="tab-costs">
       <div class="costs-container">
-        <div class="costs-header">
-          <h2>💰 Cost Dashboard</h2>
-          <div class="costs-header-actions">
+        <div class="costs-header ui-panel-header">
+          <div class="costs-header-copy ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Cost Dashboard</h2>
+            <p class="costs-desc ui-panel-desc">Track spend, token usage, and model mix for the current gateway session history.</p>
+          </div>
+          <div class="costs-header-actions ui-panel-actions">
+            <div class="cost-range-group">
+              <button class="cost-range-btn active" data-range="today" onclick="setCostRange('today')">Today</button>
+              <button class="cost-range-btn" data-range="7d" onclick="setCostRange('7d')">7d</button>
+              <button class="cost-range-btn" data-range="30d" onclick="setCostRange('30d')">30d</button>
+              <button class="cost-range-btn" data-range="all" onclick="setCostRange('all')">All</button>
+            </div>
             <span class="costs-last-updated" id="costs-last-updated"></span>
+            <button class="btn-ext" onclick="exportCostCsv()" title="Export CSV">Export</button>
             <button class="btn-ext" onclick="loadCostDashboard()" title="Refresh">Refresh</button>
+            <button class="btn-ext btn-ext--danger" onclick="resetCostData()" title="Clear all cost history">Reset</button>
           </div>
         </div>
-        <div class="costs-summary" id="costs-summary"></div>
-        <div class="costs-body">
-          <div class="costs-chart-section">
-            <h3>Token Usage by Model</h3>
-            <div class="costs-chart" id="costs-chart"></div>
-          </div>
-          <div class="costs-table-section">
-            <h3>Model Breakdown</h3>
-            <table class="costs-table" id="costs-table">
-              <thead>
-                <tr>
-                  <th>Model</th>
-                  <th>Input Tokens</th>
-                  <th>Output Tokens</th>
-                  <th>Total Tokens</th>
-                  <th>Cost</th>
-                  <th>Share</th>
+        <div class="costs-shell ui-panel-stack">
+          <div class="costs-summary ui-panel-grid ui-panel-grid--cards" id="costs-summary"></div>
+          <div class="costs-grid ui-panel-grid ui-panel-grid--split">
+            <section class="ui-panel costs-panel costs-chart-section">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Daily Spend</h3>
+                  <p class="ui-panel-desc">Daily spend across the selected time range.</p>
+                </div>
+              </div>
+              <div class="costs-chart" id="costs-chart"></div>
+            </section>
+            <section class="ui-panel costs-panel costs-chart-section">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Token Usage by Model</h3>
+                  <p class="ui-panel-desc">Compare total volume and relative input/output mix by model.</p>
+                </div>
+              </div>
+              <div class="costs-chart" id="costs-model-chart"></div>
+            </section>
+            <section class="ui-panel costs-panel costs-table-section costs-table-panel">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Model Breakdown</h3>
+                  <p class="ui-panel-desc">Per-model totals for tokens, spend, requests, and cost share.</p>
+                </div>
+              </div>
+              <div class="costs-table-wrap">
+                <table class="costs-table" id="costs-table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Input Tokens</th>
+                      <th>Output Tokens</th>
+                      <th>Total Tokens</th>
+                      <th>Cost</th>
+                      <th>Requests</th>
+                      <th>Share</th>
                 </tr>
               </thead>
               <tbody id="costs-tbody"></tbody>
-            </table>
-            <div class="empty-state" id="costs-empty" style="display:none">No usage data yet. Costs will appear here after the first LLM call.</div>
+              <tfoot id="costs-tfoot"></tfoot>
+                </table>
+              </div>
+              <div class="empty-state" id="costs-empty" style="display:none">No usage data yet. Costs will appear here after the first LLM call.</div>
+            </section>
           </div>
-        </div>
-        <div class="costs-footer">
-          <p>Costs are tracked since last restart. Daily budget and rate limits can be configured in <a href="#" onclick="event.preventDefault(); switchTab('settings')">Settings</a> → Safety.</p>
+          <div class="costs-footer ui-panel ui-panel--note">
+            <p>Costs are tracked persistently across restarts. Daily budget and rate limits can be configured in <a href="#" onclick="event.preventDefault(); switchTab('settings')">Settings</a> → Safety. Auto-refreshes every 30s while active.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -322,7 +460,7 @@
     <div class="tab-panel" id="tab-settings">
       <div class="settings-container">
         <div class="settings-header">
-          <h2>Settings</h2>
+          <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</h2>
           <div class="settings-header-actions">
             <button class="btn-ext" onclick="exportSettings()" title="Export as JSON">Export</button>
             <label class="btn-ext" style="cursor:pointer">
@@ -344,6 +482,7 @@
     </div>
   </div>
 
+  <div id="webchat-branding" class="webchat-branding">Powered by ThinClaw</div>
   <div id="toasts"></div>
   <script src="/app.js"></script>
 </body>

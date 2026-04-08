@@ -154,12 +154,11 @@ impl ChannelManager {
             {
                 let guard = self.sse_tx.read().await;
                 if let Some(ref tx) = *guard {
-                    let _ =
-                        tx.send(crate::channels::web::types::SseEvent::ChannelStatusChange {
-                            channel: name.to_string(),
-                            status: "removed".to_string(),
-                            message: Some(format!("Channel '{}' removed", name)),
-                        });
+                    let _ = tx.send(crate::channels::web::types::SseEvent::ChannelStatusChange {
+                        channel: name.to_string(),
+                        status: "removed".to_string(),
+                        message: Some(format!("Channel '{}' removed", name)),
+                    });
                 }
             }
 
@@ -423,6 +422,24 @@ impl ChannelManager {
             channel.send_draft(draft, metadata).await
         } else {
             Ok(None)
+        }
+    }
+
+    /// Delete a previously sent message (best-effort).
+    ///
+    /// Used by the streaming fallback path to remove partial streaming
+    /// messages before resending the complete response via `on_respond()`.
+    pub async fn delete_message(
+        &self,
+        channel_name: &str,
+        message_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.delete_message(message_id, metadata).await
+        } else {
+            Ok(())
         }
     }
 

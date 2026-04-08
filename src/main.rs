@@ -265,6 +265,14 @@ async fn main() -> anyhow::Result<()> {
     .build_all()
     .await?;
 
+    if let Some(db) = components.db.clone() {
+        thinclaw::tauri_commands::configure_routing_persistence(
+            db,
+            "default",
+            Arc::clone(&components.llm_runtime),
+        );
+    }
+
     let config = components.config;
 
     // ── Tunnel setup ───────────────────────────────────────────────────
@@ -577,7 +585,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-
     // Add Gmail channel if configured and not CLI-only mode.
     if !cli.cli_only
         && let Some(ref gmail_config) = config.channels.gmail
@@ -651,26 +658,27 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Start the unified webhook server if any routes were registered.
-    let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> =
-        if !webhook_routes.is_empty() {
-            let addr = webhook_server_addr
-                .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
-            if addr.ip().is_unspecified() {
-                tracing::warn!(
-                    "Webhook server is binding to {} — it will be reachable from all network interfaces. \
+    let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
+        .is_empty()
+    {
+        let addr =
+            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        if addr.ip().is_unspecified() {
+            tracing::warn!(
+                "Webhook server is binding to {} — it will be reachable from all network interfaces. \
                      Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
-                    addr.ip()
-                );
-            }
-            let mut server = WebhookServer::new(WebhookServerConfig { addr });
-            for routes in webhook_routes {
-                server.add_routes(routes);
-            }
-            server.start().await?;
-            Some(Arc::new(tokio::sync::Mutex::new(server)))
-        } else {
-            None
-        };
+                addr.ip()
+            );
+        }
+        let mut server = WebhookServer::new(WebhookServerConfig { addr });
+        for routes in webhook_routes {
+            server.add_routes(routes);
+        }
+        server.start().await?;
+        Some(Arc::new(tokio::sync::Mutex::new(server)))
+    } else {
+        None
+    };
 
     // Register lifecycle hooks.
     let active_tool_names = components.tools.list().await;
@@ -723,8 +731,9 @@ async fn main() -> anyhow::Result<()> {
     let mut gateway_state: Option<std::sync::Arc<thinclaw::channels::web::server::GatewayState>> =
         None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        let mut gw = GatewayChannel::new(gw_config.clone())
+            .with_llm_provider(Arc::clone(&components.llm))
+            .with_llm_runtime(Arc::clone(&components.llm_runtime));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
@@ -751,6 +760,7 @@ async fn main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
         if let Some(ref ss) = components.secrets_store {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }
@@ -759,10 +769,11 @@ async fn main() -> anyhow::Result<()> {
         // reachable through the public tunnel URL. We create a second
         // Router instance since axum::Router is not Clone.
         if let Some((_, _, ref wasm_router, _, _)) = wasm_channel_runtime_state {
-            let gateway_webhook_routes = thinclaw::channels::wasm::router::create_wasm_channel_router(
-                Arc::clone(wasm_router),
-                components.extension_manager.as_ref().map(Arc::clone),
-            );
+            let gateway_webhook_routes =
+                thinclaw::channels::wasm::router::create_wasm_channel_router(
+                    Arc::clone(wasm_router),
+                    components.extension_manager.as_ref().map(Arc::clone),
+                );
             gw = gw.with_webhook_routes(vec![gateway_webhook_routes]);
         }
         if config.sandbox.enabled {
@@ -806,11 +817,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "repl")]
     if config.channels.cli.enabled && cli.message.is_none() {
         let boot_tool_count = components.tools.count();
-        let boot_llm_model = components.llm.model_name().to_string();
-        let boot_cheap_model = components
-            .cheap_llm
-            .as_ref()
-            .map(|c| c.model_name().to_string());
+        let boot_llm_model = components.llm.active_model_name();
+        let boot_cheap_model = components.cheap_llm.as_ref().map(|c| c.active_model_name());
 
         let boot_info = thinclaw::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1003,26 +1011,29 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     } else {
-                        tracing::info!("SIGHUP: HTTP addr unchanged ({}), config refreshed", old_addr);
+                        tracing::info!(
+                            "SIGHUP: HTTP addr unchanged ({}), config refreshed",
+                            old_addr
+                        );
                     }
                 }
             }
         });
-        tracing::info!("SIGHUP hot-reload handler registered (send `kill -HUP` to reload HTTP webhook config)");
+        tracing::info!(
+            "SIGHUP hot-reload handler registered (send `kill -HUP` to reload HTTP webhook config)"
+        );
     }
 
     // ── WASM channel hot-reload watcher ─────────────────────────────────
     if let Some((loader, channels_dir)) = wasm_watcher_state {
         use thinclaw::channels::wasm::channel_watcher::ChannelWatcher;
 
-        let watcher = ChannelWatcher::new(
-            channels_dir,
-            loader,
-            Arc::clone(&channels),
-        );
+        let watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels));
         watcher.seed_from_dir().await;
         watcher.start().await;
-        tracing::info!("WASM channel hot-reload watcher started (new/modified/deleted .wasm files auto-detected)");
+        tracing::info!(
+            "WASM channel hot-reload watcher started (new/modified/deleted .wasm files auto-detected)"
+        );
         // Watcher runs until the process exits (task is aborted on shutdown).
     }
 
@@ -1078,7 +1089,11 @@ async fn main() -> anyhow::Result<()> {
     // Register LLM management tools (llm_select, llm_list_models).
     // The shared model override connects the tool output to the dispatcher.
     let model_override = thinclaw::tools::builtin::new_shared_model_override();
-    components.tools.register_llm_tools(model_override.clone());
+    components.tools.register_llm_tools(
+        model_override.clone(),
+        Arc::clone(&components.llm),
+        components.cheap_llm.as_ref().map(Arc::clone),
+    );
 
     // ── Agent registry (persistent multi-agent management) ──────────────
     //
@@ -1116,6 +1131,56 @@ async fn main() -> anyhow::Result<()> {
         registry
     };
 
+    // ── Periodic cost persistence ────────────────────────────────────
+    // Flush cost tracker entries to the DB every 60 seconds so cost
+    // data survives restarts (fixes the data-loss-on-restart gap).
+    if let Some(ref db) = components.db {
+        let persist_db = Arc::clone(db);
+        let persist_tracker = Arc::clone(&components.cost_tracker);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip the initial immediate tick
+            let mut last_count: usize = 0;
+            loop {
+                interval.tick().await;
+                let (snapshot, count) = {
+                    let guard = persist_tracker.lock().await;
+                    (guard.to_json(), guard.entry_count())
+                };
+                // Only write when new entries have been recorded.
+                if count != last_count {
+                    match persist_db
+                        .set_setting("default", "cost_entries", &snapshot)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("[cost] Persisted {} cost entries to DB", count);
+                            last_count = count;
+                        }
+                        Err(e) => {
+                            tracing::warn!("[cost] Failed to persist cost entries: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Cost persistence background task started (60s interval)");
+    }
+
+    // ── Background pricing sync ──────────────────────────────────────
+    // Fetch per-token pricing from OpenRouter's public API and update the
+    // dynamic cost overlay in costs.rs. Runs at startup (loading DB cache
+    // first for instant availability) then refreshes every 24 hours.
+    {
+        let pricing_db = components.db.as_ref().map(Arc::clone);
+        thinclaw::llm::pricing_sync::spawn_pricing_sync(pricing_db);
+        tracing::info!("Pricing sync background task started (24h interval)");
+    }
+
+    // Clone handles for the shutdown flush (before components are moved into deps).
+    let shutdown_db = components.db.as_ref().map(Arc::clone);
+    let shutdown_tracker = Arc::clone(&components.cost_tracker);
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -1136,6 +1201,7 @@ async fn main() -> anyhow::Result<()> {
         subagent_executor: Some(subagent_executor),
         cost_tracker: Some(components.cost_tracker),
         response_cache: Some(components.response_cache),
+        llm_runtime: Some(components.llm_runtime),
         routing_policy: Some(components.routing_policy),
         model_override: Some(model_override),
     };
@@ -1154,6 +1220,15 @@ async fn main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Final cost flush — captures any entries since the last periodic flush.
+    if let Some(ref db) = shutdown_db {
+        let snapshot = shutdown_tracker.lock().await.to_json();
+        match db.set_setting("default", "cost_entries", &snapshot).await {
+            Ok(()) => tracing::info!("[cost] Final cost flush on shutdown"),
+            Err(e) => tracing::warn!("[cost] Failed to persist cost entries on shutdown: {}", e),
+        }
+    }
 
     if let Some(ref server) = webhook_server {
         server.lock().await.shutdown().await;

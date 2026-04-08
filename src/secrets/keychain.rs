@@ -48,23 +48,49 @@ mod platform {
     use security_framework::passwords::{
         delete_generic_password, get_generic_password, set_generic_password,
     };
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
 
     use super::*;
+
+    fn get_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
 
     /// Store the master key in the macOS Keychain.
     pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
         // Convert to hex for storage (keychain prefers strings)
         let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
-        set_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT, key_hex.as_bytes())
-            .map_err(|e| SecretError::KeychainError(format!("Failed to store in keychain: {}", e)))
+        set_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT, key_hex.as_bytes()).map_err(
+            |e| SecretError::KeychainError(format!("Failed to store in keychain: {}", e)),
+        )?;
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(MASTER_KEY_ACCOUNT.to_string(), key_hex.as_bytes().to_vec());
+        }
+        Ok(())
     }
 
     /// Retrieve the master key from the macOS Keychain.
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+        if let Ok(cache) = get_cache().lock() {
+            if let Some(password) = cache.get(MASTER_KEY_ACCOUNT) {
+                let hex_str = String::from_utf8(password.clone()).map_err(|_| {
+                    SecretError::KeychainError("Invalid UTF-8 in keychain".to_string())
+                })?;
+                return hex_to_bytes(&hex_str);
+            }
+        }
+
         let password = get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("Failed to get from keychain: {}", e))
         })?;
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(MASTER_KEY_ACCOUNT.to_string(), password.clone());
+        }
 
         // Parse hex string back to bytes
         let hex_str = String::from_utf8(password)
@@ -77,28 +103,61 @@ mod platform {
     pub async fn delete_master_key() -> Result<(), SecretError> {
         delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("Failed to delete from keychain: {}", e))
-        })
+        })?;
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.remove(MASTER_KEY_ACCOUNT);
+        }
+        Ok(())
     }
 
     /// Check if a master key exists in the keychain.
     pub async fn has_master_key() -> bool {
-        get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok()
+        if let Ok(cache) = get_cache().lock() {
+            if cache.contains_key(MASTER_KEY_ACCOUNT) {
+                return true;
+            }
+        }
+        match get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT) {
+            Ok(password) => {
+                if let Ok(mut cache) = get_cache().lock() {
+                    cache.insert(MASTER_KEY_ACCOUNT.to_string(), password);
+                }
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Store an arbitrary API key string in the keychain.
     ///
     /// `account` is the keychain account name (e.g., `claude_code_api_key`).
     pub async fn store_api_key(account: &str, value: &str) -> Result<(), SecretError> {
-        set_generic_password(SERVICE_NAME, account, value.as_bytes())
-            .map_err(|e| SecretError::KeychainError(format!("Failed to store {} in keychain: {}", account, e)))
+        set_generic_password(SERVICE_NAME, account, value.as_bytes()).map_err(|e| {
+            SecretError::KeychainError(format!("Failed to store {} in keychain: {}", account, e))
+        })?;
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(account.to_string(), value.as_bytes().to_vec());
+        }
+        Ok(())
     }
 
     /// Retrieve an API key string from the keychain.
     ///
     /// Returns `None` if the key doesn't exist (rather than an error).
     pub async fn get_api_key(account: &str) -> Option<String> {
+        if let Ok(cache) = get_cache().lock() {
+            if let Some(password) = cache.get(account) {
+                return String::from_utf8(password.clone()).ok();
+            }
+        }
         match get_generic_password(SERVICE_NAME, account) {
-            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Ok(bytes) => {
+                let s = String::from_utf8(bytes.clone()).ok()?;
+                if let Ok(mut cache) = get_cache().lock() {
+                    cache.insert(account.to_string(), bytes);
+                }
+                Some(s)
+            }
             Err(_) => None,
         }
     }
@@ -111,8 +170,15 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use secret_service::{EncryptionType, SecretService};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
 
     use super::*;
+
+    fn get_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
 
     /// Store the master key in the Linux secret service (GNOME Keyring, KWallet).
     pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
@@ -150,11 +216,24 @@ mod platform {
             .await
             .map_err(|e| SecretError::KeychainError(format!("Failed to create secret: {}", e)))?;
 
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(MASTER_KEY_ACCOUNT.to_string(), key_hex.as_bytes().to_vec());
+        }
+
         Ok(())
     }
 
     /// Retrieve the master key from the Linux secret service.
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+        if let Ok(cache) = get_cache().lock() {
+            if let Some(password) = cache.get(MASTER_KEY_ACCOUNT) {
+                let hex_str = String::from_utf8(password.clone()).map_err(|_| {
+                    SecretError::KeychainError("Invalid UTF-8 in secret".to_string())
+                })?;
+                return hex_to_bytes(&hex_str);
+            }
+        }
+
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
@@ -188,6 +267,10 @@ mod platform {
             .await
             .map_err(|e| SecretError::KeychainError(format!("Failed to get secret: {}", e)))?;
 
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(MASTER_KEY_ACCOUNT.to_string(), secret.clone());
+        }
+
         let hex_str = String::from_utf8(secret)
             .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
 
@@ -217,11 +300,21 @@ mod platform {
                 .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
         }
 
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.remove(MASTER_KEY_ACCOUNT);
+        }
+
         Ok(())
     }
 
     /// Check if a master key exists in the secret service.
     pub async fn has_master_key() -> bool {
+        if let Ok(cache) = get_cache().lock() {
+            if cache.contains_key(MASTER_KEY_ACCOUNT) {
+                return true;
+            }
+        }
+
         let ss = match SecretService::connect(EncryptionType::Dh).await {
             Ok(ss) => ss,
             Err(_) => return false,
@@ -239,14 +332,21 @@ mod platform {
             Err(_) => return false,
         };
 
-        !items.unlocked.is_empty() || !items.locked.is_empty()
+        let exists = !items.unlocked.is_empty() || !items.locked.is_empty();
+        if exists {
+            // We lazily cache the actual password when it's requested via get_master_key
+            // However, we don't have the password right here. We could return true.
+        }
+        exists
     }
 
     /// Store an arbitrary API key string in the secret service.
     pub async fn store_api_key(account: &str, value: &str) -> Result<(), SecretError> {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to connect to secret service: {}", e)))?;
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+            })?;
 
         let collection = ss
             .get_default_collection()
@@ -270,12 +370,24 @@ mod platform {
                 "text/plain",
             )
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to store {}: {}", account, e)))?;
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to store {}: {}", account, e))
+            })?;
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(account.to_string(), value.as_bytes().to_vec());
+        }
         Ok(())
     }
 
     /// Retrieve an API key string from the secret service.
     pub async fn get_api_key(account: &str) -> Option<String> {
+        if let Ok(cache) = get_cache().lock() {
+            if let Some(password) = cache.get(account) {
+                return String::from_utf8(password.clone()).ok();
+            }
+        }
+
         let ss = SecretService::connect(EncryptionType::Dh).await.ok()?;
         let items = ss
             .search_items(
@@ -290,6 +402,12 @@ mod platform {
             item.unlock().await.ok()?;
         }
         let secret = item.get_secret().await.ok()?;
+
+        // Update cache
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(account.to_string(), secret.clone());
+        }
+
         String::from_utf8(secret).ok()
     }
 }
@@ -337,8 +455,7 @@ mod platform {
 
 // Re-export platform-specific functions
 pub use platform::{
-    delete_master_key, get_api_key, get_master_key, has_master_key, store_api_key,
-    store_master_key,
+    delete_master_key, get_api_key, get_master_key, has_master_key, store_api_key, store_master_key,
 };
 
 /// Keychain account name for the Claude Code API key.

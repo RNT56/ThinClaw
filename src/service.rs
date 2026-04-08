@@ -59,7 +59,7 @@ fn install() -> Result<()> {
     }
 }
 
-/// Check whether onboarding has been completed by looking for 
+/// Check whether onboarding has been completed by looking for
 /// the `ONBOARD_COMPLETED=true` env var (set by the wizard in `~/.thinclaw/.env`).
 fn onboarding_completed() -> bool {
     // Load thinclaw .env so we can check ONBOARD_COMPLETED even if it's not
@@ -131,7 +131,9 @@ fn install_macos() -> Result<()> {
                 .map(|h| h.display().to_string())
                 .unwrap_or_default()
         ),
-        path = xml_escape(&std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/usr/local/bin".to_string())),
+        path = xml_escape(
+            &std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/usr/local/bin".to_string())
+        ),
         stdout = xml_escape(&stdout.display().to_string()),
         stderr = xml_escape(&stderr.display().to_string()),
     );

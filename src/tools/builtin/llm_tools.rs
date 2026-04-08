@@ -16,8 +16,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 
 use crate::context::JobContext;
+use crate::error::LlmError;
+use crate::llm::{
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Shared state for the model override, accessible by both the tool and the dispatcher.
@@ -40,6 +46,100 @@ pub type SharedModelOverride = Arc<tokio::sync::RwLock<Option<ModelOverride>>>;
 /// Create a new empty shared model override.
 pub fn new_shared_model_override() -> SharedModelOverride {
     Arc::new(tokio::sync::RwLock::new(None))
+}
+
+pub(crate) fn is_runtime_supported_provider_slug(provider_slug: &str) -> bool {
+    crate::config::provider_catalog::endpoint_for(provider_slug).is_some()
+        || matches!(
+            provider_slug,
+            "ollama" | "openai_compatible" | "bedrock" | "llama_cpp"
+        )
+}
+
+pub(crate) fn wrap_model_spec_override(
+    inner: Arc<dyn LlmProvider>,
+    model_spec: impl Into<String>,
+) -> Arc<dyn LlmProvider> {
+    Arc::new(ModelSpecOverrideProvider {
+        inner,
+        model_spec: model_spec.into(),
+    })
+}
+
+struct ModelSpecOverrideProvider {
+    inner: Arc<dyn LlmProvider>,
+    model_spec: String,
+}
+
+#[async_trait]
+impl LlmProvider for ModelSpecOverrideProvider {
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.inner
+            .complete(request.with_model(self.model_spec.clone()))
+            .await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.inner
+            .complete_with_tools(request.with_model(self.model_spec.clone()))
+            .await
+    }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        self.inner
+            .complete_stream(request.with_model(self.model_spec.clone()))
+            .await
+    }
+
+    async fn complete_stream_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        self.inner
+            .complete_stream_with_tools(request.with_model(self.model_spec.clone()))
+            .await
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
+
+    fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
+        self.inner
+            .supports_streaming_for_model(requested_model.or(Some(self.model_spec.as_str())))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        self.inner.list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        requested_model
+            .map(str::to_string)
+            .unwrap_or_else(|| self.model_spec.clone())
+    }
+
+    fn active_model_name(&self) -> String {
+        self.model_spec.clone()
+    }
 }
 
 // ─── LlmSelectTool ─────────────────────────────────────────────────────────
@@ -130,7 +230,7 @@ impl Tool for LlmSelectTool {
 
         // Validate against provider catalog
         let endpoint = crate::config::provider_catalog::endpoint_for(provider_slug);
-        if endpoint.is_none() {
+        if endpoint.is_none() && !is_runtime_supported_provider_slug(provider_slug) {
             let available: Vec<&str> = crate::config::provider_catalog::all_provider_ids();
             return Err(ToolError::InvalidParameters(format!(
                 "Unknown provider '{}'. Available providers: {}",
@@ -140,21 +240,30 @@ impl Tool for LlmSelectTool {
         }
 
         // Check if API key is available for this provider
-        let env_key = endpoint.unwrap().env_key_name;
-        let has_key = crate::config::helpers::optional_env(env_key)
-            .ok()
-            .flatten()
-            .is_some();
+        if let Some(endpoint) = endpoint {
+            let env_key = endpoint.env_key_name;
+            let has_key = crate::config::helpers::optional_env(env_key)
+                .ok()
+                .flatten()
+                .is_some();
 
-        if !has_key {
-            return Err(ToolError::ExecutionFailed(format!(
-                "No API key configured for provider '{}'. \
-                 The user needs to add a {} API key in the WebUI Provider Vault \
-                 or set the {} environment variable.",
-                provider_slug,
-                endpoint.unwrap().display_name,
-                env_key
-            )));
+            if !has_key {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "No API key configured for provider '{}'. \
+                     The user needs to add a {} API key in the WebUI Provider Vault \
+                     or set the {} environment variable.",
+                    provider_slug, endpoint.display_name, env_key
+                )));
+            }
+
+            crate::llm::provider_factory::probe_provider_model(provider_slug, model_name)
+                .await
+                .map_err(|err| {
+                    ToolError::ExecutionFailed(format!(
+                        "Model '{} / {}' is not usable right now, so the switch was not applied: {}",
+                        provider_slug, model_name, err
+                    ))
+                })?;
         }
 
         // Store the override
@@ -189,7 +298,27 @@ impl Tool for LlmSelectTool {
 ///
 /// Queries the provider catalog and checks which providers have API keys
 /// configured, so the agent knows what it can switch to via `llm_select`.
-pub struct LlmListModelsTool;
+pub struct LlmListModelsTool {
+    primary_llm: Option<Arc<dyn LlmProvider>>,
+    cheap_llm: Option<Arc<dyn LlmProvider>>,
+}
+
+impl LlmListModelsTool {
+    pub fn new(primary_llm: Arc<dyn LlmProvider>, cheap_llm: Option<Arc<dyn LlmProvider>>) -> Self {
+        Self {
+            primary_llm: Some(primary_llm),
+            cheap_llm,
+        }
+    }
+
+    #[cfg(test)]
+    fn without_runtime_models() -> Self {
+        Self {
+            primary_llm: None,
+            cheap_llm: None,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for LlmListModelsTool {
@@ -222,48 +351,153 @@ impl Tool for LlmListModelsTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
+        let current_primary_model = self.primary_llm.as_ref().map(|llm| llm.active_model_name());
+        let current_cheap_model = self.cheap_llm.as_ref().map(|llm| llm.active_model_name());
+        let is_active_provider = |slug: &str| {
+            current_primary_model
+                .as_deref()
+                .is_some_and(|model| model == slug || model.starts_with(&format!("{slug}/")))
+                || current_cheap_model
+                    .as_deref()
+                    .is_some_and(|model| model == slug || model.starts_with(&format!("{slug}/")))
+        };
 
         let filter_provider = params.get("provider").and_then(|v| v.as_str());
-        let catalog = crate::config::provider_catalog::catalog();
-
         let mut providers = Vec::new();
         let mut available_count = 0;
 
-        // Sort by slug for stable output
-        let mut entries: Vec<_> = catalog.iter().collect();
-        entries.sort_by_key(|(slug, _)| *slug);
+        let mut entries: Vec<(String, String, String, u32, bool, bool)> =
+            crate::config::provider_catalog::catalog()
+                .iter()
+                .map(|(slug, endpoint)| {
+                    let has_key = crate::config::helpers::optional_env(endpoint.env_key_name)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    (
+                        (*slug).to_string(),
+                        endpoint.display_name.to_string(),
+                        endpoint.default_model.to_string(),
+                        endpoint.default_context_size,
+                        endpoint.supports_streaming,
+                        has_key,
+                    )
+                })
+                .collect();
+        entries.extend([
+            (
+                "ollama".to_string(),
+                "Ollama".to_string(),
+                "llama3".to_string(),
+                128_000,
+                true,
+                std::env::var("OLLAMA_BASE_URL").is_ok() || std::env::var("OLLAMA_HOST").is_ok(),
+            ),
+            (
+                "openai_compatible".to_string(),
+                "OpenAI-compatible".to_string(),
+                "default".to_string(),
+                128_000,
+                true,
+                std::env::var("LLM_BASE_URL").is_ok(),
+            ),
+            (
+                "bedrock".to_string(),
+                "AWS Bedrock".to_string(),
+                "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                200_000,
+                true,
+                crate::config::helpers::optional_env("BEDROCK_API_KEY")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    || crate::config::helpers::optional_env("AWS_BEARER_TOKEN_BEDROCK")
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    || crate::config::helpers::optional_env("BEDROCK_PROXY_URL")
+                        .ok()
+                        .flatten()
+                        .is_some(),
+            ),
+            (
+                "llama_cpp".to_string(),
+                "llama.cpp".to_string(),
+                "llama-local".to_string(),
+                32_000,
+                true,
+                std::env::var("LLAMA_SERVER_URL").is_ok(),
+            ),
+        ]);
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for (slug, endpoint) in &entries {
+        for (slug, display_name, default_model, context_size, streaming, has_key) in &entries {
             // Apply filter if provided
             if let Some(filter) = filter_provider {
-                if **slug != filter {
+                if slug != filter {
                     continue;
                 }
             }
 
-            // Check if API key is available
-            let has_key = crate::config::helpers::optional_env(endpoint.env_key_name)
-                .ok()
-                .flatten()
-                .is_some();
+            let active = is_active_provider(slug);
+            let configured = *has_key || active;
 
-            if has_key {
+            if configured {
                 available_count += 1;
             }
 
+            let status = match slug.as_str() {
+                "ollama" | "llama_cpp" => {
+                    if active {
+                        "active local runtime"
+                    } else if *has_key {
+                        "endpoint configured (unverified)"
+                    } else {
+                        "local endpoint not configured"
+                    }
+                }
+                "openai_compatible" => {
+                    if active {
+                        "active runtime (custom endpoint)"
+                    } else if *has_key {
+                        "endpoint configured (credentials may still be needed)"
+                    } else {
+                        "endpoint not configured"
+                    }
+                }
+                "bedrock" => {
+                    if active {
+                        "active runtime (native Bedrock)"
+                    } else if *has_key {
+                        "native key or legacy proxy configured (unverified)"
+                    } else {
+                        "native key missing"
+                    }
+                }
+                _ => {
+                    if *has_key {
+                        "key configured"
+                    } else {
+                        "no key"
+                    }
+                }
+            };
+
             providers.push(serde_json::json!({
                 "slug": slug,
-                "name": endpoint.display_name,
-                "default_model": endpoint.default_model,
-                "context_size": endpoint.default_context_size,
-                "streaming": endpoint.supports_streaming,
-                "has_key": has_key,
-                "status": if has_key { "✅ ready" } else { "⬚ no key" },
+                "name": display_name,
+                "default_model": default_model,
+                "context_size": context_size,
+                "streaming": streaming,
+                "has_key": configured,
+                "status": status,
             }));
         }
 
         Ok(ToolOutput::success(
             serde_json::json!({
+                "current_primary_model": current_primary_model,
+                "current_cheap_model": current_cheap_model,
                 "providers": providers,
                 "available_count": available_count,
                 "total_count": providers.len(),
@@ -333,13 +567,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_list_models_returns_catalog() {
-        let tool = LlmListModelsTool;
+        let tool = LlmListModelsTool::without_runtime_models();
         let ctx = JobContext::default();
 
-        let result = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
 
         let providers = result.result["providers"].as_array().unwrap();
         assert!(!providers.is_empty(), "Should list at least one provider");
@@ -354,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_list_models_with_filter() {
-        let tool = LlmListModelsTool;
+        let tool = LlmListModelsTool::without_runtime_models();
         let ctx = JobContext::default();
 
         let result = tool
@@ -376,15 +607,17 @@ mod tests {
 
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["model"].is_object());
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&"model".into()));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&"model".into())
+        );
     }
 
     #[test]
     fn test_llm_list_models_schema() {
-        let tool = LlmListModelsTool;
+        let tool = LlmListModelsTool::without_runtime_models();
         assert_eq!(tool.name(), "llm_list_models");
         assert!(!tool.requires_sanitization());
     }

@@ -68,6 +68,8 @@ impl LlmProvider for MockLlmProvider {
 
         Ok(CompletionResponse {
             content: format!("Mock response to: {}", user_msg),
+            provider_model: Some("mock-model-v1".to_string()),
+            cost_usd: Some(0.0),
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
@@ -89,6 +91,8 @@ impl LlmProvider for MockLlmProvider {
         if let Some(tool) = req.tools.first() {
             Ok(ToolCompletionResponse {
                 content: None,
+                provider_model: Some("mock-model-v1".to_string()),
+                cost_usd: Some(0.0),
                 tool_calls: vec![thinclaw::llm::ToolCall {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
@@ -102,6 +106,8 @@ impl LlmProvider for MockLlmProvider {
         } else {
             Ok(ToolCompletionResponse {
                 content: Some("No tools available".to_string()),
+                provider_model: Some("mock-model-v1".to_string()),
+                cost_usd: Some(0.0),
                 tool_calls: vec![],
                 thinking_content: None,
                 input_tokens: 10,
@@ -142,6 +148,8 @@ impl LlmProvider for FixedModelProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
             content: "fixed response".to_string(),
+            provider_model: Some(self.model.to_string()),
+            cost_usd: Some(0.0),
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
@@ -155,6 +163,8 @@ impl LlmProvider for FixedModelProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         Ok(ToolCompletionResponse {
             content: Some("fixed response".to_string()),
+            provider_model: Some(self.model.to_string()),
+            cost_usd: Some(0.0),
             tool_calls: vec![],
             thinking_content: None,
             input_tokens: 10,
@@ -200,11 +210,13 @@ async fn start_test_server_with_provider(
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: thinclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
+        cost_tracker: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
         routine_engine: None,
@@ -692,11 +704,13 @@ async fn test_no_llm_provider_returns_503() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: thinclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
+        cost_tracker: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
         routine_engine: None,
@@ -765,6 +779,8 @@ impl LlmProvider for ThinkingMockProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
             content: "The answer is 42.".to_string(),
+            provider_model: Some("thinking-model".to_string()),
+            cost_usd: Some(0.0),
             thinking_content: Some("Let me think step by step...".to_string()),
             input_tokens: 20,
             output_tokens: 10,
@@ -778,6 +794,8 @@ impl LlmProvider for ThinkingMockProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         Ok(ToolCompletionResponse {
             content: Some("Tool result".to_string()),
+            provider_model: Some("thinking-model".to_string()),
+            cost_usd: Some(0.0),
             tool_calls: vec![],
             thinking_content: Some("Reasoning about tools...".to_string()),
             input_tokens: 15,

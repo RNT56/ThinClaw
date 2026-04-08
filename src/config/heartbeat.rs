@@ -1,6 +1,7 @@
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
+use chrono::Timelike;
 
 /// Heartbeat configuration.
 #[derive(Debug, Clone)]
@@ -31,6 +32,8 @@ pub struct HeartbeatConfig {
     pub prompt: Option<String>,
     /// Maximum tool iterations per heartbeat run.
     pub max_iterations: u32,
+    /// User timezone (IANA). Used for active hours window check.
+    pub user_timezone: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -48,6 +51,7 @@ impl Default for HeartbeatConfig {
             active_end_hour: None,
             prompt: None,
             max_iterations: 10,
+            user_timezone: None,
         }
     }
 }
@@ -76,20 +80,28 @@ impl HeartbeatConfig {
             active_end_hour: settings.heartbeat.active_end_hour,
             prompt: settings.heartbeat.prompt.clone(),
             max_iterations: settings.heartbeat.max_iterations,
+            user_timezone: settings.user_timezone.clone(),
         })
     }
 
     /// Check if the current time falls within the configured active hours.
     ///
     /// Returns `true` if no active hours are configured (always active)
-    /// or if the current local hour is within the [start, end) range.
+    /// or if the current hour *in the user's timezone* is within the
+    /// [start, end) range. Falls back to system timezone if no user
+    /// timezone is configured.
     pub fn is_within_active_hours(&self) -> bool {
         let (start, end) = match (self.active_start_hour, self.active_end_hour) {
             (Some(s), Some(e)) => (s, e),
             _ => return true, // No restriction
         };
 
-        let now_hour = chrono::Local::now().hour() as u8;
+        let tz = crate::timezone::resolve_timezone(
+            None,
+            self.user_timezone.as_deref(),
+            &crate::timezone::detect_system_timezone().to_string(),
+        );
+        let now_hour = crate::timezone::now_in_tz(tz).hour() as u8;
 
         if start <= end {
             // Normal range: e.g. 8..22
@@ -100,5 +112,3 @@ impl HeartbeatConfig {
         }
     }
 }
-
-use chrono::Timelike;

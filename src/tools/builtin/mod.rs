@@ -11,9 +11,9 @@ mod canvas;
 mod device_info;
 mod discord_actions;
 mod echo;
+pub mod extension_tools;
 #[cfg(feature = "document-extraction")]
 mod extract_document;
-pub mod extension_tools;
 mod file;
 mod http;
 mod job;
@@ -32,6 +32,9 @@ mod time;
 mod tts;
 
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
+pub use agent_management::{
+    CreateAgentTool, ListAgentsTool, MessageAgentTool, RemoveAgentTool, UpdateAgentTool,
+};
 pub use apple_mail::AppleMailTool;
 pub use browser::BrowserTool;
 pub use camera_capture::CameraCaptureTool;
@@ -39,19 +42,21 @@ pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
-#[cfg(feature = "document-extraction")]
-pub use extract_document::ExtractDocumentTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };
+#[cfg(feature = "document-extraction")]
+pub use extract_document::ExtractDocumentTool;
 pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
-pub use llm_tools::{LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue,
 };
 pub use json::JsonTool;
+pub use llm_tools::{
+    LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override,
+};
 pub use location::LocationTool;
 pub use memory::{
     MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
@@ -62,13 +67,11 @@ pub use routine::{
 pub use screen_capture::ScreenCaptureTool;
 pub use shell::ShellTool;
 pub use skill_tools::{
-    SkillInstallTool, SkillListTool, SkillReadTool, SkillRemoveTool, SkillSearchTool,
+    SkillInstallTool, SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
+    SkillSearchTool,
 };
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
-pub use agent_management::{
-    CreateAgentTool, ListAgentsTool, UpdateAgentTool, RemoveAgentTool, MessageAgentTool,
-};
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
 pub use tts::TtsTool;

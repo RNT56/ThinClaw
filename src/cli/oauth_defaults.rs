@@ -92,13 +92,17 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
             client_id: GOOGLE_CLIENT_ID,
             client_secret: GOOGLE_CLIENT_SECRET,
         }),
-        "github_oauth_token" if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() => {
+        "github_oauth_token"
+            if !GITHUB_CLIENT_ID.is_empty() && !GITHUB_CLIENT_SECRET.is_empty() =>
+        {
             Some(OAuthCredentials {
                 client_id: GITHUB_CLIENT_ID,
                 client_secret: GITHUB_CLIENT_SECRET,
             })
         }
-        "notion_oauth_token" if !NOTION_CLIENT_ID.is_empty() && !NOTION_CLIENT_SECRET.is_empty() => {
+        "notion_oauth_token"
+            if !NOTION_CLIENT_ID.is_empty() && !NOTION_CLIENT_SECRET.is_empty() =>
+        {
             Some(OAuthCredentials {
                 client_id: NOTION_CLIENT_ID,
                 client_secret: NOTION_CLIENT_SECRET,

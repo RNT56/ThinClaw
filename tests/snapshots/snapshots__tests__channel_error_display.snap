@@ -1,7 +1,8 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 112
+assertion_line: 123
 expression: display
 ---
 - "Channel telegram failed to start: timeout"
 - "Failed to send response on channel slack: rate limited"
+- "Message too long for channel telegram: 5000 chars exceeds limit of 3800"

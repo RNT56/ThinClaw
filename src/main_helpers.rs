@@ -206,7 +206,10 @@ pub(crate) async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = Arc::new(WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store)));
+    let loader = Arc::new(WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+    ));
     let channels_dir = config.channels.wasm_channels_dir.clone();
 
     let results = match loader
@@ -280,18 +283,20 @@ pub(crate) async fn setup_wasm_channels(
                     .ok()
                     .or(config.channels.telegram_stream_mode.clone())
                     .unwrap_or_default();
-                
+
                 if !stream_mode.is_empty() {
-                    config_updates.insert("stream_mode".to_string(), serde_json::json!(stream_mode));
+                    config_updates
+                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
                 }
             } else if channel_name == "discord" {
                 let stream_mode = std::env::var("DISCORD_STREAM_MODE")
                     .ok()
                     .or(config.channels.discord_stream_mode.clone())
                     .unwrap_or_default();
-                
+
                 if !stream_mode.is_empty() {
-                    config_updates.insert("stream_mode".to_string(), serde_json::json!(stream_mode));
+                    config_updates
+                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
                 }
             }
 

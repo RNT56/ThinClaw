@@ -23,6 +23,10 @@ use crate::skills::{LoadedSkill, SkillTrust};
 /// not write files, make network requests, execute commands, or modify any state.
 /// Review by the security team is required before expanding this list.
 ///
+/// **Critical**: `skill_read` MUST be in this list. The Phase 3 lazy loading
+/// design tells the agent to call `skill_read` to get full skill instructions.
+/// If `skill_read` is removed by attenuation, installed skills cannot be used.
+///
 const READ_ONLY_TOOLS: &[&str] = &[
     "memory_search",
     "memory_read",
@@ -32,6 +36,8 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "json",
     "skill_list",
     "skill_search",
+    "skill_read",    // Required for lazy loading — reads in-memory skill content, no I/O
+    "agent_think",   // Internal reasoning scratchpad, no side effects
 ];
 
 /// Result of tool attenuation, including transparency information.
@@ -143,6 +149,7 @@ mod tests {
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
             lowercased_tags: vec![],
+            lowercased_description_words: vec![],
         }
     }
 

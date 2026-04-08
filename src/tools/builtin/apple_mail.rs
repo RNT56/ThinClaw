@@ -30,10 +30,7 @@ impl AppleMailTool {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 if name.to_string_lossy().starts_with('V') {
-                    let db = entry
-                        .path()
-                        .join("MailData")
-                        .join("Envelope Index");
+                    let db = entry.path().join("MailData").join("Envelope Index");
                     if db.exists() {
                         return Some(Self { db_path: db });
                     }
@@ -139,12 +136,7 @@ impl AppleMailTool {
         ))
     }
 
-    async fn send_email(
-        &self,
-        to: &str,
-        subject: &str,
-        body: &str,
-    ) -> Result<String, ToolError> {
+    async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<String, ToolError> {
         let escaped_to = to.replace('"', "\\\"");
         let escaped_subject = subject.replace('"', "\\\"");
         let escaped_body = body.replace('"', "\\\"").replace('\n', "\\n");
@@ -254,10 +246,7 @@ impl Tool for AppleMailTool {
                     .get("unread_only")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(20) as u32;
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
 
                 let result = self.search(sender, subject, limit, unread_only).await?;
                 Ok(ToolOutput::text(result, start.elapsed()))
@@ -272,10 +261,7 @@ impl Tool for AppleMailTool {
                     .get("subject")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(no subject)");
-                let body = params
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
                 let result = self.send_email(to, subject, body).await?;
                 Ok(ToolOutput::text(result, start.elapsed()))

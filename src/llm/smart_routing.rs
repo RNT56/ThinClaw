@@ -177,7 +177,7 @@ impl SmartRoutingProvider {
 /// Classify a message's complexity based on content patterns and length.
 ///
 /// Exposed as a free function for testability.
-fn classify_message(msg: &str, config: &SmartRoutingConfig) -> TaskComplexity {
+pub(crate) fn classify_message(msg: &str, config: &SmartRoutingConfig) -> TaskComplexity {
     let trimmed = msg.trim();
     let len = trimmed.len();
 
@@ -513,6 +513,8 @@ mod tests {
         // regardless of length.
         let response = CompletionResponse {
             content: "I'm not able to complete that request.".to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
@@ -524,6 +526,8 @@ mod tests {
         // due to the length check.
         let short = CompletionResponse {
             content: "Hmm".to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 1,
@@ -536,6 +540,8 @@ mod tests {
     fn detects_empty_response_as_uncertain() {
         let response = CompletionResponse {
             content: "".to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 0,
@@ -551,6 +557,8 @@ mod tests {
         // "Yes." at 4 chars is below the threshold.
         let response = CompletionResponse {
             content: "Yes.".to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 1,
@@ -561,6 +569,8 @@ mod tests {
         // But a 20-char response like "The capital is Rome." is NOT uncertain.
         let longer = CompletionResponse {
             content: "The capital is Rome.".to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
@@ -574,6 +584,8 @@ mod tests {
         let response = CompletionResponse {
             content: "The answer is 42. This is a well-known constant from the Hitchhiker's Guide."
                 .to_string(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 20,
@@ -682,7 +694,9 @@ mod tests {
     async fn cascade_escalates_on_uncertain_response() {
         // Cheap model returns a response with a hard refusal pattern
         let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
-        let cheap = Arc::new(StubLlm::new("I'm not able to complete that request.").with_model_name("cheap"));
+        let cheap = Arc::new(
+            StubLlm::new("I'm not able to complete that request.").with_model_name("cheap"),
+        );
 
         let router = SmartRoutingProvider::new(
             primary.clone(),

@@ -267,7 +267,10 @@ impl SetupWizard {
 
     /// Test PostgreSQL connection and store the pool.
     #[cfg(feature = "postgres")]
-    pub(super) async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
+    pub(super) async fn test_database_connection_postgres(
+        &mut self,
+        url: &str,
+    ) -> Result<(), SetupError> {
         let mut cfg = PoolConfig::new();
         cfg.url = Some(url.to_string());
         cfg.pool = Some(deadpool_postgres::PoolConfig {

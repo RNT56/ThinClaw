@@ -130,6 +130,9 @@ pub async fn skills_install_handler(
         "Skills system not enabled".to_string(),
     ))?;
 
+    // Check whether the caller wants to force-update an existing skill.
+    let force = req.force.unwrap_or(false);
+
     let content = if let Some(ref raw) = req.content {
         raw.clone()
     } else if let Some(ref url) = req.url {
@@ -148,27 +151,48 @@ pub async fn skills_install_handler(
         )));
     };
 
-    // Parse, check duplicates, and get install_dir under a brief read lock.
-    let (user_dir, skill_name_from_parse) = {
+    // Parse to extract the skill name (cheap, in-memory).
+    let normalized = crate::skills::normalize_line_endings(&content);
+    let parsed = crate::skills::parser::parse_skill_md(&normalized)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let skill_name_from_parse = parsed.manifest.name.clone();
+
+    // Check duplicates and optionally remove the old version under a brief read lock.
+    let user_dir = {
         let guard = registry.read().await;
 
-        let normalized = crate::skills::normalize_line_endings(&content);
-        let parsed = crate::skills::parser::parse_skill_md(&normalized)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-        let skill_name = parsed.manifest.name.clone();
-
-        if guard.has(&skill_name) {
+        if guard.has(&skill_name_from_parse) && !force {
             return Ok(Json(ActionResponse::fail(format!(
-                "Skill '{}' already exists",
-                skill_name
+                "Skill '{}' already exists (use force=true to update)",
+                skill_name_from_parse
             ))));
         }
 
-        (guard.install_target_dir().to_path_buf(), skill_name)
+        guard.install_target_dir().to_path_buf()
     };
 
+    // ── Force-update: remove old version first ─────────────────────────
+    // When force=true and the skill exists, remove it atomically so the
+    // subsequent install succeeds. This is the "update" path.
+    if force {
+        let mut guard = registry.write().await;
+        if guard.has(&skill_name_from_parse) {
+            // Best-effort removal: validate + delete files + commit.
+            // If any step fails, fall through — the install will fail with
+            // AlreadyExists, which is the correct behavior.
+            if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
+                let _ =
+                    crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                let _ = guard.commit_remove(&skill_name_from_parse);
+                tracing::info!(
+                    skill = %skill_name_from_parse,
+                    "Force-update: removed previous version"
+                );
+            }
+        }
+    }
+
     // Perform async I/O (write to disk, load) with no lock held.
-    let normalized = crate::skills::normalize_line_endings(&content);
     let (skill_name, loaded_skill) =
         crate::skills::registry::SkillRegistry::prepare_install_to_disk(
             &user_dir,
@@ -178,15 +202,36 @@ pub async fn skills_install_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Commit: brief write lock for in-memory addition
+    // Commit: brief write lock for in-memory addition.
+    // On failure, clean up the orphaned disk files from prepare_install_to_disk.
     let mut guard = registry.write().await;
 
     match guard.commit_install(&skill_name, loaded_skill) {
-        Ok(()) => Ok(Json(ActionResponse::ok(format!(
-            "Skill '{}' installed",
-            skill_name
-        )))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Ok(()) => {
+            let action = if force { "updated" } else { "installed" };
+            Ok(Json(ActionResponse::ok(format!(
+                "Skill '{}' {}",
+                skill_name, action
+            ))))
+        }
+        Err(e) => {
+            // ── TOCTOU cleanup ─────────────────────────────────────────
+            // Another concurrent request installed the same skill between
+            // prepare_install_to_disk and commit_install. Clean up the
+            // orphaned files we wrote to disk.
+            let orphan_dir = user_dir.join(&skill_name);
+            if orphan_dir.exists() {
+                tracing::warn!(
+                    skill = %skill_name,
+                    "Cleaning up orphaned skill files after failed commit"
+                );
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                    &orphan_dir,
+                )
+                .await;
+            }
+            Ok(Json(ActionResponse::fail(e.to_string())))
+        }
     }
 }
 
@@ -212,21 +257,21 @@ pub async fn skills_remove_handler(
         "Skills system not enabled".to_string(),
     ))?;
 
-    // Validate removal under a brief read lock
-    let skill_path = {
-        let guard = registry.read().await;
-        guard
-            .validate_remove(&name)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
-    };
+    // ── TOCTOU fix ─────────────────────────────────────────────────────
+    // Hold the write lock for the entire validate → delete → commit
+    // sequence. This prevents concurrent remove+install races where a
+    // new install could land files that get incorrectly deleted.
+    // The file I/O inside delete_skill_files is fast (single file +
+    // rmdir) so lock contention is negligible.
+    let mut guard = registry.write().await;
 
-    // Delete files from disk (async I/O, no lock held)
+    let skill_path = guard
+        .validate_remove(&name)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
     crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Remove from in-memory registry under a brief write lock
-    let mut guard = registry.write().await;
 
     match guard.commit_remove(&name) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
@@ -235,4 +280,125 @@ pub async fn skills_remove_handler(
         )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+pub async fn skills_trust_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(req): Json<SkillTrustRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation — changing trust is a security-sensitive action.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Trust changes require X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    // Parse the target trust level from the request string.
+    let target_trust = match req.trust.to_lowercase().as_str() {
+        "trusted" => crate::skills::SkillTrust::Trusted,
+        "installed" => crate::skills::SkillTrust::Installed,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Invalid trust level '{}'. Must be 'trusted' or 'installed'.",
+                    other
+                ),
+            ));
+        }
+    };
+
+    let mut guard = registry.write().await;
+
+    match guard.promote_trust(&name, target_trust).await {
+        Ok(()) => {
+            let label = target_trust.to_string();
+            Ok(Json(ActionResponse::ok(format!(
+                "Skill '{}' is now {}",
+                name, label
+            ))))
+        }
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+/// POST /api/skills/:name/reload — hot-reload a single skill from disk.
+///
+/// Re-reads the SKILL.md from its current location and replaces the
+/// in-memory entry without touching other skills. Call this after
+/// manually editing a skill file on disk.
+pub async fn skills_reload_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill reload requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let mut guard = registry.write().await;
+    match guard.reload_skill(&name).await {
+        Ok(reloaded) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' reloaded from disk",
+            reloaded
+        )))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+/// POST /api/skills/reload-all — clear and re-discover all skills from disk.
+///
+/// Use after adding new SKILL.md files on disk (which can't be picked up
+/// by the single-skill reload since they aren't in the registry yet).
+pub async fn skills_reload_all_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill reload requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let mut guard = registry.write().await;
+    let loaded = guard.reload().await;
+    Ok(Json(ActionResponse::ok(format!(
+        "Reloaded {} skill(s): {}",
+        loaded.len(),
+        loaded.join(", ")
+    ))))
 }

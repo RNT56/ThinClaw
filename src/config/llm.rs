@@ -24,7 +24,7 @@ pub enum LlmBackend {
     Tinfoil,
     /// Google Gemini via AI Studio (uses OpenAI-compatible endpoint)
     Gemini,
-    /// AWS Bedrock (Converse API with SigV4 auth)
+    /// AWS Bedrock via native OpenAI-compatible Mantle endpoints
     Bedrock,
     /// Local llama.cpp GGUF inference (requires `llama-cpp` feature)
     LlamaCpp,
@@ -134,6 +134,12 @@ pub struct GeminiDirectConfig {
 pub struct BedrockDirectConfig {
     /// AWS region (default: "us-east-1").
     pub region: String,
+    /// Native Bedrock API key for Mantle/OpenAI-compatible endpoints.
+    pub api_key: Option<SecretString>,
+    /// Legacy OpenAI-compatible proxy URL used to reach Bedrock.
+    pub proxy_url: Option<String>,
+    /// Optional legacy API key/token for the Bedrock proxy.
+    pub proxy_api_key: Option<SecretString>,
     /// Bedrock model ID (default: "anthropic.claude-3-sonnet-20240229-v1:0").
     pub model_id: String,
     /// AWS access key ID.
@@ -389,7 +395,15 @@ impl LlmConfig {
         };
 
         let bedrock = if backend == LlmBackend::Bedrock {
-            let region = optional_env("AWS_REGION")?.unwrap_or_else(|| "us-east-1".to_string());
+            let region = optional_env("AWS_REGION")?
+                .or_else(|| settings.bedrock_region.clone())
+                .unwrap_or_else(|| "us-east-1".to_string());
+            let api_key = optional_env("BEDROCK_API_KEY")?
+                .or_else(|| optional_env("AWS_BEARER_TOKEN_BEDROCK").ok().flatten())
+                .map(SecretString::from);
+            let proxy_url =
+                optional_env("BEDROCK_PROXY_URL")?.or_else(|| settings.bedrock_proxy_url.clone());
+            let proxy_api_key = optional_env("BEDROCK_PROXY_API_KEY")?.map(SecretString::from);
             let model_id = optional_env("BEDROCK_MODEL_ID")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "anthropic.claude-3-sonnet-20240229-v1:0".to_string());
@@ -398,6 +412,9 @@ impl LlmConfig {
             let max_tokens: u32 = parse_optional_env("BEDROCK_MAX_TOKENS", 4096)?;
             Some(BedrockDirectConfig {
                 region,
+                api_key,
+                proxy_url,
+                proxy_api_key,
                 model_id,
                 access_key_id,
                 secret_access_key,
@@ -412,6 +429,7 @@ impl LlmConfig {
             let context_length: u32 = parse_optional_env("LLAMA_CONTEXT_LENGTH", 4096)?;
             let gpu_layers: i32 = parse_optional_env("LLAMA_GPU_LAYERS", 0)?;
             let server_url = optional_env("LLAMA_SERVER_URL")?
+                .or_else(|| settings.llama_cpp_server_url.clone())
                 .unwrap_or_else(|| "http://localhost:8080".to_string());
             let model = optional_env("LLAMA_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -429,7 +447,9 @@ impl LlmConfig {
 
         // Resolve backend-agnostic reliability config
         let reliability = ReliabilityConfig {
-            cheap_model: optional_env("LLM_CHEAP_MODEL")?,
+            cheap_model: optional_env("LLM_CHEAP_MODEL")?
+                .or_else(|| optional_env("CHEAP_MODEL").ok().flatten())
+                .or_else(|| settings.providers.cheap_model.clone()),
             fallback_model: optional_env("LLM_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("LLM_MAX_RETRIES", 3)?,
             circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
@@ -445,7 +465,9 @@ impl LlmConfig {
             response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
             failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
             failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
-            smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
+            smart_routing_cascade: optional_env("SMART_ROUTING_CASCADE")?
+                .and_then(|value| value.parse::<bool>().ok())
+                .unwrap_or(settings.providers.smart_routing_cascade),
         };
 
         Ok(Self {

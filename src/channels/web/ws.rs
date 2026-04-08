@@ -406,10 +406,20 @@ async fn handle_client_message(
         WsClientMessage::ModelList => {
             // Return list of available models from LLM provider
             let models = if let Some(ref llm) = state.llm_provider {
-                vec![crate::api::system::ModelInfo {
-                    name: llm.model_name().to_string(),
-                    is_primary: true,
-                }]
+                let active = llm.active_model_name();
+                match llm.list_models().await {
+                    Ok(list) if !list.is_empty() => list
+                        .into_iter()
+                        .map(|name| crate::api::system::ModelInfo {
+                            is_primary: name == active,
+                            name,
+                        })
+                        .collect(),
+                    _ => vec![crate::api::system::ModelInfo {
+                        name: active,
+                        is_primary: true,
+                    }],
+                }
             } else {
                 vec![]
             };
@@ -609,6 +619,7 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
@@ -619,6 +630,7 @@ mod tests {
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            cost_tracker: None,
         }
     }
 }

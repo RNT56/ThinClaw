@@ -58,6 +58,8 @@ pub struct RoutineEngine {
     /// Uses `std::sync::Mutex` intentionally: `JoinSet::spawn()` is synchronous
     /// and we must never hold an `async` lock across a non-async call (Bug 14 fix).
     active_tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    /// User timezone (IANA) for active-hours checks. Populated from Settings.
+    user_timezone: Option<String>,
 }
 
 impl RoutineEngine {
@@ -82,6 +84,7 @@ impl RoutineEngine {
             system_event_tx: None,
             subagent_executor: None,
             active_tasks: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
+            user_timezone: None,
         }
     }
 
@@ -100,6 +103,13 @@ impl RoutineEngine {
     /// Set the subagent executor for running non-heartbeat automations.
     pub fn with_subagent_executor(mut self, executor: Arc<SubagentExecutor>) -> Self {
         self.subagent_executor = Some(executor);
+        self
+    }
+
+    /// Set the user timezone (IANA name). Active-hours checks use this
+    /// instead of `chrono::Local` so cloud/VPS deployments work correctly.
+    pub fn with_user_timezone(mut self, tz: Option<String>) -> Self {
+        self.user_timezone = tz;
         self
     }
 
@@ -315,6 +325,7 @@ impl RoutineEngine {
             sse_tx: self.sse_tx.clone(),
             system_event_tx: self.system_event_tx.clone(),
             subagent_executor: self.subagent_executor.clone(),
+            user_timezone: self.user_timezone.clone(),
         };
 
         tokio::spawn(async move {
@@ -355,6 +366,7 @@ impl RoutineEngine {
             sse_tx: self.sse_tx.clone(),
             system_event_tx: self.system_event_tx.clone(),
             subagent_executor: self.subagent_executor.clone(),
+            user_timezone: self.user_timezone.clone(),
         };
 
         // Record the run in DB, then spawn execution (IC-018: tracked via JoinSet)
@@ -459,6 +471,8 @@ struct EngineContext {
     system_event_tx: Option<mpsc::Sender<IncomingMessage>>,
     /// Optional subagent executor for non-heartbeat automations.
     subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// User timezone (IANA) for active-hours checks.
+    user_timezone: Option<String>,
 }
 
 impl EngineContext {
@@ -833,7 +847,12 @@ async fn execute_heartbeat(
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // 0. Active hours check
     if let (Some(s), Some(e)) = (active_start_hour, active_end_hour) {
-        let now_hour = chrono::Local::now().hour() as u8;
+        let tz = crate::timezone::resolve_timezone(
+            None,
+            ctx.user_timezone.as_deref(),
+            &crate::timezone::detect_system_timezone().to_string(),
+        );
+        let now_hour = crate::timezone::now_in_tz(tz).hour() as u8;
         let in_window = if s <= e {
             now_hour >= s && now_hour < e
         } else {

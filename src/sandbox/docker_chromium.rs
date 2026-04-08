@@ -145,10 +145,7 @@ impl DockerChromiumConfig {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
-            .map(|o| {
-                o.status.success()
-                    && String::from_utf8_lossy(&o.stdout).trim() == "true"
-            })
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
             .unwrap_or(false)
     }
 
@@ -229,9 +226,7 @@ impl DockerChromiumConfig {
 
             // Try a TCP connection to the debug port.
             match std::net::TcpStream::connect_timeout(
-                &addr
-                    .parse()
-                    .expect("valid socket addr"),
+                &addr.parse().expect("valid socket addr"),
                 Duration::from_secs(1),
             ) {
                 Ok(_) => {

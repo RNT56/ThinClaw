@@ -285,6 +285,10 @@ pub struct DraftReplyState {
     pub last_edit_at: Instant,
     /// Whether the initial placeholder has been posted.
     pub posted: bool,
+    /// True when the accumulated text exceeds the channel's message limit.
+    /// When set, the dispatcher should stop streaming edits and fall back
+    /// to the standard `on_respond()` path which handles message splitting.
+    pub overflow: bool,
 }
 
 impl DraftReplyState {
@@ -296,12 +300,19 @@ impl DraftReplyState {
             accumulated: String::new(),
             last_edit_at: Instant::now() - DRAFT_DEBOUNCE, // allow immediate first edit
             posted: false,
+            overflow: false,
         }
     }
 
     /// Append a chunk and return true if enough time has passed to send an edit.
+    ///
+    /// Always returns `false` when `overflow` is set — the caller should
+    /// stop sending streaming edits and fall back to the full-response path.
     pub fn append(&mut self, chunk: &str) -> bool {
         self.accumulated.push_str(chunk);
+        if self.overflow {
+            return false;
+        }
         self.last_edit_at.elapsed() >= DRAFT_DEBOUNCE
     }
 
@@ -390,6 +401,20 @@ pub trait Channel: Send + Sync {
         _metadata: &serde_json::Value,
     ) -> Result<Option<String>, ChannelError> {
         Ok(None)
+    }
+
+    /// Delete a previously sent message (best-effort).
+    ///
+    /// Used by the streaming fallback path to remove partial streaming
+    /// messages before resending the complete response via `on_respond()`.
+    ///
+    /// Default implementation does nothing (for channels that don't support deletion).
+    async fn delete_message(
+        &self,
+        _message_id: &str,
+        _metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        Ok(())
     }
 
     /// Get the stream mode for this channel.

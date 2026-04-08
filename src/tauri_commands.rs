@@ -18,12 +18,75 @@
 use crate::agent::routine::RoutineRun;
 use crate::channels::gmail_wiring::GmailConfig;
 use crate::cli::oauth_defaults::{self, GmailOAuthConfig};
+use crate::db::Database;
 use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
 use crate::extensions::lifecycle_hooks::{AuditLogHook, SerializedLifecycleEvent};
 use crate::extensions::manifest_validator::{ManifestValidator, PluginInfoRef, ValidationResponse};
+use crate::llm::LlmRuntimeManager;
 use crate::llm::cost_tracker::{CostSummary, CostTracker};
 use crate::llm::response_cache_ext::{CacheStats, CachedResponseStore};
 use crate::llm::routing_policy::{RoutingPolicy, RoutingRule, RoutingRuleSummary};
+use std::sync::{Arc, OnceLock};
+
+struct RoutingPersistenceContext {
+    store: Arc<dyn Database>,
+    user_id: String,
+    runtime: Arc<LlmRuntimeManager>,
+}
+
+static ROUTING_PERSISTENCE: OnceLock<RoutingPersistenceContext> = OnceLock::new();
+
+pub fn configure_routing_persistence(
+    store: Arc<dyn Database>,
+    user_id: impl Into<String>,
+    runtime: Arc<LlmRuntimeManager>,
+) {
+    let _ = ROUTING_PERSISTENCE.set(RoutingPersistenceContext {
+        store,
+        user_id: user_id.into(),
+        runtime,
+    });
+}
+
+fn persist_routing_policy(policy: &RoutingPolicy) -> Result<(), String> {
+    let Some(ctx) = ROUTING_PERSISTENCE.get() else {
+        return Ok(());
+    };
+
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|e| format!("No async runtime available to persist routing rules: {}", e))?;
+    let store = Arc::clone(&ctx.store);
+    let runtime = Arc::clone(&ctx.runtime);
+    let user_id = ctx.user_id.clone();
+    let policy = policy.clone();
+
+    tokio::task::block_in_place(|| {
+        handle.block_on(async move {
+            let map = store
+                .get_all_settings(&user_id)
+                .await
+                .map_err(|e| format!("Failed to load settings before routing save: {}", e))?;
+            let mut settings = crate::settings::Settings::from_db_map(&map);
+            settings.providers.policy_rules = policy.rules().to_vec();
+            settings.providers.smart_routing_enabled = policy.is_enabled();
+            if !settings.providers.policy_rules.is_empty()
+                && settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
+            {
+                settings.providers.routing_mode = crate::settings::RoutingMode::Policy;
+            }
+
+            store
+                .set_all_settings(&user_id, &settings.to_db_map())
+                .await
+                .map_err(|e| format!("Failed to persist routing rules: {}", e))?;
+            runtime
+                .reload()
+                .await
+                .map_err(|e| format!("Failed to reload routing runtime: {}", e))?;
+            Ok(())
+        })
+    })
+}
 
 // ── 1. openclaw_cost_summary ──────────────────────────────────────────
 
@@ -219,6 +282,8 @@ pub fn routing_rules_add(
     rule: RoutingRule,
     position: Option<usize>,
 ) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
+
     // Validate the rule before adding
     match &rule {
         RoutingRule::RoundRobin { providers } if providers.is_empty() => {
@@ -251,6 +316,12 @@ pub fn routing_rules_add(
         policy.add_rule(rule);
     }
 
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
+
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
@@ -265,7 +336,13 @@ pub fn routing_rules_remove(
     policy: &mut RoutingPolicy,
     index: usize,
 ) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
     policy.remove_rule(index)?;
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
@@ -281,7 +358,13 @@ pub fn routing_rules_reorder(
     from: usize,
     to: usize,
 ) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
     policy.reorder_rules(from, to)?;
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
     Ok(RoutingRuleSummary::from_policy(policy))
 }
 
@@ -386,31 +469,39 @@ pub struct GmailStatusResponse {
     pub allowed_senders: Vec<String>,
     pub missing_fields: Vec<String>,
     pub oauth_configured: bool,
+    pub needs_oauth: bool,
 }
 
 pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String> {
     use crate::channels::gmail_wiring::GmailStatus;
 
+    let missing_fields = config.validate();
+    let needs_oauth = config.enabled && missing_fields.is_empty() && config.oauth_token.is_none();
     let status = config.status();
-    let status_str = match &status {
-        GmailStatus::Disabled => "disabled".to_string(),
-        GmailStatus::Ready { subscription } => format!("ready ({})", subscription),
-        GmailStatus::MissingCredentials { fields } => {
-            format!("missing credentials: {}", fields.join(", "))
+    let status_str = if needs_oauth {
+        "needs oauth".to_string()
+    } else {
+        match &status {
+            GmailStatus::Disabled => "disabled".to_string(),
+            GmailStatus::Ready { subscription } => format!("ready ({})", subscription),
+            GmailStatus::MissingCredentials { fields } => {
+                format!("missing credentials: {}", fields.join(", "))
+            }
+            GmailStatus::Error(e) => format!("error: {}", e),
         }
-        GmailStatus::Error(e) => format!("error: {}", e),
     };
 
     Ok(GmailStatusResponse {
         enabled: config.enabled,
-        configured: config.is_configured(),
+        configured: config.enabled && missing_fields.is_empty() && !needs_oauth,
         status: status_str,
         project_id: config.project_id.clone(),
         subscription_id: config.subscription_id.clone(),
         label_filters: config.label_filters.clone(),
         allowed_senders: config.allowed_senders.clone(),
-        missing_fields: config.validate(),
+        missing_fields,
         oauth_configured: config.oauth_token.is_some(),
+        needs_oauth,
     })
 }
 
@@ -1087,6 +1178,7 @@ mod tests {
         let status = gmail_status(&config).unwrap();
         assert!(!status.enabled);
         assert!(!status.configured);
+        assert!(!status.needs_oauth);
         assert_eq!(status.status, "disabled");
     }
 
@@ -1099,12 +1191,13 @@ mod tests {
         let status = gmail_status(&config).unwrap();
         assert!(status.enabled);
         assert!(!status.configured);
+        assert!(!status.needs_oauth);
         assert!(status.status.contains("missing credentials"));
         assert!(!status.missing_fields.is_empty());
     }
 
     #[test]
-    fn test_gmail_status_ready() {
+    fn test_gmail_status_needs_oauth() {
         let config = GmailConfig {
             enabled: true,
             project_id: "my-project".into(),
@@ -1114,7 +1207,26 @@ mod tests {
         };
         let status = gmail_status(&config).unwrap();
         assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(status.needs_oauth);
+        assert_eq!(status.status, "needs oauth");
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_ready() {
+        let config = GmailConfig {
+            enabled: true,
+            project_id: "my-project".into(),
+            subscription_id: "my-sub".into(),
+            topic_id: "my-topic".into(),
+            oauth_token: Some("ya29.test-token".into()),
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
         assert!(status.configured);
+        assert!(!status.needs_oauth);
         assert!(status.status.contains("ready"));
         assert!(status.missing_fields.is_empty());
     }
@@ -1126,5 +1238,6 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"enabled\":false"));
         assert!(json.contains("\"configured\":false"));
+        assert!(json.contains("\"needs_oauth\":false"));
     }
 }

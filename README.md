@@ -91,7 +91,7 @@ ThinClaw works with **any OpenAI-compatible endpoint** out of the box. The defau
 | **Anthropic** (Claude) | `anthropic` | `ANTHROPIC_API_KEY` |
 | **OpenAI** (GPT) | `openai` | `OPENAI_API_KEY` |
 | **Google Gemini** | `gemini` | `GEMINI_API_KEY` |
-| **AWS Bedrock** | `bedrock` | `BEDROCK_PROXY_URL`, AWS credentials |
+| **AWS Bedrock** | `bedrock` | `BEDROCK_API_KEY`, `AWS_REGION` (optional), `BEDROCK_PROXY_URL` (legacy fallback) |
 | **Ollama** (local) | `ollama` | `OLLAMA_BASE_URL` (optional) |
 | **llama.cpp** (local) | `llama_cpp` | `LLAMA_CPP_SERVER_URL` |
 | **Tinfoil** (private inference) | `tinfoil` | `TINFOIL_API_KEY` |

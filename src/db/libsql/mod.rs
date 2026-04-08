@@ -6,6 +6,7 @@
 //! - Turso cloud with embedded replica (sync to cloud)
 //! - In-memory (for testing)
 
+mod agent_registry;
 mod conversations;
 mod jobs;
 mod routines;
@@ -13,7 +14,6 @@ mod sandbox;
 mod settings;
 mod tool_failures;
 mod workspace;
-mod agent_registry;
 
 use std::path::Path;
 use std::sync::Arc;

@@ -64,8 +64,7 @@ pub struct Scheduler {
     /// Running sub-tasks (tool executions, background tasks).
     subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
     /// Optional shared cost tracker for worker LLM calls.
-    cost_tracker:
-        Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl Scheduler {

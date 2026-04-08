@@ -559,9 +559,8 @@ impl Channel for DiscordChannel {
                                 .to_string();
 
                             // Download media attachments from Discord CDN
-                            let attachments = download_discord_attachments(
-                                &client, &msg.attachments,
-                            ).await;
+                            let attachments =
+                                download_discord_attachments(&client, &msg.attachments).await;
 
                             // Skip messages with no text AND no media
                             if clean.is_empty() && attachments.is_empty() {
@@ -771,32 +770,30 @@ async fn download_discord_attachments(
         }
 
         match client.get(&att.url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(bytes) => {
-                        let mime = att
-                            .content_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream");
-                        let mc = MediaContent::new(bytes.to_vec(), mime)
-                            .with_filename(att.filename.clone());
-                        tracing::debug!(
-                            filename = %att.filename,
-                            mime = %mime,
-                            size = bytes.len(),
-                            "Discord: downloaded attachment"
-                        );
-                        result.push(mc);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            filename = %att.filename,
-                            error = %e,
-                            "Discord: failed to read attachment bytes"
-                        );
-                    }
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(bytes) => {
+                    let mime = att
+                        .content_type
+                        .as_deref()
+                        .unwrap_or("application/octet-stream");
+                    let mc =
+                        MediaContent::new(bytes.to_vec(), mime).with_filename(att.filename.clone());
+                    tracing::debug!(
+                        filename = %att.filename,
+                        mime = %mime,
+                        size = bytes.len(),
+                        "Discord: downloaded attachment"
+                    );
+                    result.push(mc);
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(
+                        filename = %att.filename,
+                        error = %e,
+                        "Discord: failed to read attachment bytes"
+                    );
+                }
+            },
             Ok(resp) => {
                 tracing::warn!(
                     filename = %att.filename,

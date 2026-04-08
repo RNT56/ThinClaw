@@ -420,6 +420,87 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(id)
     }
 
+    /// Atomically replace all chunks for a document using a single connection
+    /// and an explicit BEGIN / COMMIT transaction.
+    ///
+    /// This prevents the split-brain state where old chunks are deleted but
+    /// new ones have not yet been written (which would make the document
+    /// invisible to search until the next reindex attempt).
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
+
+        // Begin transaction
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("BEGIN failed: {}", e),
+            })?;
+
+        // Delete existing chunks
+        let del_result = conn
+            .execute(
+                "DELETE FROM memory_chunks WHERE document_id = ?1",
+                params![document_id.to_string()],
+            )
+            .await;
+
+        if let Err(e) = del_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(WorkspaceError::ChunkingFailed {
+                reason: format!("Delete failed: {}", e),
+            });
+        }
+
+        // Insert new chunks
+        for (index, content, embedding) in chunks {
+            let chunk_id = Uuid::new_v4();
+            let embedding_blob = embedding.as_ref().map(|e| {
+                let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
+                bytes
+            });
+
+            let ins_result = conn
+                .execute(
+                    r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                       VALUES (?1, ?2, ?3, ?4, ?5)"#,
+                    params![
+                        chunk_id.to_string(),
+                        document_id.to_string(),
+                        *index as i64,
+                        content.as_str(),
+                        embedding_blob.map(libsql::Value::Blob),
+                    ],
+                )
+                .await;
+
+            if let Err(e) = ins_result {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(WorkspaceError::ChunkingFailed {
+                    reason: format!("Insert failed: {}", e),
+                });
+            }
+        }
+
+        // Commit
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("COMMIT failed: {}", e),
+            })?;
+
+        Ok(())
+    }
+
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

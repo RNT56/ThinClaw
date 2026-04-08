@@ -195,9 +195,9 @@ pub fn catalog() -> &'static HashMap<&'static str, ProviderEndpoint> {
                 "minimax",
                 ProviderEndpoint {
                     display_name: "MiniMax",
-                    base_url: "https://api.minimax.chat/v1",
+                    base_url: "https://api.minimax.io/v1",
                     api_style: ApiStyle::OpenAiCompatible,
-                    default_model: "MiniMax-Text-01",
+                    default_model: "MiniMax-M2.7",
                     default_context_size: 1_000_000,
                     supports_streaming: true,
                     env_key_name: "MINIMAX_API_KEY",
@@ -247,26 +247,13 @@ pub fn catalog() -> &'static HashMap<&'static str, ProviderEndpoint> {
                 "cohere",
                 ProviderEndpoint {
                     display_name: "Cohere",
-                    base_url: "https://api.cohere.com/v2",
+                    base_url: "https://api.cohere.ai/compatibility/v1",
                     api_style: ApiStyle::OpenAiCompatible,
-                    default_model: "command-r-plus",
+                    default_model: "command-a-03-2025",
                     default_context_size: 128_000,
                     supports_streaming: true,
                     env_key_name: "COHERE_API_KEY",
                     secret_name: "cohere",
-                },
-            ),
-            (
-                "xiaomi",
-                ProviderEndpoint {
-                    display_name: "Xiaomi",
-                    base_url: "https://api.xiaomi.com/v1",
-                    api_style: ApiStyle::OpenAiCompatible,
-                    default_model: "MiMo-7B-RL",
-                    default_context_size: 128_000,
-                    supports_streaming: true,
-                    env_key_name: "XIAOMI_API_KEY",
-                    secret_name: "xiaomi",
                 },
             ),
             (
@@ -338,5 +325,24 @@ mod tests {
     fn groq_uses_compatible_api() {
         let ep = endpoint_for("groq").unwrap();
         assert_eq!(ep.api_style, ApiStyle::OpenAiCompatible);
+    }
+
+    #[test]
+    fn minimax_uses_current_openai_compat_endpoint() {
+        let ep = endpoint_for("minimax").unwrap();
+        assert_eq!(ep.base_url, "https://api.minimax.io/v1");
+        assert_eq!(ep.default_model, "MiniMax-M2.7");
+    }
+
+    #[test]
+    fn cohere_uses_compatibility_api() {
+        let ep = endpoint_for("cohere").unwrap();
+        assert_eq!(ep.base_url, "https://api.cohere.ai/compatibility/v1");
+        assert_eq!(ep.default_model, "command-a-03-2025");
+    }
+
+    #[test]
+    fn xiaomi_is_not_in_catalog() {
+        assert!(endpoint_for("xiaomi").is_none());
     }
 }

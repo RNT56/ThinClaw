@@ -168,8 +168,7 @@ pub struct SubagentExecutor {
     /// Optional SSE broadcast sender for routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Optional shared cost tracker for sub-agent LLM calls.
-    cost_tracker:
-        Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
 
 impl SubagentExecutor {
@@ -705,6 +704,7 @@ async fn run_subagent_loop(
             metadata: std::collections::HashMap::new(),
             force_text,
             thinking: Default::default(),
+            max_output_tokens: None,
         };
 
         let output = reasoning.respond_with_tools(&ctx).await?;

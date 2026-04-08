@@ -11,6 +11,7 @@ pub mod bedrock;
 pub mod circuit_breaker;
 pub mod cost_tracker;
 pub mod costs;
+pub mod pricing_sync;
 pub mod discovery;
 pub mod embeddings;
 pub mod extended_context;
@@ -29,14 +30,16 @@ pub mod response_cache_ext;
 pub mod retry;
 mod rig_adapter;
 pub mod routing_policy;
+pub mod runtime_manager;
 pub mod smart_routing;
+pub mod usage_tracking;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, StreamChunk, StreamChunkStream, ThinkingConfig, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ToolResult,
+    ToolCompletionResponse, ToolDefinition, ToolResult, sanitize_tool_messages,
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{
@@ -46,7 +49,9 @@ pub use reasoning::{
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
+pub use runtime_manager::{LlmRuntimeManager, RuntimeStatus, normalize_providers_settings};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
+pub use usage_tracking::UsageTrackingProvider;
 
 #[cfg(test)]
 mod tests {

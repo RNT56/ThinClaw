@@ -222,6 +222,13 @@ pub(crate) fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMe
         }
     }
 
+    // Defensive sanitize: if the input messages already contained orphaned
+    // tool_result messages (e.g. the hard cap fired just before a
+    // ContextLengthExceeded retry), ensure they are promoted to user messages
+    // before the compacted slice is returned to the caller. This makes the
+    // function correct regardless of the caller's input state.
+    crate::llm::sanitize_tool_messages(&mut compacted);
+
     compacted
 }
 
@@ -268,7 +275,9 @@ mod tests {
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, crate::error::LlmError> {
             Ok(CompletionResponse {
-                content: "ok".to_string(),
+                content: "Sure, let me help you with that.".to_string(),
+                provider_model: None,
+                cost_usd: None,
                 thinking_content: None,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -282,6 +291,8 @@ mod tests {
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
             Ok(ToolCompletionResponse {
                 content: Some("ok".to_string()),
+                provider_model: None,
+                cost_usd: None,
                 tool_calls: Vec::new(),
                 thinking_content: None,
                 input_tokens: 0,
@@ -316,6 +327,7 @@ mod tests {
             subagent_executor: None,
             cost_tracker: None,
             response_cache: None,
+            llm_runtime: None,
             routing_policy: None,
             model_override: None,
         };

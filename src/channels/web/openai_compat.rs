@@ -596,7 +596,7 @@ async fn handle_streaming(
     let requested_model = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
-    let is_native = llm.supports_streaming();
+    let is_native = llm.supports_streaming_for_model(Some(req.model.as_str()));
 
     // Obtain the streaming chunk stream from the provider.
     let chunk_stream = if has_tools {

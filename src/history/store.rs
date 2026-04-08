@@ -72,9 +72,7 @@ impl Store {
                     pool
                 }
                 Err(tls_err) => {
-                    tracing::debug!(
-                        "TLS pool creation failed ({tls_err}), falling back to NoTls"
-                    );
+                    tracing::debug!("TLS pool creation failed ({tls_err}), falling back to NoTls");
                     cfg.create_pool(Some(Runtime::Tokio1), NoTls)
                         .map_err(|e| DatabaseError::Pool(e.to_string()))?
                 }

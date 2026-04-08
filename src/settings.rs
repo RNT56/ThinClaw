@@ -13,6 +13,36 @@ use serde::{Deserialize, Serialize};
 /// Enables ThinClaw to manage multiple LLM providers with failover,
 /// smart routing, and model allowlists — whether running headless
 /// (config.toml / env vars) or inside Scrappy (UI-driven).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingMode {
+    #[default]
+    PrimaryOnly,
+    CheapSplit,
+    Policy,
+}
+
+impl RoutingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrimaryOnly => "primary_only",
+            Self::CheapSplit => "cheap_split",
+            Self::Policy => "policy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderModelSlots {
+    /// Primary/high-quality model for this provider.
+    #[serde(default)]
+    pub primary: Option<String>,
+
+    /// Cheap/fast model for this provider.
+    #[serde(default)]
+    pub cheap: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersSettings {
     /// Enabled cloud provider IDs (e.g., ["anthropic", "openai", "groq"]).
@@ -36,10 +66,38 @@ pub struct ProvidersSettings {
     #[serde(default)]
     pub cheap_model: Option<String>,
 
+    /// Preferred provider whose cheap slot should be used first for cheap routing.
+    /// Other configured cheap providers remain available as automatic fallbacks.
+    #[serde(default)]
+    pub preferred_cheap_provider: Option<String>,
+
+    /// Explicit provider order for the primary pool.
+    /// The first entry is the provider tried first for primary-pool routing.
+    #[serde(default)]
+    pub primary_pool_order: Vec<String>,
+
+    /// Explicit provider order for the cheap pool.
+    /// The first entry is the provider tried first for cheap-pool routing.
+    #[serde(default)]
+    pub cheap_pool_order: Vec<String>,
+
+    /// Per-provider model slots.
+    /// Each enabled provider can expose one primary model and one cheap model.
+    #[serde(default)]
+    pub provider_models: HashMap<String, ProviderModelSlots>,
+
     /// Master toggle for the smart routing system.
     /// When false, all requests go to the primary model even if cheap_model is set.
     #[serde(default = "default_true")]
     pub smart_routing_enabled: bool,
+
+    /// Routing mode used when smart routing is enabled.
+    ///
+    /// - primary_only: always use the primary provider/model
+    /// - cheap_split: route simple work to the cheap model and complex work to primary
+    /// - policy: evaluate ordered routing rules
+    #[serde(default)]
+    pub routing_mode: RoutingMode,
 
     /// Enable cascade mode for moderate-complexity messages.
     /// When true, moderate messages try the cheap model first and escalate
@@ -47,9 +105,21 @@ pub struct ProvidersSettings {
     #[serde(default = "default_true")]
     pub smart_routing_cascade: bool,
 
+    /// When enabled, tool-capable agent turns use a second text-only synthesis
+    /// pass so the final user-facing answer can route to the cheap model.
+    #[serde(default)]
+    pub tool_phase_synthesis_enabled: bool,
+
+    /// When enabled, the primary planning pass in tool-phase synthesis keeps
+    /// model-side thinking/reasoning enabled. Disable this to save more
+    /// expensive-model tokens at the cost of weaker tool planning.
+    #[serde(default = "default_true")]
+    pub tool_phase_primary_thinking_enabled: bool,
+
     /// Per-provider model allowlists.
-    /// Key: provider ID, Value: list of allowed model IDs.
-    /// If a provider is enabled but not listed here, ALL its models are allowed.
+    /// Legacy compatibility field.
+    /// Historically used to stash a preferred provider model per non-primary provider.
+    /// New routing flows should use `provider_models` instead.
     #[serde(default)]
     pub allowed_models: HashMap<String, Vec<String>>,
 
@@ -57,6 +127,10 @@ pub struct ProvidersSettings {
     /// If empty, auto-generated from enabled providers.
     #[serde(default)]
     pub fallback_chain: Vec<String>,
+
+    /// Ordered routing policy rules. Evaluated only when routing_mode = policy.
+    #[serde(default)]
+    pub policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
 }
 
 impl Default for ProvidersSettings {
@@ -66,10 +140,18 @@ impl Default for ProvidersSettings {
             primary: None,
             primary_model: None,
             cheap_model: None,
+            preferred_cheap_provider: None,
+            primary_pool_order: Vec::new(),
+            cheap_pool_order: Vec::new(),
+            provider_models: HashMap::new(),
             smart_routing_enabled: true,
+            routing_mode: RoutingMode::PrimaryOnly,
             smart_routing_cascade: true,
+            tool_phase_synthesis_enabled: false,
+            tool_phase_primary_thinking_enabled: true,
             allowed_models: HashMap::new(),
             fallback_chain: Vec::new(),
+            policy_rules: Vec::new(),
         }
     }
 }
@@ -119,6 +201,15 @@ pub struct Settings {
     /// OpenAI-compatible endpoint base URL (when llm_backend = "openai_compatible").
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
+    /// AWS region override for Bedrock (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+    /// Legacy OpenAI-compatible proxy URL for Bedrock access (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_proxy_url: Option<String>,
+    /// llama.cpp server URL override (when llm_backend = "llama_cpp").
+    #[serde(default)]
+    pub llama_cpp_server_url: Option<String>,
 
     // === Step 4: Model Selection ===
     /// Currently selected model.
@@ -190,6 +281,14 @@ pub struct Settings {
     /// Observability backend: "none", "log".
     #[serde(default = "default_observability_backend")]
     pub observability_backend: String,
+
+    // === Timezone ===
+    /// User timezone (IANA name, e.g. "Europe/Berlin").
+    /// Auto-detected from the system during onboarding; can be overridden by
+    /// the agent's bootstrap conversation (USER.md `Timezone` field) or via
+    /// `thinclaw config set user_timezone <tz>`.
+    #[serde(default)]
+    pub user_timezone: Option<String>,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -982,40 +1081,56 @@ impl Settings {
     /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.
     /// Missing keys get their default value.
     pub fn from_db_map(map: &std::collections::HashMap<String, serde_json::Value>) -> Self {
-        // Start with defaults, then overlay each DB setting.
+        // Reconstruct the full nested JSON tree from flattened DB key-value
+        // pairs, then deserialize all at once.
         //
-        // The settings table stores both Settings struct fields and app-specific
-        // data (e.g. nearai.session_token). Skip keys that don't correspond to
-        // a known Settings path.
-        let mut settings = Self::default();
+        // The previous approach called `set()` per-key, which silently failed
+        // for HashMap-based fields like `provider_models` because `set()`
+        // cannot create intermediate map keys that don't exist in the default
+        // struct.  By rebuilding the tree first, all nested structures —
+        // including dynamic HashMap entries — roundtrip correctly.
+        let mut tree = serde_json::to_value(Self::default()).unwrap_or(serde_json::Value::Object(
+            serde_json::Map::new(),
+        ));
 
         for (key, value) in map {
-            // Convert the JSONB value to a string for the existing set() method
-            let value_str = match value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Null => continue, // null means default, skip
-                other => other.to_string(),
-            };
-
-            match settings.set(key, &value_str) {
-                Ok(()) => {}
-                // The settings table stores both Settings fields and app-specific
-                // data (e.g. nearai.session_token). Silently skip unknown paths.
-                Err(e) if e.starts_with("Path not found") => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to apply DB setting '{}' = '{}': {}",
-                        key,
-                        value_str,
-                        e
-                    );
-                }
+            if matches!(value, serde_json::Value::Null) {
+                continue; // null means default, skip
             }
+            insert_dotted_path(&mut tree, key, value.clone());
         }
 
-        settings
+        match serde_json::from_value::<Self>(tree.clone()) {
+            Ok(settings) => settings,
+            Err(e) => {
+                tracing::warn!("from_db_map full-tree deserialize failed, falling back to per-key set(): {}", e);
+                // Fall back to the legacy per-key approach so we don't lose
+                // everything on a single bad key.
+                let mut settings = Self::default();
+                for (key, value) in map {
+                    let value_str = match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Null => continue,
+                        other => other.to_string(),
+                    };
+                    match settings.set(key, &value_str) {
+                        Ok(()) => {}
+                        Err(e) if e.starts_with("Path not found") => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to apply DB setting '{}' = '{}': {}",
+                                key,
+                                value_str,
+                                e
+                            );
+                        }
+                    }
+                }
+                settings
+            }
+        }
     }
 
     /// Flatten Settings into a key-value map suitable for DB storage.
@@ -1257,11 +1372,16 @@ impl Settings {
                     for part in &parts[..parts.len() - 1] {
                         cur = cur.get_mut(*part).expect("path already validated");
                     }
-                    cur.as_object_mut()
-                        .expect("parent is object")
-                        .insert((*final_key).to_string(), serde_json::Value::String(value.to_string()));
-                    *self = serde_json::from_value(json)
-                        .map_err(|e2| format!("Failed to apply setting: {} (also tried as string: {})", e, e2))?;
+                    cur.as_object_mut().expect("parent is object").insert(
+                        (*final_key).to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    );
+                    *self = serde_json::from_value(json).map_err(|e2| {
+                        format!(
+                            "Failed to apply setting: {} (also tried as string: {})",
+                            e, e2
+                        )
+                    })?;
                 } else {
                     return Err(format!("Failed to apply setting: {}", e));
                 }
@@ -1292,6 +1412,43 @@ impl Settings {
         collect_settings(&json, String::new(), &mut results);
         results.sort_by(|a, b| a.0.cmp(&b.0));
         results
+    }
+}
+
+/// Insert a value into a nested JSON tree using a dotted path.
+///
+/// This is the inverse of [`collect_settings_json`]: given a flattened key
+/// like `"providers.provider_models.openai.cheap"`, it navigates (and creates
+/// intermediate objects as needed) through the JSON tree and sets the leaf
+/// value.  This enables correct round-tripping of `HashMap`-based fields
+/// that the old per-key `set()` approach could not handle.
+fn insert_dotted_path(root: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return;
+    }
+
+    let mut current = root;
+    for part in &parts[..parts.len() - 1] {
+        // Navigate into (or create) intermediate objects.
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = current
+            .as_object_mut()
+            .expect("just ensured object")
+            .entry(*part)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+
+    if let Some(final_key) = parts.last() {
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current
+            .as_object_mut()
+            .expect("just ensured object")
+            .insert((*final_key).to_string(), value);
     }
 }
 
@@ -1862,5 +2019,80 @@ mod tests {
 
         // Step 1's choice applied
         assert_eq!(current.database_backend, Some("libsql".to_string()));
+    }
+
+    /// Regression test: per-provider model slots stored in the `provider_models`
+    /// HashMap must survive the `to_db_map` → `from_db_map` roundtrip.
+    ///
+    /// The old `from_db_map` used `set()` per-key, which silently failed for
+    /// dynamic HashMap keys like `providers.provider_models.openai.cheap`
+    /// because the intermediate `"openai"` key didn't exist in the default
+    /// empty map.  This caused the user's cheap model selection to be lost
+    /// after every save.
+    #[test]
+    fn test_provider_models_db_round_trip() {
+        let mut settings = Settings::default();
+        settings.providers.provider_models.insert(
+            "openai".to_string(),
+            ProviderModelSlots {
+                primary: Some("gpt-4o".to_string()),
+                cheap: Some("gpt-4o-mini".to_string()),
+            },
+        );
+        settings.providers.provider_models.insert(
+            "anthropic".to_string(),
+            ProviderModelSlots {
+                primary: Some("claude-sonnet-4-20250514".to_string()),
+                cheap: Some("claude-3-5-haiku-latest".to_string()),
+            },
+        );
+        settings.providers.enabled = vec!["openai".to_string(), "anthropic".to_string()];
+        settings.providers.primary = Some("anthropic".to_string());
+        settings.providers.primary_model = Some("claude-sonnet-4-20250514".to_string());
+        settings.providers.cheap_model = Some("openai/gpt-4o-mini".to_string());
+        settings.providers.preferred_cheap_provider = Some("openai".to_string());
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+
+        // Primary provider settings survive
+        assert_eq!(restored.providers.primary, Some("anthropic".to_string()));
+        assert_eq!(
+            restored.providers.primary_model,
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+
+        // Cheap model settings survive
+        assert_eq!(
+            restored.providers.cheap_model,
+            Some("openai/gpt-4o-mini".to_string())
+        );
+        assert_eq!(
+            restored.providers.preferred_cheap_provider,
+            Some("openai".to_string())
+        );
+
+        // Per-provider model slots survive (this was the bug)
+        let openai_slots = restored
+            .providers
+            .provider_models
+            .get("openai")
+            .expect("openai provider_models entry must survive roundtrip");
+        assert_eq!(openai_slots.primary, Some("gpt-4o".to_string()));
+        assert_eq!(openai_slots.cheap, Some("gpt-4o-mini".to_string()));
+
+        let anthropic_slots = restored
+            .providers
+            .provider_models
+            .get("anthropic")
+            .expect("anthropic provider_models entry must survive roundtrip");
+        assert_eq!(
+            anthropic_slots.primary,
+            Some("claude-sonnet-4-20250514".to_string())
+        );
+        assert_eq!(
+            anthropic_slots.cheap,
+            Some("claude-3-5-haiku-latest".to_string())
+        );
     }
 }

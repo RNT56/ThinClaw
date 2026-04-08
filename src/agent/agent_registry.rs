@@ -25,7 +25,9 @@ const RESERVED_IDS: &[&str] = &[
 /// Validation error for agent configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentRegistryError {
-    #[error("Invalid agent_id '{0}': must be 2-32 chars, lowercase alphanumeric, hyphens, or underscores")]
+    #[error(
+        "Invalid agent_id '{0}': must be 2-32 chars, lowercase alphanumeric, hyphens, or underscores"
+    )]
     InvalidAgentId(String),
     #[error("Reserved agent_id '{0}': cannot use reserved names")]
     ReservedAgentId(String),
@@ -244,7 +246,9 @@ impl AgentRegistry {
 
         // Re-register in router (unregister + register to update)
         self.router.unregister_agent(agent_id).await;
-        self.router.register_agent(record_to_workspace(&record)).await;
+        self.router
+            .register_agent(record_to_workspace(&record))
+            .await;
 
         tracing::info!(agent_id = %agent_id, "Updated agent workspace");
         Ok(record)
@@ -268,7 +272,11 @@ impl AgentRegistry {
         if let Some(ref db) = self.db {
             Ok(db.get_agent_workspace(agent_id).await?)
         } else {
-            Ok(self.router.get_agent(agent_id).await.map(|ws| workspace_to_record(&ws)))
+            Ok(self
+                .router
+                .get_agent(agent_id)
+                .await
+                .map(|ws| workspace_to_record(&ws)))
         }
     }
 
@@ -279,8 +287,7 @@ impl AgentRegistry {
         user_id: &str,
     ) -> Option<Arc<Workspace>> {
         let db = self.db.as_ref()?;
-        let ws = Workspace::new_with_db(user_id, Arc::clone(db))
-            .with_agent(record.id);
+        let ws = Workspace::new_with_db(user_id, Arc::clone(db)).with_agent(record.id);
         Some(Arc::new(ws))
     }
 
@@ -316,8 +323,7 @@ impl AgentRegistry {
             None => return,
         };
 
-        let ws = Workspace::new_with_db("default", Arc::clone(db))
-            .with_agent(record.id);
+        let ws = Workspace::new_with_db("default", Arc::clone(db)).with_agent(record.id);
 
         let identity_content = format!(
             "# {}\n\n{}\n\n_Created: {}_\n",
@@ -386,7 +392,15 @@ mod tests {
     async fn test_create_agent() {
         let reg = make_registry();
         let record = reg
-            .create_agent("test-bot", "Test Bot", Some("You are helpful."), None, vec![], vec![], false)
+            .create_agent(
+                "test-bot",
+                "Test Bot",
+                Some("You are helpful."),
+                None,
+                vec![],
+                vec![],
+                false,
+            )
             .await
             .unwrap();
 
@@ -398,31 +412,36 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_agent_id() {
         let reg = make_registry();
-        assert!(reg
-            .create_agent("UPPER", "Name", None, None, vec![], vec![], false)
-            .await
-            .is_err());
-        assert!(reg
-            .create_agent("a", "Name", None, None, vec![], vec![], false)
-            .await
-            .is_err());
-        assert!(reg
-            .create_agent("spaces here", "Name", None, None, vec![], vec![], false)
-            .await
-            .is_err());
+        assert!(
+            reg.create_agent("UPPER", "Name", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
+        assert!(
+            reg.create_agent("a", "Name", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
+        assert!(
+            reg.create_agent("spaces here", "Name", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_reserved_agent_id() {
         let reg = make_registry();
-        assert!(reg
-            .create_agent("default", "Default", None, None, vec![], vec![], false)
-            .await
-            .is_err());
-        assert!(reg
-            .create_agent("system", "System", None, None, vec![], vec![], false)
-            .await
-            .is_err());
+        assert!(
+            reg.create_agent("default", "Default", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
+        assert!(
+            reg.create_agent("system", "System", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -431,10 +450,11 @@ mod tests {
         reg.create_agent("bot-a", "Bot A", None, None, vec![], vec![], false)
             .await
             .unwrap();
-        assert!(reg
-            .create_agent("bot-a", "Bot A Again", None, None, vec![], vec![], false)
-            .await
-            .is_err());
+        assert!(
+            reg.create_agent("bot-a", "Bot A Again", None, None, vec![], vec![], false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -450,14 +470,9 @@ mod tests {
     #[tokio::test]
     async fn test_default_agent_protected() {
         let reg = make_registry();
-        reg.create_agent(
-            "main-bot",
-            "Main",
-            None, None, vec![], vec![],
-            true,
-        )
-        .await
-        .unwrap();
+        reg.create_agent("main-bot", "Main", None, None, vec![], vec![], true)
+            .await
+            .unwrap();
         assert!(reg.remove_agent("main-bot", false).await.is_err());
         assert!(reg.remove_agent("main-bot", true).await.unwrap());
     }

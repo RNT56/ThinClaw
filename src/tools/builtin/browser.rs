@@ -251,18 +251,14 @@ impl BrowserTool {
         // Try local Chrome first (unless Docker is forced).
         if !force_docker {
             if let Some(chrome_path) = Self::find_chrome() {
-                return self
-                    .launch_local_chrome(&mut guard, chrome_path)
-                    .await;
+                return self.launch_local_chrome(&mut guard, chrome_path).await;
             }
         }
 
         // Fall back to Docker Chromium.
         if let Some(ref docker_config) = self.docker_config {
             if DockerChromiumConfig::is_docker_available() {
-                return self
-                    .connect_docker_chrome(&mut guard, docker_config)
-                    .await;
+                return self.connect_docker_chrome(&mut guard, docker_config).await;
             }
             tracing::warn!("Docker not available for browser fallback");
         }
@@ -347,12 +343,11 @@ impl BrowserTool {
         // Connect to Chrome via its HTTP endpoint. `chromiumoxide` will
         // automatically discover the WebSocket URL from /json/version.
         let endpoint = docker_config.http_endpoint();
-        let (browser, mut handler) =
-            Browser::connect(&endpoint).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to connect to Docker Chromium at {endpoint}: {e}"
-                ))
-            })?;
+        let (browser, mut handler) = Browser::connect(&endpoint).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to connect to Docker Chromium at {endpoint}: {e}"
+            ))
+        })?;
 
         // Spawn the CDP handler loop.
         tokio::spawn(async move { while handler.next().await.is_some() {} });
@@ -1098,10 +1093,8 @@ mod tests {
     #[test]
     fn test_new_with_docker() {
         let docker_config = DockerChromiumConfig::default();
-        let tool = BrowserTool::new_with_docker(
-            PathBuf::from("/tmp/test-browser"),
-            docker_config.clone(),
-        );
+        let tool =
+            BrowserTool::new_with_docker(PathBuf::from("/tmp/test-browser"), docker_config.clone());
         assert_eq!(tool.name(), "browser");
         assert!(tool.docker_config.is_some());
         assert_eq!(

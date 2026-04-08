@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::LlmError;
 
 use crate::llm::cost_tracker::{CostEntry, CostTracker};
+use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
 };
@@ -52,6 +53,8 @@ pub struct ReasoningContext {
     /// Extended thinking configuration. When enabled, compatible providers
     /// will return their chain-of-thought reasoning alongside the response.
     pub thinking: crate::llm::ThinkingConfig,
+    /// Optional output cap for this reasoning turn.
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ReasoningContext {
@@ -65,6 +68,7 @@ impl ReasoningContext {
             metadata: std::collections::HashMap::new(),
             force_text: false,
             thinking: Default::default(),
+            max_output_tokens: None,
         }
     }
 
@@ -95,6 +99,12 @@ impl ReasoningContext {
     /// Set metadata (forwarded to the LLM provider).
     pub fn with_metadata(mut self, metadata: std::collections::HashMap<String, String>) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Set a per-turn output cap.
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
         self
     }
 }
@@ -186,8 +196,50 @@ pub enum RespondResult {
 pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
+    pub routed_model_name: Option<String>,
+    pub finish_reason: crate::llm::FinishReason,
     /// Extended thinking / chain-of-thought content from the LLM, if available.
     pub thinking_content: Option<String>,
+}
+
+fn merge_streamed_tool_calls(
+    mut tool_calls: Vec<ToolCall>,
+    partial_tool_calls: std::collections::HashMap<u32, (String, String, String)>,
+) -> Vec<ToolCall> {
+    for (_idx, (id, name, args)) in partial_tool_calls {
+        if name.is_empty() {
+            continue;
+        }
+
+        let arguments: serde_json::Value =
+            serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+
+        let safe_id = if id.trim().is_empty() {
+            format!("call_{}", uuid::Uuid::new_v4().simple())
+        } else {
+            id
+        };
+
+        if let Some(existing) = tool_calls.iter_mut().find(|tc| tc.id == safe_id) {
+            if existing.name.is_empty() {
+                existing.name = name;
+            }
+            if existing.arguments.is_null() && !arguments.is_null() {
+                existing.arguments = arguments;
+            }
+            continue;
+        }
+
+        tool_calls.push(ToolCall {
+            id: safe_id,
+            name,
+            arguments,
+        });
+    }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    tool_calls.retain(|tc| seen_ids.insert(tc.id.clone()));
+    tool_calls
 }
 
 /// Reasoning engine for the agent.
@@ -203,6 +255,8 @@ pub struct Reasoning {
     channel: Option<String>,
     /// Model name for runtime context.
     model_name: Option<String>,
+    /// Cheap model configured for lightweight tasks, if any.
+    cheap_model_name: Option<String>,
     /// Whether this is a group chat context.
     is_group_chat: bool,
     /// Workspace mode: "unrestricted", "sandboxed", or "project".
@@ -221,6 +275,10 @@ pub struct Reasoning {
 }
 
 impl Reasoning {
+    fn mark_request_metadata(&self, metadata: &mut std::collections::HashMap<String, String>) {
+        mark_reasoning_request(metadata, self.channel.as_deref());
+    }
+
     /// Create a new reasoning engine.
     pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
         Self {
@@ -230,6 +288,7 @@ impl Reasoning {
             skill_context: None,
             channel: None,
             model_name: None,
+            cheap_model_name: None,
             is_group_chat: false,
             workspace_mode: None,
             workspace_root: None,
@@ -245,6 +304,7 @@ impl Reasoning {
     /// to a different model/provider mid-conversation. The swap takes effect
     /// on the next `respond_with_tools` call.
     pub fn swap_llm(&mut self, new_llm: Arc<dyn LlmProvider>) {
+        self.model_name = Some(new_llm.active_model_name());
         self.llm = new_llm;
     }
 
@@ -256,6 +316,25 @@ impl Reasoning {
         Arc::clone(&self.llm)
     }
 
+    /// Clone the current reasoning configuration onto a different LLM handle.
+    pub fn fork_with_llm(&self, llm: Arc<dyn LlmProvider>) -> Self {
+        let model_name = llm.active_model_name();
+        Self {
+            llm,
+            safety: Arc::clone(&self.safety),
+            workspace_system_prompt: self.workspace_system_prompt.clone(),
+            skill_context: self.skill_context.clone(),
+            channel: self.channel.clone(),
+            model_name: Some(model_name),
+            cheap_model_name: self.cheap_model_name.clone(),
+            is_group_chat: self.is_group_chat,
+            workspace_mode: self.workspace_mode.clone(),
+            workspace_root: self.workspace_root.clone(),
+            active_channels: self.active_channels.clone(),
+            cost_tracker: self.cost_tracker.clone(),
+            response_cache: self.response_cache.clone(),
+        }
+    }
 
     /// Wire a shared cost tracker so every LLM call is recorded.
     ///
@@ -313,6 +392,11 @@ impl Reasoning {
         if !n.is_empty() {
             self.model_name = Some(n);
         }
+        self
+    }
+
+    pub fn with_cheap_model_name(mut self, name: Option<String>) -> Self {
+        self.cheap_model_name = name.filter(|s| !s.is_empty());
         self
     }
 
@@ -390,13 +474,21 @@ impl Reasoning {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
         };
-        self.record_cost(&usage).await;
+        self.record_cost(
+            &usage,
+            response.provider_model.as_deref(),
+            response.cost_usd,
+        )
+        .await;
 
         let cleaned = clean_response(&response.content);
 
         // Store in cache
         if let Some(ref cache) = self.response_cache {
-            let model = self.llm.active_model_name();
+            let model = response
+                .provider_model
+                .clone()
+                .unwrap_or_else(|| self.llm.active_model_name());
             cache.write().await.set(&cache_key, cleaned.clone(), &model);
         }
 
@@ -419,12 +511,19 @@ impl Reasoning {
     }
 
     /// Record token usage + cost into the shared CostTracker (fire-and-forget).
-    async fn record_cost(&self, usage: &TokenUsage) {
+    async fn record_cost(
+        &self,
+        usage: &TokenUsage,
+        provider_model: Option<&str>,
+        cost_usd: Option<f64>,
+    ) {
         let Some(ref tracker) = self.cost_tracker else {
             return;
         };
-        let model = self.llm.active_model_name();
-        let cost_usd = {
+        let model = provider_model
+            .map(std::borrow::ToOwned::to_owned)
+            .unwrap_or_else(|| self.llm.active_model_name());
+        let fallback_cost_usd = {
             let (input_rate, output_rate) = self.llm.cost_per_token();
             let input = rust_decimal::Decimal::from(usage.input_tokens);
             let output = rust_decimal::Decimal::from(usage.output_tokens);
@@ -432,6 +531,7 @@ impl Reasoning {
             use rust_decimal::prelude::ToPrimitive;
             total.to_f64().unwrap_or(0.0)
         };
+        let cost_usd = cost_usd.unwrap_or(fallback_cost_usd);
         let agent_id = self
             .channel
             .clone()
@@ -470,9 +570,10 @@ impl Reasoning {
             )));
         }
 
-        let request = CompletionRequest::new(messages)
+        let mut request = CompletionRequest::new(messages)
             .with_max_tokens(2048)
             .with_temperature(0.3);
+        self.mark_request_metadata(&mut request.metadata);
 
         let response = self.llm.complete(request).await?;
 
@@ -481,7 +582,12 @@ impl Reasoning {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
         };
-        self.record_cost(&usage).await;
+        self.record_cost(
+            &usage,
+            response.provider_model.as_deref(),
+            response.cost_usd,
+        )
+        .await;
 
         // Parse the plan from the response
         self.parse_plan(&response.content)
@@ -513,6 +619,7 @@ impl Reasoning {
                 .with_max_tokens(1024)
                 .with_tool_choice("auto");
         request.metadata = context.metadata.clone();
+        self.mark_request_metadata(&mut request.metadata);
 
         let response = self.llm.complete_with_tools(request).await?;
 
@@ -521,7 +628,12 @@ impl Reasoning {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
         };
-        self.record_cost(&usage).await;
+        self.record_cost(
+            &usage,
+            response.provider_model.as_deref(),
+            response.cost_usd,
+        )
+        .await;
 
         let reasoning = response.content.unwrap_or_default();
 
@@ -578,11 +690,22 @@ Respond in JSON format:
             )));
         }
 
-        let request = CompletionRequest::new(messages)
+        let mut request = CompletionRequest::new(messages)
             .with_max_tokens(1024)
             .with_temperature(0.1);
+        self.mark_request_metadata(&mut request.metadata);
 
         let response = self.llm.complete(request).await?;
+        let usage = TokenUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        };
+        self.record_cost(
+            &usage,
+            response.provider_model.as_deref(),
+            response.cost_usd,
+        )
+        .await;
 
         self.parse_evaluation(&response.content)
     }
@@ -650,14 +773,17 @@ Respond in JSON format:
             context.available_tools.clone()
         };
 
+        let max_output_tokens = context.max_output_tokens.unwrap_or(4096);
+
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
-                .with_max_tokens(4096)
+                .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .with_tool_choice("auto")
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
+            self.mark_request_metadata(&mut request.metadata);
 
             let response = self.llm.complete_with_tools(request).await?;
             let thinking = response.thinking_content.clone();
@@ -667,7 +793,12 @@ Respond in JSON format:
             };
 
             // Record cost for EVERY tool-completion LLM call (feeds Cost Dashboard).
-            self.record_cost(&usage).await;
+            self.record_cost(
+                &usage,
+                response.provider_model.as_deref(),
+                response.cost_usd,
+            )
+            .await;
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
@@ -677,6 +808,8 @@ Respond in JSON format:
                         content: response.content.map(|c| clean_response(&c)),
                     },
                     usage,
+                    routed_model_name: response.provider_model.clone(),
+                    finish_reason: response.finish_reason,
                     thinking_content: thinking,
                 });
             }
@@ -701,6 +834,8 @@ Respond in JSON format:
                         },
                     },
                     usage,
+                    routed_model_name: response.provider_model.clone(),
+                    finish_reason: response.finish_reason,
                     thinking_content: thinking,
                 });
             }
@@ -723,15 +858,18 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                routed_model_name: response.provider_model.clone(),
+                finish_reason: response.finish_reason,
                 thinking_content: thinking,
             })
         } else {
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
-                .with_max_tokens(4096)
+                .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
+            self.mark_request_metadata(&mut request.metadata);
 
             let response = self.llm.complete(request).await?;
             let usage = TokenUsage {
@@ -740,7 +878,12 @@ Respond in JSON format:
             };
 
             // Record cost for text-only completion LLM call (feeds Cost Dashboard).
-            self.record_cost(&usage).await;
+            self.record_cost(
+                &usage,
+                response.provider_model.as_deref(),
+                response.cost_usd,
+            )
+            .await;
 
             let cleaned = clean_response(&response.content);
             let final_text = if cleaned.trim().is_empty() {
@@ -755,6 +898,8 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                routed_model_name: response.provider_model.clone(),
+                finish_reason: response.finish_reason,
                 thinking_content: response.thinking_content,
             })
         }
@@ -810,20 +955,24 @@ Respond in JSON format:
         };
 
         // Use streaming completion
+        let max_output_tokens = context.max_output_tokens.unwrap_or(4096);
+
         let mut stream = if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
-                .with_max_tokens(4096)
+                .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .with_tool_choice("auto")
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
+            self.mark_request_metadata(&mut request.metadata);
             self.llm.complete_stream_with_tools(request).await?
         } else {
             let mut request = CompletionRequest::new(messages)
-                .with_max_tokens(4096)
+                .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
+            self.mark_request_metadata(&mut request.metadata);
             self.llm.complete_stream(request).await?
         };
 
@@ -832,7 +981,8 @@ Respond in JSON format:
         let mut thinking_content: Option<String> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut final_usage = TokenUsage::default();
-        let mut _finish_reason = crate::llm::FinishReason::Stop;
+        let mut final_finish_reason = crate::llm::FinishReason::Stop;
+        let mut final_provider_model: Option<String> = None;
 
         // Accumulator for tool call deltas (index -> partial ToolCall)
         let mut partial_tool_calls: std::collections::HashMap<u32, (String, String, String)> =
@@ -872,6 +1022,8 @@ Respond in JSON format:
                     }
                 }
                 crate::llm::StreamChunk::Done {
+                    provider_model,
+                    cost_usd,
                     input_tokens,
                     output_tokens,
                     finish_reason: fr,
@@ -880,26 +1032,20 @@ Respond in JSON format:
                         input_tokens,
                         output_tokens,
                     };
-                    _finish_reason = fr;
+                    final_finish_reason = fr;
 
                     // Record cost when stream completes (feeds Cost Dashboard).
-                    self.record_cost(&final_usage).await;
+                    self.record_cost(&final_usage, provider_model.as_deref(), cost_usd)
+                        .await;
+                    final_provider_model = provider_model;
                 }
             }
         }
 
-        // Convert partial tool call deltas to complete ToolCalls
-        for (_idx, (id, name, args)) in partial_tool_calls {
-            if !name.is_empty() {
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-        }
+        // Some providers emit both a complete ToolCall and ToolCallDelta events
+        // for the same logical call. Merge instead of appending blindly so we
+        // don't execute the same tool twice.
+        tool_calls = merge_streamed_tool_calls(tool_calls, partial_tool_calls);
 
         // If tool calls were returned, return them (no streaming to user)
         if !tool_calls.is_empty() {
@@ -913,6 +1059,8 @@ Respond in JSON format:
                     },
                 },
                 usage: final_usage,
+                routed_model_name: final_provider_model,
+                finish_reason: final_finish_reason,
                 thinking_content,
             });
         }
@@ -934,6 +1082,8 @@ Respond in JSON format:
                         },
                     },
                     usage: final_usage,
+                    routed_model_name: final_provider_model,
+                    finish_reason: final_finish_reason,
                     thinking_content,
                 });
             }
@@ -952,6 +1102,8 @@ Respond in JSON format:
         Ok(RespondOutput {
             result: RespondResult::Text(final_text),
             usage: final_usage,
+            routed_model_name: final_provider_model,
+            finish_reason: final_finish_reason,
             thinking_content,
         })
     }
@@ -1178,21 +1330,32 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         // Channel-specific formatting hints for the current channel
         if let Some(ref channel) = self.channel {
             let hints = match channel.as_str() {
-                "discord" => Some("\
+                "discord" => Some(
+                    "\
 - No markdown tables (Discord renders them as plaintext). Use bullet lists instead.\n\
-- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."),
-                "whatsapp" => Some("\
+- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`.",
+                ),
+                "whatsapp" => Some(
+                    "\
 - No markdown headers or tables (WhatsApp ignores them). Use **bold** for emphasis.\n\
-- Keep messages concise; long replies get truncated on mobile."),
-                "telegram" => Some("\
-- No markdown tables (Telegram strips them). Bullet lists and bold work well."),
-                "slack" => Some("\
+- Keep messages concise; long replies get truncated on mobile.",
+                ),
+                "telegram" => Some(
+                    "\
+- No markdown tables (Telegram strips them). Bullet lists and bold work well.",
+                ),
+                "slack" => Some(
+                    "\
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
-- Prefer threaded replies when responding to older messages."),
+- Prefer threaded replies when responding to older messages.",
+                ),
                 _ => None,
             };
             if let Some(hints) = hints {
-                sections.push(format!("\n\n## Channel Formatting ({})\n{}", channel, hints));
+                sections.push(format!(
+                    "\n\n## Channel Formatting ({})\n{}",
+                    channel, hints
+                ));
             }
         }
 
@@ -1208,6 +1371,9 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         }
         if let Some(ref model) = self.model_name {
             parts.push(format!("model={}", model));
+        }
+        if let Some(ref cheap_model) = self.cheap_model_name {
+            parts.push(format!("cheap_model={}", cheap_model));
         }
         format!("\n\n## Runtime\n{}", parts.join(" | "))
     }
@@ -1234,7 +1400,7 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         let json_str = extract_json(content).unwrap_or(content);
 
         serde_json::from_str(json_str).map_err(|e| LlmError::InvalidResponse {
-            provider: self.llm.model_name().to_string(),
+            provider: self.llm.active_model_name(),
             reason: format!("Failed to parse plan: {}", e),
         })
     }
@@ -1243,8 +1409,175 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         let json_str = extract_json(content).unwrap_or(content);
 
         serde_json::from_str(json_str).map_err(|e| LlmError::InvalidResponse {
-            provider: self.llm.model_name().to_string(),
+            provider: self.llm.active_model_name(),
             reason: format!("Failed to parse evaluation: {}", e),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::error::LlmError;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+
+    struct FinishReasonTestLlm {
+        response: FinishReason,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FinishReasonTestLlm {
+        fn model_name(&self) -> &str {
+            "finish-reason-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: "text response".to_string(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: self.response,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("tool-capable response".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: self.response,
+            })
+        }
+    }
+
+    #[test]
+    fn merge_streamed_tool_calls_dedupes_full_and_delta_versions() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "memory_read".to_string(),
+            arguments: serde_json::json!({"target": "daily_log"}),
+        }];
+
+        let mut partial_tool_calls = std::collections::HashMap::new();
+        partial_tool_calls.insert(
+            0,
+            (
+                "call_1".to_string(),
+                "memory_read".to_string(),
+                r#"{"target":"daily_log"}"#.to_string(),
+            ),
+        );
+
+        let merged = merge_streamed_tool_calls(tool_calls, partial_tool_calls);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "call_1");
+        assert_eq!(merged[0].name, "memory_read");
+        assert_eq!(
+            merged[0].arguments,
+            serde_json::json!({"target": "daily_log"})
+        );
+    }
+
+    #[test]
+    fn merge_streamed_tool_calls_preserves_delta_only_calls() {
+        let mut partial_tool_calls = std::collections::HashMap::new();
+        partial_tool_calls.insert(
+            0,
+            (
+                "call_2".to_string(),
+                "memory_read".to_string(),
+                r#"{"target":"USER.md"}"#.to_string(),
+            ),
+        );
+
+        let merged = merge_streamed_tool_calls(Vec::new(), partial_tool_calls);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "call_2");
+        assert_eq!(merged[0].name, "memory_read");
+        assert_eq!(
+            merged[0].arguments,
+            serde_json::json!({"target": "USER.md"})
+        );
+    }
+
+    #[tokio::test]
+    async fn respond_with_tools_preserves_non_streaming_finish_reason() {
+        let reasoning = Reasoning::new(
+            Arc::new(FinishReasonTestLlm {
+                response: FinishReason::Length,
+            }),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+        );
+        let context = ReasoningContext::new()
+            .with_messages(vec![ChatMessage::user("hello")])
+            .with_tools(vec![ToolDefinition {
+                name: "demo".to_string(),
+                description: "demo tool".to_string(),
+                parameters: serde_json::json!({"type":"object"}),
+            }]);
+
+        let output = reasoning
+            .respond_with_tools(&context)
+            .await
+            .expect("non-streaming response should succeed");
+
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
+    async fn respond_with_tools_streaming_preserves_finish_reason() {
+        let reasoning = Reasoning::new(
+            Arc::new(FinishReasonTestLlm {
+                response: FinishReason::ContentFilter,
+            }),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+        );
+        let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
+        let mut streamed = String::new();
+
+        let output = reasoning
+            .respond_with_tools_streaming(&context, |chunk| streamed.push_str(chunk))
+            .await
+            .expect("streaming response should succeed");
+
+        assert_eq!(streamed, "text response");
+        assert_eq!(output.finish_reason, FinishReason::ContentFilter);
     }
 }

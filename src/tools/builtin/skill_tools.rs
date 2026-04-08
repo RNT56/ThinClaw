@@ -341,7 +341,7 @@ impl Tool for SkillInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog."
+        "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog. Set force=true to update an existing skill."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -359,6 +359,11 @@ impl Tool for SkillInstallTool {
                 "content": {
                     "type": "string",
                     "description": "Optional: raw SKILL.md content to install directly (skips fetch)"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "If true, removes the existing skill before installing the new version (update/upgrade)",
+                    "default": false
                 }
             },
             "required": ["name"]
@@ -372,6 +377,10 @@ impl Tool for SkillInstallTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
@@ -386,52 +395,86 @@ impl Tool for SkillInstallTool {
             fetch_skill_content(&download_url).await?
         };
 
+        // Parse to extract the name (cheap, in-memory).
+        let normalized = crate::skills::normalize_line_endings(&content);
+        let parsed = crate::skills::parser::parse_skill_md(&normalized)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        let skill_name_from_parse = parsed.manifest.name.clone();
+
         // Check for duplicates and get install_dir under a brief read lock.
-        let (user_dir, skill_name_from_parse) = {
+        let user_dir = {
             let guard = self.registry.read().await;
 
-            // Parse to extract the name (cheap, in-memory)
-            let normalized = crate::skills::normalize_line_endings(&content);
-            let parsed = crate::skills::parser::parse_skill_md(&normalized)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            let skill_name = parsed.manifest.name.clone();
-
-            if guard.has(&skill_name) {
+            if guard.has(&skill_name_from_parse) && !force {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "Skill '{}' already exists",
-                    skill_name
+                    "Skill '{}' already exists (use force=true to update)",
+                    skill_name_from_parse
                 )));
             }
 
-            (guard.install_target_dir().to_path_buf(), skill_name)
+            guard.install_target_dir().to_path_buf()
         };
+
+        // ── Force-update: remove old version first ─────────────────────
+        if force {
+            let mut guard = self.registry.write().await;
+            if guard.has(&skill_name_from_parse) {
+                if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
+                    let _ =
+                        crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                    let _ = guard.commit_remove(&skill_name_from_parse);
+                    tracing::info!(
+                        skill = %skill_name_from_parse,
+                        "Force-update: removed previous version"
+                    );
+                }
+            }
+        }
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
         let (skill_name, loaded_skill) =
             crate::skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
-                &crate::skills::normalize_line_endings(&content),
+                &normalized,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         // Commit the in-memory addition under a brief write lock.
+        // On failure, clean up the orphaned disk files from prepare_install_to_disk.
         let installed_name = {
             let mut guard = self.registry.write().await;
-            guard
-                .commit_install(&skill_name, loaded_skill)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            skill_name
+            match guard.commit_install(&skill_name, loaded_skill) {
+                Ok(()) => skill_name,
+                Err(e) => {
+                    // ── TOCTOU cleanup ──────────────────────────────────
+                    // Another concurrent call installed the same skill between
+                    // prepare_install and commit_install. Clean up orphaned files.
+                    let orphan_dir = user_dir.join(&skill_name);
+                    if orphan_dir.exists() {
+                        tracing::warn!(
+                            skill = %skill_name,
+                            "Cleaning up orphaned skill files after failed commit"
+                        );
+                        let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                            &orphan_dir,
+                        )
+                        .await;
+                    }
+                    return Err(ToolError::ExecutionFailed(e.to_string()));
+                }
+            }
         };
 
+        let action = if force { "updated" } else { "installed" };
         let output = serde_json::json!({
             "name": installed_name,
-            "status": "installed",
+            "status": action,
             "trust": "installed",
             "message": format!(
-                "Skill '{}' installed successfully. It will activate when matching keywords are detected.",
-                installed_name
+                "Skill '{}' {} successfully. It will activate when matching keywords are detected.",
+                installed_name, action
             ),
         });
 
@@ -546,6 +589,22 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
     })?;
 
     if !response.status().is_success() {
+        // Provide a more helpful error for redirect responses (3xx).
+        // Redirects are intentionally disabled (Policy::none) to prevent
+        // redirect-based SSRF. Tell the user why and suggest the final URL.
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown");
+            return Err(ToolError::ExecutionFailed(format!(
+                "URL returned HTTP {} redirect to '{}'. Redirects are blocked for security. \
+                 Use the final destination URL directly.",
+                response.status(),
+                location
+            )));
+        }
         return Err(ToolError::ExecutionFailed(format!(
             "Skill fetch returned HTTP {}: {}",
             response.status(),
@@ -727,26 +786,29 @@ impl Tool for SkillRemoveTool {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
 
-        // Validate removal and get the filesystem path under a brief read lock.
-        let skill_path = {
-            let guard = self.registry.read().await;
-            guard
-                .validate_remove(name)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
-        };
+        // ── TOCTOU fix ─────────────────────────────────────────────────
+        // Hold the write lock for the entire validate → delete → commit
+        // sequence. This prevents concurrent remove+install races where a
+        // new install could land files that get incorrectly deleted.
+        // The file I/O inside delete_skill_files is fast (single file +
+        // rmdir) so lock contention is negligible.
+        let mut guard = self.registry.write().await;
 
-        // Delete files from disk (async I/O, no lock held).
+        let skill_path = guard
+            .validate_remove(name)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        // Delete files from disk (async I/O).
         crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        // Remove from in-memory registry under a brief write lock.
-        {
-            let mut guard = self.registry.write().await;
-            guard
-                .commit_remove(name)
-                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-        }
+        // Remove from in-memory registry.
+        guard
+            .commit_remove(name)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        drop(guard);
 
         let output = serde_json::json!({
             "name": name,
@@ -758,6 +820,108 @@ impl Tool for SkillRemoveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+// ── skill_reload ────────────────────────────────────────────────────────
+
+/// Hot-reload a skill (or all skills) from disk without restarting.
+///
+/// Use after editing a SKILL.md file on disk so that changes take effect
+/// in the current session. A single-skill reload is surgical and fast;
+/// the `all` flag triggers a full re-discovery pass.
+pub struct SkillReloadTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+}
+
+impl SkillReloadTool {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillReloadTool {
+    fn name(&self) -> &str {
+        "skill_reload"
+    }
+
+    fn description(&self) -> &str {
+        "Reload a skill (or all skills) from disk after editing SKILL.md files. \
+         Use after making on-disk changes so they take effect immediately without restarting. \
+         Provide a skill name to reload just that skill, or set all=true to rediscover all skills."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the specific skill to reload from disk. \
+                                   Required unless all=true."
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "When true, reload ALL skills (full re-discovery). \
+                                   Use after adding new skill files on disk.",
+                    "default": false
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let reload_all = params
+            .get("all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if reload_all {
+            let mut guard = self.registry.write().await;
+            let loaded = guard.reload().await;
+            let output = serde_json::json!({
+                "status": "reloaded_all",
+                "skills": loaded,
+                "count": loaded.len(),
+                "message": format!("Reloaded all skills: {}", loaded.join(", ")),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Single-skill reload
+        let name = require_str(&params, "name")?;
+        let mut guard = self.registry.write().await;
+
+        match guard.reload_skill(name).await {
+            Ok(reloaded_name) => {
+                let output = serde_json::json!({
+                    "status": "reloaded",
+                    "name": reloaded_name,
+                    "message": format!(
+                        "Skill '{}' has been reloaded from disk. \
+                         Updated keywords, descriptions, and prompt content are now active.",
+                        reloaded_name
+                    ),
+                });
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            Err(e) => Err(ToolError::ExecutionFailed(format!(
+                "Failed to reload skill '{}': {}",
+                name, e
+            ))),
+        }
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Reloading changes agent behavior — require explicit approval
+        // unless auto-approve is enabled.
         ApprovalRequirement::UnlessAutoApproved
     }
 }

@@ -1,10 +1,9 @@
 //! Extensions wizard step: tool installation from registry.
 
-
 use crate::setup::prompts::{print_error, print_info, print_success, select_many};
 
-use super::{SetupError, SetupWizard};
 use super::helpers::{discover_installed_tools, load_registry_catalog};
+use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn step_extensions(&mut self) -> Result<(), SetupError> {

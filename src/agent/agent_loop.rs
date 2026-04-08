@@ -93,9 +93,11 @@ pub struct AgentDeps {
     /// read by `openclaw_cache_stats` Tauri command for the Cache Dashboard.
     pub response_cache:
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
+    /// Live runtime manager for reading effective routing state without restart.
+    pub llm_runtime: Option<Arc<crate::llm::runtime_manager::LlmRuntimeManager>>,
     /// Smart routing policy — selects provider/model based on request context.
     /// Read/written by `openclaw_routing_*` Tauri commands, consulted before each LLM call.
-    pub routing_policy: Option<Arc<tokio::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>>,
+    pub routing_policy: Option<Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>>,
     /// Agent-driven model override state, written by the `llm_select` tool.
     /// When set, the dispatcher creates a new provider from the catalog and
     /// uses it instead of the default routing. Resets per conversation.
@@ -218,11 +220,6 @@ impl Agent {
         &self.deps.llm
     }
 
-    /// Get the cheap/fast LLM provider, falling back to the main one.
-    pub(super) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
-        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
-    }
-
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
@@ -310,6 +307,25 @@ impl Agent {
             }
 
             selected.into_iter().cloned().collect()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Collect a compact snapshot of ALL loaded skills for the always-on skill directory.
+    ///
+    /// Returns `(name, description)` pairs for every skill currently in the registry,
+    /// regardless of whether they matched the current message. Used by the dispatcher
+    /// to build the always-visible skill directory in the system prompt so the agent
+    /// always knows what skills are installed even when none keyword-matched.
+    pub(super) async fn collect_all_skills(&self) -> Vec<(String, String)> {
+        if let Some(registry) = self.skill_registry() {
+            let guard = registry.read().await;
+            guard
+                .skills()
+                .iter()
+                .map(|s| (s.manifest.name.clone(), s.manifest.description.clone()))
+                .collect()
         } else {
             vec![]
         }
@@ -570,6 +586,13 @@ impl Agent {
                         engine = engine.with_subagent_executor(Arc::clone(executor));
                     }
 
+                    // Wire user timezone for active-hours checks
+                    let user_tz = self
+                        .heartbeat_config
+                        .as_ref()
+                        .and_then(|hb| hb.user_timezone.clone());
+                    engine = engine.with_user_timezone(user_tz);
+
                     let engine = Arc::new(engine);
 
                     // Register routine tools
@@ -761,7 +784,7 @@ impl Agent {
         // Hook: BeforeAgentStart — allow hooks to inspect/modify startup config
         {
             let event = crate::hooks::HookEvent::AgentStart {
-                model: self.llm().model_name().to_string(),
+                model: self.llm().active_model_name(),
                 provider: self.config.name.clone(),
             };
             match self.hooks().run(&event).await {
@@ -938,11 +961,7 @@ impl Agent {
             }
         };
 
-        let target_channel = self
-            .config
-            .notify_channel
-            .as_deref()
-            .unwrap_or("web");
+        let target_channel = self.config.notify_channel.as_deref().unwrap_or("web");
 
         // Resolve the notification recipient. For channels like Telegram,
         // this must be a numeric chat ID (e.g. the owner_id), not the
@@ -955,10 +974,7 @@ impl Agent {
             .unwrap_or("default");
 
         // ── 1. BOOT.md — runs on every startup ────────────────────────
-        match workspace
-            .read(crate::workspace::paths::BOOT)
-            .await
-        {
+        match workspace.read(crate::workspace::paths::BOOT).await {
             Ok(doc) => {
                 if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
                     tracing::info!(
@@ -974,15 +990,15 @@ impl Agent {
                     let ctx_docs = [
                         ("HEARTBEAT.md", "HEARTBEAT.md"),
                         ("MEMORY.md", "MEMORY.md"),
-                        (&format!("daily/{}.md", today), &format!("daily/{}.md", today)),
+                        (
+                            &format!("daily/{}.md", today),
+                            &format!("daily/{}.md", today),
+                        ),
                     ];
                     for (path, label) in &ctx_docs {
                         match workspace.read(path).await {
                             Ok(d) if !d.content.trim().is_empty() => {
-                                context_sections.push(format!(
-                                    "--- {} ---\n{}",
-                                    label, d.content
-                                ));
+                                context_sections.push(format!("--- {} ---\n{}", label, d.content));
                             }
                             _ => {} // Missing or empty — skip silently
                         }
@@ -999,13 +1015,8 @@ impl Agent {
                         )
                     };
 
-                    self.run_startup_hook(
-                        "boot",
-                        &enriched_content,
-                        target_channel,
-                        notify_user,
-                    )
-                    .await;
+                    self.run_startup_hook("boot", &enriched_content, target_channel, notify_user)
+                        .await;
                 } else {
                     tracing::debug!("BOOT.md is empty/template-only — skipping");
                 }
@@ -1019,23 +1030,15 @@ impl Agent {
         }
 
         // ── 2. BOOTSTRAP.md — runs only on first run ──────────────────
-        match workspace
-            .read(crate::workspace::paths::BOOTSTRAP)
-            .await
-        {
+        match workspace.read(crate::workspace::paths::BOOTSTRAP).await {
             Ok(doc) => {
                 if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
                     tracing::info!(
                         "Executing BOOTSTRAP.md first-run hook (target channel: {})",
                         target_channel,
                     );
-                    self.run_startup_hook(
-                        "bootstrap",
-                        &doc.content,
-                        target_channel,
-                        notify_user,
-                    )
-                    .await;
+                    self.run_startup_hook("bootstrap", &doc.content, target_channel, notify_user)
+                        .await;
 
                     // Replace BOOTSTRAP.md content with a sentinel so it
                     // only runs once. We write a marker instead of deleting
@@ -1061,9 +1064,8 @@ impl Agent {
                                 "Failed to mark BOOTSTRAP.md as completed, attempting delete: {}",
                                 e
                             );
-                            if let Err(del_err) = workspace
-                                .delete(crate::workspace::paths::BOOTSTRAP)
-                                .await
+                            if let Err(del_err) =
+                                workspace.delete(crate::workspace::paths::BOOTSTRAP).await
                             {
                                 tracing::warn!(
                                     "Failed to delete BOOTSTRAP.md (may re-run next startup): {}",
@@ -1082,7 +1084,10 @@ impl Agent {
                 );
             }
             Err(e) => {
-                tracing::warn!("Failed to read BOOTSTRAP.md: {} — skipping first-run hook", e);
+                tracing::warn!(
+                    "Failed to read BOOTSTRAP.md: {} — skipping first-run hook",
+                    e
+                );
             }
         }
     }
@@ -1100,11 +1105,7 @@ impl Agent {
         // The channel is set to the hook name (e.g. "boot", "bootstrap")
         // so handle_message can identify the source. The user_id is the
         // resolved notification recipient (e.g. Telegram owner_id).
-        let message = IncomingMessage::new(
-            hook_name,
-            notify_user,
-            content,
-        );
+        let message = IncomingMessage::new(hook_name, notify_user, content);
 
         match self.handle_message(&message).await {
             Ok(Some(response)) if !response.is_empty() => {
@@ -1123,17 +1124,10 @@ impl Agent {
                     );
                     // Fallback: try web channel so the user at least sees it somewhere.
                     if target_channel != "web" {
-                        let _ = self
-                            .channels
-                            .broadcast("web", notify_user, out)
-                            .await;
+                        let _ = self.channels.broadcast("web", notify_user, out).await;
                     }
                 } else {
-                    tracing::info!(
-                        "Sent {} hook response to '{}'",
-                        hook_name,
-                        target_channel,
-                    );
+                    tracing::info!("Sent {} hook response to '{}'", hook_name, target_channel,);
                 }
                 // Also mirror to web if the primary channel is not web.
                 if target_channel != "web" {
@@ -1145,10 +1139,14 @@ impl Agent {
 
                 // Persist the boot/bootstrap response to conversation history
                 // so late-connecting WebUI clients can see it when they load.
-                self.persist_hook_response(hook_name, notify_user, &response).await;
+                self.persist_hook_response(hook_name, notify_user, &response)
+                    .await;
             }
             Ok(Some(_empty)) => {
-                tracing::debug!("{} hook returned empty response — nothing to send", hook_name);
+                tracing::debug!(
+                    "{} hook returned empty response — nothing to send",
+                    hook_name
+                );
             }
             Ok(None) => {
                 tracing::debug!("{} hook returned None — nothing to send", hook_name);
@@ -1206,11 +1204,7 @@ impl Agent {
             .add_conversation_message(conversation_id, "assistant", response)
             .await
         {
-            tracing::warn!(
-                "Failed to persist {} hook response: {}",
-                hook_name,
-                e
-            );
+            tracing::warn!("Failed to persist {} hook response: {}", hook_name, e);
         } else {
             tracing::debug!(
                 "Persisted {} hook response to assistant conversation {}",
@@ -1342,11 +1336,7 @@ impl Agent {
                 // Notify the user that the agent is restarting, then trigger
                 // orderly shutdown. The OS service manager (launchd KeepAlive /
                 // systemd Restart=always) will automatically relaunch the process.
-                let target_channel = self
-                    .config
-                    .notify_channel
-                    .as_deref()
-                    .unwrap_or("web");
+                let target_channel = self.config.notify_channel.as_deref().unwrap_or("web");
                 let restart_msg = OutgoingResponse::text(
                     "🔄 Restarting ThinClaw agent… The service manager will relaunch me shortly.",
                 );

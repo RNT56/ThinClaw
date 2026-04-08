@@ -20,7 +20,8 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::llm::cost_tracker::{BudgetConfig, CostTracker};
 use crate::llm::response_cache_ext::{CacheConfig, CachedResponseStore};
-use crate::llm::routing_policy::RoutingPolicy;
+use crate::llm::usage_tracking::UsageTrackingProvider;
+use crate::llm::{LlmRuntimeManager, normalize_providers_settings};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -38,6 +39,7 @@ pub struct AppComponents {
     pub config: Config,
     pub db: Option<Arc<dyn Database>>,
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    pub llm_runtime: Arc<LlmRuntimeManager>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
@@ -66,8 +68,8 @@ pub struct AppComponents {
     pub audit_hook: Arc<AuditLogHook>,
     /// Shared response cache — populated by Reasoning, read by `openclaw_cache_stats`.
     pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
-    /// Smart routing policy — rules + latency tracker, used by dispatcher before LLM calls.
-    pub routing_policy: Arc<tokio::sync::RwLock<RoutingPolicy>>,
+    /// Live smart routing policy owned by the runtime manager.
+    pub routing_policy: Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>,
 }
 
 /// Options that control optional init phases.
@@ -157,6 +159,21 @@ impl AppBuilder {
     pub fn with_tool_bridge(mut self, bridge: Arc<dyn ToolBridge>) -> Self {
         self.tool_bridge = Some(bridge);
         self
+    }
+
+    /// Inspect the currently resolved config while using the builder incrementally.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Inspect the initialized database handle while using the builder incrementally.
+    pub fn db(&self) -> Option<&Arc<dyn Database>> {
+        self.db.as_ref()
+    }
+
+    /// Inspect the initialized secrets store while using the builder incrementally.
+    pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
     }
 
     /// Phase 1: Initialize database backend.
@@ -261,12 +278,13 @@ impl AppBuilder {
             match db.get_all_settings("default").await {
                 Ok(map) => {
                     let settings = crate::settings::Settings::from_db_map(&map);
-                    if !settings.providers.enabled.is_empty() {
+                    let providers = normalize_providers_settings(&settings);
+                    if !providers.enabled.is_empty() || providers.primary.is_some() {
                         tracing::info!(
                             "Multi-provider settings loaded from DB: {} provider(s) enabled",
-                            settings.providers.enabled.len()
+                            providers.enabled.len()
                         );
-                        self.providers_settings = Some(settings.providers);
+                        self.providers_settings = Some(providers);
                     }
                 }
                 Err(e) => {
@@ -306,7 +324,7 @@ impl AppBuilder {
         // skip creation but still inject keys and re-resolve config.
         if self.secrets_store.is_some() {
             if let Some(ref secrets) = self.secrets_store {
-                crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+                crate::config::inject_all_secrets_from_store(secrets.as_ref(), "default").await;
                 if let Some(ref db) = self.db {
                     let toml_path = self.toml_path.as_deref();
                     match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
@@ -376,7 +394,7 @@ impl AppBuilder {
 
         if let Some(ref secrets) = store {
             // Inject LLM API keys from encrypted storage
-            crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+            crate::config::inject_all_secrets_from_store(secrets.as_ref(), "default").await;
 
             // Re-resolve config with newly available keys
             if let Some(ref db) = self.db {
@@ -876,12 +894,33 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        let (llm, cheap_llm) = self.init_llm()?;
+        let providers_settings = self
+            .providers_settings
+            .clone()
+            .unwrap_or_else(crate::settings::ProvidersSettings::default);
+        let llm_runtime = LlmRuntimeManager::new(
+            self.config.clone(),
+            providers_settings,
+            self.db.clone(),
+            self.secrets_store.clone(),
+            "default",
+            self.toml_path.clone(),
+        )?;
+        let runtime_llm = llm_runtime.primary_handle();
+        let runtime_cheap_llm = Some(llm_runtime.cheap_handle());
 
         // Create the shared cost tracker early (before init_tools) so the
         // builder tool's iterative LLM loop can be cost-tracked from the start.
         let cost_tracker = {
-            let mut tracker = CostTracker::new(BudgetConfig::default());
+            let budget = BudgetConfig {
+                daily_limit_usd: self
+                    .config
+                    .agent
+                    .max_cost_per_day_cents
+                    .map(|c| c as f64 / 100.0),
+                ..BudgetConfig::default()
+            };
+            let mut tracker = CostTracker::new(budget);
 
             // Restore persisted entries from the ThinClaw DB.
             if let Some(ref db) = self.db {
@@ -895,8 +934,29 @@ impl AppBuilder {
             Arc::new(tokio::sync::Mutex::new(tracker))
         };
 
-        let (safety, tools, embeddings, workspace) =
-            self.init_tools(&llm, Some(Arc::clone(&cost_tracker))).await?;
+        let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
+            crate::agent::cost_guard::CostGuardConfig {
+                max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
+                max_actions_per_hour: self.config.agent.max_actions_per_hour,
+            },
+        ));
+
+        let llm: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
+            runtime_llm,
+            Arc::clone(&cost_tracker),
+            Some(Arc::clone(&cost_guard)),
+        ));
+        let cheap_llm = runtime_cheap_llm.map(|cheap| {
+            Arc::new(UsageTrackingProvider::new(
+                cheap,
+                Arc::clone(&cost_tracker),
+                Some(Arc::clone(&cost_guard)),
+            )) as Arc<dyn LlmProvider>
+        });
+
+        let (safety, tools, embeddings, workspace) = self
+            .init_tools(&llm, Some(Arc::clone(&cost_tracker)))
+            .await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -952,6 +1012,27 @@ impl AppBuilder {
                 }
             }
 
+            // ── Timezone sync: Settings <-> USER.md ──────────────────────
+            // 1. If wizard set a timezone but USER.md is still empty, pre-fill it
+            //    so the bootstrap conversation doesn't need to ask again.
+            // 2. If the agent already captured a timezone in USER.md (via bootstrap),
+            //    sync it back to Settings so heartbeat/routines use the right TZ.
+            let wizard_tz = self.config.heartbeat.user_timezone.clone();
+            if let Some(user_md_tz) = ws.extract_user_timezone().await {
+                // Agent already captured timezone in USER.md — sync to Settings
+                if wizard_tz.as_deref() != Some(&user_md_tz) {
+                    tracing::info!("Syncing USER.md timezone '{}' back to Settings", user_md_tz);
+                    if let Some(ref db) = self.db {
+                        let _ = db
+                            .set_setting("default", "user_timezone", &serde_json::json!(user_md_tz))
+                            .await;
+                    }
+                }
+            } else if let Some(ref tz) = wizard_tz {
+                // Wizard detected timezone but USER.md is empty — pre-fill
+                let _ = ws.inject_user_timezone(tz).await;
+            }
+
             if embeddings.is_some() {
                 let ws_bg = Arc::clone(ws);
                 tokio::spawn(async move {
@@ -972,6 +1053,41 @@ impl AppBuilder {
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
                 .with_installed_dir(self.config.skills.installed_dir.clone());
+
+            // Wire workspace skills dir: <workspace_root>/skills/
+            //
+            // Workspace skills have highest priority (see discover_all ordering) and
+            // are loaded with Trusted trust level. They are intended for repo-scoped
+            // or project-scoped skills placed by developers alongside their code.
+            //
+            // Derivation priority:
+            //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
+            //   2. <workspace_root>/skills/ when workspace_root is configured
+            //   3. No workspace skills directory (workspace skills disabled)
+            let workspace_skills_dir = if let Ok(explicit) =
+                std::env::var("SKILLS_WORKSPACE_DIR")
+            {
+                if !explicit.is_empty() {
+                    Some(std::path::PathBuf::from(explicit))
+                } else {
+                    None
+                }
+            } else {
+                self.config
+                    .agent
+                    .workspace_root
+                    .as_ref()
+                    .map(|root| root.join("skills"))
+            };
+
+            if let Some(ws_dir) = workspace_skills_dir {
+                tracing::info!(
+                    "Skills: workspace dir → {}",
+                    ws_dir.display()
+                );
+                registry = registry.with_workspace_dir(ws_dir);
+            }
+
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
@@ -985,13 +1101,6 @@ impl AppBuilder {
         };
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
-
-        let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
-            crate::agent::cost_guard::CostGuardConfig {
-                max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
-                max_actions_per_hour: self.config.agent.max_actions_per_hour,
-            },
-        ));
 
         // Register hardware bridge tools if a bridge was injected
         let session_approvals = Arc::new(SessionApprovals::new());
@@ -1033,6 +1142,7 @@ impl AppBuilder {
             config: self.config,
             db: self.db,
             secrets_store: self.secrets_store,
+            llm_runtime: Arc::clone(&llm_runtime),
             llm,
             cheap_llm,
             safety,
@@ -1057,7 +1167,7 @@ impl AppBuilder {
             response_cache: Arc::new(tokio::sync::RwLock::new(CachedResponseStore::new(
                 CacheConfig::default(),
             ))),
-            routing_policy: Arc::new(tokio::sync::RwLock::new(RoutingPolicy::from_env())),
+            routing_policy: Arc::clone(&llm_runtime.routing_policy),
         })
     }
 }

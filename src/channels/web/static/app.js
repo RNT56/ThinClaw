@@ -30,6 +30,13 @@ function authenticate() {
     return;
   }
 
+  // Show loading state
+  var btn = document.querySelector('#auth-screen button');
+  var origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Connecting\u2026';
+  document.getElementById('auth-error').textContent = '';
+
   // Test the token against the health-ish endpoint (chat/threads requires auth)
   apiFetch('/api/chat/threads')
     .then(() => {
@@ -57,6 +64,8 @@ function authenticate() {
       }
     })
     .catch(() => {
+      btn.disabled = false;
+      btn.textContent = origText;
       sessionStorage.removeItem('thinclaw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
@@ -92,6 +101,8 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 
 function apiFetch(path, options) {
   const opts = options || {};
+  const raw = opts.raw;
+  delete opts.raw;
   opts.headers = opts.headers || {};
   opts.headers['Authorization'] = 'Bearer ' + token;
   if (opts.body && typeof opts.body === 'object') {
@@ -99,6 +110,7 @@ function apiFetch(path, options) {
     opts.body = JSON.stringify(opts.body);
   }
   return fetch(path, opts).then((res) => {
+    if (raw) return res;
     if (!res.ok) {
       return res.text().then(function(body) {
         throw new Error(body || (res.status + ' ' + res.statusText));
@@ -210,6 +222,17 @@ function connectSSE() {
 
   eventSource.addEventListener('extension_status', (e) => {
     if (currentTab === 'extensions') loadExtensions();
+  });
+
+  eventSource.addEventListener('cost_alert', (e) => {
+    const data = JSON.parse(e.data);
+    const alertType = data.alert_type || 'warning';
+    const msg = data.message || (alertType === 'exceeded'
+      ? 'Daily budget exceeded — agent actions are paused.'
+      : 'Approaching daily budget limit.');
+    showToast(msg, alertType === 'exceeded' ? 'error' : 'warning');
+    // Auto-refresh cost dashboard if it's the active tab
+    if (currentTab === 'costs') loadCostDashboard();
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -475,7 +498,7 @@ function addToolCard(name) {
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
+  chevron.innerHTML = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m9 18 6-6-6-6"/></svg>';
 
   header.appendChild(icon);
   header.appendChild(toolName);
@@ -532,8 +555,8 @@ function completeToolCard(name, success) {
   entry.finalDuration = elapsed;
   entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
   entry.icon.innerHTML = success
-    ? '<span class="activity-icon-success">&#10003;</span>'
-    : '<span class="activity-icon-fail">&#10007;</span>';
+    ? '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>'
+    : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   entry.card.setAttribute('data-status', success ? 'success' : 'fail');
 }
 
@@ -610,7 +633,7 @@ function finalizeActivityGroup() {
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
   const summary = document.createElement('div');
   summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+  summary.innerHTML = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m9 18 6-6-6-6"/></svg>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
     + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
@@ -704,7 +727,7 @@ function showJobCard(data) {
 
   const icon = document.createElement('span');
   icon.className = 'job-card-icon';
-  icon.textContent = '\u2692';
+  icon.innerHTML = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 12-8.373 8.373a1 1 0 1 1-1.414-1.414L13.586 10.586"/><path d="m18.293 14.707 1.414-1.414a1 1 0 0 0 0-1.414l-7.586-7.586a1 1 0 0 0-1.414 0l-1.414 1.414a1 1 0 0 0 0 1.414l7.586 7.586a1 1 0 0 0 1.414 0z"/></svg>';
   card.appendChild(icon);
 
   const info = document.createElement('div');
@@ -1128,7 +1151,7 @@ function switchTab(tab) {
   }
   if (tab === 'skills') loadSkills();
   if (tab === 'providers') loadProviders();
-  if (tab === 'costs') loadCostDashboard();
+  if (tab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
   if (tab === 'settings') loadSettings();
 }
 
@@ -1570,13 +1593,13 @@ function loadExtensions() {
 
 function renderAvailableExtensionCard(entry) {
   const card = document.createElement('div');
-  card.className = 'ext-card ext-available';
+  card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-panel--feature ui-resource-card ext-card ext-available';
 
   const header = document.createElement('div');
-  header.className = 'ext-header';
+  header.className = 'ext-header ui-resource-header';
 
   const name = document.createElement('span');
-  name.className = 'ext-name';
+  name.className = 'ext-name ui-resource-name';
   name.textContent = entry.display_name;
   header.appendChild(name);
 
@@ -1588,19 +1611,19 @@ function renderAvailableExtensionCard(entry) {
   card.appendChild(header);
 
   const desc = document.createElement('div');
-  desc.className = 'ext-desc';
+  desc.className = 'ext-desc ui-resource-meta';
   desc.textContent = entry.description;
   card.appendChild(desc);
 
   if (entry.keywords && entry.keywords.length > 0) {
     const kw = document.createElement('div');
-    kw.className = 'ext-keywords';
+    kw.className = 'ext-keywords ui-resource-note';
     kw.textContent = entry.keywords.join(', ');
     card.appendChild(kw);
   }
 
   const actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'ext-actions ui-resource-actions';
 
   const installBtn = document.createElement('button');
   installBtn.className = 'btn-ext install';
@@ -1636,13 +1659,14 @@ function renderAvailableExtensionCard(entry) {
 
 function renderMcpServerCard(entry, installedExt) {
   var card = document.createElement('div');
-  card.className = 'ext-card' + (installedExt ? '' : ' ext-available');
+  card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card'
+    + (installedExt ? '' : ' ui-panel--feature ext-available');
 
   var header = document.createElement('div');
-  header.className = 'ext-header';
+  header.className = 'ext-header ui-resource-header';
 
   var name = document.createElement('span');
-  name.className = 'ext-name';
+  name.className = 'ext-name ui-resource-name';
   name.textContent = entry.display_name;
   header.appendChild(name);
 
@@ -1661,12 +1685,12 @@ function renderMcpServerCard(entry, installedExt) {
   card.appendChild(header);
 
   var desc = document.createElement('div');
-  desc.className = 'ext-desc';
+  desc.className = 'ext-desc ui-resource-meta';
   desc.textContent = entry.description;
   card.appendChild(desc);
 
   var actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'ext-actions ui-resource-actions';
 
   if (installedExt) {
     if (!installedExt.active) {
@@ -1725,13 +1749,13 @@ function createReconfigureButton(extName) {
 
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
 
   const header = document.createElement('div');
-  header.className = 'ext-header';
+  header.className = 'ext-header ui-resource-header';
 
   const name = document.createElement('span');
-  name.className = 'ext-name';
+  name.className = 'ext-name ui-resource-name';
   name.textContent = ext.name;
   header.appendChild(name);
 
@@ -1757,14 +1781,14 @@ function renderExtensionCard(ext) {
 
   if (ext.description) {
     const desc = document.createElement('div');
-    desc.className = 'ext-desc';
+    desc.className = 'ext-desc ui-resource-meta';
     desc.textContent = ext.description;
     card.appendChild(desc);
   }
 
   if (ext.url) {
     const url = document.createElement('div');
-    url.className = 'ext-url';
+    url.className = 'ext-url ui-resource-note';
     url.textContent = ext.url;
     url.title = ext.url;
     card.appendChild(url);
@@ -1772,7 +1796,7 @@ function renderExtensionCard(ext) {
 
   if (ext.tools.length > 0) {
     const tools = document.createElement('div');
-    tools.className = 'ext-tools';
+    tools.className = 'ext-tools ui-resource-note';
     tools.textContent = 'Tools: ' + ext.tools.join(', ');
     card.appendChild(tools);
   }
@@ -1780,7 +1804,7 @@ function renderExtensionCard(ext) {
   // Show activation error for WASM channels
   if (ext.kind === 'wasm_channel' && ext.activation_error) {
     const errorDiv = document.createElement('div');
-    errorDiv.className = 'ext-error';
+    errorDiv.className = 'ext-error ui-resource-note';
     errorDiv.textContent = ext.activation_error;
     card.appendChild(errorDiv);
   }
@@ -1789,13 +1813,13 @@ function renderExtensionCard(ext) {
   if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
       && (ext.activation_status === 'configured' || ext.active)) {
     const noteDiv = document.createElement('div');
-    noteDiv.className = 'ext-note';
+    noteDiv.className = 'ext-note ui-resource-note';
     noteDiv.textContent = 'Full integration coming soon. Use the CLI to complete setup.';
     card.appendChild(noteDiv);
   }
 
   const actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'ext-actions ui-resource-actions';
 
   if (ext.kind === 'wasm_channel') {
     // WASM channels: state-based buttons (no generic Activate)
@@ -2241,6 +2265,32 @@ let currentJobId = null;
 let currentJobSubTab = 'overview';
 let jobFilesTreeState = null;
 
+function buildJobsOverviewShell() {
+  return '<div class="jobs-header ui-page-header ui-panel-header">'
+    + '<div class="ui-panel-copy">'
+    + '<h2 class="ui-panel-title ui-panel-title--page">Jobs</h2>'
+    + '<p class="ui-panel-desc">Inspect sandbox runs, review activity, and jump into job workspaces.</p>'
+    + '</div>'
+    + '</div>'
+    + '<div class="jobs-shell ui-panel-stack">'
+    + '<div class="jobs-summary ui-panel-grid ui-panel-grid--cards" id="jobs-summary"></div>'
+    + '<section class="ui-panel ui-panel-stack jobs-list-panel" id="jobs-list-panel">'
+    + '<div class="ui-panel-header ui-panel-header--divider">'
+    + '<div class="ui-panel-copy">'
+    + '<h3 class="ui-panel-title">Recent Jobs</h3>'
+    + '<p class="ui-panel-desc">Track status, creation time, and quick recovery actions for each run.</p>'
+    + '</div>'
+    + '</div>'
+    + '<div class="ui-panel-table-wrap" id="jobs-table-shell">'
+    + '<table class="jobs-table ui-panel-table" id="jobs-table"><thead><tr>'
+    + '<th>ID</th><th>Title</th><th>Status</th><th>Created</th><th>Actions</th>'
+    + '</tr></thead><tbody id="jobs-tbody"></tbody></table>'
+    + '</div>'
+    + '<div class="empty-state ui-panel-empty" id="jobs-empty" style="display:none">No jobs found</div>'
+    + '</section>'
+    + '</div>';
+}
+
 function loadJobs() {
   currentJobId = null;
   jobFilesTreeState = null;
@@ -2248,12 +2298,7 @@ function loadJobs() {
   // Rebuild DOM if renderJobDetail() destroyed it (it wipes .jobs-container innerHTML).
   const container = document.querySelector('.jobs-container');
   if (!document.getElementById('jobs-summary')) {
-    container.innerHTML =
-      '<div class="jobs-summary" id="jobs-summary"></div>'
-      + '<table class="jobs-table" id="jobs-table"><thead><tr>'
-      + '<th>ID</th><th>Title</th><th>Status</th><th>Created</th><th>Actions</th>'
-      + '</tr></thead><tbody id="jobs-tbody"></tbody></table>'
-      + '<div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>';
+    container.innerHTML = buildJobsOverviewShell();
   }
 
   Promise.all([
@@ -2275,22 +2320,25 @@ function renderJobsSummary(s) {
 }
 
 function summaryCard(label, count, cls) {
-  return '<div class="summary-card ' + cls + '">'
-    + '<div class="count">' + count + '</div>'
-    + '<div class="label">' + label + '</div>'
+  return '<div class="ui-panel ui-panel--compact ui-panel--subtle ui-metric-card summary-card ' + cls + '">'
+    + '<div class="ui-metric-value count">' + count + '</div>'
+    + '<div class="ui-metric-label label">' + label + '</div>'
     + '</div>';
 }
 
 function renderJobsList(jobs) {
   const tbody = document.getElementById('jobs-tbody');
   const empty = document.getElementById('jobs-empty');
+  const tableShell = document.getElementById('jobs-table-shell');
 
   if (jobs.length === 0) {
     tbody.innerHTML = '';
+    if (tableShell) tableShell.style.display = 'none';
     empty.style.display = 'block';
     return;
   }
 
+  if (tableShell) tableShell.style.display = '';
   empty.style.display = 'none';
   tbody.innerHTML = jobs.map((job) => {
     const shortId = job.id.substring(0, 8);
@@ -2359,6 +2407,9 @@ function renderJobDetail(job) {
   const stateClass = job.state.replace(' ', '_');
 
   container.innerHTML = '';
+  const shell = document.createElement('section');
+  shell.className = 'ui-panel ui-panel-stack job-detail-shell';
+  container.appendChild(shell);
 
   // Header
   const header = document.createElement('div');
@@ -2376,7 +2427,7 @@ function renderJobDetail(job) {
   }
 
   header.innerHTML = headerHtml;
-  container.appendChild(header);
+  shell.appendChild(header);
 
   // Sub-tab bar
   const tabs = document.createElement('div');
@@ -2392,12 +2443,13 @@ function renderJobDetail(job) {
     });
     tabs.appendChild(btn);
   }
-  container.appendChild(tabs);
+  shell.appendChild(tabs);
 
   // Content
   const content = document.createElement('div');
-  content.className = 'job-detail-content';
-  container.appendChild(content);
+  content.className = 'job-detail-content ui-panel-stack';
+  content._jobId = job ? job.id : null;
+  shell.appendChild(content);
 
   switch (currentJobSubTab) {
     case 'overview': renderJobOverview(content, job); break;
@@ -2407,7 +2459,7 @@ function renderJobDetail(job) {
 }
 
 function metaItem(label, value) {
-  return '<div class="meta-item"><div class="meta-label">' + escapeHtml(label)
+  return '<div class="ui-panel ui-panel--subtle meta-item"><div class="meta-label">' + escapeHtml(label)
     + '</div><div class="meta-value">' + escapeHtml(String(value != null ? value : '-'))
     + '</div></div>';
 }
@@ -2438,7 +2490,7 @@ function renderJobOverview(container, job) {
   // Description
   if (job.description) {
     const descSection = document.createElement('div');
-    descSection.className = 'job-description';
+    descSection.className = 'ui-panel ui-panel--subtle job-description';
     const descHeader = document.createElement('h3');
     descHeader.textContent = 'Description';
     descSection.appendChild(descHeader);
@@ -2452,7 +2504,7 @@ function renderJobOverview(container, job) {
   // State transitions timeline
   if (job.transitions.length > 0) {
     const timelineSection = document.createElement('div');
-    timelineSection.className = 'job-timeline-section';
+    timelineSection.className = 'ui-panel ui-panel--subtle job-timeline-section';
     const tlHeader = document.createElement('h3');
     tlHeader.textContent = 'State Transitions';
     timelineSection.appendChild(tlHeader);
@@ -2702,7 +2754,7 @@ function appendActivityEvent(terminal, eventType, data) {
       break;
     case 'tool_use':
       el.innerHTML = '<details class="activity-tool-block"><summary>'
-        + '<span class="activity-tool-icon">&#9881;</span> '
+        + '<span class="activity-tool-icon"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span> '
         + escapeHtml(data.tool_name || 'tool')
         + '</summary><pre class="activity-tool-input">'
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
@@ -2710,7 +2762,7 @@ function appendActivityEvent(terminal, eventType, data) {
       break;
     case 'tool_result': {
       const trSuccess = data.success !== false;
-      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trIcon = trSuccess ? '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
       const trOutput = data.output || data.error || '';
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
@@ -2781,8 +2833,8 @@ function loadRoutines() {
   // Restore list view if detail was open
   const detail = document.getElementById('routine-detail');
   if (detail) detail.style.display = 'none';
-  const table = document.getElementById('routines-table');
-  if (table) table.style.display = '';
+  const listPanel = document.getElementById('routines-list-panel');
+  if (listPanel) listPanel.style.display = '';
 
   Promise.all([
     apiFetch('/api/routines/summary'),
@@ -2805,13 +2857,16 @@ function renderRoutinesSummary(s) {
 function renderRoutinesList(routines) {
   const tbody = document.getElementById('routines-tbody');
   const empty = document.getElementById('routines-empty');
+  const tableShell = document.getElementById('routines-table-shell');
 
   if (!routines || routines.length === 0) {
     tbody.innerHTML = '';
+    if (tableShell) tableShell.style.display = 'none';
     empty.style.display = 'block';
     return;
   }
 
+  if (tableShell) tableShell.style.display = '';
   empty.style.display = 'none';
   tbody.innerHTML = routines.map((r) => {
     const statusClass = r.status === 'active' ? 'completed'
@@ -2853,8 +2908,8 @@ function closeRoutineDetail() {
 }
 
 function renderRoutineDetail(routine) {
-  const table = document.getElementById('routines-table');
-  if (table) table.style.display = 'none';
+  const listPanel = document.getElementById('routines-list-panel');
+  if (listPanel) listPanel.style.display = 'none';
   document.getElementById('routines-empty').style.display = 'none';
 
   const detail = document.getElementById('routine-detail');
@@ -2867,7 +2922,8 @@ function renderRoutineDetail(routine) {
     : routine.consecutive_failures > 0 ? 'failing'
     : 'active';
 
-  let html = '<div class="job-detail-header">'
+  let html = '<section class="ui-panel ui-panel-stack routine-detail-shell">'
+    + '<div class="job-detail-header">'
     + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; Back</button>'
     + '<h2>' + escapeHtml(routine.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>'
@@ -2886,22 +2942,22 @@ function renderRoutineDetail(routine) {
 
   // Description
   if (routine.description) {
-    html += '<div class="job-description"><h3>Description</h3>'
+    html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Description</h3>'
       + '<div class="job-description-body">' + escapeHtml(routine.description) + '</div></div>';
   }
 
   // Trigger config
-  html += '<div class="job-description"><h3>Trigger</h3>'
+  html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Trigger</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
 
   // Action config
-  html += '<div class="job-description"><h3>Action</h3>'
+  html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
   // Recent runs
   if (routine.recent_runs && routine.recent_runs.length > 0) {
-    html += '<div class="job-timeline-section"><h3>Recent Runs</h3>'
-      + '<table class="routines-table"><thead><tr>'
+    html += '<div class="ui-panel ui-panel--subtle job-timeline-section"><h3>Recent Runs</h3>'
+      + '<div class="ui-panel-table-wrap"><table class="routines-table ui-panel-table"><thead><tr>'
       + '<th>Trigger</th><th>Started</th><th>Completed</th><th>Status</th><th>Summary</th><th>Tokens</th>'
       + '</tr></thead><tbody>';
     for (const run of routine.recent_runs) {
@@ -2920,9 +2976,10 @@ function renderRoutineDetail(routine) {
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
     }
-    html += '</tbody></table></div>';
+    html += '</tbody></table></div></div>';
   }
 
+  html += '</section>';
   detail.innerHTML = html;
 }
 
@@ -3066,11 +3123,113 @@ var MODEL_COLORS = [
   '#fb923c', '#38bdf8', '#c084fc', '#4ade80', '#f87171',
 ];
 
+var costAutoRefreshTimer = null;
+var costDataCache = null;
+var costRange = 'today'; // 'today' | '7d' | '30d' | 'all'
+
+function startCostAutoRefresh() {
+  stopCostAutoRefresh();
+  costAutoRefreshTimer = setInterval(loadCostDashboard, 30000);
+}
+
+function stopCostAutoRefresh() {
+  if (costAutoRefreshTimer) { clearInterval(costAutoRefreshTimer); costAutoRefreshTimer = null; }
+}
+
+function setCostRange(range) {
+  costRange = range;
+  // Update active button
+  document.querySelectorAll('.cost-range-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.range === range);
+  });
+  if (costDataCache) {
+    renderCostSummary(costDataCache);
+    renderDailyChart(costDataCache);
+    renderCostChart(costDataCache);
+    renderCostTable(costDataCache);
+  }
+}
+
+function getCostRangeLabel(range) {
+  if (range === 'today') return 'Today';
+  if (range === '7d') return 'Last 7 Days';
+  if (range === '30d') return 'Last 30 Days';
+  return 'All Time';
+}
+
+function getCostRangeModelDetails(data, range) {
+  if (range === 'today') return (data.today_model_details || []).slice();
+  if (range === '7d') return (data.last_7d_model_details || []).slice();
+  if (range === '30d') return (data.last_30d_model_details || []).slice();
+  return (data.model_details || []).slice();
+}
+
+function summarizeCostModels(models) {
+  var totalInput = 0;
+  var totalOutput = 0;
+  var totalCost = 0;
+  var totalRequests = 0;
+  for (var i = 0; i < models.length; i++) {
+    totalInput += models[i].input_tokens || 0;
+    totalOutput += models[i].output_tokens || 0;
+    totalCost += models[i].cost_usd || 0;
+    totalRequests += models[i].requests || 0;
+  }
+  return {
+    totalInput: totalInput,
+    totalOutput: totalOutput,
+    totalCost: totalCost,
+    totalRequests: totalRequests,
+  };
+}
+
+function getCostRangeSnapshot(data, range) {
+  var models = getCostRangeModelDetails(data, range);
+  var totals = summarizeCostModels(models);
+  return {
+    models: models,
+    totalInput: totals.totalInput,
+    totalOutput: totals.totalOutput,
+    totalCost: totals.totalCost,
+    totalRequests: totals.totalRequests,
+  };
+}
+
+function buildCostModelLabelCounts(models) {
+  var counts = {};
+  for (var i = 0; i < models.length; i++) {
+    var label = shortModelName(models[i].model);
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  return counts;
+}
+
+function displayCostModelLabel(model, shortLabelCounts) {
+  var shortLabel = shortModelName(model);
+  if ((shortLabelCounts[shortLabel] || 0) <= 1) {
+    return shortLabel;
+  }
+  if (model.indexOf('/') >= 0) {
+    var parts = model.split('/');
+    return parts.slice(Math.max(0, parts.length - 2)).join('/');
+  }
+  return model;
+}
+
 function loadCostDashboard() {
-  apiFetch('/api/gateway/status').then(function(data) {
-    renderCostSummary(data);
-    renderCostChart(data);
-    renderCostTable(data);
+  Promise.all([
+    apiFetch('/api/costs/summary'),
+    apiFetch('/api/gateway/status'),
+  ]).then(function(results) {
+    var summary = results[0];
+    var gateway = results[1];
+    // Merge gateway info (actions/hr, budget, uptime) into cost summary
+    summary._gateway = gateway;
+    costDataCache = summary;
+    renderCostSummary(summary);
+    renderDailyChart(summary);
+    renderCostChart(summary);
+    renderCostTable(summary);
     var ts = document.getElementById('costs-last-updated');
     if (ts) ts.textContent = 'Updated ' + new Date().toLocaleTimeString();
   }).catch(function(err) {
@@ -3079,82 +3238,160 @@ function loadCostDashboard() {
   });
 }
 
+function utcTodayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function filterDailyData(daily, range) {
+  if (!daily || range === 'all') return daily;
+  var todayKey = utcTodayKey();
+  var days = range === 'today' ? 1 : range === '7d' ? 7 : 30;
+  // Compute cutoff in UTC by subtracting days from the UTC date
+  var todayDate = new Date(todayKey + 'T00:00:00Z');
+  var cutoff = new Date(todayDate.getTime() - (days - 1) * 86400000);
+
+  var filtered = {};
+  // Fill in missing days with 0 using UTC day stepping
+  for (var t = cutoff.getTime(); t <= todayDate.getTime(); t += 86400000) {
+    var key = new Date(t).toISOString().slice(0, 10);
+    filtered[key] = daily[key] || 0;
+  }
+  return filtered;
+}
+
 function renderCostSummary(data) {
   var el = document.getElementById('costs-summary');
   if (!el) return;
 
-  var dailyCost = data.daily_cost != null ? parseFloat(data.daily_cost) : 0;
-  var actionsHr = data.actions_this_hour || 0;
-  var models = data.model_usage || [];
+  var gw = data._gateway || {};
+  var rangeSnapshot = getCostRangeSnapshot(data, costRange);
+  var rangeCost = rangeSnapshot.totalCost;
+  var actionsHr = gw.actions_this_hour || 0;
+  var totalIn = rangeSnapshot.totalInput;
+  var totalOut = rangeSnapshot.totalOutput;
+  var totalReq = rangeSnapshot.totalRequests;
+  var rangeLabel = getCostRangeLabel(costRange);
 
-  var totalInput = 0, totalOutput = 0, totalCost = 0;
-  for (var i = 0; i < models.length; i++) {
-    totalInput += models[i].input_tokens || 0;
-    totalOutput += models[i].output_tokens || 0;
-    totalCost += parseFloat(models[i].cost) || 0;
-  }
-  var totalTokens = totalInput + totalOutput;
+  // Spend card with optional budget progress
+  var spendHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card accent">'
+    + '<div class="cost-card-label">Spent · ' + rangeLabel + '</div>'
+    + '<div class="cost-card-value">' + formatCost(String(rangeCost)) + '</div>'
+    + '<div class="cost-card-sub">' + totalReq + ' requests total</div>';
 
-  // Daily spend card with optional budget bar
-  var spendHtml = '<div class="cost-card accent">'
-    + '<div class="cost-card-label">Spent Today</div>'
-    + '<div class="cost-card-value">' + formatCost(String(dailyCost)) + '</div>'
-    + '<div class="cost-card-sub">' + formatTokenCount(totalInput) + ' in / ' + formatTokenCount(totalOutput) + ' out</div>';
-
-  // Budget progress bar — shown when server reports a daily limit
-  if (data.budget_limit_usd) {
-    var budgetUsd = parseFloat(data.budget_limit_usd);
-    var pct = budgetUsd > 0 ? Math.min(100, (dailyCost / budgetUsd) * 100) : 0;
+  if (gw.budget_limit_usd && costRange === 'today') {
+    var budgetUsd = parseFloat(gw.budget_limit_usd);
+    var todayStr = utcTodayKey();
+    var todayCost = (data.daily || {})[todayStr] || 0;
+    var pct = budgetUsd > 0 ? Math.min(100, (todayCost / budgetUsd) * 100) : 0;
     var budgetClass = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok';
     spendHtml += '<div class="cost-budget-bar"><div class="cost-budget-fill ' + budgetClass + '" style="width:' + pct.toFixed(1) + '%"></div></div>'
-      + '<div class="cost-card-sub">Budget: ' + formatCost(data.budget_limit_usd) + ' (' + pct.toFixed(0) + '% used)</div>';
+      + '<div class="cost-card-sub">Budget: ' + formatCost(gw.budget_limit_usd) + ' (' + pct.toFixed(0) + '% used)</div>';
   }
   spendHtml += '</div>';
 
   // Total tokens card
-  var tokensHtml = '<div class="cost-card blue">'
+  var tokensHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card blue">'
     + '<div class="cost-card-label">Total Tokens</div>'
-    + '<div class="cost-card-value">' + formatTokenCount(totalTokens) + '</div>'
-    + '<div class="cost-card-sub">' + formatTokenCount(totalInput) + ' input · ' + formatTokenCount(totalOutput) + ' output</div>'
+    + '<div class="cost-card-value">' + formatTokenCount(totalIn + totalOut) + '</div>'
+    + '<div class="cost-card-sub">' + formatTokenCount(totalIn) + ' input · ' + formatTokenCount(totalOut) + ' output</div>'
     + '</div>';
 
-  // Active models card
-  var modelsHtml = '<div class="cost-card purple">'
+  // Active models
+  var modelDetails = rangeSnapshot.models;
+  var modelsHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card purple">'
     + '<div class="cost-card-label">Active Models</div>'
-    + '<div class="cost-card-value">' + models.length + '</div>'
-    + '<div class="cost-card-sub">' + (models.length > 0 ? escapeHtml(shortModelName(models[0].model)) + (models.length > 1 ? ' + ' + (models.length - 1) + ' more' : '') : 'No usage yet') + '</div>'
+    + '<div class="cost-card-value">' + modelDetails.length + '</div>'
+    + '<div class="cost-card-sub">' + (modelDetails.length > 0 ? escapeHtml(shortModelName(modelDetails[0].model)) + (modelDetails.length > 1 ? ' + ' + (modelDetails.length - 1) + ' more' : '') : 'No usage yet') + '</div>'
     + '</div>';
 
   // Actions/hour card
   var actionsSubText = 'LLM calls in the last 60 minutes';
-  if (data.hourly_action_limit) {
-    actionsSubText = actionsHr + ' of ' + data.hourly_action_limit + ' allowed per hour';
+  if (gw.hourly_action_limit) {
+    actionsSubText = actionsHr + ' of ' + gw.hourly_action_limit + ' allowed per hour';
   }
-  var actionsHtml = '<div class="cost-card amber">'
+  var actionsHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card amber">'
     + '<div class="cost-card-label">Actions / Hour</div>'
     + '<div class="cost-card-value">' + actionsHr + '</div>'
     + '<div class="cost-card-sub">' + actionsSubText + '</div>'
     + '</div>';
 
-  el.innerHTML = spendHtml + tokensHtml + modelsHtml + actionsHtml;
+  var capacityHtml = '';
+  if (data.entries_at_capacity) {
+    capacityHtml = '<div class="cost-capacity-warn" style="grid-column:1/-1;padding:8px 12px;background:rgba(245,166,35,0.12);border:1px solid rgba(245,166,35,0.3);border-radius:var(--radius);font-size:12px;color:var(--warning);">'
+      + '⚠ Live entry buffer full (' + (data.max_entries || 50000).toLocaleString() + ' entries). Oldest entries are compacted — daily/model totals are preserved but individual records are summarized.'
+      + '</div>';
+  }
+
+  el.innerHTML = spendHtml + tokensHtml + modelsHtml + actionsHtml + capacityHtml;
 }
 
-function renderCostChart(data) {
+function renderDailyChart(data) {
   var el = document.getElementById('costs-chart');
   if (!el) return;
 
-  var models = data.model_usage || [];
+  var daily = filterDailyData(data.daily || {}, costRange);
+  var days = Object.keys(daily).sort();
+
+  if (days.length === 0 || (days.length === 1 && daily[days[0]] === 0)) {
+    el.innerHTML = '<div class="empty-state">No daily usage data to display yet.</div>';
+    return;
+  }
+
+  var maxCost = 0;
+  for (var i = 0; i < days.length; i++) {
+    if (daily[days[i]] > maxCost) maxCost = daily[days[i]];
+  }
+  if (maxCost === 0) maxCost = 0.01;
+
+  var barWidth = Math.max(16, Math.min(48, Math.floor(600 / days.length) - 4));
+
+  var html = '<div class="daily-chart-container">';
+  html += '<div class="daily-chart-bars">';
+  for (var i = 0; i < days.length; i++) {
+    var cost = daily[days[i]];
+    var pct = (cost / maxCost) * 100;
+    var dateLabel = days[i].slice(5); // "04-05"
+    var dayOfWeek = new Date(days[i] + 'T12:00:00Z');
+    var weekday = dayOfWeek.toLocaleDateString('en-US', { weekday: 'short' });
+    var isToday = days[i] === utcTodayKey();
+    var barClass = isToday ? 'daily-bar today' : 'daily-bar';
+
+    html += '<div class="daily-bar-col">'
+      + '<div class="daily-bar-value">' + (cost >= 0.01 ? formatCost(String(cost)) : cost > 0 ? '<$0.01' : '') + '</div>'
+      + '<div class="daily-bar-track">'
+      + '<div class="' + barClass + '" style="height:' + Math.max(2, pct).toFixed(1) + '%;width:' + barWidth + 'px" title="' + days[i] + ': ' + formatCost(String(cost)) + '"></div>'
+      + '</div>'
+      + '<div class="daily-bar-date">' + (days.length <= 14 ? weekday + '<br>' : '') + dateLabel + '</div>'
+      + '</div>';
+  }
+  html += '</div></div>';
+
+  el.innerHTML = html;
+}
+
+function renderCostChart(data) {
+  var el = document.getElementById('costs-model-chart');
+  if (!el) return;
+
+  var models = getCostRangeModelDetails(data, costRange);
   if (models.length === 0) {
     el.innerHTML = '<div class="empty-state">No token usage to display yet.</div>';
     return;
   }
 
-  // Sort by total tokens descending
   models.sort(function(a, b) {
-    return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+    var totalA = (a.input_tokens || 0) + (a.output_tokens || 0);
+    var totalB = (b.input_tokens || 0) + (b.output_tokens || 0);
+    if (totalA !== totalB) return totalB - totalA;
+    return (b.cost_usd || 0) - (a.cost_usd || 0);
   });
+  var shortLabelCounts = buildCostModelLabelCounts(models);
 
-  var maxTokens = (models[0].input_tokens || 0) + (models[0].output_tokens || 0);
+  var maxTokens = 0;
+  for (var i = 0; i < models.length; i++) {
+    var t = (models[i].input_tokens || 0) + (models[i].output_tokens || 0);
+    if (t > maxTokens) maxTokens = t;
+  }
   if (maxTokens === 0) maxTokens = 1;
 
   var html = '';
@@ -3164,20 +3401,18 @@ function renderCostChart(data) {
     var out = m.output_tokens || 0;
     var total = inp + out;
     var pct = (total / maxTokens) * 100;
-    var inpPct = total > 0 ? (inp / total) * pct : 0;
-    var outPct = total > 0 ? (out / total) * pct : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
-    var colorDark = color + '99'; // 60% opacity for output
+    var colorDark = color + '99';
 
     html += '<div class="chart-bar-row">'
-      + '<div class="chart-bar-label" title="' + escapeHtml(m.model) + '">' + escapeHtml(shortModelName(m.model)) + '</div>'
+      + '<div class="chart-bar-label" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</div>'
       + '<div class="chart-bar-track">'
       + '<div class="chart-bar-fill-inner" style="width:' + pct.toFixed(1) + '%;display:flex">'
       + '<div class="chart-bar-input" style="width:' + (total > 0 ? (inp/total*100).toFixed(1) : 0) + '%;background:' + color + '"></div>'
       + '<div class="chart-bar-output" style="width:' + (total > 0 ? (out/total*100).toFixed(1) : 0) + '%;background:' + colorDark + '"></div>'
       + '</div>'
       + '</div>'
-      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(m.cost) + '</div>'
+      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(String(m.cost_usd)) + '</div>'
       + '</div>';
   }
 
@@ -3192,64 +3427,106 @@ function renderCostChart(data) {
 
 function renderCostTable(data) {
   var tbody = document.getElementById('costs-tbody');
+  var tfoot = document.getElementById('costs-tfoot');
   var empty = document.getElementById('costs-empty');
   var table = document.getElementById('costs-table');
   if (!tbody) return;
 
-  var models = data.model_usage || [];
+  var models = getCostRangeModelDetails(data, costRange);
 
   if (models.length === 0) {
     if (table) table.style.display = 'none';
+    if (tfoot) tfoot.innerHTML = '';
     if (empty) empty.style.display = 'block';
     return;
   }
 
+  models.sort(function(a, b) {
+    if ((b.cost_usd || 0) !== (a.cost_usd || 0)) return (b.cost_usd || 0) - (a.cost_usd || 0);
+    var totalA = (a.input_tokens || 0) + (a.output_tokens || 0);
+    var totalB = (b.input_tokens || 0) + (b.output_tokens || 0);
+    return totalB - totalA;
+  });
+  var shortLabelCounts = buildCostModelLabelCounts(models);
+
   if (table) table.style.display = '';
   if (empty) empty.style.display = 'none';
 
-  // Sort by cost descending
-  models.sort(function(a, b) {
-    return (parseFloat(b.cost) || 0) - (parseFloat(a.cost) || 0);
-  });
-
-  var totalInput = 0, totalOutput = 0, totalCost = 0;
+  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
-    totalCost += parseFloat(models[i].cost) || 0;
+    totalCost += models[i].cost_usd || 0;
+    totalReq += models[i].requests || 0;
   }
-  var totalTokens = totalInput + totalOutput;
 
   var html = '';
   for (var i = 0; i < models.length; i++) {
     var m = models[i];
     var inp = m.input_tokens || 0;
     var out = m.output_tokens || 0;
-    var cost = parseFloat(m.cost) || 0;
+    var cost = m.cost_usd || 0;
+    var req = m.requests || 0;
     var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
 
     html += '<tr>'
-      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name">' + escapeHtml(shortModelName(m.model)) + '</span></td>'
+      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span></td>'
       + '<td>' + formatTokenCount(inp) + '</td>'
       + '<td>' + formatTokenCount(out) + '</td>'
       + '<td>' + formatTokenCount(inp + out) + '</td>'
-      + '<td>' + formatCost(m.cost) + '</td>'
+      + '<td>' + formatCost(String(cost)) + '</td>'
+      + '<td>' + req + '</td>'
       + '<td><span class="cost-share-bar" style="width:' + Math.max(2, share * 0.6) + 'px;background:' + color + '"></span>' + share.toFixed(1) + '%</td>'
       + '</tr>';
   }
-
-  // Footer totals row
-  html += '</tbody><tfoot><tr>'
-    + '<td>Total</td>'
-    + '<td>' + formatTokenCount(totalInput) + '</td>'
-    + '<td>' + formatTokenCount(totalOutput) + '</td>'
-    + '<td>' + formatTokenCount(totalTokens) + '</td>'
-    + '<td>' + formatCost(String(totalCost)) + '</td>'
-    + '<td>100%</td>'
-    + '</tr></tfoot>';
-
   tbody.innerHTML = html;
+  if (tfoot) {
+    tfoot.innerHTML = '<tr>'
+      + '<td>Total</td>'
+      + '<td>' + formatTokenCount(totalInput) + '</td>'
+      + '<td>' + formatTokenCount(totalOutput) + '</td>'
+      + '<td>' + formatTokenCount(totalInput + totalOutput) + '</td>'
+      + '<td>' + formatCost(String(totalCost)) + '</td>'
+      + '<td>' + totalReq + '</td>'
+      + '<td>100%</td>'
+      + '</tr>';
+  }
+}
+
+function exportCostCsv() {
+  apiFetch('/api/costs/export', { raw: true }).then(function(res) {
+    if (!res.ok) throw new Error('Export failed: ' + res.status);
+    var filename = 'thinclaw-costs.csv';
+    var disposition = res.headers.get('content-disposition');
+    if (disposition) {
+      var match = /filename="?([^"]+)"?/i.exec(disposition);
+      if (match) filename = match[1];
+    }
+    return res.blob().then(function(blob) { return { blob: blob, filename: filename }; });
+  }).then(function(result) {
+    var url = URL.createObjectURL(result.blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = result.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }).catch(function(err) {
+    showToast('CSV export failed: ' + err.message, 'error');
+  });
+}
+
+function resetCostData() {
+  if (!confirm('Clear all cost history? This cannot be undone.')) return;
+  apiFetch('/api/costs/reset', { method: 'POST' }).then(function() {
+    showToast('Cost history cleared', 'success');
+    costDataCache = null;
+    loadCostDashboard();
+  }).catch(function(err) {
+    showToast('Reset failed: ' + err.message, 'error');
+  });
 }
 
 // --- TEE attestation ---
@@ -3426,13 +3703,13 @@ function loadSkills() {
 
 function renderSkillCard(skill) {
   var card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card skill-card';
 
   var header = document.createElement('div');
-  header.className = 'ext-header';
+  header.className = 'ext-header ui-resource-header';
 
   var name = document.createElement('span');
-  name.className = 'ext-name';
+  name.className = 'ext-name ui-resource-name';
   name.textContent = skill.name;
   header.appendChild(name);
 
@@ -3450,27 +3727,71 @@ function renderSkillCard(skill) {
   card.appendChild(header);
 
   var desc = document.createElement('div');
-  desc.className = 'ext-desc';
+  desc.className = 'ext-desc ui-resource-meta';
   desc.textContent = skill.description;
   card.appendChild(desc);
 
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
-    kw.className = 'ext-keywords';
+    kw.className = 'ext-keywords ui-resource-note';
     kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
     card.appendChild(kw);
   }
 
   var actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'ext-actions ui-resource-actions';
 
-  // Only show Remove for registry-installed skills, not user-placed trusted skills
-  if (skill.trust.toLowerCase() !== 'trusted') {
-    var removeBtn = document.createElement('button');
-    removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
-    removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
-    actions.appendChild(removeBtn);
+  var isWorkspace = skill.source && skill.source.indexOf('Workspace') === 0;
+  var isInstalled = skill.trust.toLowerCase() === 'installed';
+  var isTrusted = skill.trust.toLowerCase() === 'trusted';
+
+  if (!isWorkspace) {
+    // Trust/Untrust toggle for non-workspace skills
+    if (isInstalled) {
+      var trustBtn = document.createElement('button');
+      trustBtn.className = 'btn-ext install';
+      trustBtn.textContent = 'Trust';
+      trustBtn.title = 'Promote to Trusted — allows full tool access (shell, http, etc.)';
+      trustBtn.addEventListener('click', function() {
+        if (!confirm(
+          'Trust skill "' + skill.name + '"?\n\n' +
+          'This grants the skill full tool access (shell, file write, http, etc.).\n' +
+          'Only trust skills from sources you trust.'
+        )) return;
+        changeSkillTrust(skill.name, 'trusted');
+      });
+      actions.appendChild(trustBtn);
+
+      var removeBtn = document.createElement('button');
+      removeBtn.className = 'btn-ext remove';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
+      actions.appendChild(removeBtn);
+    } else if (isTrusted) {
+      var untrustBtn = document.createElement('button');
+      untrustBtn.className = 'btn-ext remove';
+      untrustBtn.textContent = 'Untrust';
+      untrustBtn.title = 'Demote to Installed — restricts to read-only tools';
+      untrustBtn.addEventListener('click', function() {
+        if (!confirm('Revoke trust for skill "' + skill.name + '"?\n\nThe skill will be restricted to read-only tools.')) return;
+        changeSkillTrust(skill.name, 'installed');
+      });
+      actions.appendChild(untrustBtn);
+
+      var removeBtn2 = document.createElement('button');
+      removeBtn2.className = 'btn-ext remove';
+      removeBtn2.textContent = 'Remove';
+      removeBtn2.addEventListener('click', function() { removeSkill(skill.name); });
+      actions.appendChild(removeBtn2);
+    }
+
+    // Reload button — hot-reload this skill from disk after editing its SKILL.md
+    var reloadBtn = document.createElement('button');
+    reloadBtn.className = 'btn-ext';
+    reloadBtn.textContent = '↻ Reload';
+    reloadBtn.title = 'Re-read this skill\'s SKILL.md from disk (use after editing the file)';
+    reloadBtn.addEventListener('click', function() { reloadSkill(skill.name); });
+    actions.appendChild(reloadBtn);
   }
 
   card.appendChild(actions);
@@ -3494,11 +3815,7 @@ function searchClawHub() {
     // Show registry error as a warning banner if present
     if (data.catalog_error) {
       var warning = document.createElement('div');
-      warning.className = 'empty-state';
-      warning.style.color = '#f0ad4e';
-      warning.style.borderLeft = '3px solid #f0ad4e';
-      warning.style.paddingLeft = '12px';
-      warning.style.marginBottom = '16px';
+      warning.className = 'ui-panel ui-panel--note skill-search-warning';
       warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
       resultsDiv.appendChild(warning);
     }
@@ -3540,13 +3857,13 @@ function searchClawHub() {
 
 function renderCatalogSkillCard(entry, installedNames) {
   var card = document.createElement('div');
-  card.className = 'ext-card ext-available skill-search-result';
+  card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-panel--feature ui-resource-card ext-card ext-available skill-card skill-search-result';
 
   var header = document.createElement('div');
-  header.className = 'ext-header';
+  header.className = 'ext-header ui-resource-header';
 
   var name = document.createElement('a');
-  name.className = 'ext-name';
+  name.className = 'ext-name ui-resource-name';
   name.textContent = entry.name || entry.slug;
   name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
   name.target = '_blank';
@@ -3567,14 +3884,14 @@ function renderCatalogSkillCard(entry, installedNames) {
 
   if (entry.description) {
     var desc = document.createElement('div');
-    desc.className = 'ext-desc';
+    desc.className = 'ext-desc ui-resource-meta';
     desc.textContent = entry.description;
     card.appendChild(desc);
   }
 
   // Metadata row: owner, stars, downloads, recency
   var meta = document.createElement('div');
-  meta.className = 'ext-meta';
+  meta.className = 'ext-meta ui-resource-note';
   meta.style.fontSize = '11px';
   meta.style.color = '#888';
   meta.style.marginTop = '6px';
@@ -3620,7 +3937,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   }
 
   var actions = document.createElement('div');
-  actions.className = 'ext-actions';
+  actions.className = 'ext-actions ui-resource-actions';
 
   var slug = entry.slug || entry.name;
   var isInstalled = installedNames[entry.name] || installedNames[slug];
@@ -3630,6 +3947,21 @@ function renderCatalogSkillCard(entry, installedNames) {
     label.className = 'ext-active-label';
     label.textContent = 'Installed';
     actions.appendChild(label);
+
+    // Show an Update button so the user can force-reinstall
+    var updateBtn = document.createElement('button');
+    updateBtn.className = 'btn-ext install';
+    updateBtn.textContent = 'Update';
+    updateBtn.style.marginLeft = '8px';
+    updateBtn.addEventListener('click', (function(s, btn) {
+      return function() {
+        if (!confirm('Update skill "' + s + '" from ClawHub?')) return;
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+        installSkill(s, null, btn, true);
+      };
+    })(slug, updateBtn));
+    actions.appendChild(updateBtn);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
@@ -3670,9 +4002,13 @@ function formatTimeAgo(epochMs) {
   return Math.floor(months / 12) + 'y ago';
 }
 
-function installSkill(nameOrSlug, url, btn) {
+function installSkill(nameOrSlug, url, btn, force) {
   var body = { name: nameOrSlug };
   if (url) body.url = url;
+  if (force) body.force = true;
+
+  var action = force ? 'Updated' : 'Installed';
+  var actionLower = force ? 'update' : 'install';
 
   apiFetch('/api/skills/install', {
     method: 'POST',
@@ -3680,15 +4016,15 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+      showToast(action + ' skill "' + nameOrSlug + '"', 'success');
     } else {
-      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' failed: ' + (res.message || 'unknown error'), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    if (btn) { btn.disabled = false; btn.textContent = force ? 'Update' : 'Install'; }
   }).catch(function(err) {
-    showToast('Install failed: ' + err.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    showToast(actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' failed: ' + err.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = force ? 'Update' : 'Install'; }
   });
 }
 
@@ -3706,6 +4042,56 @@ function removeSkill(name) {
     loadSkills();
   }).catch(function(err) {
     showToast('Remove failed: ' + err.message, 'error');
+  });
+}
+
+function changeSkillTrust(name, targetTrust) {
+  var label = targetTrust === 'trusted' ? 'Trusted' : 'Installed';
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/trust', {
+    method: 'PUT',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { trust: targetTrust },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Skill "' + name + '" is now ' + label, 'success');
+    } else {
+      showToast('Trust change failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+  }).catch(function(err) {
+    showToast('Trust change failed: ' + err.message, 'error');
+  });
+}
+
+function reloadSkill(name) {
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/reload', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Skill "' + name + '" reloaded from disk', 'success');
+    } else {
+      showToast('Reload failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+  }).catch(function(err) {
+    showToast('Reload failed: ' + err.message, 'error');
+  });
+}
+
+function reloadAllSkills() {
+  apiFetch('/api/skills/reload-all', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast(res.message || 'All skills reloaded', 'success');
+    } else {
+      showToast('Reload all failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+  }).catch(function(err) {
+    showToast('Reload all failed: ' + err.message, 'error');
   });
 }
 
@@ -3810,14 +4196,14 @@ function formatDate(isoString) {
 // falls into an "Other" section as raw key/value.
 const SETTINGS_SCHEMA = {
   'Notifications': {
-    icon: '🔔',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
     fields: [
       { key: 'notifications.preferred_channel', label: 'Preferred channel', type: 'text', desc: 'Channel for proactive messages (heartbeats, alerts). e.g. "telegram", "signal", "web"', nullable: true },
       { key: 'notifications.recipient', label: 'Recipient', type: 'text', desc: 'Your ID on the preferred channel (chat ID, phone number, pubkey)', nullable: true },
     ]
   },
   'Heartbeat': {
-    icon: '💓',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
     fields: [
       { key: 'heartbeat.enabled', label: 'Enabled', type: 'bool', desc: 'Master switch for proactive heartbeats' },
       { key: 'heartbeat.interval_secs', label: 'Interval (seconds)', type: 'number', desc: 'Time between heartbeat checks', min: 60, max: 86400 },
@@ -3832,7 +4218,7 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Agent': {
-    icon: '🤖',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="18" height="14" x="3" y="7" rx="2"/><path d="M12 7V3"/><path d="M15 3h-6"/><circle cx="9" cy="13" r="2"/><circle cx="15" cy="13" r="2"/><path d="M9 18h6"/></svg>',
     fields: [
       { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
       { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
@@ -3842,27 +4228,27 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.use_planning', label: 'Use planning', type: 'bool', desc: 'Plan before tool execution' },
       { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
       { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
-      { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (⚠️ use with caution)' },
+      { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (use with caution)' },
     ]
   },
-  'Smart Routing': {
-    icon: '🔀',
+  'LLM Backend': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>',
     fields: [
-      { key: 'providers.cheap_model', label: 'Cheap model', type: 'text', desc: 'Provider/model for lightweight tasks (e.g. "groq/llama-3.1-8b-instant", "openai/gpt-4o-mini"). Empty = disabled', nullable: true },
-      { key: 'providers.smart_routing_cascade', label: 'Cascade mode', type: 'bool', desc: 'When enabled, moderate-complexity messages try the cheap model first and escalate to primary if uncertain' },
-      { key: 'providers.smart_routing_enabled', label: 'Smart routing enabled', type: 'bool', desc: 'Master toggle for the smart routing system' },
-      { key: 'providers.fallback_chain', label: 'Failover chain', type: 'text', desc: 'Comma-separated fallback models (e.g. "openai/gpt-4o,groq/llama-3.3-70b"). Used when the primary provider fails', nullable: true },
+      { key: 'llm_backend', label: 'LLM backend', type: 'text', desc: 'Legacy backend selector. Use the Providers tab for primary provider and routing.', nullable: true },
+      { key: 'selected_model', label: 'Selected model', type: 'text', desc: 'Legacy raw model ID for the active backend. Use the Providers tab for provider/model routing.', nullable: true },
+      { key: 'openai_compatible_base_url', label: 'Compatible base URL', type: 'text', desc: 'Base URL for custom OpenAI-compatible providers', nullable: true },
+      { key: 'ollama_base_url', label: 'Ollama base URL', type: 'text', desc: 'Base URL for local Ollama', nullable: true },
     ]
   },
   'Channels — Telegram': {
-    icon: '📱',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></svg>',
     fields: [
       { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
       { key: 'channels.telegram_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
     ]
   },
   'Channels — Signal': {
-    icon: '🔒',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
     fields: [
       { key: 'channels.signal_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Signal channel' },
       { key: 'channels.signal_http_url', label: 'HTTP URL', type: 'text', desc: 'signal-cli daemon endpoint (e.g. http://127.0.0.1:8080)', nullable: true },
@@ -3873,7 +4259,7 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — Discord': {
-    icon: '🎮',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="20" height="12" x="2" y="6" rx="2"/><path d="M6 12h4"/><path d="M8 10v4"/><path d="M15 13h.01"/><path d="M18 11h.01"/></svg>',
     fields: [
       { key: 'channels.discord_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Discord channel' },
       { key: 'channels.discord_guild_id', label: 'Guild ID', type: 'text', desc: 'Restrict to single server (optional)', nullable: true },
@@ -3882,14 +4268,14 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — Slack': {
-    icon: '💬',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
     fields: [
       { key: 'channels.slack_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Slack channel' },
       { key: 'channels.slack_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated channel/DM IDs (empty = all)', nullable: true },
     ]
   },
   'Channels — Nostr': {
-    icon: '🟣',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/></svg>',
     fields: [
       { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Nostr channel' },
       { key: 'channels.nostr_relays', label: 'Relays', type: 'text', desc: 'Comma-separated relay URLs (wss://...)', nullable: true },
@@ -3897,7 +4283,7 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — iMessage': {
-    icon: '🍎',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06Z"/><path d="M10 2c1 .5 2 2 2 5"/></svg>',
     fields: [
       { key: 'channels.imessage_enabled', label: 'Enabled', type: 'bool', desc: 'Enable iMessage channel (macOS only)' },
       { key: 'channels.imessage_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone/email (empty = all)', nullable: true },
@@ -3905,7 +4291,7 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — Apple Mail': {
-    icon: '📬',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="16" height="13" x="4" y="6" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="m4 6 8 5 8-5"/></svg>',
     fields: [
       { key: 'channels.apple_mail_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Apple Mail channel (macOS only)' },
       { key: 'channels.apple_mail_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated sender emails (empty = all)', nullable: true },
@@ -3915,7 +4301,7 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — Gmail': {
-    icon: '📧',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="16" height="13" x="4" y="6" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="m4 6 8 5 8-5"/></svg>',
     fields: [
       { key: 'channels.gmail_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Gmail channel' },
       { key: 'channels.gmail_project_id', label: 'GCP Project ID', type: 'text', desc: 'Google Cloud project', nullable: true },
@@ -3925,20 +4311,20 @@ const SETTINGS_SCHEMA = {
     ]
   },
   'Channels — Web Gateway': {
-    icon: '🌐',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
     fields: [
       { key: 'channels.gateway_port', label: 'Port', type: 'number', desc: 'Web gateway port (default: 3000)', min: 1, max: 65535, nullable: true },
     ]
   },
   'Safety': {
-    icon: '🛡️',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
     fields: [
       { key: 'safety.max_actions_per_hour', label: 'Max actions/hour', type: 'number', desc: 'Rate limit for tool actions', min: 1, nullable: true },
       { key: 'safety.max_daily_cost_usd', label: 'Max daily cost ($)', type: 'number', desc: 'Daily spending cap in USD', min: 0, step: 0.01, nullable: true },
     ]
   },
   'Features': {
-    icon: '⚙️',
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
     fields: [
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
@@ -3955,108 +4341,2057 @@ for (const section of Object.values(SETTINGS_SCHEMA)) {
   for (const f of section.fields) SCHEMA_KEYS.add(f.key);
 }
 
+const SENSITIVE_KEYS = new Set([
+  'database_url',
+  'libsql_url',
+  'tunnel.ngrok_token',
+  'tunnel.cf_token',
+  'channels.discord_bot_token',
+  'channels.slack_bot_token',
+  'channels.slack_app_token',
+  'channels.gateway_auth_token',
+]);
+
 // --- Provider Vault ---
+
+let providerRoutingConfig = null;
+const providerModelsCache = new Map();
+const providerModelsInflight = new Map();
+const MODEL_CHOICE_PAGE_SIZE = 24;
+let modelChoiceDismissListenerBound = false;
+let providerRoutingSaveInFlight = null;
+let providerRoutingSavePendingRequest = null;
+let activeRoutingPoolDrag = null;
+
+function waitForProviderRoutingSaves() {
+  if (!providerRoutingSaveInFlight) return Promise.resolve();
+  return providerRoutingSaveInFlight.catch(() => null).then(() => waitForProviderRoutingSaves());
+}
 
 function loadProviders() {
   const container = document.getElementById('providers-content');
   container.innerHTML = '<div class="settings-loading">Loading providers...</div>';
-  apiFetch('/api/providers').then((data) => {
-    renderProviderVault(data.providers || []);
-  }).catch((err) => {
-    container.innerHTML = '<div class="empty-state">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
-  });
+  const runLoad = () => {
+    Promise.all([
+      apiFetch('/api/providers'),
+      apiFetch('/api/providers/config'),
+    ]).then(([providersData, configData]) => {
+      providerRoutingConfig = configData;
+      providerModelsCache.clear();
+      providerModelsInflight.clear();
+      renderProvidersWorkspace(providersData.providers || [], configData);
+    }).catch((err) => {
+      container.innerHTML = '<div class="empty-state">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
+    });
+  };
+  if (providerRoutingSaveInFlight) {
+    waitForProviderRoutingSaves().finally(runLoad);
+    return;
+  }
+  runLoad();
 }
 
 function loadProviderVault() {
   loadProviders();
 }
 
-function renderProviderVault(providers) {
+function renderProvidersWorkspace(providers, config) {
   const container = document.getElementById('providers-content');
-  const configured = providers.filter(p => p.has_key).length;
-  const total = providers.length;
+  const mergedProviders = mergeProviderEntries(providers, config.providers || []);
 
-  let html = '<div class="vault-stats">';
-  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + configured + '</span><span class="vault-stat-label">Configured</span></div>';
-  html += '<div class="vault-stat-card"><span class="vault-stat-number">' + (total - configured) + '</span><span class="vault-stat-label">Available</span></div>';
-  html += '</div>';
-
-  // Configured providers
-  if (configured > 0) {
-    html += '<h3 class="vault-section-title">Configured Providers</h3>';
-    html += '<div class="vault-card-grid">';
-    for (const p of providers.filter(x => x.has_key)) {
-      html += renderProviderCard(p);
-    }
-    html += '</div>';
+  let html = '<section class="ui-panel ui-panel-stack providers-workspace-shell">';
+  html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models first, then enable routing only if you want cheap-split or policy-based behavior across multiple providers.</p></div><div class="ui-panel-actions"><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
+  if (config.last_reload_error) {
+    html += '<div class="ui-inline-alert ui-inline-alert--error">' + escapeHtml(config.last_reload_error) + '</div>';
+  } else if (config.runtime_revision) {
+    html += '<div class="ui-inline-alert">Live runtime revision ' + escapeHtml(String(config.runtime_revision)) + ' is active.</div>';
   }
-
-  // Unconfigured providers
-  const unconfigured = providers.filter(x => !x.has_key);
-  if (unconfigured.length > 0) {
-    html += '<h3 class="vault-section-title">Available Providers</h3>';
-    html += '<div class="vault-card-grid">';
-    for (const p of unconfigured) {
-      html += renderProviderCard(p);
-    }
-    html += '</div>';
-  }
-
+  html += renderProvidersSection(mergedProviders, config);
+  html += renderRoutingSection(config, mergedProviders);
+  html += '</section>';
   container.innerHTML = html;
+  attachProvidersEvents();
+}
 
-  // Attach event listeners
-  container.querySelectorAll('.btn-vault-save').forEach(btn => {
-    btn.addEventListener('click', () => saveProviderKey(btn.dataset.slug));
-  });
-  container.querySelectorAll('.btn-vault-remove').forEach(btn => {
-    btn.addEventListener('click', () => removeProviderKey(btn.dataset.slug, btn.dataset.name));
+function mergeProviderEntries(vaultProviders, configProviders) {
+  const vaultMap = new Map((vaultProviders || []).map((provider) => [provider.slug, provider]));
+  return (configProviders || []).map((provider) => {
+    const vault = vaultMap.get(provider.slug) || {};
+    return {
+      ...provider,
+      auth_kind: vault.auth_kind || (['ollama', 'llama_cpp'].includes(provider.slug) ? 'local' : 'api_key'),
+      env_key_name: vault.env_key_name || provider.env_key_name || '',
+      default_model: provider.default_model || vault.default_model || '',
+      display_name: provider.display_name || vault.display_name || provider.slug,
+      has_key: !!(provider.has_key || vault.has_key),
+      primary_model: provider.primary_model || '',
+      cheap_model: provider.cheap_model || '',
+    };
   });
 }
 
-function renderProviderCard(p) {
-  const statusIcon = p.has_key ? '✅' : '⬚';
-  const statusClass = p.has_key ? 'vault-card configured' : 'vault-card unconfigured';
-  let html = '<div class="' + statusClass + '" id="vault-card-' + escapeHtml(p.slug) + '">';
-  html += '<div class="vault-card-header">';
-  html += '<span class="vault-card-status">' + statusIcon + '</span>';
-  html += '<strong class="vault-card-name">' + escapeHtml(p.display_name) + '</strong>';
+function renderProvidersSection(providers, config) {
+  // Filter out infrastructure providers — they are configured in Connection Settings
+  const HIDDEN_SLUGS = ['llama_cpp', 'openai_compatible'];
+  const visibleProviders = providers.filter(p => !HIDDEN_SLUGS.includes(p.slug));
+
+  let html = '<div class="routing-section-block ui-panel-stack">';
+  html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Providers</h4><p class="ui-panel-desc">Enable providers, save API credentials, and pick models for each slot.</p></div></div>';
+  html += '<div class="providers-editor-grid ui-panel-grid ui-panel-grid--cards">';
+  for (const provider of visibleProviders) {
+    html += renderProviderEditorCard(provider);
+  }
   html += '</div>';
-  html += '<div class="vault-card-model">Default: ' + escapeHtml(p.default_model) + '</div>';
-  html += '<div class="vault-card-actions">';
-  if (p.has_key) {
-    html += '<span class="vault-key-status">Key configured</span>';
-    html += '<button class="btn-vault-remove" data-slug="' + escapeHtml(p.slug) + '" data-name="' + escapeHtml(p.display_name) + '">Remove Key</button>';
+
+  // Connection settings — collapsible, lives under Providers where it belongs
+  html += '<details class="connection-settings-details">';
+  html += '<summary class="connection-settings-summary">Connection Settings <span class="connection-settings-hint">(local endpoints, Bedrock region, legacy proxy fallback)</span></summary>';
+  html += '<div class="routing-mini-grid connection-settings-body">';
+  html += '<div><label class="routing-field-label">OpenAI-compatible base URL</label><input id="routing-compatible-base-url" class="routing-input" type="text" value="' + escapeHtml(config.compatible_base_url || '') + '" placeholder="http://localhost:8000/v1"></div>';
+  html += '<div><label class="routing-field-label">Ollama base URL</label><input id="routing-ollama-base-url" class="routing-input" type="text" value="' + escapeHtml(config.ollama_base_url || '') + '" placeholder="http://localhost:11434"></div>';
+  html += '<div><label class="routing-field-label">Bedrock region</label><input id="routing-bedrock-region" class="routing-input" type="text" value="' + escapeHtml(config.bedrock_region || '') + '" placeholder="us-east-1"></div>';
+  html += '<div><label class="routing-field-label">Legacy Bedrock proxy URL</label><input id="routing-bedrock-proxy-url" class="routing-input" type="text" value="' + escapeHtml(config.bedrock_proxy_url || '') + '" placeholder="http://localhost:4000/v1"></div>';
+  html += '<div><label class="routing-field-label">llama.cpp server URL</label><input id="routing-llama-cpp-server-url" class="routing-input" type="text" value="' + escapeHtml(config.llama_cpp_server_url || '') + '" placeholder="http://localhost:8080"></div>';
+  html += '</div></details>';
+
+  html += '</div>';
+  return html;
+}
+
+function renderProviderEditorCard(provider) {
+  const status = providerStatusMeta(provider);
+  const primaryOwner = !!provider.primary;
+  const cheapOwner = !!provider.preferred_cheap;
+  let html = '<article class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive ui-panel--focusable provider-editor-card'
+    + (provider.enabled ? ' enabled' : ' disabled')
+    + (primaryOwner ? ' primary-owner' : '')
+    + (cheapOwner ? ' cheap-owner' : '')
+    + '" data-provider-row="' + escapeHtml(provider.slug)
+    + '" data-enabled="' + (provider.enabled ? 'true' : 'false')
+    + '" data-primary-owner="' + (primaryOwner ? 'true' : 'false')
+    + '" data-cheap-owner="' + (cheapOwner ? 'true' : 'false')
+    + '" tabindex="0" role="button" aria-pressed="' + (provider.enabled ? 'true' : 'false') + '" draggable="true">';
+  html += '<div class="provider-editor-head">';
+  html += '<div class="provider-editor-title-row"><strong>' + escapeHtml(provider.display_name) + '</strong><span class="provider-activation-state">' + (provider.enabled ? 'Active' : 'Inactive') + '</span></div>';
+  html += '<div class="provider-editor-meta-row">';
+  html += '<span class="provider-status-chip ' + escapeHtml(status.className) + '">' + escapeHtml(status.label) + '</span>';
+  html += renderProviderRolePill('primary', primaryOwner);
+  html += renderProviderRolePill('cheap', cheapOwner);
+  if (provider.discovery_supported) {
+    html += '<button type="button" class="provider-refresh-models" data-provider="' + escapeHtml(provider.slug) + '">Refresh</button>';
   } else {
-    html += '<input type="password" id="vault-key-' + escapeHtml(p.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(p.env_key_name) + '">';
-    html += '<button class="btn-vault-save" data-slug="' + escapeHtml(p.slug) + '">Save Key</button>';
+    html += '<span class="provider-refresh-models provider-refresh-models--placeholder" aria-hidden="true">Refresh</span>';
   }
   html += '</div>';
   html += '</div>';
+  // --- Model slots: always visible so users can configure before enabling ---
+  html += '<div class="provider-slot-grid">';
+  html += renderProviderSlotEditor(provider, 'primary');
+  html += renderProviderSlotEditor(provider, 'cheap');
+  html += '</div>';
+  // --- Credentials: always shown, fixed height ---
+  html += '<div class="provider-editor-credentials">';
+  if (provider.auth_kind === 'local') {
+    html += '<div class="provider-editor-inline-note">Uses local connection settings.</div>';
+  } else if (provider.has_key) {
+    html += '<span class="vault-key-status">Credentials configured</span>';
+    html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove</button>';
+  } else {
+    html += '<input type="password" id="vault-key-' + escapeHtml(provider.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(provider.env_key_name || 'API key') + '">';
+    html += '<button class="btn-vault-save inline" data-slug="' + escapeHtml(provider.slug) + '">Save</button>';
+  }
+  html += '</div>';
+  html += '</article>';
   return html;
+}
+
+function renderProviderSlotEditor(provider, role) {
+  const title = role === 'primary' ? 'Primary slot' : 'Cheap slot';
+  const currentValue = role === 'primary' ? provider.primary_model : provider.cheap_model;
+  let html = '<div class="ui-panel ui-panel--subtle ui-panel--compact provider-slot-card">';
+  html += '<div class="provider-slot-head"><label class="routing-field-label tight">' + title + '</label></div>';
+  html += renderModelChoiceControl(provider.slug, role, currentValue);
+  html += '</div>';
+  return html;
+}
+
+function renderProviderRolePill(role, assigned) {
+  const roleLabel = role === 'cheap' ? 'Cheap' : 'Primary';
+  const title = role === 'cheap'
+    ? 'Assign this provider as the cheap-route owner'
+    : 'Assign this provider as the primary-route owner';
+  return '<button type="button" class="provider-role-pill ' + escapeHtml(role) + (assigned ? ' assigned' : '') + '" data-role="' + escapeHtml(role) + '" aria-pressed="' + (assigned ? 'true' : 'false') + '" title="' + escapeHtml(title) + '">' + escapeHtml(roleLabel) + '</button>';
+}
+
+function providerStatusMeta(provider) {
+  if (provider.auth_kind === 'local') {
+    return {
+      label: provider.enabled ? 'local active' : 'local',
+      className: provider.enabled ? 'local ready' : 'local',
+      note: provider.slug === 'ollama'
+        ? 'Uses the Ollama base URL from the connection settings.'
+        : provider.slug === 'llama_cpp'
+          ? 'Uses the llama.cpp server URL from the connection settings.'
+          : 'Configured locally.',
+    };
+  }
+  if (provider.has_key) {
+    return {
+      label: 'credentials ready',
+      className: 'ready',
+      note: 'Stored securely and available for live routing.',
+    };
+  }
+  return {
+    label: provider.auth_required ? 'needs key' : 'optional',
+    className: 'missing',
+    note: provider.slug === 'openai_compatible'
+      ? 'Custom OpenAI-compatible endpoints can work with or without a stored key.'
+      : provider.slug === 'bedrock'
+        ? 'Prefer a native Bedrock API key. A legacy proxy URL can still be used from Connection Settings if needed.'
+        : 'Add credentials here to make this provider available immediately.',
+  };
+}
+
+function getProviderCards() {
+  return Array.from(document.querySelectorAll('[data-provider-row]'));
+}
+
+function getProviderCardSlug(row) {
+  return row?.getAttribute('data-provider-row') || '';
+}
+
+function canProviderBeActivated(row) {
+  const slug = getProviderCardSlug(row);
+  const provider = getProviderEntry(slug);
+  if (!provider) return true;
+  if (provider.auth_kind === 'local') return true;
+  if (!provider.auth_required) return true;
+  return !!provider.has_key;
+}
+
+function promptProviderCredentialsRequired(row) {
+  const slug = getProviderCardSlug(row);
+  const provider = getProviderEntry(slug);
+  const displayName = provider?.display_name || slug || 'This provider';
+  showToast('Set an API key for ' + displayName + ' before activating it.', 'error');
+  const input = row?.querySelector('.vault-key-input');
+  if (input) input.focus();
+}
+
+function getProviderRoleDatasetKey(role) {
+  return role === 'cheap' ? 'cheapOwner' : 'primaryOwner';
+}
+
+function getProviderRoleClassName(role) {
+  return role === 'cheap' ? 'cheap-owner' : 'primary-owner';
+}
+
+function getAssignedProviderCard(role) {
+  const datasetKey = getProviderRoleDatasetKey(role);
+  return getProviderCards().find((row) => row.dataset[datasetKey] === 'true') || null;
+}
+
+function updateProviderRolePresentation(row) {
+  if (!row) return;
+  const primaryOwner = row.dataset.primaryOwner === 'true';
+  const cheapOwner = row.dataset.cheapOwner === 'true';
+  row.classList.toggle('primary-owner', primaryOwner);
+  row.classList.toggle('cheap-owner', cheapOwner);
+  row.querySelectorAll('.provider-role-pill').forEach((pill) => {
+    const isAssigned = pill.dataset.role === 'primary' ? primaryOwner : cheapOwner;
+    pill.classList.toggle('assigned', isAssigned);
+    pill.setAttribute('aria-pressed', isAssigned ? 'true' : 'false');
+  });
+}
+
+function setProviderRoleAssignment(role, slug) {
+  const datasetKey = getProviderRoleDatasetKey(role);
+  const className = getProviderRoleClassName(role);
+  getProviderCards().forEach((row) => {
+    const isOwner = !!slug && getProviderCardSlug(row) === slug;
+    row.dataset[datasetKey] = isOwner ? 'true' : 'false';
+    row.classList.toggle(className, isOwner);
+    updateProviderRolePresentation(row);
+  });
+}
+
+function reconcileProviderRoleAssignments(preferredSlug) {
+  const enabledRows = getProviderCards().filter((row) => row.dataset.enabled === 'true');
+  const enabledSlugs = new Set(enabledRows.map(getProviderCardSlug));
+  let primarySlug = getProviderCardSlug(getAssignedProviderCard('primary'));
+  let cheapSlug = getProviderCardSlug(getAssignedProviderCard('cheap'));
+
+  if (!enabledSlugs.has(primarySlug)) primarySlug = '';
+  if (!enabledSlugs.has(cheapSlug)) cheapSlug = '';
+
+  if (!primarySlug) {
+    primarySlug = enabledSlugs.has(preferredSlug) ? preferredSlug : (enabledRows[0] ? getProviderCardSlug(enabledRows[0]) : '');
+  }
+  if (!cheapSlug) {
+    cheapSlug = enabledSlugs.has(preferredSlug) ? preferredSlug : (primarySlug || (enabledRows[0] ? getProviderCardSlug(enabledRows[0]) : ''));
+  }
+
+  setProviderRoleAssignment('primary', primarySlug || null);
+  setProviderRoleAssignment('cheap', cheapSlug || null);
+  const liveProviders = getLiveProviderEntries();
+  syncRolePoolOrderWithOwner('primary', primarySlug || null, liveProviders);
+  syncRolePoolOrderWithOwner('cheap', cheapSlug || null, liveProviders);
+}
+
+function assignProviderCardRole(row, role) {
+  if (!row) return;
+  if (row.dataset.enabled !== 'true') {
+    if (!canProviderBeActivated(row)) {
+      promptProviderCredentialsRequired(row);
+      return;
+    }
+    row.dataset.enabled = 'true';
+    row.classList.add('enabled');
+    row.classList.remove('disabled');
+    row.setAttribute('aria-pressed', 'true');
+    const stateNode = row.querySelector('.provider-activation-state');
+    if (stateNode) stateNode.textContent = 'Active';
+  }
+  const slug = getProviderCardSlug(row);
+  setProviderRoleAssignment(role, slug);
+  promoteProviderInRolePool(role, slug);
+  reconcileProviderRoleAssignments(getProviderCardSlug(row));
+  updateAliasSummaries();
+  saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
+}
+
+function renderRoutingSection(config, providers) {
+  const mode = config.routing_mode || 'primary_only';
+  const primarySummary = summarizeRoleTargets(providers, 'primary');
+  const cheapSummary = summarizeRoleTargets(providers, 'cheap');
+
+  let html = '<div class="routing-section-block ui-panel-stack">';
+  html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Routing Strategy</h4><p class="ui-panel-desc">Choose how requests are distributed across your enabled providers.</p></div></div>';
+  html += '<div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel--focusable routing-card routing-strategy-card">';
+
+  // --- Row 1: always visible — enable toggle + mode selector ---
+  html += '<div class="routing-mode-pills">';
+  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-enabled"' + (config.routing_enabled ? ' checked' : '') + '> <span>Enable routing</span></label>';
+  html += '<select id="routing-mode" class="routing-select routing-mode-select">';
+  html += '<option value="primary_only"' + (mode === 'primary_only' ? ' selected' : '') + '>Primary only</option>';
+  html += '<option value="cheap_split"' + (mode === 'cheap_split' ? ' selected' : '') + '>Cheap split</option>';
+  html += '<option value="policy"' + (mode === 'policy' ? ' selected' : '') + '>Policy rules</option>';
+  html += '</select>';
+  html += '</div>';
+  html += '<div id="routing-mode-note" class="routing-inline-note"></div>';
+
+  // --- cheap_split + policy: show pool summaries and cascade toggle ---
+  html += '<div id="routing-advanced-options" class="' + (mode === 'primary_only' ? 'is-hidden' : '') + '">';
+  html += '<label class="routing-inline-toggle" style="margin-top:14px"><input type="checkbox" id="routing-cascade"' + (config.cascade_enabled ? ' checked' : '') + '> <span>Cascade moderate cheap answers up to the primary pool</span></label>';
+  html += '<label id="routing-tool-phase-toggle-row" class="routing-inline-toggle" style="margin-top:14px"><input type="checkbox" id="routing-tool-phase-synthesis"' + (config.tool_phase_synthesis_enabled ? ' checked' : '') + '> <span>Separate tool planning from final answer</span></label>';
+  html += '<div id="routing-tool-phase-note" class="routing-inline-note">Run hidden tool-capable planning first. The cheap model is used only when the planner explicitly replies with NO_TOOLS_NEEDED; if the primary model already produces the final answer, that answer is used directly. Applies only in Cheap split mode and is ignored when llm_select is active.</div>';
+  html += '<label id="routing-tool-phase-thinking-row" class="routing-inline-toggle" style="margin-top:10px"><input type="checkbox" id="routing-tool-phase-primary-thinking"' + (config.tool_phase_primary_thinking_enabled !== false ? ' checked' : '') + '> <span>Allow primary planning thinking</span></label>';
+  html += '<div id="routing-tool-phase-thinking-note" class="routing-inline-note">Keeps model-side reasoning enabled on the primary planning pass. Disable this to save more expensive-model tokens, but tool planning may get weaker.</div>';
+  html += '<div class="routing-summary-stack" style="margin-top:14px">';
+  html += renderRolePoolEditor('primary', providers, primarySummary);
+  html += renderRolePoolEditor('cheap', providers, cheapSummary);
+  html += '</div>';
+  // --- policy only: fallback chain ---
+  html += '<div id="routing-policy-extras" class="' + (mode !== 'policy' ? 'is-hidden' : '') + '">';
+  html += '<label class="routing-field-label">Fallback chain</label>';
+  html += renderTargetListBuilder('routing-fallback-chain-builder', config.fallback_chain || [], 'Add fallback target');
+  html += '</div>';
+  html += '</div>'; // end #routing-advanced-options
+
+  html += '</div>'; // end .routing-strategy-card
+
+  // --- Policy rules and simulator: only shown in policy mode ---
+  const policyHidden = mode !== 'policy';
+  html += '<div id="routing-policy-section" class="routing-policy-subsection' + (policyHidden ? ' is-hidden' : '') + '">';
+  html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Policy Rules</h4><p class="ui-panel-desc">Ordered rules decide which provider or model handles each request. Rules are applied top-to-bottom; the first match wins.</p></div><div class="ui-panel-actions"><button id="routing-add-rule" class="btn-vault-save inline">Add Rule</button></div></div>';
+  html += '<div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel--focusable routing-card policy-editor-card">';
+  html += '<div id="routing-rules-list">';
+  if ((config.policy_rules || []).length === 0) {
+    html += '<div class="routing-empty-state">No policy rules yet. Add one to explicitly steer large-context, vision, latency, cost, or fallback behavior.</div>';
+  } else {
+    for (const rule of (config.policy_rules || [])) {
+      html += renderRoutingRuleCard(rule);
+    }
+  }
+  html += '</div></div>';
+  html += '<details class="routing-simulator-details">';
+  html += '<summary class="routing-simulator-summary">Route Simulator <span class="connection-settings-hint">(test your routing configuration)</span></summary>';
+  html += '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--focusable routing-card simulation-card" style="margin-top:12px">';
+  html += '<textarea id="routing-sim-prompt" class="routing-textarea" placeholder="Describe a representative request"></textarea>';
+  html += '<div class="routing-sim-options">';
+  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-vision"> <span>Contains image input</span></label>';
+  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-tools"> <span>Uses tools</span></label>';
+  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-stream"> <span>Requires streaming</span></label>';
+  html += '</div>';
+  html += '<div class="routing-sim-actions"><button id="routing-simulate" class="btn-vault-save inline">Simulate</button><div id="routing-sim-result" class="routing-sim-result">' + escapeHtml(config.last_reload_error || 'Ready.') + '</div></div>';
+  html += '</div>';
+  html += '</details>';
+  html += '</div>'; // end #routing-policy-section
+
+  html += '</div>'; // end .routing-section-block
+  return html;
+}
+
+function attachProvidersEvents() {
+  const container = document.getElementById('providers-content');
+  container.onclick = (event) => {
+    const saveKeyBtn = event.target.closest('.btn-vault-save[data-slug]');
+    if (saveKeyBtn) {
+      saveProviderKey(saveKeyBtn.dataset.slug);
+      return;
+    }
+    const removeKeyBtn = event.target.closest('.btn-vault-remove[data-slug]');
+    if (removeKeyBtn) {
+      removeProviderKey(removeKeyBtn.dataset.slug, removeKeyBtn.dataset.name);
+      return;
+    }
+    if (event.target.closest('#providers-routing-save')) {
+      saveProvidersRoutingConfig();
+      return;
+    }
+    if (event.target.closest('#routing-simulate')) {
+      simulateRoutingDecision();
+      return;
+    }
+    if (event.target.closest('#routing-add-rule')) {
+      const list = document.getElementById('routing-rules-list');
+      if (list && list.querySelector('.routing-empty-state')) list.innerHTML = '';
+      list.insertAdjacentHTML('beforeend', renderRoutingRuleCard({ VisionContent: { provider: 'primary' } }));
+      initializeProvidersUi();
+      return;
+    }
+    const addTargetBtn = event.target.closest('.routing-add-target-row');
+    if (addTargetBtn) {
+      const builder = addTargetBtn.closest('.routing-target-list-builder');
+      if (!builder) return;
+      const list = builder.querySelector('.routing-target-list');
+      const empty = list.querySelector('.routing-empty-state');
+      if (empty) empty.remove();
+      list.insertAdjacentHTML('beforeend', renderTargetListRow(addTargetBtn.dataset.defaultTarget || 'primary'));
+      initializeProvidersUi();
+      return;
+    }
+    const removeTargetBtn = event.target.closest('.routing-remove-target-row');
+    if (removeTargetBtn) {
+      const row = removeTargetBtn.closest('.routing-target-list-row');
+      if (row) row.remove();
+      refreshTargetListEmptyState(removeTargetBtn.closest('.routing-target-list-builder'));
+      return;
+    }
+    const removeRuleBtn = event.target.closest('.routing-remove-rule');
+    if (removeRuleBtn) {
+      const card = removeRuleBtn.closest('.routing-rule-card');
+      if (card) card.remove();
+      const list = document.getElementById('routing-rules-list');
+      if (list && !list.children.length) {
+        list.innerHTML = '<div class="routing-empty-state">No policy rules yet. Add one to explicitly steer large-context, vision, latency, cost, or fallback behavior.</div>';
+      }
+      return;
+    }
+    const refreshBtn = event.target.closest('.provider-refresh-models');
+    if (refreshBtn) {
+      ensureProviderModelsLoaded(refreshBtn.dataset.provider, true);
+      return;
+    }
+    const rolePill = event.target.closest('.provider-role-pill');
+    if (rolePill) {
+      assignProviderCardRole(rolePill.closest('.provider-editor-card'), rolePill.dataset.role || 'primary');
+      return;
+    }
+    const providerCard = event.target.closest('.provider-editor-card');
+    if (providerCard) {
+      const interactiveTarget = event.target.closest('button, input, select, textarea, a, label, .routing-model-choice');
+      if (!interactiveTarget) {
+        toggleProviderCardEnabled(providerCard);
+        return;
+      }
+    }
+    const modelChoiceTrigger = event.target.closest('.model-choice-trigger');
+    if (modelChoiceTrigger) {
+      const choice = modelChoiceTrigger.closest('.routing-model-choice');
+      if (!choice) return;
+      const willOpen = choice.dataset.open !== 'true';
+      if (willOpen) {
+        closeOpenModelChoices(choice);
+      }
+      const nextChoice = rerenderModelChoice(choice, {
+        open: willOpen,
+        searchQuery: willOpen ? (choice.dataset.searchQuery || '') : '',
+        visibleCount: MODEL_CHOICE_PAGE_SIZE,
+      }, { focusSearch: willOpen });
+      if (willOpen) {
+        ensureProviderModelsLoaded(nextChoice.dataset.provider, false);
+      }
+      return;
+    }
+    const modelChoiceOption = event.target.closest('.model-choice-option');
+    if (modelChoiceOption) {
+      const choice = modelChoiceOption.closest('.routing-model-choice');
+      if (!choice) return;
+      const action = modelChoiceOption.dataset.modelChoiceAction || '';
+      if (action === 'pick-option') {
+        rerenderModelChoice(choice, {
+          selectedMode: 'option',
+          selectedValue: modelChoiceOption.dataset.modelId || '',
+          open: false,
+          searchQuery: '',
+          visibleCount: MODEL_CHOICE_PAGE_SIZE,
+        });
+      } else if (action === 'pick-custom') {
+        rerenderModelChoice(choice, {
+          selectedMode: 'custom',
+          customValue: modelChoiceOption.dataset.customValue || choice.dataset.searchQuery || '',
+          open: false,
+          searchQuery: '',
+          visibleCount: MODEL_CHOICE_PAGE_SIZE,
+        }, { focusCustom: true });
+      }
+      updateAliasSummaries();
+      return;
+    }
+    const loadMoreBtn = event.target.closest('.model-choice-load-more');
+    if (loadMoreBtn) {
+      const choice = loadMoreBtn.closest('.routing-model-choice');
+      if (!choice) return;
+      rerenderModelChoice(choice, {
+        open: true,
+        visibleCount: Number(choice.dataset.visibleCount || MODEL_CHOICE_PAGE_SIZE) + MODEL_CHOICE_PAGE_SIZE,
+      }, { focusSearch: true });
+      return;
+    }
+    const clearSearchBtn = event.target.closest('.model-choice-clear-search');
+    if (clearSearchBtn) {
+      const choice = clearSearchBtn.closest('.routing-model-choice');
+      if (!choice) return;
+      rerenderModelChoice(choice, {
+        open: true,
+        searchQuery: '',
+        visibleCount: MODEL_CHOICE_PAGE_SIZE,
+      }, { focusSearch: true });
+    }
+  };
+
+  container.onchange = (event) => {
+    if (event.target.matches('#routing-mode')) {
+      updateRoutingModePresentation();
+    }
+    if (event.target.matches('#routing-tool-phase-synthesis')) {
+      updateRoutingModePresentation();
+    }
+    if (event.target.matches('.routing-target-kind, .routing-target-provider')) {
+      refreshTargetPicker(event.target.closest('.routing-target-picker'));
+    }
+    if (event.target.matches('.routing-rule-kind')) {
+      rerenderRuleCardBody(event.target.closest('.routing-rule-card'));
+    }
+  };
+
+  container.oninput = (event) => {
+    if (event.target.matches('.model-choice-search')) {
+      const choice = event.target.closest('.routing-model-choice');
+      if (!choice) return;
+      rerenderModelChoice(choice, {
+        open: true,
+        searchQuery: event.target.value,
+        visibleCount: MODEL_CHOICE_PAGE_SIZE,
+      }, { focusSearch: true });
+      return;
+    }
+    if (event.target.matches('.model-choice-custom')) {
+      const choice = event.target.closest('.routing-model-choice');
+      if (choice) {
+        choice.dataset.selectedMode = 'custom';
+        choice.dataset.customValue = event.target.value;
+      }
+      updateAliasSummaries();
+    }
+  };
+
+  container.ondragstart = (event) => {
+    const tag = event.target.closest('.routing-pool-tag');
+    if (tag) {
+      activeRoutingPoolDrag = {
+        source: 'pool',
+        role: tag.dataset.role || 'primary',
+        slug: tag.dataset.slug || '',
+      };
+      tag.classList.add('is-dragging');
+    } else {
+      const card = event.target.closest('.provider-editor-card');
+      if (!card) return;
+      activeRoutingPoolDrag = {
+        source: 'provider',
+        role: '',
+        slug: getProviderCardSlug(card),
+      };
+      card.classList.add('is-dragging');
+    }
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', activeRoutingPoolDrag.slug);
+    }
+  };
+
+  container.ondragover = (event) => {
+    if (!activeRoutingPoolDrag) return;
+    const role = getRoutingPoolRoleTarget(event.target);
+    if (!role) return;
+    if (activeRoutingPoolDrag.source === 'pool' && role !== activeRoutingPoolDrag.role) return;
+    if (!canProviderJoinRolePool(activeRoutingPoolDrag.slug, role)) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+  };
+
+  container.ondrop = (event) => {
+    if (!activeRoutingPoolDrag) return;
+    const role = getRoutingPoolRoleTarget(event.target);
+    if (!role) return;
+    if (activeRoutingPoolDrag.source === 'pool' && role !== activeRoutingPoolDrag.role) return;
+    const providers = getLiveProviderEntries();
+    if (!canProviderJoinRolePool(activeRoutingPoolDrag.slug, role, providers)) return;
+    event.preventDefault();
+    const draggedSlug = activeRoutingPoolDrag.slug;
+    const targetTag = event.target.closest('.routing-pool-tag');
+    const currentOrder = getCurrentRolePoolOrder(role, providers);
+    const nextOrder = currentOrder.filter((slug) => slug !== draggedSlug);
+    let insertIndex = nextOrder.length;
+    if (targetTag && targetTag.dataset.role === role) {
+      const targetSlug = targetTag.dataset.slug || '';
+      const targetIndex = nextOrder.indexOf(targetSlug);
+      const rect = targetTag.getBoundingClientRect();
+      const insertAfter = event.clientX > rect.left + (rect.width / 2);
+      insertIndex = targetIndex === -1 ? nextOrder.length : targetIndex + (insertAfter ? 1 : 0);
+    }
+    nextOrder.splice(insertIndex, 0, draggedSlug);
+    applyRolePoolOrder(role, nextOrder);
+    activeRoutingPoolDrag = null;
+  };
+
+  container.ondragend = () => {
+    activeRoutingPoolDrag = null;
+    container.querySelectorAll('.routing-pool-tag.is-dragging').forEach((tag) => {
+      tag.classList.remove('is-dragging');
+    });
+    container.querySelectorAll('.provider-editor-card.is-dragging').forEach((card) => {
+      card.classList.remove('is-dragging');
+    });
+  };
+
+  container.onkeydown = (event) => {
+    if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('.provider-editor-card')) {
+      event.preventDefault();
+      toggleProviderCardEnabled(event.target);
+      return;
+    }
+    if (event.target.matches('.model-choice-search') && event.key === 'Escape') {
+      const choice = event.target.closest('.routing-model-choice');
+      if (!choice) return;
+      event.preventDefault();
+      rerenderModelChoice(choice, {
+        open: false,
+        searchQuery: '',
+        visibleCount: MODEL_CHOICE_PAGE_SIZE,
+      });
+      return;
+    }
+    if (event.target.matches('.model-choice-search') && event.key === 'Enter') {
+      const choice = event.target.closest('.routing-model-choice');
+      const firstAction = choice?.querySelector('.model-choice-option');
+      if (firstAction) {
+        event.preventDefault();
+        firstAction.click();
+      }
+    }
+  };
+
+  initializeProvidersUi();
+}
+
+function toggleProviderCardEnabled(row) {
+  if (!row) return;
+  const nextEnabled = row.dataset.enabled !== 'true';
+  if (nextEnabled && !canProviderBeActivated(row)) {
+    promptProviderCredentialsRequired(row);
+    return;
+  }
+  row.dataset.enabled = nextEnabled ? 'true' : 'false';
+  row.classList.toggle('enabled', nextEnabled);
+  row.classList.toggle('disabled', !nextEnabled);
+  row.setAttribute('aria-pressed', nextEnabled ? 'true' : 'false');
+  const stateNode = row.querySelector('.provider-activation-state');
+  if (stateNode) stateNode.textContent = nextEnabled ? 'Active' : 'Inactive';
+  reconcileProviderRoleAssignments(nextEnabled ? getProviderCardSlug(row) : '');
+  updateAliasSummaries();
+  saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
 }
 
 function saveProviderKey(slug) {
   const input = document.getElementById('vault-key-' + slug);
   if (!input || !input.value.trim()) { showToast('Please enter an API key', 'error'); return; }
+  const body = { api_key: input.value.trim() };
   const headers = { 'Content-Type': 'application/json' };
-  if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  if (token) headers['Authorization'] = 'Bearer ' + token;
   fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
     method: 'POST', headers,
-    body: JSON.stringify({ api_key: input.value.trim() }),
-  }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    body: JSON.stringify(body),
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.message || ('HTTP ' + r.status));
+    return data;
+  })
     .then(d => { showToast(d.message || 'Key saved', 'success'); loadProviderVault(); })
     .catch(e => showToast('Failed to save key: ' + e.message, 'error'));
 }
 
 function removeProviderKey(slug, displayName) {
-  if (!confirm('Remove API key for ' + displayName + '?')) return;
+  if (!confirm('Remove credentials for ' + displayName + '?')) return;
   const headers = {};
-  if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+  if (token) headers['Authorization'] = 'Bearer ' + token;
   fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
     method: 'DELETE', headers,
-  }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.message || ('HTTP ' + r.status));
+    return data;
+  })
     .then(d => { showToast(d.message || 'Key removed', 'success'); loadProviderVault(); })
     .catch(e => showToast('Failed to remove key: ' + e.message, 'error'));
+}
+
+function collectProvidersRoutingConfig() {
+  const providers = [];
+  document.querySelectorAll('[data-provider-row]').forEach(row => {
+    const slug = row.getAttribute('data-provider-row');
+    const source = (providerRoutingConfig.providers || []).find(p => p.slug === slug) || {};
+    const enabled = row.dataset.enabled === 'true';
+    const primaryModelValue = collectModelChoice(row.querySelector('.routing-model-choice[data-role="primary"]'));
+    const cheapModelValue = collectModelChoice(row.querySelector('.routing-model-choice[data-role="cheap"]'));
+    providers.push({
+      slug,
+      display_name: source.display_name || slug,
+      api_style: source.api_style || 'openai_compatible',
+      default_model: source.default_model || '',
+      env_key_name: source.env_key_name || '',
+      has_key: !!source.has_key,
+      auth_required: !!source.auth_required,
+      enabled,
+      primary: enabled && row.dataset.primaryOwner === 'true',
+      preferred_cheap: enabled && row.dataset.cheapOwner === 'true',
+      discovery_supported: !!source.discovery_supported,
+      primary_model: primaryModelValue,
+      cheap_model: cheapModelValue,
+      suggested_primary_model: source.suggested_primary_model || source.default_model || '',
+      suggested_cheap_model: source.suggested_cheap_model || source.primary_model || source.default_model || '',
+    });
+  });
+
+  const primaryOwner = providers.find((provider) => provider.primary);
+  const cheapOwner = providers.find((provider) => provider.preferred_cheap);
+  const primaryProvider = primaryOwner?.slug || null;
+  const primaryModel = primaryOwner?.primary_model || null;
+  const preferredCheapProvider = cheapOwner?.slug || null;
+  const cheapModel = cheapOwner?.cheap_model
+    ? (cheapOwner.slug + '/' + cheapOwner.cheap_model)
+    : null;
+  const activeProviderSlugs = new Set(providers.filter((provider) => provider.enabled).map((provider) => provider.slug));
+  const primaryPoolOrder = getCurrentRolePoolOrder('primary', providers)
+    .filter((slug) => activeProviderSlugs.has(slug));
+  const cheapPoolOrder = getCurrentRolePoolOrder('cheap', providers)
+    .filter((slug) => activeProviderSlugs.has(slug));
+
+  const policyRules = [];
+  document.querySelectorAll('.routing-rule-card').forEach(row => {
+    const kind = row.querySelector('.routing-rule-kind').value;
+    if (kind === 'large_context') {
+      const providerTarget = sanitizeRouteTarget(
+        collectTargetPicker(row.querySelector('.routing-single-target .routing-target-picker')) || 'primary',
+        activeProviderSlugs,
+        'primary',
+      );
+      policyRules.push({
+        LargeContext: {
+          threshold: Number(row.querySelector('.routing-rule-threshold')?.value || '120000'),
+          provider: providerTarget || 'primary',
+        },
+      });
+    } else if (kind === 'vision') {
+      const providerTarget = sanitizeRouteTarget(
+        collectTargetPicker(row.querySelector('.routing-single-target .routing-target-picker')) || 'primary',
+        activeProviderSlugs,
+        'primary',
+      );
+      policyRules.push({
+        VisionContent: {
+          provider: providerTarget || 'primary',
+        },
+      });
+    } else if (kind === 'cost') {
+      policyRules.push({ CostOptimized: { max_cost_per_m_usd: Number(row.querySelector('.routing-rule-cost')?.value || '0') } });
+    } else if (kind === 'latency') {
+      policyRules.push('LowestLatency');
+    } else if (kind === 'round_robin') {
+      const roundRobinTargets = sanitizeRouteTargetList(
+        collectTargetList(row.querySelector('.routing-target-list-builder')),
+        activeProviderSlugs,
+      );
+      if (!roundRobinTargets.length) {
+        return;
+      }
+      policyRules.push({
+        RoundRobin: {
+          providers: roundRobinTargets,
+        },
+      });
+    } else if (kind === 'fallback') {
+      const fallbackPrimary = sanitizeRouteTarget(
+        collectTargetPicker(row.querySelector('.routing-single-target .routing-target-picker')) || 'primary',
+        activeProviderSlugs,
+        'primary',
+      );
+      const fallbackTargets = sanitizeRouteTargetList(
+        collectTargetList(row.querySelector('.routing-target-list-builder')),
+        activeProviderSlugs,
+      );
+      policyRules.push({
+        Fallback: {
+          primary: fallbackPrimary || 'primary',
+          fallbacks: fallbackTargets,
+        },
+      });
+    }
+  });
+
+  return {
+    routing_enabled: document.getElementById('routing-enabled').checked,
+    routing_mode: document.getElementById('routing-mode').value,
+    cascade_enabled: document.getElementById('routing-cascade').checked,
+    tool_phase_synthesis_enabled: document.getElementById('routing-tool-phase-synthesis').checked,
+    tool_phase_primary_thinking_enabled: document.getElementById('routing-tool-phase-primary-thinking')?.checked ?? true,
+    compatible_base_url: document.getElementById('routing-compatible-base-url').value.trim() || null,
+    ollama_base_url: document.getElementById('routing-ollama-base-url').value.trim() || null,
+    bedrock_region: document.getElementById('routing-bedrock-region').value.trim() || null,
+    bedrock_proxy_url: document.getElementById('routing-bedrock-proxy-url').value.trim() || null,
+    llama_cpp_server_url: document.getElementById('routing-llama-cpp-server-url').value.trim() || null,
+    primary_provider: primaryProvider,
+    primary_model: primaryModel,
+    preferred_cheap_provider: preferredCheapProvider,
+    cheap_model: cheapModel,
+    primary_pool_order: primaryPoolOrder,
+    cheap_pool_order: cheapPoolOrder,
+    fallback_chain: sanitizeRouteTargetList(
+      collectTargetList(document.getElementById('routing-fallback-chain-builder')),
+      activeProviderSlugs,
+    ),
+    policy_rules: policyRules,
+    providers,
+  };
+}
+
+function syncPrimaryProviderCard(slug) {
+  return slug;
+}
+
+function syncPreferredCheapProvider(slug) {
+  return slug;
+}
+
+function updateRoutingModePresentation() {
+  const mode = document.getElementById('routing-mode')?.value || 'primary_only';
+  const note = document.getElementById('routing-mode-note');
+  const advancedOptions = document.getElementById('routing-advanced-options');
+  const policyExtras = document.getElementById('routing-policy-extras');
+  const policySection = document.getElementById('routing-policy-section');
+  const toolPhaseToggleRow = document.getElementById('routing-tool-phase-toggle-row');
+  const toolPhaseToggle = document.getElementById('routing-tool-phase-synthesis');
+  const toolPhaseNote = document.getElementById('routing-tool-phase-note');
+  const toolPhaseThinkingRow = document.getElementById('routing-tool-phase-thinking-row');
+  const toolPhaseThinkingToggle = document.getElementById('routing-tool-phase-primary-thinking');
+  const toolPhaseThinkingNote = document.getElementById('routing-tool-phase-thinking-note');
+  const simulator = document.querySelector('.routing-simulator-details');
+  const toolPhaseThinkingVisible = mode === 'cheap_split' && !!toolPhaseToggle?.checked;
+  if (advancedOptions) advancedOptions.classList.toggle('is-hidden', mode === 'primary_only');
+  if (policyExtras) policyExtras.classList.toggle('is-hidden', mode !== 'policy');
+  if (policySection) policySection.classList.toggle('is-hidden', mode !== 'policy');
+  if (toolPhaseToggleRow) toolPhaseToggleRow.classList.toggle('is-hidden', mode === 'primary_only');
+  if (toolPhaseToggle) toolPhaseToggle.disabled = mode !== 'cheap_split';
+  if (toolPhaseNote) toolPhaseNote.classList.toggle('is-hidden', mode === 'primary_only');
+  if (toolPhaseThinkingRow) toolPhaseThinkingRow.classList.toggle('is-hidden', !toolPhaseThinkingVisible);
+  if (toolPhaseThinkingToggle) toolPhaseThinkingToggle.disabled = !toolPhaseThinkingVisible;
+  if (toolPhaseThinkingNote) toolPhaseThinkingNote.classList.toggle('is-hidden', !toolPhaseThinkingVisible);
+  if (simulator && mode !== 'policy') simulator.open = false;
+  if (note) {
+    if (mode === 'primary_only') {
+      note.textContent = 'All requests stay on the selected primary provider. Advanced routing options stay hidden until you switch to Cheap split or Policy rules.';
+    } else if (mode === 'cheap_split') {
+      note.textContent = 'Simple work uses the cheap slot pool, while complex or tool-heavy work stays on the primary slot pool.';
+    } else {
+      note.textContent = 'Ordered policy rules below decide which alias, provider slot, or specific model handles each request.';
+    }
+  }
+}
+
+function mergeProviderRoutingSaveOptions(existing, next) {
+  if (!existing) return next;
+  return {
+    quietSuccess: existing.quietSuccess && next.quietSuccess,
+    reloadAfterSave: existing.reloadAfterSave || next.reloadAfterSave,
+  };
+}
+
+function saveProvidersRoutingConfig(options, payloadOverride) {
+  const normalizedOptions = {
+    quietSuccess: !!options?.quietSuccess,
+    reloadAfterSave: options?.reloadAfterSave !== false,
+  };
+  const payload = payloadOverride || collectProvidersRoutingConfig();
+  if (providerRoutingSaveInFlight) {
+    providerRoutingSavePendingRequest = {
+      options: mergeProviderRoutingSaveOptions(providerRoutingSavePendingRequest?.options, normalizedOptions),
+      payload,
+    };
+    return providerRoutingSaveInFlight;
+  }
+  const quietSuccess = normalizedOptions.quietSuccess;
+  const reloadAfterSave = normalizedOptions.reloadAfterSave;
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const request = fetch('/api/providers/config', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(payload),
+  }).then((res) => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    providerRoutingConfig = Object.assign({}, providerRoutingConfig || {}, payload);
+    if (!quietSuccess) {
+      showToast('Routing configuration saved', 'success');
+    }
+    if (reloadAfterSave) {
+      loadProviders();
+    }
+  }).catch((err) => {
+    showToast('Failed to save routing: ' + err.message, 'error');
+    throw err;
+  });
+  const trackedRequest = request.finally(() => {
+    if (providerRoutingSaveInFlight === trackedRequest) {
+      providerRoutingSaveInFlight = null;
+      if (providerRoutingSavePendingRequest) {
+        const pendingRequest = providerRoutingSavePendingRequest;
+        providerRoutingSavePendingRequest = null;
+        saveProvidersRoutingConfig(pendingRequest.options, pendingRequest.payload);
+      }
+    }
+  });
+  providerRoutingSaveInFlight = trackedRequest;
+  return trackedRequest;
+}
+
+function simulateRoutingDecision() {
+  apiFetch('/api/providers/route/simulate', {
+    method: 'POST',
+    body: {
+      prompt: document.getElementById('routing-sim-prompt').value.trim(),
+      has_vision: document.getElementById('routing-sim-vision').checked,
+      has_tools: document.getElementById('routing-sim-tools').checked,
+      requires_streaming: document.getElementById('routing-sim-stream').checked,
+    },
+  }).then((data) => {
+    document.getElementById('routing-sim-result').textContent = data.target + ' - ' + data.reason;
+  }).catch((err) => {
+    document.getElementById('routing-sim-result').textContent = 'Simulation failed: ' + err.message;
+  });
+}
+
+function getRolePoolConfigKey(role) {
+  return role === 'cheap' ? 'cheap_pool_order' : 'primary_pool_order';
+}
+
+function getConfiguredRolePoolOrder(role) {
+  const key = getRolePoolConfigKey(role);
+  return Array.isArray(providerRoutingConfig?.[key]) ? providerRoutingConfig[key].slice() : [];
+}
+
+function setConfiguredRolePoolOrder(role, order) {
+  if (!providerRoutingConfig) providerRoutingConfig = { providers: [] };
+  providerRoutingConfig[getRolePoolConfigKey(role)] = (order || []).slice();
+}
+
+function getRolePoolOrderFromDom(role) {
+  const list = document.querySelector('.routing-pool-tags[data-role="' + role + '"]');
+  if (!list) return null;
+  return Array.from(list.querySelectorAll('.routing-pool-tag'))
+    .map((tag) => tag.dataset.slug || '')
+    .filter(Boolean);
+}
+
+function getProviderRoleModel(provider, role, options) {
+  if (!provider) return '';
+  const allowDefault = options?.allowDefault !== false;
+  const primaryModel = (provider.primary_model || '').trim();
+  const cheapModel = (provider.cheap_model || '').trim();
+  const defaultModel = allowDefault ? ((provider.default_model || '').trim()) : '';
+  if (role === 'cheap') {
+    return cheapModel || primaryModel || defaultModel;
+  }
+  return primaryModel || defaultModel;
+}
+
+function getRoleEligibleProviders(providers, role) {
+  return (providers || []).filter((provider) => {
+    if (!provider.enabled) return false;
+    return !!getProviderRoleModel(provider, role, { allowDefault: true });
+  });
+}
+
+function normalizeRolePoolOrder(providers, role, preferredOrder, options) {
+  const eligible = getRoleEligibleProviders(providers, role);
+  const bySlug = new Map(eligible.map((provider) => [provider.slug, provider]));
+  const ordered = [];
+  const push = (slug) => {
+    if (!slug || !bySlug.has(slug) || ordered.includes(slug)) return;
+    ordered.push(slug);
+  };
+  if (options?.respectOwner !== false) {
+    const ownerSlug = role === 'cheap'
+      ? eligible.find((provider) => provider.preferred_cheap)?.slug
+      : eligible.find((provider) => provider.primary)?.slug;
+    if (ownerSlug) push(ownerSlug);
+  }
+  (preferredOrder || []).forEach(push);
+  eligible
+    .slice()
+    .sort((a, b) => a.display_name.localeCompare(b.display_name))
+    .forEach((provider) => push(provider.slug));
+  return ordered;
+}
+
+function getCurrentRolePoolOrder(role, providers) {
+  const sourceOrder = getRolePoolOrderFromDom(role) || getConfiguredRolePoolOrder(role);
+  return normalizeRolePoolOrder(providers || getLiveProviderEntries(), role, sourceOrder);
+}
+
+function getOrderedRolePoolProviders(providers, role) {
+  const eligible = getRoleEligibleProviders(providers, role);
+  const bySlug = new Map(eligible.map((provider) => [provider.slug, provider]));
+  return getCurrentRolePoolOrder(role, providers)
+    .map((slug) => bySlug.get(slug))
+    .filter(Boolean);
+}
+
+function syncRolePoolOrderWithOwner(role, ownerSlug, providers) {
+  const baseOrder = getCurrentRolePoolOrder(role, providers);
+  const preferredOrder = ownerSlug
+    ? [ownerSlug].concat(baseOrder.filter((slug) => slug !== ownerSlug))
+    : baseOrder;
+  const nextOrder = normalizeRolePoolOrder(providers || getLiveProviderEntries(), role, preferredOrder);
+  setConfiguredRolePoolOrder(role, nextOrder);
+  return nextOrder;
+}
+
+function promoteProviderInRolePool(role, slug) {
+  if (!slug) return;
+  syncRolePoolOrderWithOwner(role, slug, getLiveProviderEntries());
+}
+
+function applyRolePoolOrder(role, nextOrder, options) {
+  const providers = getLiveProviderEntries();
+  const normalized = normalizeRolePoolOrder(providers, role, nextOrder, { respectOwner: false });
+  setConfiguredRolePoolOrder(role, normalized);
+  setProviderRoleAssignment(role, normalized[0] || null);
+  rerenderPoolEditors();
+  if (options?.autosave !== false) {
+    saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
+  }
+  return normalized;
+}
+
+function rerenderPoolEditors() {
+  const primarySummaryNode = document.getElementById('routing-primary-alias-summary');
+  const cheapSummaryNode = document.getElementById('routing-cheap-alias-summary');
+  // Clear stale pool-tag DOM so getCurrentRolePoolOrder falls through to config
+  if (primarySummaryNode) primarySummaryNode.innerHTML = '';
+  if (cheapSummaryNode) cheapSummaryNode.innerHTML = '';
+  const providers = getLiveProviderEntries();
+  const primarySummary = summarizeRoleTargets(providers, 'primary');
+  const cheapSummary = summarizeRoleTargets(providers, 'cheap');
+  if (primarySummaryNode) primarySummaryNode.innerHTML = renderRolePoolEditorContent('primary', providers, primarySummary);
+  if (cheapSummaryNode) cheapSummaryNode.innerHTML = renderRolePoolEditorContent('cheap', providers, cheapSummary);
+}
+
+function getRoutingPoolRoleTarget(node) {
+  const target = node?.closest('[data-pool-role], .routing-pool-tag[data-role]');
+  if (!target) return '';
+  return target.dataset.poolRole || target.dataset.role || '';
+}
+
+function canProviderJoinRolePool(slug, role, providers) {
+  if (!slug || !role) return false;
+  const providerMap = new Map((providers || getLiveProviderEntries()).map((provider) => [provider.slug, provider]));
+  const provider = providerMap.get(slug);
+  return !!provider && !!getRoleEligibleProviders([provider], role).length;
+}
+
+function renderRolePoolEditorContent(role, providers, summary) {
+  const orderedProviders = getOrderedRolePoolProviders(providers, role);
+  if (!orderedProviders.length) {
+    return '<div class="routing-summary-pill">' + escapeHtml(summary.full) + '</div>';
+  }
+  let html = '<div class="routing-pool-tags" data-role="' + escapeHtml(role) + '" data-pool-role="' + escapeHtml(role) + '">';
+  orderedProviders.forEach((provider, index) => {
+    const model = getProviderRoleModel(provider, role, { allowDefault: true });
+    html += '<div class="routing-pool-tag' + (index === 0 ? ' is-owner' : '') + '" draggable="true" tabindex="0" data-role="' + escapeHtml(role) + '" data-slug="' + escapeHtml(provider.slug) + '" title="' + escapeHtml(provider.display_name + ' / ' + model) + '">';
+    html += '<span class="routing-pool-tag-provider">' + escapeHtml(provider.display_name) + '</span>';
+    html += '<span class="routing-pool-tag-model">' + escapeHtml(compactModelChoicePreviewTitle(model)) + '</span>';
+    if (index === 0) {
+      html += '<span class="routing-pool-tag-owner">' + escapeHtml(role === 'cheap' ? 'Cheap owner' : 'Primary owner') + '</span>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function renderRolePoolEditor(role, providers, summary) {
+  const title = role === 'cheap' ? 'Cheap pool' : 'Primary pool';
+  const containerId = role === 'cheap' ? 'routing-cheap-alias-summary' : 'routing-primary-alias-summary';
+  let html = '<div class="routing-pool-editor-shell" data-pool-role="' + escapeHtml(role) + '">';
+  html += '<label class="routing-field-label">' + escapeHtml(title) + '</label>';
+  html += '<div class="routing-inline-note routing-pool-hint">Drag tags to reorder this pool. The first tag is tried first.</div>';
+  html += '<div id="' + escapeHtml(containerId) + '" class="routing-pool-editor" data-pool-role="' + escapeHtml(role) + '">';
+  html += renderRolePoolEditorContent(role, providers, summary);
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+function summarizeRoleTargets(providers, role) {
+  const ordered = getOrderedRolePoolProviders(providers, role);
+  if (!ordered.length) {
+    return {
+      short: 'None',
+      full: role === 'primary' ? 'Enable providers and choose primary-slot models to build the primary pool.' : 'Enable providers and choose cheap-slot models to build the cheap pool.',
+    };
+  }
+  const labels = ordered.map((provider) => {
+    const model = getProviderRoleModel(provider, role, { allowDefault: true });
+    return provider.display_name + ' / ' + model;
+  });
+  return {
+    short: ordered[0].display_name,
+    full: labels.join(' -> '),
+  };
+}
+
+function getProviderEntry(slug) {
+  return (providerRoutingConfig?.providers || []).find(provider => provider.slug === slug) || null;
+}
+
+function getProviderEntries() {
+  return providerRoutingConfig?.providers || [];
+}
+
+function getLiveProviderEntries() {
+  const rows = Array.from(document.querySelectorAll('[data-provider-row]'));
+  if (!rows.length) return getProviderEntries();
+  return rows.map((row) => {
+    const slug = row.getAttribute('data-provider-row');
+    const source = getProviderEntry(slug) || {};
+    return {
+      slug,
+      display_name: source.display_name || slug,
+      enabled: row.dataset.enabled === 'true',
+      primary: row.dataset.primaryOwner === 'true',
+      preferred_cheap: row.dataset.cheapOwner === 'true',
+      primary_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="primary"]')) || source.primary_model || '',
+      cheap_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="cheap"]')) || source.cheap_model || '',
+      suggested_primary_model: source.suggested_primary_model,
+      suggested_cheap_model: source.suggested_cheap_model,
+      default_model: source.default_model,
+    };
+  });
+}
+
+function modelChoiceHint(providerSlug, role) {
+  const discovery = providerModelsCache.get(providerSlug);
+  if (discovery && discovery.discovery_status === 'discovered') {
+    const suggestion = role === 'primary'
+      ? discovery.suggested_primary_model
+      : role === 'cheap'
+        ? discovery.suggested_cheap_model
+        : (discovery.suggested_primary_model || discovery.current_primary_model);
+    return suggestion ? ('Discovery suggestion: ' + suggestion) : 'Live model discovery loaded.';
+  }
+  const provider = getProviderEntry(providerSlug);
+  const suggestion = role === 'primary'
+    ? (provider?.suggested_primary_model || provider?.default_model)
+    : role === 'cheap'
+      ? (provider?.suggested_cheap_model || provider?.cheap_model || provider?.default_model)
+      : (provider?.suggested_primary_model || provider?.primary_model || provider?.default_model);
+  return suggestion ? ('Known model: ' + suggestion) : 'Enter a model ID manually if discovery does not list the one you need.';
+}
+
+function getSuggestedModel(providerSlug, role) {
+  const discovery = providerModelsCache.get(providerSlug);
+  if (discovery) {
+    return role === 'primary'
+      ? (discovery.suggested_primary_model || discovery.current_primary_model || null)
+      : role === 'cheap'
+        ? (discovery.suggested_cheap_model || discovery.current_cheap_model || discovery.suggested_primary_model || null)
+        : (discovery.current_primary_model || discovery.suggested_primary_model || null);
+  }
+  const provider = getProviderEntry(providerSlug);
+  if (!provider) return null;
+  return role === 'primary'
+    ? (provider.primary_model || provider.suggested_primary_model || provider.default_model || null)
+    : role === 'cheap'
+      ? (provider.cheap_model || provider.suggested_cheap_model || provider.primary_model || provider.default_model || null)
+      : (provider.primary_model || provider.suggested_primary_model || provider.default_model || null);
+}
+
+const MODEL_PROVIDER_GROUP_LABELS = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+  meta: 'Meta',
+  'meta-llama': 'Meta Llama',
+  mistralai: 'Mistral AI',
+  mistral: 'Mistral AI',
+  deepseek: 'DeepSeek',
+  qwen: 'Qwen',
+  moonshotai: 'Moonshot AI',
+  moonshot: 'Moonshot',
+  cohere: 'Cohere',
+  perplexity: 'Perplexity',
+  xai: 'xAI',
+  'x-ai': 'xAI',
+  gryphe: 'Gryphe',
+  ai21: 'AI21',
+  amazon: 'Amazon',
+  microsoft: 'Microsoft',
+  nvidia: 'NVIDIA',
+  zhipu: 'Zhipu AI',
+  zhipuai: 'Zhipu AI',
+  bytedance: 'ByteDance',
+};
+
+function formatModelChoiceContextLength(contextLength) {
+  if (!contextLength) return null;
+  if (contextLength >= 1000000) {
+    const value = contextLength / 1000000;
+    return (Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)) + 'M ctx';
+  }
+  if (contextLength >= 1000) {
+    return Math.round(contextLength / 1000) + 'k ctx';
+  }
+  return contextLength + ' ctx';
+}
+
+function humanizeModelProviderGroup(rawKey) {
+  if (!rawKey) return 'Models';
+  const known = MODEL_PROVIDER_GROUP_LABELS[rawKey.toLowerCase()];
+  if (known) return known;
+  return rawKey
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ');
+}
+
+function compactModelChoicePreviewTitle(value) {
+  if (!value) return '';
+  let title = String(value).trim();
+  if (!title) return '';
+
+  const slashIndex = title.indexOf('/');
+  if (slashIndex > 0) {
+    title = title.slice(slashIndex + 1);
+  } else {
+    const dotIndex = title.indexOf('.');
+    if (dotIndex > 0) {
+      const prefix = title.slice(0, dotIndex).toLowerCase();
+      if (MODEL_PROVIDER_GROUP_LABELS[prefix]) {
+        title = title.slice(dotIndex + 1);
+      }
+    }
+  }
+
+  title = title
+    .replace(/-20\d{6}(?:-v\d(?::\d+)?)?$/i, '')
+    .replace(/-preview-\d{2}-\d{2}$/i, '')
+    .replace(/-\d{4}$/i, '');
+
+  if (title.length > 28) {
+    title = title.slice(0, 25) + '...';
+  }
+
+  return title;
+}
+
+function inferModelOptionGroup(providerSlug, option) {
+  const id = option?.id || '';
+  const slashIndex = id.indexOf('/');
+  if (slashIndex > 0) {
+    const key = id.slice(0, slashIndex);
+    return {
+      key,
+      label: humanizeModelProviderGroup(key),
+    };
+  }
+  const provider = getProviderEntry(providerSlug);
+  return {
+    key: providerSlug || 'models',
+    label: provider?.display_name || 'Models',
+  };
+}
+
+function getRenderableModelOptions(providerSlug) {
+  const discovery = providerModelsCache.get(providerSlug);
+  if (discovery && Array.isArray(discovery.models) && discovery.models.length) {
+    return discovery.models.slice();
+  }
+  const provider = getProviderEntry(providerSlug);
+  if (!provider) return [];
+  const seen = new Set();
+  const items = [];
+  [
+    provider.primary_model,
+    provider.cheap_model,
+  ].filter(Boolean).forEach((id) => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      items.push({
+        id,
+        label: id,
+        recommended_primary: provider.suggested_primary_model === id,
+        recommended_cheap: provider.suggested_cheap_model === id,
+        source: 'configured',
+        context_length: null,
+      });
+    }
+  });
+  return items;
+}
+
+function getModelChoiceUiState(choice) {
+  if (!choice) return {};
+  const customInput = choice.querySelector('.model-choice-custom');
+  return {
+    selectedMode: choice.dataset.selectedMode || '',
+    selectedValue: choice.dataset.selectedValue || '',
+    searchQuery: choice.dataset.searchQuery || '',
+    visibleCount: Number(choice.dataset.visibleCount || MODEL_CHOICE_PAGE_SIZE),
+    open: choice.dataset.open === 'true',
+    customValue: customInput ? customInput.value : (choice.dataset.customValue || ''),
+  };
+}
+
+function buildModelChoiceViewModel(providerSlug, role, currentValue, uiState) {
+  const options = getRenderableModelOptions(providerSlug);
+  const normalizedValue = (currentValue || '').trim();
+  const optionIds = new Set(options.map((option) => option.id));
+  let selectedMode = uiState?.selectedMode || (normalizedValue
+    ? (optionIds.has(normalizedValue) ? 'option' : 'custom')
+    : '');
+  let selectedValue = uiState?.selectedValue || '';
+  let customValue = Object.prototype.hasOwnProperty.call(uiState || {}, 'customValue')
+    ? uiState.customValue
+    : '';
+
+  if (selectedMode === 'option') {
+    const candidate = selectedValue || normalizedValue;
+    if (candidate && optionIds.has(candidate)) {
+      selectedValue = candidate;
+    } else {
+      selectedMode = 'custom';
+      selectedValue = '';
+    }
+  }
+
+  if (selectedMode === 'custom') {
+    if (!customValue) {
+      customValue = normalizedValue && !optionIds.has(normalizedValue) ? normalizedValue : '';
+    }
+    selectedValue = '';
+  } else if (selectedMode !== 'option') {
+    selectedMode = '';
+    selectedValue = '';
+    customValue = '';
+  }
+
+  return {
+    providerSlug,
+    role,
+    options,
+    discovery: providerModelsCache.get(providerSlug) || null,
+    selectedMode,
+    selectedValue,
+    customValue,
+    searchQuery: uiState?.searchQuery || '',
+    visibleCount: Math.max(MODEL_CHOICE_PAGE_SIZE, Number(uiState?.visibleCount || MODEL_CHOICE_PAGE_SIZE)),
+    open: !!uiState?.open,
+  };
+}
+
+function getSelectedModelChoiceDescriptor(viewModel) {
+  if (viewModel.selectedMode === 'option') {
+    const selectedOption = viewModel.options.find((option) => option.id === viewModel.selectedValue) || null;
+    const fullTitle = selectedOption?.label || viewModel.selectedValue;
+    return {
+      label: 'Selected model',
+      title: compactModelChoicePreviewTitle(fullTitle),
+      fullTitle,
+      meta: '',
+    };
+  }
+  if (viewModel.selectedMode === 'custom') {
+    return {
+      label: 'Custom model ID',
+      title: compactModelChoicePreviewTitle(viewModel.customValue || 'Enter any model ID'),
+      fullTitle: viewModel.customValue || 'Enter any model ID',
+      meta: viewModel.customValue ? 'Manual override' : '',
+    };
+  }
+  return {
+    label: 'Selected model',
+    title: 'Choose a model',
+    fullTitle: 'Choose a model',
+    meta: '',
+  };
+}
+
+function buildModelChoiceGroups(viewModel) {
+  const query = viewModel.searchQuery.trim().toLowerCase();
+  const orderedGroups = [];
+  const groupMap = new Map();
+  const selectedOption = viewModel.selectedMode === 'option'
+    ? viewModel.options.find((option) => option.id === viewModel.selectedValue) || null
+    : null;
+  const pinSelected = !!selectedOption && (!query || [
+    selectedOption.id,
+    selectedOption.label,
+  ].filter(Boolean).join(' ').toLowerCase().includes(query));
+
+  for (const option of viewModel.options) {
+    if (pinSelected && option.id === selectedOption.id) continue;
+    const group = inferModelOptionGroup(viewModel.providerSlug, option);
+    const haystack = [
+      option.id,
+      option.label,
+      group.label,
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (query && !haystack.includes(query)) continue;
+    if (!groupMap.has(group.key)) {
+      const entry = {
+        key: group.key,
+        label: group.label,
+        items: [],
+      };
+      groupMap.set(group.key, entry);
+      orderedGroups.push(entry);
+    }
+    groupMap.get(group.key).items.push(option);
+  }
+
+  return orderedGroups;
+}
+
+function sliceModelChoiceGroups(groups, visibleCount) {
+  let remaining = visibleCount;
+  return groups
+    .map((group) => {
+      if (remaining <= 0) return null;
+      const items = group.items.slice(0, remaining);
+      remaining -= items.length;
+      return items.length ? {
+        key: group.key,
+        label: group.label,
+        totalCount: group.items.length,
+        items,
+      } : null;
+    })
+    .filter(Boolean);
+}
+
+function renderModelChoiceBadges(option) {
+  let html = '';
+  if (option.recommended_primary) {
+    html += '<span class="model-choice-badge primary">Primary</span>';
+  }
+  if (option.recommended_cheap) {
+    html += '<span class="model-choice-badge cheap">Cheap</span>';
+  }
+  if (option.source && option.source !== 'discovered' && option.source !== 'configured') {
+    html += '<span class="model-choice-badge muted">' + escapeHtml(option.source) + '</span>';
+  }
+  return html;
+}
+
+function renderModelChoiceOption(viewModel, option) {
+  const meta = [];
+  if (option.label && option.label !== option.id) {
+    meta.push(option.id);
+  }
+  const contextLabel = formatModelChoiceContextLength(option.context_length);
+  if (contextLabel) meta.push(contextLabel);
+  if (option.recommended_primary) meta.push('Primary pick');
+  if (option.recommended_cheap) meta.push('Cheap pick');
+
+  return '<button type="button" class="model-choice-option' + (viewModel.selectedMode === 'option' && viewModel.selectedValue === option.id ? ' active' : '') + '" data-model-choice-action="pick-option" data-model-id="' + escapeHtml(option.id) + '">'
+    + '<span class="model-choice-option-copy">'
+    + '<span class="model-choice-option-line"><strong>' + escapeHtml(option.label || option.id) + '</strong>' + renderModelChoiceBadges(option) + '</span>'
+    + '<span class="model-choice-option-meta">' + escapeHtml(meta.join(' · ') || option.id) + '</span>'
+    + '</span>'
+    + '</button>';
+}
+
+function renderModelChoiceSelectedOption(viewModel) {
+  if (viewModel.selectedMode !== 'option') return '';
+  const option = viewModel.options.find((entry) => entry.id === viewModel.selectedValue) || null;
+  if (!option) return '';
+  const query = viewModel.searchQuery.trim().toLowerCase();
+  const haystack = [
+    option.id,
+    option.label,
+    'current selection',
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (query && !haystack.includes(query)) return '';
+
+  const meta = [];
+  if (option.label && option.label !== option.id) {
+    meta.push(option.id);
+  }
+  const contextLabel = formatModelChoiceContextLength(option.context_length);
+  if (contextLabel) meta.push(contextLabel);
+  meta.push('Pinned until you choose a different model');
+
+  return '<button type="button" class="model-choice-option model-choice-option--selected active" data-model-choice-action="pick-option" data-model-id="' + escapeHtml(option.id) + '">'
+    + '<span class="model-choice-option-copy">'
+    + '<span class="model-choice-option-line"><strong>Current selection</strong><span class="model-choice-badge primary">Pinned</span></span>'
+    + '<span class="model-choice-option-meta">' + escapeHtml((option.label || option.id) + ' · ' + meta.join(' · ')) + '</span>'
+    + '</span>'
+    + '</button>';
+}
+
+function renderModelChoiceCustomOption(viewModel) {
+  const seedValue = (viewModel.searchQuery || viewModel.customValue || '').trim();
+  const meta = seedValue
+    ? ('Use "' + seedValue + '" as a custom model ID')
+    : 'Type any provider-specific model ID manually';
+  return '<button type="button" class="model-choice-option model-choice-option--custom' + (viewModel.selectedMode === 'custom' ? ' active' : '') + '" data-model-choice-action="pick-custom" data-custom-value="' + escapeHtml(seedValue) + '">'
+    + '<span class="model-choice-option-copy">'
+    + '<span class="model-choice-option-line"><strong>Custom model ID</strong><span class="model-choice-badge muted">Manual</span></span>'
+    + '<span class="model-choice-option-meta">' + escapeHtml(meta) + '</span>'
+    + '</span>'
+    + '</button>';
+}
+
+function renderModelChoicePanel(viewModel) {
+  const groups = buildModelChoiceGroups(viewModel);
+  const selectedHtml = renderModelChoiceSelectedOption(viewModel);
+  const totalMatches = groups.reduce((sum, group) => sum + group.items.length, 0) + (selectedHtml ? 1 : 0);
+  const visibleGroups = sliceModelChoiceGroups(groups, viewModel.visibleCount);
+  const visibleMatchCount = visibleGroups.reduce((sum, group) => sum + group.items.length, 0) + (selectedHtml ? 1 : 0);
+  const customHtml = renderModelChoiceCustomOption(viewModel);
+
+  let listHtml = '';
+  if (selectedHtml) {
+    listHtml += '<div class="model-choice-list-block model-choice-list-block--pinned">' + selectedHtml + '</div>';
+  }
+  for (const group of visibleGroups) {
+    listHtml += '<section class="model-choice-group">';
+    listHtml += '<div class="model-choice-group-label">' + escapeHtml(group.label) + '<span>' + escapeHtml(String(group.items.length === group.totalCount ? group.totalCount : (group.items.length + ' / ' + group.totalCount))) + '</span></div>';
+    for (const option of group.items) {
+      listHtml += renderModelChoiceOption(viewModel, option);
+    }
+    listHtml += '</section>';
+  }
+  if (!listHtml) {
+    listHtml = '<div class="model-choice-empty-state">No matching models yet. Refine the search or use a custom model ID.</div>';
+  }
+  listHtml += '<div class="model-choice-list-block model-choice-list-block--footer">' + customHtml + '</div>';
+
+  const searchPlaceholder = (getProviderEntry(viewModel.providerSlug)?.display_name || 'provider') + ' models';
+  const statusLabel = viewModel.discovery?.discovery_status === 'discovered'
+    ? 'Live catalog'
+    : viewModel.discovery?.discovery_status === 'fallback'
+      ? 'Fallback catalog'
+      : (viewModel.options.length ? 'Saved models' : 'Manual only');
+
+  let footerHtml = '<div class="model-choice-panel-footer">';
+  footerHtml += '<span class="model-choice-result-meta">' + escapeHtml((totalMatches || viewModel.options.length) + ' models · ' + statusLabel) + '</span>';
+  if (viewModel.searchQuery) {
+    footerHtml += '<button type="button" class="model-choice-clear-search">Clear search</button>';
+  }
+  if (totalMatches > visibleMatchCount) {
+    footerHtml += '<button type="button" class="model-choice-load-more">Load more</button>';
+  }
+  footerHtml += '</div>';
+
+  return '<div class="model-choice-panel' + (viewModel.open ? '' : ' is-hidden') + '">'
+    + '<div class="model-choice-search-shell">'
+    + '<input type="text" class="routing-input model-choice-search" value="' + escapeHtml(viewModel.searchQuery) + '" placeholder="Search ' + escapeHtml(searchPlaceholder) + '">'
+    + '</div>'
+    + '<div class="model-choice-list-shell">' + listHtml + '</div>'
+    + footerHtml
+    + '</div>';
+}
+
+function renderModelChoiceControl(providerSlug, role, currentValue, uiState) {
+  const viewModel = buildModelChoiceViewModel(providerSlug, role, currentValue, uiState);
+  const descriptor = getSelectedModelChoiceDescriptor(viewModel);
+  const discoveryLabel = viewModel.discovery?.discovery_status === 'discovered'
+    ? 'Live catalog'
+    : viewModel.discovery?.discovery_status === 'fallback'
+      ? 'Fallback catalog'
+      : (viewModel.options.length ? 'Saved models' : 'Manual only');
+  const summaryParts = [];
+  if (descriptor.meta) summaryParts.push(descriptor.meta);
+  if (viewModel.options.length) summaryParts.push(viewModel.options.length + ' models');
+  summaryParts.push(discoveryLabel);
+
+  let html = '<div class="routing-model-choice" data-model-choice data-provider="' + escapeHtml(providerSlug) + '" data-role="' + escapeHtml(role) + '" data-selected-mode="' + escapeHtml(viewModel.selectedMode) + '" data-selected-value="' + escapeHtml(viewModel.selectedValue || '') + '" data-search-query="' + escapeHtml(viewModel.searchQuery || '') + '" data-visible-count="' + escapeHtml(String(viewModel.visibleCount)) + '" data-open="' + (viewModel.open ? 'true' : 'false') + '" data-custom-value="' + escapeHtml(viewModel.customValue || '') + '" data-overlay-align="left" data-overlay-vertical="down">';
+  html += '<button type="button" class="model-choice-trigger" aria-expanded="' + (viewModel.open ? 'true' : 'false') + '">';
+  html += '<span class="model-choice-trigger-copy">';
+  html += '<span class="model-choice-trigger-label">' + escapeHtml(descriptor.label) + '</span>';
+  html += '<span class="model-choice-trigger-title" title="' + escapeHtml(descriptor.fullTitle || descriptor.title) + '">' + escapeHtml(descriptor.title) + '</span>';
+  if (summaryParts.length) {
+    html += '<span class="model-choice-trigger-meta-line">' + escapeHtml(summaryParts.join(' · ')) + '</span>';
+  }
+  html += '</span>';
+  html += '</button>';
+  html += renderModelChoicePanel(viewModel);
+  html += '<input type="text" class="routing-input model-choice-custom' + (viewModel.selectedMode === 'custom' ? '' : ' is-hidden') + '" value="' + escapeHtml(viewModel.selectedMode === 'custom' ? (viewModel.customValue || '') : '') + '" placeholder="Enter model ID manually">';
+  html += '</div>';
+  return html;
+}
+
+function adjustModelChoiceOverlay(choice) {
+  if (!choice) return;
+  const panel = choice.querySelector('.model-choice-panel');
+  const trigger = choice.querySelector('.model-choice-trigger');
+  if (!panel || !trigger || panel.classList.contains('is-hidden')) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const preferredWidth = Math.min(420, Math.max(triggerRect.width, window.innerWidth - 72));
+  const preferredAlign = choice.dataset.role === 'cheap' ? 'right' : 'left';
+  let align = preferredAlign;
+  if (preferredAlign === 'left' && triggerRect.left + preferredWidth > window.innerWidth - 20) {
+    align = 'right';
+  } else if (preferredAlign === 'right' && triggerRect.right - preferredWidth < 20) {
+    align = 'left';
+  }
+  choice.dataset.overlayAlign = align;
+  choice.dataset.overlayVertical = 'down';
+}
+
+function rerenderModelChoice(choice, overrides, opts) {
+  if (!choice) return null;
+  const uiState = Object.assign({}, getModelChoiceUiState(choice), overrides || {});
+  const currentValue = Object.prototype.hasOwnProperty.call(uiState, 'currentValue')
+    ? uiState.currentValue
+    : collectModelChoice(choice);
+  const replacement = htmlToElement(renderModelChoiceControl(
+    choice.dataset.provider || '',
+    choice.dataset.role || 'primary',
+    currentValue,
+    uiState,
+  ));
+  choice.replaceWith(replacement);
+  syncProviderCardOpenState(replacement);
+  adjustModelChoiceOverlay(replacement);
+  if (opts?.focusSearch) {
+    const input = replacement.querySelector('.model-choice-search');
+    if (input) {
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+  }
+  if (opts?.focusCustom) {
+    const input = replacement.querySelector('.model-choice-custom');
+    if (input) {
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+  }
+  return replacement;
+}
+
+function syncProviderCardOpenState(choice) {
+  const card = choice?.closest('.provider-editor-card');
+  if (!card) return;
+  card.classList.toggle('dropdown-open', !!card.querySelector('.routing-model-choice[data-open="true"]'));
+}
+
+function closeOpenModelChoices(exceptChoice) {
+  document.querySelectorAll('.routing-model-choice[data-open="true"]').forEach((choice) => {
+    if (exceptChoice && choice === exceptChoice) return;
+    rerenderModelChoice(choice, {
+      open: false,
+      searchQuery: '',
+      visibleCount: MODEL_CHOICE_PAGE_SIZE,
+    });
+  });
+}
+
+function bindModelChoiceDismissListener() {
+  if (modelChoiceDismissListenerBound) return;
+  document.addEventListener('mousedown', (event) => {
+    if (event.target.closest('.routing-model-choice')) return;
+    closeOpenModelChoices();
+  }, true);
+  modelChoiceDismissListenerBound = true;
+}
+
+function collectModelChoice(choice) {
+  if (!choice) return null;
+  const selectedMode = choice.dataset.selectedMode || '';
+  if (selectedMode === 'custom') {
+    const input = choice.querySelector('.model-choice-custom');
+    return input && input.value.trim() ? input.value.trim() : null;
+  }
+  if (selectedMode === 'option') {
+    return choice.dataset.selectedValue || null;
+  }
+  return null;
+}
+
+function parseRouteTarget(target) {
+  const value = (target || '').trim();
+  if (!value || value === 'primary') return { kind: 'alias_primary', provider: '', model: '' };
+  if (value === 'cheap') return { kind: 'alias_cheap', provider: '', model: '' };
+  if (value.endsWith('@primary')) return { kind: 'provider_primary', provider: value.slice(0, -8), model: '' };
+  if (value.endsWith('@cheap')) return { kind: 'provider_cheap', provider: value.slice(0, -6), model: '' };
+  const slashIndex = value.indexOf('/');
+  if (slashIndex !== -1) {
+    return {
+      kind: 'specific_model',
+      provider: value.slice(0, slashIndex),
+      model: value.slice(slashIndex + 1),
+    };
+  }
+  return { kind: 'specific_model', provider: '', model: value };
+}
+
+function routeTargetProviderSlug(target) {
+  const parsed = parseRouteTarget(target);
+  if (parsed.kind === 'provider_primary' || parsed.kind === 'provider_cheap' || parsed.kind === 'specific_model') {
+    return parsed.provider || null;
+  }
+  return null;
+}
+
+function sanitizeRouteTarget(target, activeProviderSlugs, fallbackTarget) {
+  if (!target) return fallbackTarget || null;
+  const providerSlug = routeTargetProviderSlug(target);
+  if (!providerSlug) return target;
+  return activeProviderSlugs.has(providerSlug) ? target : (fallbackTarget || null);
+}
+
+function sanitizeRouteTargetList(targets, activeProviderSlugs) {
+  return (targets || [])
+    .map((target) => sanitizeRouteTarget(target, activeProviderSlugs, null))
+    .filter(Boolean);
+}
+
+function getTargetSelectableProviders(kind, selectedSlug) {
+  let providers = getLiveProviderEntries();
+  if (kind !== 'specific_model') {
+    providers = providers.filter((provider) => provider.enabled || provider.primary || provider.preferred_cheap || provider.slug === selectedSlug);
+  }
+  return providers.length ? providers : getLiveProviderEntries();
+}
+
+function providerSlotSummary(provider, role) {
+  if (!provider) return '';
+  const model = getProviderRoleModel(provider, role, { allowDefault: true });
+  return model ? (provider.display_name + ' / ' + model) : provider.display_name;
+}
+
+function renderProviderSelectOptions(kind, selectedSlug) {
+  return getTargetSelectableProviders(kind, selectedSlug)
+    .map((provider) => {
+      let label = provider.display_name;
+      if (kind === 'provider_primary') {
+        label = providerSlotSummary(provider, 'primary');
+      } else if (kind === 'provider_cheap') {
+        label = providerSlotSummary(provider, 'cheap');
+      }
+      return '<option value="' + escapeHtml(provider.slug) + '"' + (selectedSlug === provider.slug ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+    })
+    .join('');
+}
+
+function renderTargetResolution(target) {
+  const parsed = parseRouteTarget(target);
+  if (parsed.kind === 'alias_primary') {
+    const summary = summarizeRoleTargets(getLiveProviderEntries(), 'primary');
+    return 'Primary pool: ' + summary.full;
+  }
+  if (parsed.kind === 'alias_cheap') {
+    const summary = summarizeRoleTargets(getLiveProviderEntries(), 'cheap');
+    return 'Cheap pool: ' + summary.full;
+  }
+  const provider = getProviderEntry(parsed.provider);
+  if (parsed.kind === 'provider_primary') {
+    return provider ? ('Provider primary slot: ' + providerSlotSummary(provider, 'primary')) : 'Provider primary slot';
+  }
+  if (parsed.kind === 'provider_cheap') {
+    return provider ? ('Provider cheap slot: ' + providerSlotSummary(provider, 'cheap')) : 'Provider cheap slot';
+  }
+  if (provider && parsed.model) {
+    return 'Specific target: ' + provider.display_name + ' / ' + parsed.model;
+  }
+  if (parsed.model) {
+    return 'Specific model: ' + parsed.model;
+  }
+  return 'Choose a target';
+}
+
+function renderTargetPicker(target) {
+  const parsed = parseRouteTarget(target);
+  const selectableProviders = getTargetSelectableProviders(parsed.kind, parsed.provider);
+  const provider = parsed.provider || selectableProviders[0]?.slug || '';
+  let html = '<div class="routing-target-picker' + ((parsed.kind === 'alias_primary' || parsed.kind === 'alias_cheap') ? ' alias-mode' : '') + '" data-target-picker>';
+  html += '<select class="routing-select routing-target-kind">';
+  html += '<option value="alias_primary"' + (parsed.kind === 'alias_primary' ? ' selected' : '') + '>Primary alias</option>';
+  html += '<option value="alias_cheap"' + (parsed.kind === 'alias_cheap' ? ' selected' : '') + '>Cheap alias</option>';
+  html += '<option value="provider_primary"' + (parsed.kind === 'provider_primary' ? ' selected' : '') + '>Provider primary slot</option>';
+  html += '<option value="provider_cheap"' + (parsed.kind === 'provider_cheap' ? ' selected' : '') + '>Provider cheap slot</option>';
+  html += '<option value="specific_model"' + (parsed.kind === 'specific_model' ? ' selected' : '') + '>Specific provider/model</option>';
+  html += '</select>';
+  html += '<select class="routing-select routing-target-provider' + ((parsed.kind === 'alias_primary' || parsed.kind === 'alias_cheap') ? ' is-hidden' : '') + '">' + renderProviderSelectOptions(parsed.kind, provider) + '</select>';
+  html += '<div class="routing-target-model-shell' + (parsed.kind === 'specific_model' ? '' : ' is-hidden') + '">';
+  html += renderModelChoiceControl(provider, 'specific', parsed.model);
+  html += '</div>';
+  html += '<div class="routing-target-helper">' + escapeHtml(renderTargetResolution(target || 'primary')) + '</div>';
+  html += '</div>';
+  return html;
+}
+
+function renderTargetListRow(target) {
+  return '<div class="routing-target-list-row">' + renderTargetPicker(target) + '<button type="button" class="btn-vault-remove routing-remove-target-row">Remove</button></div>';
+}
+
+function renderTargetListBuilder(builderId, targets, addLabel) {
+  const listTargets = Array.isArray(targets) ? targets : [];
+  let html = '<div id="' + escapeHtml(builderId) + '" class="routing-target-list-builder">';
+  html += '<div class="routing-target-list">';
+  if (!listTargets.length) {
+    html += '<div class="routing-empty-state">No targets added yet.</div>';
+  } else {
+    for (const target of listTargets) html += renderTargetListRow(target);
+  }
+  html += '</div>';
+  html += '<button type="button" class="btn-vault-save inline routing-add-target-row" data-default-target="primary">' + escapeHtml(addLabel) + '</button>';
+  html += '</div>';
+  return html;
+}
+
+function renderRoutingRuleCard(rule) {
+  const parsed = parseRoutingRule(rule);
+  let html = '<div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel--focusable routing-rule-card">';
+  html += '<div class="routing-rule-head">';
+  html += '<select class="routing-select routing-rule-kind">';
+  html += '<option value="large_context"' + (parsed.kind === 'large_context' ? ' selected' : '') + '>Large context</option>';
+  html += '<option value="vision"' + (parsed.kind === 'vision' ? ' selected' : '') + '>Vision</option>';
+  html += '<option value="cost"' + (parsed.kind === 'cost' ? ' selected' : '') + '>Cost cap</option>';
+  html += '<option value="latency"' + (parsed.kind === 'latency' ? ' selected' : '') + '>Lowest latency</option>';
+  html += '<option value="round_robin"' + (parsed.kind === 'round_robin' ? ' selected' : '') + '>Round robin</option>';
+  html += '<option value="fallback"' + (parsed.kind === 'fallback' ? ' selected' : '') + '>Explicit fallback</option>';
+  html += '</select>';
+  html += '<button type="button" class="btn-vault-remove routing-remove-rule">Remove</button>';
+  html += '</div>';
+  html += '<div class="routing-rule-body">' + renderRoutingRuleBody(parsed) + '</div>';
+  html += '</div>';
+  return html;
+}
+
+function parseRoutingRule(rule) {
+  if (typeof rule === 'string') {
+    return { kind: 'latency' };
+  }
+  if (rule.LargeContext) {
+    return {
+      kind: 'large_context',
+      threshold: String(rule.LargeContext.threshold || 120000),
+      target: rule.LargeContext.provider || 'primary',
+    };
+  }
+  if (rule.VisionContent) {
+    return { kind: 'vision', target: rule.VisionContent.provider || 'primary' };
+  }
+  if (rule.CostOptimized) {
+    return { kind: 'cost', maxCost: String(rule.CostOptimized.max_cost_per_m_usd || 0) };
+  }
+  if (rule.RoundRobin) {
+    return { kind: 'round_robin', targets: rule.RoundRobin.providers || [] };
+  }
+  if (rule.Fallback) {
+    return {
+      kind: 'fallback',
+      target: rule.Fallback.primary || 'primary',
+      fallbacks: rule.Fallback.fallbacks || [],
+    };
+  }
+  return { kind: 'latency' };
+}
+
+function renderRoutingRuleBody(parsed) {
+  if (parsed.kind === 'large_context') {
+    return '<div class="routing-rule-grid"><div><label class="routing-field-label tight">Token threshold</label><input type="number" class="routing-input routing-rule-threshold" value="' + escapeHtml(parsed.threshold || '120000') + '" min="1"></div><div class="routing-single-target"><label class="routing-field-label tight">Route to</label>' + renderTargetPicker(parsed.target || 'primary') + '</div></div>';
+  }
+  if (parsed.kind === 'vision') {
+    return '<div class="routing-single-target"><label class="routing-field-label tight">Route image requests to</label>' + renderTargetPicker(parsed.target || 'primary') + '</div>';
+  }
+  if (parsed.kind === 'cost') {
+    return '<div><label class="routing-field-label tight">Maximum cost per million tokens</label><input type="number" step="0.01" class="routing-input routing-rule-cost" value="' + escapeHtml(parsed.maxCost || '0') + '" min="0"></div>';
+  }
+  if (parsed.kind === 'round_robin') {
+    return '<div><label class="routing-field-label tight">Rotate across these targets</label>' + renderTargetListBuilder('round-robin-' + Math.random().toString(36).slice(2), parsed.targets || [], 'Add round-robin target') + '</div>';
+  }
+  if (parsed.kind === 'fallback') {
+    return '<div class="routing-rule-stack"><div class="routing-single-target"><label class="routing-field-label tight">Primary target</label>' + renderTargetPicker(parsed.target || 'primary') + '</div><div><label class="routing-field-label tight">Fallback targets</label>' + renderTargetListBuilder('fallback-' + Math.random().toString(36).slice(2), parsed.fallbacks || [], 'Add fallback target') + '</div></div>';
+  }
+  return '<div class="routing-inline-note">This rule routes to the provider slot with the lowest observed average latency.</div>';
+}
+
+function rerenderRuleCardBody(card) {
+  if (!card) return;
+  const kind = card.querySelector('.routing-rule-kind')?.value || 'latency';
+  const body = card.querySelector('.routing-rule-body');
+  if (!body) return;
+  body.innerHTML = renderRoutingRuleBody({ kind });
+  initializeProvidersUi();
+}
+
+function refreshTargetPicker(targetPicker) {
+  if (!targetPicker) return;
+  const kind = targetPicker.querySelector('.routing-target-kind')?.value || 'alias_primary';
+  const providerSelect = targetPicker.querySelector('.routing-target-provider');
+  const modelShell = targetPicker.querySelector('.routing-target-model-shell');
+  const helper = targetPicker.querySelector('.routing-target-helper');
+  if (!providerSelect || !modelShell) return;
+  const currentProvider = providerSelect.value;
+  const options = renderProviderSelectOptions(kind, currentProvider);
+  providerSelect.innerHTML = options;
+  if (!providerSelect.value && getTargetSelectableProviders(kind, currentProvider)[0]) {
+    providerSelect.value = getTargetSelectableProviders(kind, currentProvider)[0].slug;
+  }
+  providerSelect.classList.toggle('is-hidden', kind === 'alias_primary' || kind === 'alias_cheap');
+  modelShell.classList.toggle('is-hidden', kind !== 'specific_model');
+  targetPicker.classList.toggle('alias-mode', kind === 'alias_primary' || kind === 'alias_cheap');
+  if (kind === 'specific_model') {
+    const currentChoice = modelShell.querySelector('.routing-model-choice');
+    const currentValue = collectModelChoice(currentChoice);
+    modelShell.innerHTML = renderModelChoiceControl(providerSelect.value, 'specific', currentValue);
+    ensureProviderModelsLoaded(providerSelect.value, false);
+  }
+  if (helper) {
+    helper.textContent = renderTargetResolution(collectTargetPicker(targetPicker) || (kind === 'alias_cheap' ? 'cheap' : 'primary'));
+  }
+}
+
+function collectTargetPicker(targetPicker) {
+  if (!targetPicker) return null;
+  const kind = targetPicker.querySelector('.routing-target-kind')?.value || 'alias_primary';
+  if (kind === 'alias_primary') return 'primary';
+  if (kind === 'alias_cheap') return 'cheap';
+  const provider = targetPicker.querySelector('.routing-target-provider')?.value || '';
+  if (!provider) return null;
+  if (kind === 'provider_primary') return provider + '@primary';
+  if (kind === 'provider_cheap') return provider + '@cheap';
+  const model = collectModelChoice(targetPicker.querySelector('.routing-model-choice'));
+  return model ? (provider + '/' + model) : null;
+}
+
+function collectTargetList(builder) {
+  if (!builder) return [];
+  return Array.from(builder.querySelectorAll('.routing-target-list-row'))
+    .map((row) => collectTargetPicker(row.querySelector('.routing-target-picker')))
+    .filter(Boolean);
+}
+
+function refreshTargetListEmptyState(builder) {
+  if (!builder) return;
+  const list = builder.querySelector('.routing-target-list');
+  if (!list) return;
+  if (list.querySelector('.routing-target-list-row')) return;
+  if (!list.querySelector('.routing-empty-state')) {
+    list.innerHTML = '<div class="routing-empty-state">No targets added yet.</div>';
+  }
+}
+
+function initializeProvidersUi() {
+  bindModelChoiceDismissListener();
+  reconcileProviderRoleAssignments();
+  document.querySelectorAll('.routing-target-picker').forEach(refreshTargetPicker);
+  updateRoutingModePresentation();
+  updateAliasSummaries();
+  primeProviderModelDiscovery();
+}
+
+function updateAliasSummaries() {
+  const providers = getLiveProviderEntries();
+  const primarySummary = summarizeRoleTargets(providers, 'primary');
+  const cheapSummary = summarizeRoleTargets(providers, 'cheap');
+  const primarySummaryNode = document.getElementById('routing-primary-alias-summary');
+  const cheapSummaryNode = document.getElementById('routing-cheap-alias-summary');
+  syncRolePoolOrderWithOwner('primary', providers.find((provider) => provider.primary)?.slug || null, providers);
+  syncRolePoolOrderWithOwner('cheap', providers.find((provider) => provider.preferred_cheap)?.slug || null, providers);
+  if (primarySummaryNode) primarySummaryNode.innerHTML = renderRolePoolEditorContent('primary', providers, primarySummary);
+  if (cheapSummaryNode) cheapSummaryNode.innerHTML = renderRolePoolEditorContent('cheap', providers, cheapSummary);
+}
+
+function primeProviderModelDiscovery() {
+  getProviderEntries()
+    .filter((provider) => provider.enabled)
+    .slice(0, 8)
+    .forEach((provider) => ensureProviderModelsLoaded(provider.slug, false));
+}
+
+function ensureProviderModelsLoaded(slug, force) {
+  if (!slug) return Promise.resolve(null);
+  if (!force && providerModelsCache.has(slug)) return Promise.resolve(providerModelsCache.get(slug));
+  if (!force && providerModelsInflight.has(slug)) return providerModelsInflight.get(slug);
+  const request = apiFetch('/api/providers/' + encodeURIComponent(slug) + '/models').then((data) => {
+    providerModelsCache.set(slug, data);
+    providerModelsInflight.delete(slug);
+    refreshModelChoiceControlsForProvider(slug);
+    return data;
+  }).catch((err) => {
+    providerModelsInflight.delete(slug);
+    if (force) {
+      showToast('Model discovery failed for ' + slug + ': ' + err.message, 'error');
+    }
+    return null;
+  });
+  providerModelsInflight.set(slug, request);
+  return request;
+}
+
+function refreshModelChoiceControlsForProvider(slug) {
+  document.querySelectorAll('.routing-model-choice[data-provider="' + slug + '"]').forEach((node) => {
+    const currentValue = collectModelChoice(node);
+    const role = node.dataset.role || 'primary';
+    const uiState = getModelChoiceUiState(node);
+    node.replaceWith(htmlToElement(renderModelChoiceControl(slug, role, currentValue, uiState)));
+  });
+  document.querySelectorAll('.routing-target-provider').forEach((select) => {
+    if (select.value === slug) {
+      refreshTargetPicker(select.closest('.routing-target-picker'));
+    }
+  });
+  updateAliasSummaries();
+}
+
+function htmlToElement(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html.trim();
+  return template.content.firstElementChild;
 }
 
 let settingsCache = {}; // key -> { value, updated_at }
@@ -4068,6 +6403,7 @@ function loadSettings() {
   apiFetch('/api/settings').then((data) => {
     settingsCache = {};
     for (const s of (data.settings || [])) {
+      if (SENSITIVE_KEYS.has(s.key)) continue;
       settingsCache[s.key] = { value: s.value, updated_at: s.updated_at };
     }
     renderSettings();
@@ -4087,7 +6423,7 @@ function renderSettings() {
   searchInput.type = 'text';
   searchInput.id = 'settings-search';
   searchInput.className = 'settings-search-input';
-  searchInput.placeholder = '🔍  Search settings...';
+  searchInput.placeholder = 'Search settings...';
   searchInput.addEventListener('input', () => filterSettings(searchInput.value));
   searchWrap.appendChild(searchInput);
   container.appendChild(searchWrap);
@@ -4133,10 +6469,10 @@ function renderSettings() {
 
     // "Other" settings go into Advanced tab
     if (tabName === 'Advanced') {
-      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k)).sort();
+      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k) && !SENSITIVE_KEYS.has(k)).sort();
       if (otherKeys.length > 0) {
         const otherSection = {
-          icon: '📋',
+          icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>',
           fields: otherKeys.map(key => ({
             key: key,
             label: key,
@@ -4368,6 +6704,11 @@ function renderSettingField(field) {
 }
 
 function saveSetting(key, value) {
+  if (SENSITIVE_KEYS.has(key)) {
+    showToast('This setting is managed via the secrets store, not the Settings UI.', 'error');
+    return;
+  }
+
   const headers = { 'Authorization': 'Bearer ' + token };
 
   if (value === null) {

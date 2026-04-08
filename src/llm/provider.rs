@@ -226,6 +226,10 @@ impl CompletionRequest {
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub content: String,
+    /// The actual model that serviced the request.
+    pub provider_model: Option<String>,
+    /// The actual completion cost calculated by the servicing provider, if known.
+    pub cost_usd: Option<f64>,
     /// Extended thinking / reasoning content, if the model produced it.
     pub thinking_content: Option<String>,
     pub input_tokens: u32,
@@ -342,6 +346,10 @@ impl ToolCompletionRequest {
 pub struct ToolCompletionResponse {
     /// Text content (may be empty if tool calls are present).
     pub content: Option<String>,
+    /// The actual model that serviced the request.
+    pub provider_model: Option<String>,
+    /// The actual completion cost calculated by the servicing provider, if known.
+    pub cost_usd: Option<f64>,
     /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
     /// Extended thinking / reasoning content, if the model produced it.
@@ -381,6 +389,10 @@ pub enum StreamChunk {
     },
     /// Stream is complete — carries final token counts.
     Done {
+        /// The actual model that serviced the request.
+        provider_model: Option<String>,
+        /// The actual completion cost calculated by the servicing provider, if known.
+        cost_usd: Option<f64>,
         input_tokens: u32,
         output_tokens: u32,
         finish_reason: FinishReason,
@@ -394,7 +406,11 @@ pub type StreamChunkStream =
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Get the model name.
+    /// Get the static provider identifier (e.g., `"runtime"`, `"openai"`,
+    /// `"anthropic"`).
+    ///
+    /// For the dynamically-resolved model name (which may change at runtime
+    /// via hot-reload or per-request routing), use [`active_model_name()`].
     fn model_name(&self) -> &str;
 
     /// Get cost per token (input, output).
@@ -420,6 +436,8 @@ pub trait LlmProvider: Send + Sync {
         let resp = self.complete(request).await?;
         Ok(simulate_stream_from_response(
             resp.content,
+            resp.provider_model,
+            resp.cost_usd,
             resp.thinking_content,
             vec![],
             resp.input_tokens,
@@ -438,6 +456,8 @@ pub trait LlmProvider: Send + Sync {
         let resp = self.complete_with_tools(request).await?;
         Ok(simulate_stream_from_response(
             resp.content.unwrap_or_default(),
+            resp.provider_model,
+            resp.cost_usd,
             resp.thinking_content,
             resp.tool_calls,
             resp.input_tokens,
@@ -450,6 +470,15 @@ pub trait LlmProvider: Send + Sync {
     /// Used by the OpenAI-compat endpoint to set the `x-thinclaw-streaming` header.
     fn supports_streaming(&self) -> bool {
         false
+    }
+
+    /// Whether this provider supports native streaming for a specific request model.
+    ///
+    /// Most providers ignore `requested_model` and simply report their current
+    /// streaming capability. Runtime-routed providers can override this to
+    /// resolve the exact request target before answering.
+    fn supports_streaming_for_model(&self, _requested_model: Option<&str>) -> bool {
+        self.supports_streaming()
     }
 
     /// List available models from the provider.
@@ -506,6 +535,8 @@ pub trait LlmProvider: Send + Sync {
 /// native token-level streaming.
 fn simulate_stream_from_response(
     content: String,
+    provider_model: Option<String>,
+    cost_usd: Option<f64>,
     thinking_content: Option<String>,
     tool_calls: Vec<ToolCall>,
     input_tokens: u32,
@@ -515,6 +546,8 @@ fn simulate_stream_from_response(
     Box::pin(futures::stream::unfold(
         SimState::new(
             content,
+            provider_model,
+            cost_usd,
             thinking_content,
             tool_calls,
             input_tokens,
@@ -549,6 +582,8 @@ fn simulate_stream_from_response(
                 state.done = true;
                 return Some((
                     Ok(StreamChunk::Done {
+                        provider_model: state.provider_model.clone(),
+                        cost_usd: state.cost_usd,
                         input_tokens: state.input_tokens,
                         output_tokens: state.output_tokens,
                         finish_reason: state.finish_reason,
@@ -564,6 +599,8 @@ fn simulate_stream_from_response(
 
 /// Internal state for the simulated stream.
 struct SimState {
+    provider_model: Option<String>,
+    cost_usd: Option<f64>,
     thinking: Option<String>,
     words: Vec<String>,
     tool_calls: Vec<ToolCall>,
@@ -576,6 +613,8 @@ struct SimState {
 impl SimState {
     fn new(
         content: String,
+        provider_model: Option<String>,
+        cost_usd: Option<f64>,
         thinking: Option<String>,
         tool_calls: Vec<ToolCall>,
         input_tokens: u32,
@@ -596,6 +635,8 @@ impl SimState {
         }
 
         Self {
+            provider_model,
+            cost_usd,
             thinking,
             words,
             tool_calls,
@@ -623,38 +664,55 @@ impl SimState {
 pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
     use std::collections::HashSet;
 
-    // Collect all tool_call_ids from assistant messages with tool_calls.
-    let mut known_ids: HashSet<String> = HashSet::new();
-    for msg in messages.iter() {
-        if msg.role == Role::Assistant
-            && let Some(ref calls) = msg.tool_calls
-        {
-            for tc in calls {
-                known_ids.insert(tc.id.clone());
-            }
-        }
-    }
+    // Forward-walk tracking which tool_call_ids are "active" from the
+    // immediately preceding assistant(tool_calls) block.
+    //
+    // The OpenAI API enforces a strict adjacency rule: a `tool` message is
+    // valid ONLY when the immediately preceding assistant message has
+    // `tool_calls` containing a matching id.  A global id-lookup is
+    // insufficient because the history cap may drop an assistant(tool_calls)
+    // message while keeping its downstream tool result messages — those
+    // results are now orphaned even though the same id might appear elsewhere.
+    let mut active_ids: HashSet<String> = HashSet::new();
 
-    // Rewrite orphaned tool_result messages as user messages.
     for msg in messages.iter_mut() {
-        if msg.role != Role::Tool {
-            continue;
-        }
-        let is_orphaned = match &msg.tool_call_id {
-            Some(id) => !known_ids.contains(id),
-            None => true,
-        };
-        if is_orphaned {
-            let tool_name = msg.name.as_deref().unwrap_or("unknown");
-            tracing::debug!(
-                tool_call_id = ?msg.tool_call_id,
-                tool_name,
-                "Rewriting orphaned tool_result as user message",
-            );
-            msg.role = Role::User;
-            msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
-            msg.tool_call_id = None;
-            msg.name = None;
+        match msg.role {
+            Role::Assistant => {
+                // Start a fresh active block from this assistant message.
+                active_ids.clear();
+                if let Some(ref calls) = msg.tool_calls {
+                    for tc in calls {
+                        active_ids.insert(tc.id.clone());
+                    }
+                }
+                // If this assistant has no tool_calls, active_ids stays empty,
+                // so any subsequent Tool messages will be treated as orphaned.
+            }
+            Role::User | Role::System => {
+                // A non-tool user/system message ends any active tool block.
+                active_ids.clear();
+            }
+            Role::Tool => {
+                let is_orphaned = match &msg.tool_call_id {
+                    Some(id) => !active_ids.contains(id),
+                    None => true,
+                };
+                if is_orphaned {
+                    let tool_name = msg.name.as_deref().unwrap_or("unknown");
+                    tracing::debug!(
+                        tool_call_id = ?msg.tool_call_id,
+                        tool_name,
+                        "Rewriting orphaned tool_result as user message (adjacency check)",
+                    );
+                    msg.role = Role::User;
+                    msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
+                    msg.tool_call_id = None;
+                    msg.name = None;
+                }
+                // Do NOT clear active_ids here — one assistant message can have
+                // multiple tool calls whose results follow sequentially, and all
+                // of them must remain in the active set until the block ends.
+            }
         }
     }
 }
@@ -727,12 +785,58 @@ mod tests {
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
     }
 
+    #[test]
+    fn test_sanitize_adjacency_cap_drop_scenario() {
+        // Simulates the hard-cap truncation scenario:
+        // An assistant(tool_calls) was dropped by the cap but its Tool result
+        // was kept (straddles the cut boundary). The Tool result must be
+        // promoted to a User message even though the same call_id might appear
+        // in a different, older assistant message further down the list.
+        //
+        // Before cap:  [user] [assistant(call_1)] [tool(call_1)] [user] [assistant] [user]
+        // After cap drops first two messages:
+        //              [tool(call_1)] [user] [assistant] [user]   ← tool is now orphaned
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        // Simulate what remains after the cap drops the assistant(tool_calls):
+        let mut messages = vec![
+            // assistant(tool_calls) was here but is now GONE (dropped by cap)
+            ChatMessage::tool_result("call_1", "search", "some result"),
+            ChatMessage::user("follow-up question"),
+            ChatMessage::assistant("plain text response"),
+            ChatMessage::user("another question"),
+        ];
+        // Inject a stale assistant_with_tool_calls at a different position
+        // (call_1 exists globally, but NOT adjacent to the tool result any more)
+        let mut alt_messages = vec![
+            // This assistant is NOT adjacent to the tool result above
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "search", "some result"), // orphaned
+            ChatMessage::user("follow-up question"),
+            ChatMessage::assistant("plain text response"),
+        ];
+        sanitize_tool_messages(&mut alt_messages);
+        // call_1's tool result is adjacent to the assistant(tool_calls) → still valid
+        assert_eq!(alt_messages[1].role, Role::Tool);
+
+        // Now test the actual cap scenario: drop the assistant(tool_calls)
+        sanitize_tool_messages(&mut messages);
+        // tool result at index 0 has no preceding assistant(tool_calls) → orphaned
+        assert_eq!(messages[0].role, Role::User);
+        assert!(messages[0].content.contains("[Tool `search` returned:"));
+    }
+
     #[tokio::test]
     async fn test_simulated_stream_text_only() {
         use futures::StreamExt;
 
         let stream = simulate_stream_from_response(
             "Hello world, this is a test of streaming.".to_string(),
+            Some("test-model".to_string()),
+            Some(0.123),
             None,
             vec![],
             10,
@@ -765,10 +869,15 @@ mod tests {
         // Last should be Done
         match &chunks[chunks.len() - 1] {
             StreamChunk::Done {
+                provider_model,
+                cost_usd,
                 input_tokens,
                 output_tokens,
                 finish_reason,
+                ..
             } => {
+                assert_eq!(provider_model.as_deref(), Some("test-model"));
+                assert_eq!(*cost_usd, Some(0.123));
                 assert_eq!(*input_tokens, 10);
                 assert_eq!(*output_tokens, 20);
                 assert_eq!(*finish_reason, FinishReason::Stop);
@@ -798,6 +907,8 @@ mod tests {
         };
         let stream = simulate_stream_from_response(
             "Result text".to_string(),
+            Some("search-model".to_string()),
+            Some(0.05),
             Some("I need to think about this.".to_string()),
             vec![tc],
             5,
@@ -844,8 +955,16 @@ mod tests {
     async fn test_simulated_stream_empty_content() {
         use futures::StreamExt;
 
-        let stream =
-            simulate_stream_from_response(String::new(), None, vec![], 0, 0, FinishReason::Stop);
+        let stream = simulate_stream_from_response(
+            String::new(),
+            None,
+            None,
+            None,
+            vec![],
+            0,
+            0,
+            FinishReason::Stop,
+        );
 
         let mut chunks: Vec<StreamChunk> = Vec::new();
         let mut stream = std::pin::pin!(stream);

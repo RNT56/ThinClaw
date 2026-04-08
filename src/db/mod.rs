@@ -400,6 +400,33 @@ pub trait WorkspaceStore: Send + Sync {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError>;
+
+    /// Atomically replace all chunks for a document.
+    ///
+    /// Deletes all existing chunks and inserts the new set in a single
+    /// database transaction. This prevents the split-brain state where
+    /// old chunks have been deleted but new ones have not yet been inserted
+    /// (which would leave the document invisible in search).
+    ///
+    /// # Default implementation
+    ///
+    /// Falls back to sequential `delete_chunks` + `insert_chunk` calls for
+    /// backends that do not override this method (e.g. PostgreSQL, where
+    /// connection-pool transactions are less straightforward to express in a
+    /// trait default). Backends with embedded connections (libSQL) override
+    /// this with a proper `BEGIN` / `COMMIT` block.
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<(), WorkspaceError> {
+        self.delete_chunks(document_id).await?;
+        for (index, content, embedding) in chunks {
+            self.insert_chunk(document_id, *index, content, embedding.as_deref())
+                .await?;
+        }
+        Ok(())
+    }
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

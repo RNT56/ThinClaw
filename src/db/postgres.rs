@@ -691,9 +691,12 @@ impl WorkspaceStore for PgBackend {
 #[async_trait]
 impl AgentRegistryStore for PgBackend {
     async fn save_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError> {
-        let client = self.store.pool().get().await.map_err(|e| {
-            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
-        })?;
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
 
         // Ensure table exists (only on first call per process lifetime)
         static TABLE_CREATED: std::sync::atomic::AtomicBool =
@@ -716,14 +719,16 @@ impl AgentRegistryStore for PgBackend {
                     &[],
                 )
                 .await
-                .map_err(|e| DatabaseError::Query(format!("Failed to ensure agent_workspaces table: {e}")))?;
+                .map_err(|e| {
+                    DatabaseError::Query(format!("Failed to ensure agent_workspaces table: {e}"))
+                })?;
             TABLE_CREATED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let bound_channels = serde_json::to_value(&ws.bound_channels)
-            .unwrap_or(serde_json::Value::Array(vec![]));
-        let trigger_keywords = serde_json::to_value(&ws.trigger_keywords)
-            .unwrap_or(serde_json::Value::Array(vec![]));
+        let bound_channels =
+            serde_json::to_value(&ws.bound_channels).unwrap_or(serde_json::Value::Array(vec![]));
+        let trigger_keywords =
+            serde_json::to_value(&ws.trigger_keywords).unwrap_or(serde_json::Value::Array(vec![]));
 
         client
             .execute(
@@ -754,9 +759,12 @@ impl AgentRegistryStore for PgBackend {
         &self,
         agent_id: &str,
     ) -> Result<Option<AgentWorkspaceRecord>, DatabaseError> {
-        let client = self.store.pool().get().await.map_err(|e| {
-            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
-        })?;
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
 
         let row = client
             .query_opt(
@@ -772,9 +780,12 @@ impl AgentRegistryStore for PgBackend {
     }
 
     async fn list_agent_workspaces(&self) -> Result<Vec<AgentWorkspaceRecord>, DatabaseError> {
-        let client = self.store.pool().get().await.map_err(|e| {
-            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
-        })?;
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
 
         let rows = client
             .query(
@@ -790,9 +801,12 @@ impl AgentRegistryStore for PgBackend {
     }
 
     async fn delete_agent_workspace(&self, agent_id: &str) -> Result<bool, DatabaseError> {
-        let client = self.store.pool().get().await.map_err(|e| {
-            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
-        })?;
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
 
         let affected = client
             .execute(
@@ -805,18 +819,18 @@ impl AgentRegistryStore for PgBackend {
         Ok(affected > 0)
     }
 
-    async fn update_agent_workspace(
-        &self,
-        ws: &AgentWorkspaceRecord,
-    ) -> Result<(), DatabaseError> {
-        let client = self.store.pool().get().await.map_err(|e| {
-            DatabaseError::Pool(format!("Failed to get PG connection: {e}"))
-        })?;
+    async fn update_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
 
-        let bound_channels = serde_json::to_value(&ws.bound_channels)
-            .unwrap_or(serde_json::Value::Array(vec![]));
-        let trigger_keywords = serde_json::to_value(&ws.trigger_keywords)
-            .unwrap_or(serde_json::Value::Array(vec![]));
+        let bound_channels =
+            serde_json::to_value(&ws.bound_channels).unwrap_or(serde_json::Value::Array(vec![]));
+        let trigger_keywords =
+            serde_json::to_value(&ws.trigger_keywords).unwrap_or(serde_json::Value::Array(vec![]));
 
         let affected = client
             .execute(

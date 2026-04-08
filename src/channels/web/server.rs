@@ -29,7 +29,8 @@ use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
 use crate::channels::web::handlers::skills::{
-    skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
+    skills_install_handler, skills_list_handler, skills_reload_all_handler,
+    skills_reload_handler, skills_remove_handler, skills_search_handler, skills_trust_handler,
 };
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
@@ -87,24 +88,31 @@ impl RateLimiter {
             .unwrap_or_default()
             .as_secs();
 
-        let window = self.window_start.load(Ordering::Relaxed);
+        let window = self.window_start.load(Ordering::Acquire);
         if now.saturating_sub(window) >= self.window_secs {
-            // Window expired, reset
-            self.window_start.store(now, Ordering::Relaxed);
-            self.remaining
-                .store(self.max_requests - 1, Ordering::Relaxed);
-            return true;
+            // Window expired — try to reset. Only one thread wins the CAS.
+            if self
+                .window_start
+                .compare_exchange(window, now, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.remaining
+                    .store(self.max_requests - 1, Ordering::Release);
+                return true;
+            }
+            // Lost the race — another thread already reset. Fall through
+            // to the normal decrement path.
         }
 
         // Try to decrement remaining
         loop {
-            let current = self.remaining.load(Ordering::Relaxed);
+            let current = self.remaining.load(Ordering::Acquire);
             if current == 0 {
                 return false;
             }
             if self
                 .remaining
-                .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 return true;
@@ -145,6 +153,8 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Live LLM runtime manager for hot reload and routing status APIs.
+    pub llm_runtime: Option<Arc<crate::llm::LlmRuntimeManager>>,
     /// Skill registry for skill management API.
     pub skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
@@ -156,6 +166,8 @@ pub struct GatewayState {
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
     /// Cost guard for token/cost tracking.
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Shared cost tracker — richer historical data (daily/monthly/per-agent).
+    pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     /// Routine engine for webhook-triggered routine execution.
     pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
     /// Server startup time for uptime calculation.
@@ -292,9 +304,34 @@ pub async fn start_server(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
         )
+        .route(
+            "/api/skills/{name}/trust",
+            axum::routing::put(skills_trust_handler),
+        )
+        .route(
+            "/api/skills/{name}/reload",
+            axum::routing::post(skills_reload_handler),
+        )
+        .route(
+            "/api/skills/reload-all",
+            axum::routing::post(skills_reload_all_handler),
+        )
         // Provider Vault (API key management)
         .route("/api/providers", get(providers_list_handler))
-        .route("/api/providers/{slug}/key", post(providers_save_key_handler))
+        .route("/api/providers/{slug}/models", get(provider_models_handler))
+        .route("/api/providers/config", get(providers_config_handler))
+        .route(
+            "/api/providers/config",
+            axum::routing::put(providers_config_set_handler),
+        )
+        .route(
+            "/api/providers/route/simulate",
+            post(providers_route_simulate_handler),
+        )
+        .route(
+            "/api/providers/{slug}/key",
+            post(providers_save_key_handler),
+        )
         .route(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
@@ -314,6 +351,10 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        // Cost dashboard (rich historical data from CostTracker)
+        .route("/api/costs/summary", get(costs_summary_handler))
+        .route("/api/costs/export", get(costs_export_handler))
+        .route("/api/costs/reset", post(costs_reset_handler))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -345,15 +386,33 @@ pub async fn start_server(
 
     // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
     // origins are allowed, since the gateway is a local-first service.
-    let cors = CorsLayer::new()
-        .allow_origin([
+    // When binding to 0.0.0.0 (unspecified), also allow 127.0.0.1 since
+    // "http://0.0.0.0" is not a valid browser origin.
+    let mut origins: Vec<axum::http::HeaderValue> = vec![
+        format!("http://localhost:{}", addr.port())
+            .parse()
+            .expect("valid origin"),
+    ];
+    // Always add the literal bind address (unless it's unspecified, which
+    // browsers can't use as an origin).
+    if !addr.ip().is_unspecified() {
+        origins.push(
             format!("http://{}:{}", addr.ip(), addr.port())
                 .parse()
                 .expect("valid origin"),
-            format!("http://localhost:{}", addr.port())
+        );
+    }
+    // When binding to 0.0.0.0 or [::], add the loopback so users accessing
+    // via http://127.0.0.1:<port> aren't blocked.
+    if addr.ip().is_unspecified() {
+        origins.push(
+            format!("http://127.0.0.1:{}", addr.port())
                 .parse()
                 .expect("valid origin"),
-        ])
+        );
+    }
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -410,14 +469,75 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler() -> impl IntoResponse {
+async fn index_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    let webchat = load_webchat_config(state.as_ref()).await;
+    let html = render_index_html(&webchat);
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/index.html"),
+        html,
     )
+}
+
+async fn load_webchat_config(state: &GatewayState) -> crate::config::WebChatConfig {
+    if let Some(store) = state.store.as_ref()
+        && let Ok(map) = store.get_all_settings(&state.user_id).await
+    {
+        let settings = crate::settings::Settings::from_db_map(&map);
+        return crate::config::WebChatConfig::from_settings(&settings);
+    }
+
+    crate::config::WebChatConfig::from_env()
+}
+
+fn render_index_html(webchat: &crate::config::WebChatConfig) -> String {
+    let theme = match webchat.theme {
+        crate::config::WebChatTheme::Light => "light",
+        crate::config::WebChatTheme::Dark => "dark",
+        crate::config::WebChatTheme::System => "system",
+    };
+    let branding = if webchat.show_branding {
+        "true"
+    } else {
+        "false"
+    };
+    let mut html = include_str!("static/index.html").replace(
+        "<html lang=\"en\">",
+        &format!(
+            "<html lang=\"en\" data-webchat-theme=\"{theme}\" data-show-branding=\"{branding}\">"
+        ),
+    );
+
+    let inline_css = render_webchat_inline_css(webchat);
+    if !inline_css.is_empty() {
+        html = html.replace(
+            "</head>",
+            &format!("  <style id=\"webchat-runtime-theme\">{inline_css}</style>\n</head>"),
+        );
+    }
+
+    html
+}
+
+fn render_webchat_inline_css(webchat: &crate::config::WebChatConfig) -> String {
+    let Some(accent) = webchat
+        .accent_color
+        .as_deref()
+        .filter(|value| is_safe_hex_color(value))
+    else {
+        return String::new();
+    };
+
+    format!(":root {{ --accent: {accent}; --accent-hover: {accent}; }}")
+}
+
+fn is_safe_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    matches!(bytes.len(), 4 | 7 | 9)
+        && bytes.first() == Some(&b'#')
+        && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
 async fn css_handler() -> impl IntoResponse {
@@ -2798,11 +2918,130 @@ struct ProviderInfo {
     default_context_size: u32,
     has_key: bool,
     env_key_name: String,
+    auth_kind: String,
 }
 
 #[derive(serde::Serialize)]
 struct ProvidersListResponse {
     providers: Vec<ProviderInfo>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct ProviderConfigEntry {
+    slug: String,
+    display_name: String,
+    api_style: String,
+    default_model: String,
+    env_key_name: String,
+    #[serde(default)]
+    has_key: bool,
+    #[serde(default)]
+    auth_required: bool,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    primary: bool,
+    #[serde(default)]
+    preferred_cheap: bool,
+    #[serde(default)]
+    discovery_supported: bool,
+    primary_model: Option<String>,
+    cheap_model: Option<String>,
+    suggested_primary_model: Option<String>,
+    suggested_cheap_model: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ProvidersConfigResponse {
+    routing_enabled: bool,
+    routing_mode: String,
+    cascade_enabled: bool,
+    tool_phase_synthesis_enabled: bool,
+    tool_phase_primary_thinking_enabled: bool,
+    compatible_base_url: Option<String>,
+    ollama_base_url: Option<String>,
+    bedrock_region: Option<String>,
+    bedrock_proxy_url: Option<String>,
+    llama_cpp_server_url: Option<String>,
+    primary_provider: Option<String>,
+    primary_model: Option<String>,
+    preferred_cheap_provider: Option<String>,
+    cheap_model: Option<String>,
+    #[serde(default)]
+    primary_pool_order: Vec<String>,
+    #[serde(default)]
+    cheap_pool_order: Vec<String>,
+    fallback_chain: Vec<String>,
+    policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
+    providers: Vec<ProviderConfigEntry>,
+    runtime_revision: Option<u64>,
+    last_reload_error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProvidersConfigWriteRequest {
+    routing_enabled: bool,
+    routing_mode: String,
+    cascade_enabled: bool,
+    tool_phase_synthesis_enabled: bool,
+    tool_phase_primary_thinking_enabled: bool,
+    compatible_base_url: Option<String>,
+    ollama_base_url: Option<String>,
+    bedrock_region: Option<String>,
+    bedrock_proxy_url: Option<String>,
+    llama_cpp_server_url: Option<String>,
+    primary_provider: Option<String>,
+    primary_model: Option<String>,
+    preferred_cheap_provider: Option<String>,
+    cheap_model: Option<String>,
+    #[serde(default)]
+    primary_pool_order: Vec<String>,
+    #[serde(default)]
+    cheap_pool_order: Vec<String>,
+    fallback_chain: Vec<String>,
+    policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
+    providers: Vec<ProviderConfigEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderModelOption {
+    id: String,
+    label: String,
+    context_length: Option<u32>,
+    source: String,
+    recommended_primary: bool,
+    recommended_cheap: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderModelsResponse {
+    slug: String,
+    display_name: String,
+    discovery_supported: bool,
+    discovery_status: String,
+    error: Option<String>,
+    current_primary_model: Option<String>,
+    current_cheap_model: Option<String>,
+    suggested_primary_model: Option<String>,
+    suggested_cheap_model: Option<String>,
+    models: Vec<ProviderModelOption>,
+}
+
+#[derive(serde::Deserialize)]
+struct RouteSimulateRequest {
+    prompt: String,
+    #[serde(default)]
+    has_vision: bool,
+    #[serde(default)]
+    has_tools: bool,
+    #[serde(default)]
+    requires_streaming: bool,
+}
+
+#[derive(serde::Serialize)]
+struct RouteSimulateResponse {
+    target: String,
+    reason: String,
 }
 
 async fn providers_list_handler(
@@ -2818,11 +3057,10 @@ async fn providers_list_handler(
 
     for (slug, endpoint) in entries {
         // Check if an API key is available (env var or secrets store).
-        let has_env =
-            crate::config::helpers::optional_env(endpoint.env_key_name)
-                .ok()
-                .flatten()
-                .is_some();
+        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+            .ok()
+            .flatten()
+            .is_some();
         let has_secret = if let Some(ss) = secrets {
             ss.exists(&state.user_id, endpoint.secret_name)
                 .await
@@ -2846,107 +3084,1621 @@ async fn providers_list_handler(
             default_context_size: endpoint.default_context_size,
             has_key: has_env || has_secret,
             env_key_name: endpoint.env_key_name.to_string(),
+            auth_kind: "api_key".to_string(),
         });
     }
+
+    let compat_has_key = crate::config::helpers::optional_env("LLM_API_KEY")
+        .ok()
+        .flatten()
+        .is_some()
+        || secret_exists(secrets, &state.user_id, "llm_compatible_api_key").await;
+    providers.push(ProviderInfo {
+        slug: "openai_compatible".to_string(),
+        display_name: "OpenAI-compatible".to_string(),
+        api_style: "openai_compatible".to_string(),
+        default_model: "default".to_string(),
+        default_context_size: 128_000,
+        has_key: compat_has_key,
+        env_key_name: "LLM_API_KEY".to_string(),
+        auth_kind: "api_key".to_string(),
+    });
+
+    let bedrock_has_key = crate::config::helpers::optional_env("BEDROCK_API_KEY")
+        .ok()
+        .flatten()
+        .is_some()
+        || crate::config::helpers::optional_env("AWS_BEARER_TOKEN_BEDROCK")
+            .ok()
+            .flatten()
+            .is_some()
+        || secret_exists(secrets, &state.user_id, "llm_bedrock_api_key").await
+        || crate::config::helpers::optional_env("BEDROCK_PROXY_API_KEY")
+            .ok()
+            .flatten()
+            .is_some()
+        || secret_exists(secrets, &state.user_id, "llm_bedrock_proxy_api_key").await;
+    providers.push(ProviderInfo {
+        slug: "bedrock".to_string(),
+        display_name: "AWS Bedrock".to_string(),
+        api_style: "bedrock".to_string(),
+        default_model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+        default_context_size: 200_000,
+        has_key: bedrock_has_key,
+        env_key_name: "BEDROCK_API_KEY".to_string(),
+        auth_kind: "api_key".to_string(),
+    });
+
+    providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
 
     Ok(Json(ProvidersListResponse { providers }))
 }
 
+async fn providers_config_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<ProvidersConfigResponse>, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
+        tracing::error!("Failed to load provider settings: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let settings = crate::settings::Settings::from_db_map(&map);
+    let providers_settings = crate::llm::normalize_providers_settings(&settings);
+    let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
+    let secrets = state.secrets_store.as_ref();
+    let providers =
+        build_routing_provider_entries(&state.user_id, &settings, &providers_settings, secrets)
+            .await;
+
+    Ok(Json(ProvidersConfigResponse {
+        routing_enabled: providers_settings.smart_routing_enabled,
+        routing_mode: providers_settings.routing_mode.as_str().to_string(),
+        cascade_enabled: providers_settings.smart_routing_cascade,
+        tool_phase_synthesis_enabled: providers_settings.tool_phase_synthesis_enabled,
+        tool_phase_primary_thinking_enabled: providers_settings.tool_phase_primary_thinking_enabled,
+        compatible_base_url: settings.openai_compatible_base_url.clone(),
+        ollama_base_url: settings.ollama_base_url.clone(),
+        bedrock_region: settings.bedrock_region.clone(),
+        bedrock_proxy_url: settings.bedrock_proxy_url.clone(),
+        llama_cpp_server_url: settings.llama_cpp_server_url.clone(),
+        primary_provider: providers_settings.primary.clone(),
+        primary_model: providers_settings.primary_model.clone(),
+        preferred_cheap_provider: providers_settings.preferred_cheap_provider.clone(),
+        cheap_model: providers_settings.cheap_model.clone(),
+        primary_pool_order: providers_settings.primary_pool_order.clone(),
+        cheap_pool_order: providers_settings.cheap_pool_order.clone(),
+        fallback_chain: providers_settings.fallback_chain.clone(),
+        policy_rules: providers_settings.policy_rules.clone(),
+        providers,
+        runtime_revision: runtime_status.as_ref().map(|status| status.revision),
+        last_reload_error: runtime_status.and_then(|status| status.last_error),
+    }))
+}
+
+async fn build_routing_provider_entries(
+    user_id: &str,
+    settings: &crate::settings::Settings,
+    providers_settings: &crate::settings::ProvidersSettings,
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+) -> Vec<ProviderConfigEntry> {
+    let mut providers = Vec::new();
+    let mut entries: Vec<_> = crate::config::provider_catalog::catalog().iter().collect();
+    entries.sort_by_key(|(slug, _)| *slug);
+
+    for (slug, endpoint) in entries {
+        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+            .ok()
+            .flatten()
+            .is_some();
+        let has_secret = secret_exists(secrets, user_id, endpoint.secret_name).await;
+        let primary_model = provider_primary_model_for_slug(
+            settings,
+            providers_settings,
+            slug,
+            endpoint.default_model,
+        );
+        let cheap_model = provider_cheap_model_for_slug(
+            settings,
+            providers_settings,
+            slug,
+            endpoint.default_model,
+        );
+        providers.push(ProviderConfigEntry {
+            slug: (*slug).to_string(),
+            display_name: endpoint.display_name.to_string(),
+            api_style: match endpoint.api_style {
+                crate::config::provider_catalog::ApiStyle::OpenAi => "openai",
+                crate::config::provider_catalog::ApiStyle::Anthropic => "anthropic",
+                crate::config::provider_catalog::ApiStyle::OpenAiCompatible => "openai_compatible",
+                crate::config::provider_catalog::ApiStyle::Ollama => "ollama",
+            }
+            .to_string(),
+            default_model: endpoint.default_model.to_string(),
+            env_key_name: endpoint.env_key_name.to_string(),
+            has_key: has_env || has_secret,
+            auth_required: true,
+            enabled: providers_settings
+                .enabled
+                .iter()
+                .any(|enabled| enabled == slug),
+            primary: providers_settings.primary.as_deref() == Some(slug),
+            preferred_cheap: providers_settings.preferred_cheap_provider.as_deref() == Some(slug),
+            discovery_supported: provider_supports_model_discovery(slug),
+            primary_model: primary_model.clone(),
+            cheap_model: cheap_model.clone(),
+            suggested_primary_model: primary_model
+                .or_else(|| Some(endpoint.default_model.to_string())),
+            suggested_cheap_model: cheap_model
+                .or_else(|| suggested_cheap_model_for_slug(slug, endpoint.default_model)),
+        });
+    }
+
+    providers.push(synthetic_provider_entry(
+        "ollama",
+        "Ollama",
+        "ollama",
+        settings
+            .selected_model
+            .as_deref()
+            .filter(|_| settings.llm_backend.as_deref() == Some("ollama"))
+            .unwrap_or("llama3"),
+        "OLLAMA_BASE_URL",
+        providers_settings,
+        settings,
+        true,
+        false,
+    ));
+
+    providers.push(synthetic_provider_entry(
+        "openai_compatible",
+        "OpenAI-compatible",
+        "openai_compatible",
+        settings
+            .selected_model
+            .as_deref()
+            .filter(|_| settings.llm_backend.as_deref() == Some("openai_compatible"))
+            .unwrap_or("default"),
+        "LLM_API_KEY",
+        providers_settings,
+        settings,
+        settings.openai_compatible_base_url.is_some()
+            || crate::config::helpers::optional_env("LLM_BASE_URL")
+                .ok()
+                .flatten()
+                .is_some()
+            || crate::config::helpers::optional_env("LLM_API_KEY")
+                .ok()
+                .flatten()
+                .is_some()
+            || secret_exists(secrets, user_id, "llm_compatible_api_key").await,
+        false,
+    ));
+
+    providers.push(synthetic_provider_entry(
+        "bedrock",
+        "AWS Bedrock",
+        "bedrock",
+        "anthropic.claude-3-sonnet-20240229-v1:0",
+        "BEDROCK_API_KEY",
+        providers_settings,
+        settings,
+        crate::config::helpers::optional_env("BEDROCK_API_KEY")
+            .ok()
+            .flatten()
+            .is_some()
+            || crate::config::helpers::optional_env("AWS_BEARER_TOKEN_BEDROCK")
+                .ok()
+                .flatten()
+                .is_some()
+            || secret_exists(secrets, user_id, "llm_bedrock_api_key").await
+            || crate::config::helpers::optional_env("BEDROCK_PROXY_API_KEY")
+                .ok()
+                .flatten()
+                .is_some()
+            || secret_exists(secrets, user_id, "llm_bedrock_proxy_api_key").await,
+        false,
+    ));
+
+    providers.push(synthetic_provider_entry(
+        "llama_cpp",
+        "llama.cpp",
+        "llama_cpp",
+        "llama-local",
+        "",
+        providers_settings,
+        settings,
+        true,
+        false,
+    ));
+
+    providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    providers
+}
+
+fn synthetic_provider_entry(
+    slug: &str,
+    display_name: &str,
+    api_style: &str,
+    default_model: &str,
+    env_key_name: &str,
+    providers_settings: &crate::settings::ProvidersSettings,
+    settings: &crate::settings::Settings,
+    has_key: bool,
+    auth_required: bool,
+) -> ProviderConfigEntry {
+    ProviderConfigEntry {
+        slug: slug.to_string(),
+        display_name: display_name.to_string(),
+        api_style: api_style.to_string(),
+        default_model: default_model.to_string(),
+        env_key_name: env_key_name.to_string(),
+        has_key,
+        auth_required,
+        enabled: providers_settings
+            .enabled
+            .iter()
+            .any(|enabled| enabled == slug),
+        primary: providers_settings.primary.as_deref() == Some(slug),
+        preferred_cheap: providers_settings.preferred_cheap_provider.as_deref() == Some(slug),
+        discovery_supported: provider_supports_model_discovery(slug),
+        primary_model: provider_primary_model_for_slug(
+            settings,
+            providers_settings,
+            slug,
+            default_model,
+        ),
+        cheap_model: provider_cheap_model_for_slug(
+            settings,
+            providers_settings,
+            slug,
+            default_model,
+        ),
+        suggested_primary_model: Some(default_model.to_string()),
+        suggested_cheap_model: suggested_cheap_model_for_slug(slug, default_model),
+    }
+}
+
+fn provider_primary_model_for_slug(
+    settings: &crate::settings::Settings,
+    providers_settings: &crate::settings::ProvidersSettings,
+    slug: &str,
+    default_model: &str,
+) -> Option<String> {
+    providers_settings
+        .provider_models
+        .get(slug)
+        .and_then(|slots| slots.primary.clone())
+        .or_else(|| {
+            if providers_settings.primary.as_deref() == Some(slug) {
+                providers_settings.primary_model.clone()
+            } else {
+                providers_settings
+                    .allowed_models
+                    .get(slug)
+                    .and_then(|models| models.first().cloned())
+            }
+        })
+        .or_else(|| {
+            if matches!(
+                settings.llm_backend.as_deref(),
+                Some(current) if current == slug || (slug == "openrouter" && current == "openai_compatible")
+            ) {
+                settings.selected_model.clone()
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if providers_settings
+                .enabled
+                .iter()
+                .any(|enabled| enabled == slug)
+            {
+                Some(default_model.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn provider_cheap_model_for_slug(
+    settings: &crate::settings::Settings,
+    providers_settings: &crate::settings::ProvidersSettings,
+    slug: &str,
+    default_model: &str,
+) -> Option<String> {
+    providers_settings
+        .provider_models
+        .get(slug)
+        .and_then(|slots| slots.cheap.clone())
+        .or_else(|| {
+            providers_settings
+                .cheap_model
+                .as_deref()
+                .and_then(|spec| spec.split_once('/'))
+                .and_then(|(cheap_slug, model)| {
+                    if cheap_slug == slug {
+                        Some(model.to_string())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .or_else(|| suggested_cheap_model_for_slug(slug, default_model))
+        .or_else(|| {
+            provider_primary_model_for_slug(settings, providers_settings, slug, default_model)
+        })
+}
+
+fn suggested_cheap_model_for_slug(slug: &str, default_model: &str) -> Option<String> {
+    match slug {
+        "openai" => Some("gpt-4o-mini".to_string()),
+        "anthropic" => Some("claude-3-5-haiku-latest".to_string()),
+        "gemini" => Some("gemini-2.5-flash-lite".to_string()),
+        "minimax" => Some("MiniMax-M2.5-highspeed".to_string()),
+        "cohere" => Some("command-r7b-12-2024".to_string()),
+        "openrouter" => Some("openai/gpt-4o-mini".to_string()),
+        "tinfoil" => Some("kimi-k2-5".to_string()),
+        _ if !default_model.is_empty() => Some(default_model.to_string()),
+        _ => None,
+    }
+}
+
+fn provider_supports_model_discovery(slug: &str) -> bool {
+    crate::config::provider_catalog::endpoint_for(slug).is_some()
+        || matches!(
+            slug,
+            "ollama" | "openai_compatible" | "bedrock" | "llama_cpp"
+        )
+}
+
+async fn build_provider_models_response(
+    user_id: &str,
+    slug: &str,
+    settings: &crate::settings::Settings,
+    providers_settings: &crate::settings::ProvidersSettings,
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+) -> ProviderModelsResponse {
+    let (display_name, default_model) = provider_identity(slug);
+    let current_primary_model =
+        provider_primary_model_for_slug(settings, providers_settings, slug, default_model.as_str());
+    let current_cheap_model =
+        provider_cheap_model_for_slug(settings, providers_settings, slug, default_model.as_str());
+    let discovery_supported = provider_supports_model_discovery(slug);
+
+    if !discovery_supported {
+        let suggested_primary_model = current_primary_model
+            .clone()
+            .or_else(|| Some(default_model.clone()));
+        let suggested_cheap_model = current_cheap_model
+            .clone()
+            .or_else(|| suggested_cheap_model_for_slug(slug, default_model.as_str()));
+        return ProviderModelsResponse {
+            slug: slug.to_string(),
+            display_name,
+            discovery_supported: false,
+            discovery_status: "unsupported".to_string(),
+            error: None,
+            current_primary_model: current_primary_model.clone(),
+            current_cheap_model: current_cheap_model.clone(),
+            suggested_primary_model: suggested_primary_model.clone(),
+            suggested_cheap_model: suggested_cheap_model.clone(),
+            models: fallback_provider_model_options(
+                slug,
+                default_model.as_str(),
+                current_primary_model.as_deref(),
+                current_cheap_model.as_deref(),
+                suggested_primary_model.as_deref(),
+                suggested_cheap_model.as_deref(),
+            ),
+        };
+    }
+
+    match discover_provider_models(user_id, slug, settings, secrets).await {
+        Ok(result) => {
+            let (
+                discovered_models,
+                suggested_primary_model,
+                suggested_cheap_model,
+                has_live_models,
+            ) = provider_model_options_from_discovery(
+                slug,
+                default_model.as_str(),
+                result.models,
+                current_primary_model.as_deref(),
+                current_cheap_model.as_deref(),
+            );
+            if result.error.is_some() || !has_live_models {
+                let fallback_primary_model = current_primary_model
+                    .clone()
+                    .or_else(|| Some(default_model.clone()));
+                let fallback_cheap_model = current_cheap_model
+                    .clone()
+                    .or_else(|| suggested_cheap_model_for_slug(slug, default_model.as_str()));
+                ProviderModelsResponse {
+                    slug: slug.to_string(),
+                    display_name,
+                    discovery_supported: true,
+                    discovery_status: "fallback".to_string(),
+                    error: result.error,
+                    current_primary_model: current_primary_model.clone(),
+                    current_cheap_model: current_cheap_model.clone(),
+                    suggested_primary_model: fallback_primary_model.clone(),
+                    suggested_cheap_model: fallback_cheap_model.clone(),
+                    models: fallback_provider_model_options(
+                        slug,
+                        default_model.as_str(),
+                        current_primary_model.as_deref(),
+                        current_cheap_model.as_deref(),
+                        fallback_primary_model.as_deref(),
+                        fallback_cheap_model.as_deref(),
+                    ),
+                }
+            } else {
+                ProviderModelsResponse {
+                    slug: slug.to_string(),
+                    display_name,
+                    discovery_supported: true,
+                    discovery_status: "discovered".to_string(),
+                    error: result.error,
+                    current_primary_model,
+                    current_cheap_model,
+                    suggested_primary_model,
+                    suggested_cheap_model,
+                    models: discovered_models,
+                }
+            }
+        }
+        Err(error) => {
+            let suggested_primary_model = current_primary_model
+                .clone()
+                .or_else(|| Some(default_model.clone()));
+            let suggested_cheap_model = current_cheap_model
+                .clone()
+                .or_else(|| suggested_cheap_model_for_slug(slug, default_model.as_str()));
+            ProviderModelsResponse {
+                slug: slug.to_string(),
+                display_name,
+                discovery_supported: true,
+                discovery_status: "fallback".to_string(),
+                error: Some(error),
+                current_primary_model: current_primary_model.clone(),
+                current_cheap_model: current_cheap_model.clone(),
+                suggested_primary_model: suggested_primary_model.clone(),
+                suggested_cheap_model: suggested_cheap_model.clone(),
+                models: fallback_provider_model_options(
+                    slug,
+                    default_model.as_str(),
+                    current_primary_model.as_deref(),
+                    current_cheap_model.as_deref(),
+                    suggested_primary_model.as_deref(),
+                    suggested_cheap_model.as_deref(),
+                ),
+            }
+        }
+    }
+}
+
+fn provider_identity(slug: &str) -> (String, String) {
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
+        return (
+            endpoint.display_name.to_string(),
+            endpoint.default_model.to_string(),
+        );
+    }
+
+    match slug {
+        "ollama" => ("Ollama".to_string(), "llama3".to_string()),
+        "openai_compatible" => ("OpenAI-compatible".to_string(), "default".to_string()),
+        "bedrock" => (
+            "AWS Bedrock".to_string(),
+            "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+        ),
+        "llama_cpp" => ("llama.cpp".to_string(), "llama-local".to_string()),
+        other => (other.to_string(), "default".to_string()),
+    }
+}
+
+async fn discover_provider_models(
+    user_id: &str,
+    slug: &str,
+    settings: &crate::settings::Settings,
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+) -> Result<crate::llm::discovery::DiscoveryResult, String> {
+    let discovery = crate::llm::discovery::ModelDiscovery::new();
+
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
+        let missing_credentials =
+            || format!("{} credentials are not configured", endpoint.display_name);
+        return match endpoint.api_style {
+            crate::config::provider_catalog::ApiStyle::Anthropic => {
+                let api_key = resolve_provider_secret(
+                    user_id,
+                    endpoint.env_key_name,
+                    endpoint.secret_name,
+                    secrets,
+                )
+                .await
+                .ok_or_else(missing_credentials)?;
+                Ok(discovery.discover_anthropic(&api_key).await)
+            }
+            crate::config::provider_catalog::ApiStyle::Ollama => {
+                let base_url = settings
+                    .ollama_base_url
+                    .clone()
+                    .or_else(|| {
+                        crate::config::helpers::optional_env("OLLAMA_BASE_URL")
+                            .ok()
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| endpoint.base_url.to_string());
+                Ok(discovery.discover_ollama(&base_url).await)
+            }
+            crate::config::provider_catalog::ApiStyle::OpenAi
+            | crate::config::provider_catalog::ApiStyle::OpenAiCompatible => {
+                let api_key = resolve_provider_secret(
+                    user_id,
+                    endpoint.env_key_name,
+                    endpoint.secret_name,
+                    secrets,
+                )
+                .await;
+                if slug == "cohere" {
+                    let api_key = api_key.ok_or_else(missing_credentials)?;
+                    Ok(discovery.discover_cohere(&api_key).await)
+                } else {
+                    let auth = Some(format!(
+                        "Bearer {}",
+                        api_key.ok_or_else(missing_credentials)?
+                    ));
+                    Ok(discovery
+                        .discover_openai_compatible(endpoint.base_url, auth.as_deref())
+                        .await)
+                }
+            }
+        };
+    }
+
+    match slug {
+        "ollama" => {
+            let base_url = settings
+                .ollama_base_url
+                .clone()
+                .or_else(|| {
+                    crate::config::helpers::optional_env("OLLAMA_BASE_URL")
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "http://localhost:11434".to_string());
+            Ok(discovery.discover_ollama(&base_url).await)
+        }
+        "openai_compatible" => {
+            let base_url = settings
+                .openai_compatible_base_url
+                .clone()
+                .or_else(|| {
+                    crate::config::helpers::optional_env("LLM_BASE_URL")
+                        .ok()
+                        .flatten()
+                })
+                .ok_or_else(|| "Set a compatible base URL before discovering models".to_string())?;
+            let auth =
+                resolve_provider_secret(user_id, "LLM_API_KEY", "llm_compatible_api_key", secrets)
+                    .await
+                    .map(|key| format!("Bearer {key}"));
+            Ok(discovery
+                .discover_openai_compatible(&base_url, auth.as_deref())
+                .await)
+        }
+        "bedrock" => {
+            let (base_url, auth) =
+                resolve_bedrock_discovery_target(user_id, settings, secrets).await?;
+            Ok(discovery
+                .discover_openai_compatible(&base_url, auth.as_deref())
+                .await)
+        }
+        "llama_cpp" => {
+            let base_url = settings
+                .llama_cpp_server_url
+                .clone()
+                .or_else(|| {
+                    crate::config::helpers::optional_env("LLAMA_SERVER_URL")
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "http://localhost:8080".to_string());
+            Ok(discovery.discover_openai_compatible(&base_url, None).await)
+        }
+        other => Err(format!("Model discovery is not supported for '{}'", other)),
+    }
+}
+
+async fn resolve_provider_secret(
+    user_id: &str,
+    env_key: &str,
+    secret_name: &str,
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    crate::config::resolve_provider_secret_value(user_id, env_key, secret_name, secrets).await
+}
+
+async fn resolve_bedrock_discovery_target(
+    user_id: &str,
+    settings: &crate::settings::Settings,
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+) -> Result<(String, Option<String>), String> {
+    let region = settings
+        .bedrock_region
+        .clone()
+        .or_else(|| {
+            crate::config::helpers::optional_env("AWS_REGION")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| "us-east-1".to_string());
+
+    if let Some(api_key) =
+        resolve_provider_secret(user_id, "BEDROCK_API_KEY", "llm_bedrock_api_key", secrets).await
+    {
+        return Ok((
+            crate::llm::discovery::bedrock_mantle_base_url(&region),
+            Some(format!("Bearer {api_key}")),
+        ));
+    }
+
+    if let Some(proxy_url) = settings.bedrock_proxy_url.clone().or_else(|| {
+        crate::config::helpers::optional_env("BEDROCK_PROXY_URL")
+            .ok()
+            .flatten()
+    }) {
+        let auth = resolve_provider_secret(
+            user_id,
+            "BEDROCK_PROXY_API_KEY",
+            "llm_bedrock_proxy_api_key",
+            secrets,
+        )
+        .await
+        .map(|key| format!("Bearer {key}"));
+        return Ok((proxy_url, auth));
+    }
+
+    Err(
+        "Configure BEDROCK_API_KEY for native Bedrock access or set a legacy Bedrock proxy URL."
+            .to_string(),
+    )
+}
+
+fn provider_model_options_from_discovery(
+    slug: &str,
+    default_model: &str,
+    discovered: Vec<crate::llm::discovery::DiscoveredModel>,
+    current_primary_model: Option<&str>,
+    current_cheap_model: Option<&str>,
+) -> (
+    Vec<ProviderModelOption>,
+    Option<String>,
+    Option<String>,
+    bool,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut discovered_map = BTreeMap::new();
+    for model in discovered.into_iter().filter(|model| {
+        // For OpenAI, apply the strict chat-family filter to drop snapshots,
+        // audio, realtime, fine-tuned, and deprecated models.
+        if slug == "openai" {
+            crate::llm::discovery::is_openai_chat_model(&model.id)
+        } else {
+            model.is_chat
+        }
+    }) {
+        discovered_map.entry(model.id.clone()).or_insert(model);
+    }
+
+    let has_live_models = !discovered_map.is_empty();
+    let current_primary_model =
+        current_primary_model.filter(|model| discovered_map.contains_key(*model));
+    let current_cheap_model =
+        current_cheap_model.filter(|model| discovered_map.contains_key(*model));
+    let suggested_provider_cheap = suggested_cheap_model_for_slug(slug, default_model)
+        .filter(|model| discovered_map.contains_key(model.as_str()));
+
+    let suggested_primary_model = current_primary_model
+        .map(str::to_string)
+        .or_else(|| {
+            discovered_map
+                .keys()
+                .max_by_key(|model| primary_model_rank(model))
+                .cloned()
+        })
+        .or_else(|| {
+            if has_live_models {
+                None
+            } else {
+                Some(default_model.to_string())
+            }
+        });
+
+    let suggested_cheap_model = current_cheap_model
+        .map(str::to_string)
+        .or_else(|| suggested_provider_cheap.clone())
+        .or_else(|| {
+            discovered_map
+                .keys()
+                .max_by_key(|model| cheap_model_rank(model))
+                .cloned()
+        })
+        .or_else(|| {
+            if has_live_models {
+                suggested_primary_model.clone()
+            } else {
+                suggested_cheap_model_for_slug(slug, default_model)
+                    .or_else(|| suggested_primary_model.clone())
+            }
+        });
+
+    let mut model_ids = BTreeSet::new();
+    let mut ordered_ids = Vec::new();
+    for id in discovered_map.keys() {
+        if model_ids.insert(id.clone()) {
+            ordered_ids.push(id.clone());
+        }
+    }
+
+    ordered_ids.sort_by(|a, b| {
+        if matches!(slug, "openai" | "minimax" | "cohere") {
+            let priority = |model: &String| match slug {
+                "openai" => crate::llm::discovery::openai_model_priority(model),
+                "minimax" => crate::llm::discovery::minimax_model_priority(model),
+                "cohere" => crate::llm::discovery::cohere_model_priority(model),
+                _ => usize::MAX,
+            };
+            priority(a).cmp(&priority(b))
+        } else {
+            // All others: use the generic display rank (higher = better)
+            model_display_rank(
+                a,
+                suggested_primary_model.as_deref(),
+                suggested_cheap_model.as_deref(),
+                current_primary_model,
+                current_cheap_model,
+            )
+            .cmp(&model_display_rank(
+                b,
+                suggested_primary_model.as_deref(),
+                suggested_cheap_model.as_deref(),
+                current_primary_model,
+                current_cheap_model,
+            ))
+            .reverse()
+            .then_with(|| a.cmp(b))
+        }
+    });
+    let models = ordered_ids
+        .into_iter()
+        .map(|id| {
+            let discovered = discovered_map.get(&id);
+            ProviderModelOption {
+                id: id.clone(),
+                label: discovered
+                    .map(|model| model.name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| id.clone()),
+                context_length: discovered.and_then(|model| model.context_length),
+                source: if discovered.is_some() {
+                    "discovered".to_string()
+                } else {
+                    "configured".to_string()
+                },
+                recommended_primary: suggested_primary_model.as_deref() == Some(id.as_str()),
+                recommended_cheap: suggested_cheap_model.as_deref() == Some(id.as_str()),
+            }
+        })
+        .collect();
+
+    (
+        models,
+        suggested_primary_model,
+        suggested_cheap_model,
+        has_live_models,
+    )
+}
+
+fn fallback_provider_model_options(
+    slug: &str,
+    default_model: &str,
+    current_primary_model: Option<&str>,
+    current_cheap_model: Option<&str>,
+    suggested_primary_model: Option<&str>,
+    suggested_cheap_model: Option<&str>,
+) -> Vec<ProviderModelOption> {
+    use std::collections::BTreeSet;
+
+    let mut seen = BTreeSet::new();
+    let mut models = Vec::new();
+
+    // 1. Always include configured/suggested/default entries first.
+    for id in [
+        current_primary_model,
+        current_cheap_model,
+        suggested_primary_model,
+        suggested_cheap_model,
+        Some(default_model),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if seen.insert(id.to_string()) {
+            models.push(ProviderModelOption {
+                id: id.to_string(),
+                label: id.to_string(),
+                context_length: None,
+                source: if id == default_model {
+                    "default".to_string()
+                } else {
+                    "configured".to_string()
+                },
+                recommended_primary: suggested_primary_model == Some(id),
+                recommended_cheap: suggested_cheap_model == Some(id),
+            });
+        }
+    }
+
+    // 2. Inject curated static fallbacks per provider (matches wizard quality).
+    for (static_id, _label) in static_fallback_models(slug) {
+        if seen.insert(static_id.to_string()) {
+            models.push(ProviderModelOption {
+                id: static_id.to_string(),
+                label: static_id.to_string(),
+                context_length: None,
+                source: "curated".to_string(),
+                recommended_primary: false,
+                recommended_cheap: false,
+            });
+        }
+    }
+
+    if models.is_empty() && !default_model.is_empty() {
+        models.push(ProviderModelOption {
+            id: default_model.to_string(),
+            label: default_model.to_string(),
+            context_length: None,
+            source: "default".to_string(),
+            recommended_primary: true,
+            recommended_cheap: suggested_cheap_model_for_slug(slug, default_model).as_deref()
+                == Some(default_model),
+        });
+    }
+
+    models
+}
+
+/// Curated static model IDs per provider, used as fallback when live
+/// discovery fails. Matches the wizard's static defaults.
+fn static_fallback_models(slug: &str) -> Vec<(&'static str, &'static str)> {
+    match slug {
+        "anthropic" => vec![
+            ("claude-opus-4-6", "Claude Opus 4.6 (latest)"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-opus-4-5", "Claude Opus 4.5"),
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5 (fast)"),
+        ],
+        "openai" => vec![
+            ("gpt-5.3-codex", "GPT-5.3 Codex (latest)"),
+            ("gpt-5.2-codex", "GPT-5.2 Codex"),
+            ("gpt-5.2", "GPT-5.2"),
+            ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini (fast)"),
+            ("gpt-5", "GPT-5"),
+            ("gpt-5-mini", "GPT-5 Mini"),
+            ("gpt-4.1", "GPT-4.1"),
+            ("gpt-4.1-mini", "GPT-4.1 Mini"),
+            ("o4-mini", "o4-mini (fast reasoning)"),
+            ("o3", "o3 (reasoning)"),
+        ],
+        "gemini" => vec![
+            ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+        ],
+        "groq" => vec![
+            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+            ("llama-3.1-8b-instant", "Llama 3.1 8B Instant"),
+        ],
+        "mistral" => vec![
+            ("mistral-large-latest", "Mistral Large"),
+            ("mistral-small-latest", "Mistral Small"),
+        ],
+        "xai" => vec![("grok-3", "Grok 3"), ("grok-3-mini", "Grok 3 Mini")],
+        "deepseek" => vec![
+            ("deepseek-chat", "DeepSeek Chat"),
+            ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ],
+        "openrouter" => vec![
+            (
+                "anthropic/claude-sonnet-4-20250514",
+                "Claude Sonnet 4 (via OR)",
+            ),
+            ("openai/gpt-5.3-codex", "GPT-5.3 Codex (via OR)"),
+            ("google/gemini-2.5-flash", "Gemini 2.5 Flash (via OR)"),
+        ],
+        "together" => vec![
+            (
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                "Llama 3.3 70B Turbo",
+            ),
+            (
+                "meta-llama/Llama-3.1-8B-Instruct-Turbo",
+                "Llama 3.1 8B Turbo",
+            ),
+        ],
+        "cerebras" => vec![("llama-3.3-70b", "Llama 3.3 70B")],
+        "nvidia" => vec![("meta/llama-3.3-70b-instruct", "Llama 3.3 70B")],
+        "minimax" => vec![
+            ("MiniMax-M2.7", "MiniMax M2.7"),
+            ("MiniMax-M2.5", "MiniMax M2.5"),
+            ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
+            ("MiniMax-M2.1", "MiniMax M2.1"),
+            ("MiniMax-M2.1-highspeed", "MiniMax M2.1 Highspeed"),
+            ("MiniMax-M2", "MiniMax M2"),
+        ],
+        "cohere" => vec![
+            ("command-a-03-2025", "Command A"),
+            ("command-r-plus-08-2024", "Command R+"),
+            ("command-r-08-2024", "Command R"),
+            ("command-r7b-12-2024", "Command R7B"),
+        ],
+        "tinfoil" => vec![("kimi-k2-5", "Kimi K2.5")],
+        _ => vec![],
+    }
+}
+
+fn primary_model_rank(model: &str) -> i32 {
+    let lower = model.to_lowercase();
+    let mut score = 0;
+    if lower.contains("pro")
+        || lower.contains("sonnet")
+        || lower.contains("opus")
+        || lower.contains("command-a")
+        || lower.contains("4o")
+        || lower.contains("large")
+        || lower.contains("70b")
+    {
+        score += 40;
+    }
+    if lower.contains("m2.7") {
+        score += 52;
+    } else if lower.contains("m2.5") && !lower.contains("highspeed") {
+        score += 48;
+    } else if lower.contains("m2.1") && !lower.contains("highspeed") {
+        score += 44;
+    } else if lower.contains("command-r-plus") {
+        score += 34;
+    }
+    if lower.contains("mini")
+        || lower.contains("haiku")
+        || lower.contains("flash-lite")
+        || lower.contains("nano")
+        || lower.contains("small")
+        || lower.contains("8b")
+        || lower.contains("instant")
+    {
+        score -= 18;
+    }
+    if lower.contains("highspeed") || lower.contains("r7b") {
+        score -= 14;
+    }
+    if lower.contains("embedding")
+        || lower.contains("audio")
+        || lower.contains("tts")
+        || lower.contains("image")
+        || lower.contains("moderation")
+    {
+        score -= 100;
+    }
+    score
+}
+
+fn cheap_model_rank(model: &str) -> i32 {
+    let lower = model.to_lowercase();
+    let mut score = 0;
+    if lower.contains("mini")
+        || lower.contains("haiku")
+        || lower.contains("flash-lite")
+        || lower.contains("flash")
+        || lower.contains("nano")
+        || lower.contains("small")
+        || lower.contains("instant")
+        || lower.contains("8b")
+    {
+        score += 45;
+    }
+    if lower.contains("highspeed") || lower.contains("r7b") {
+        score += 42;
+    }
+    if lower.contains("pro")
+        || lower.contains("opus")
+        || lower.contains("sonnet")
+        || lower.contains("command-a")
+        || lower.contains("large")
+        || lower.contains("70b")
+    {
+        score -= 18;
+    }
+    if lower.contains("embedding")
+        || lower.contains("audio")
+        || lower.contains("tts")
+        || lower.contains("image")
+        || lower.contains("moderation")
+    {
+        score -= 100;
+    }
+    score
+}
+
+fn model_display_rank(
+    model: &str,
+    suggested_primary_model: Option<&str>,
+    suggested_cheap_model: Option<&str>,
+    current_primary_model: Option<&str>,
+    current_cheap_model: Option<&str>,
+) -> i32 {
+    let mut score = primary_model_rank(model).max(cheap_model_rank(model));
+    if suggested_primary_model == Some(model) {
+        score += 60;
+    }
+    if suggested_cheap_model == Some(model) {
+        score += 50;
+    }
+    if current_primary_model == Some(model) {
+        score += 40;
+    }
+    if current_cheap_model == Some(model) {
+        score += 35;
+    }
+    score
+}
+
+async fn secret_exists(
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    secret_name: &str,
+) -> bool {
+    if let Some(ss) = secrets {
+        ss.exists(user_id, secret_name).await.unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+async fn providers_config_set_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<ProvidersConfigWriteRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
+        tracing::error!(
+            "Failed to load settings before provider config write: {}",
+            e
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let mut settings = crate::settings::Settings::from_db_map(&map);
+
+    settings.providers.smart_routing_enabled = body.routing_enabled;
+    settings.providers.routing_mode = match body.routing_mode.as_str() {
+        "cheap_split" => crate::settings::RoutingMode::CheapSplit,
+        "policy" => crate::settings::RoutingMode::Policy,
+        _ => crate::settings::RoutingMode::PrimaryOnly,
+    };
+    settings.providers.smart_routing_cascade = body.cascade_enabled;
+    settings.providers.tool_phase_synthesis_enabled = body.tool_phase_synthesis_enabled;
+    settings.providers.tool_phase_primary_thinking_enabled =
+        body.tool_phase_primary_thinking_enabled;
+    settings.openai_compatible_base_url = body
+        .compatible_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.ollama_base_url = body
+        .ollama_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.bedrock_region = body
+        .bedrock_region
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.bedrock_proxy_url = body
+        .bedrock_proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.llama_cpp_server_url = body
+        .llama_cpp_server_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.providers.primary = body.primary_provider.clone();
+    settings.providers.primary_model = body
+        .primary_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.providers.preferred_cheap_provider = body.preferred_cheap_provider.clone();
+    settings.providers.cheap_model = body
+        .cheap_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    settings.providers.primary_pool_order = body.primary_pool_order.clone();
+    settings.providers.cheap_pool_order = body.cheap_pool_order.clone();
+    settings.providers.fallback_chain = body.fallback_chain.clone();
+    settings.providers.policy_rules = body.policy_rules.clone();
+    settings.providers.enabled = body
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| provider.slug.clone())
+        .collect();
+    let previous_provider_models = settings.providers.provider_models.clone();
+    let previous_allowed_models = settings.providers.allowed_models.clone();
+    settings.providers.allowed_models.clear();
+    settings.providers.provider_models.clear();
+
+    for provider in &body.providers {
+        let previous_slots = previous_provider_models.get(&provider.slug);
+        let (primary_model, cheap_model, should_persist_slots) = resolve_saved_provider_models(
+            provider,
+            previous_slots,
+            previous_allowed_models.get(&provider.slug),
+        );
+
+        if should_persist_slots {
+            settings.providers.provider_models.insert(
+                provider.slug.clone(),
+                crate::settings::ProviderModelSlots {
+                    primary: primary_model.clone(),
+                    cheap: cheap_model.clone(),
+                },
+            );
+        }
+
+        if provider.primary {
+            settings.providers.primary = Some(provider.slug.clone());
+            settings.providers.primary_model = primary_model.clone();
+        }
+        if provider.preferred_cheap {
+            settings.providers.preferred_cheap_provider = Some(provider.slug.clone());
+        }
+        if provider.enabled
+            && let Some(model) = primary_model.as_deref()
+        {
+            settings
+                .providers
+                .allowed_models
+                .insert(provider.slug.clone(), vec![model.to_string()]);
+        }
+    }
+
+    let enabled_set: std::collections::HashSet<String> =
+        settings.providers.enabled.iter().cloned().collect();
+    settings.providers.primary = settings
+        .providers
+        .primary
+        .filter(|slug| enabled_set.contains(slug));
+    settings.providers.preferred_cheap_provider = settings
+        .providers
+        .preferred_cheap_provider
+        .filter(|slug| enabled_set.contains(slug));
+    settings.providers.primary_pool_order =
+        unique_enabled_provider_order(&settings.providers.primary_pool_order, &enabled_set);
+    settings.providers.cheap_pool_order =
+        unique_enabled_provider_order(&settings.providers.cheap_pool_order, &enabled_set);
+    settings
+        .providers
+        .fallback_chain
+        .retain(|entry| route_target_is_available_for_enabled_providers(entry, &enabled_set));
+
+    if let Some(primary_slug) = settings.providers.primary.clone() {
+        settings.providers.primary_model = settings
+            .providers
+            .provider_models
+            .get(&primary_slug)
+            .and_then(|slots| slots.primary.clone())
+            .or(settings.providers.primary_model.clone());
+    }
+
+    if let Some(preferred_cheap_slug) = settings.providers.preferred_cheap_provider.clone() {
+        settings.providers.cheap_model = settings
+            .providers
+            .provider_models
+            .get(&preferred_cheap_slug)
+            .and_then(|slots| {
+                slots
+                    .cheap
+                    .as_ref()
+                    .map(|model| format!("{preferred_cheap_slug}/{model}"))
+            })
+            .or(settings.providers.cheap_model.clone());
+    } else if settings.providers.cheap_model.is_none() {
+        settings.providers.cheap_model =
+            settings
+                .providers
+                .provider_models
+                .iter()
+                .find_map(|(slug, slots)| {
+                    enabled_set
+                        .contains(slug)
+                        .then(|| slots.cheap.as_ref().map(|model| format!("{slug}/{model}")))
+                        .flatten()
+                });
+    }
+
+    sync_legacy_llm_settings(&mut settings);
+    let next_settings_map = settings.to_db_map();
+    let stale_provider_keys = stale_provider_namespace_keys(&map, &next_settings_map);
+
+    for key in stale_provider_keys {
+        store
+            .delete_setting(&state.user_id, &key)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to delete stale provider setting '{}': {}", key, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
+
+    store
+        .set_all_settings(&state.user_id, &next_settings_map)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to save provider config: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    reload_llm_runtime(state.as_ref()).await.map_err(|e| {
+        tracing::error!("Provider config reload failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn trimmed_optional_model(value: Option<&String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn resolve_saved_provider_models(
+    provider: &ProviderConfigEntry,
+    previous_slots: Option<&crate::settings::ProviderModelSlots>,
+    previous_allowed_models: Option<&Vec<String>>,
+) -> (Option<String>, Option<String>, bool) {
+    let previous_primary_model = previous_slots
+        .and_then(|slots| slots.primary.clone())
+        .or_else(|| previous_allowed_models.and_then(|models| models.first().cloned()));
+    let previous_cheap_model = previous_slots.and_then(|slots| slots.cheap.clone());
+    let incoming_primary_model = trimmed_optional_model(provider.primary_model.as_ref());
+    let incoming_cheap_model = trimmed_optional_model(provider.cheap_model.as_ref());
+    let suggested_primary_model = trimmed_optional_model(provider.suggested_primary_model.as_ref())
+        .or_else(|| previous_primary_model.clone())
+        .or_else(|| {
+            if provider.enabled || provider.primary {
+                Some(provider.default_model.clone())
+            } else {
+                None
+            }
+        });
+    let primary_model = incoming_primary_model
+        .clone()
+        .or_else(|| previous_primary_model.clone())
+        .or_else(|| suggested_primary_model.clone());
+    let suggested_cheap_model = trimmed_optional_model(provider.suggested_cheap_model.as_ref())
+        .or_else(|| previous_cheap_model.clone())
+        .or_else(|| primary_model.clone());
+    let cheap_model = incoming_cheap_model
+        .clone()
+        .or_else(|| previous_cheap_model.clone())
+        .or_else(|| suggested_cheap_model.clone())
+        .or_else(|| primary_model.clone());
+    let should_persist_slots = provider.enabled
+        || provider.primary
+        || provider.preferred_cheap
+        || incoming_primary_model.is_some()
+        || incoming_cheap_model.is_some()
+        || previous_slots.is_some();
+
+    (primary_model, cheap_model, should_persist_slots)
+}
+
+fn stale_provider_namespace_keys(
+    previous: &std::collections::HashMap<String, serde_json::Value>,
+    next: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    const PROVIDER_OBJECT_PREFIXES: &[&str] =
+        &["providers.allowed_models.", "providers.provider_models."];
+
+    previous
+        .keys()
+        .filter(|key| {
+            PROVIDER_OBJECT_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+                && !next.contains_key(*key)
+        })
+        .cloned()
+        .collect()
+}
+
+fn unique_enabled_provider_order(
+    entries: &[String],
+    enabled: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut unique = Vec::new();
+    for entry in entries {
+        if enabled.contains(entry) && !unique.iter().any(|existing| existing == entry) {
+            unique.push(entry.clone());
+        }
+    }
+    unique
+}
+
+fn route_target_is_available_for_enabled_providers(
+    target: &str,
+    enabled: &std::collections::HashSet<String>,
+) -> bool {
+    if matches!(target, "primary" | "cheap") {
+        return true;
+    }
+    if let Some(slug) = target
+        .strip_suffix("@primary")
+        .or_else(|| target.strip_suffix("@cheap"))
+    {
+        return enabled.contains(slug);
+    }
+    if let Some((slug, _)) = target.split_once('/') {
+        return enabled.contains(slug);
+    }
+    false
+}
+
+async fn provider_models_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(slug): Path<String>,
+) -> Result<Json<ProviderModelsResponse>, StatusCode> {
+    let settings = if let Some(ref store) = state.store {
+        let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
+            tracing::error!(
+                "Failed to load provider settings for model discovery: {}",
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        crate::settings::Settings::from_db_map(&map)
+    } else {
+        crate::settings::Settings::load()
+    };
+
+    let providers_settings = crate::llm::normalize_providers_settings(&settings);
+    let response = build_provider_models_response(
+        &state.user_id,
+        &slug,
+        &settings,
+        &providers_settings,
+        state.secrets_store.as_ref(),
+    )
+    .await;
+
+    Ok(Json(response))
+}
+
+async fn providers_route_simulate_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<RouteSimulateRequest>,
+) -> Result<Json<RouteSimulateResponse>, StatusCode> {
+    let runtime = state
+        .llm_runtime
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let ctx = crate::llm::routing_policy::RoutingContext {
+        estimated_input_tokens: (body.prompt.len() / 4) as u32,
+        has_vision: body.has_vision,
+        has_tools: body.has_tools,
+        requires_streaming: body.requires_streaming,
+        budget_usd: None,
+    };
+    let (target, reason) = runtime.simulate_route_for_prompt(ctx, Some(body.prompt.as_str()));
+    Ok(Json(RouteSimulateResponse { target, reason }))
+}
+
 #[derive(serde::Deserialize)]
 struct ProviderKeyRequest {
-    api_key: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 async fn providers_save_key_handler(
     State(state): State<Arc<GatewayState>>,
     Path(slug): Path<String>,
     Json(body): Json<ProviderKeyRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Validate provider exists in catalog.
-    let endpoint = crate::config::provider_catalog::endpoint_for(&slug)
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     let secrets = state
         .secrets_store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let spec = provider_credential_spec(&slug).ok_or(StatusCode::NOT_FOUND)?;
 
-    if body.api_key.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+    match &spec {
+        ProviderCredentialSpec::ApiKey { secret_name, .. } => {
+            let api_key = body.api_key.as_deref().unwrap_or("").trim().to_string();
+            if api_key.is_empty() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let _ = secrets.delete(&state.user_id, secret_name).await;
+            let params = crate::secrets::CreateSecretParams::new(*secret_name, api_key)
+                .with_provider(slug.clone());
+            secrets.create(&state.user_id, params).await.map_err(|e| {
+                tracing::error!("Failed to save API key for '{}': {}", slug, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
     }
-
-    // Delete existing secret if present, then create a new one.
-    let _ = secrets.delete(&state.user_id, endpoint.secret_name).await;
-
-    let params = crate::secrets::CreateSecretParams::new(
-        endpoint.secret_name,
-        body.api_key.clone(),
-    )
-    .with_provider(slug.clone());
-    secrets
-        .create(&state.user_id, params)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to save API key for '{}': {}", slug, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
 
     // Hot-reload secrets into the env overlay so the new key is immediately usable.
     let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
-        "Provider Vault: API key saved and secrets refreshed"
+        "Provider Vault credentials saved and secrets refreshed"
     );
 
     // Auto-add provider to `providers.enabled` and `providers.fallback_chain`
     // so the new key is immediately usable for failover without manual settings
     // editing or a restart.
     if let Some(ref db) = state.store {
-        auto_enable_provider(db.as_ref(), &state.user_id, &slug, endpoint.default_model).await;
+        auto_enable_provider(db.as_ref(), &state.user_id, &slug, spec.default_model()).await;
+    }
+    if let Err(e) = reload_llm_runtime(state.as_ref()).await {
+        tracing::warn!("Provider Vault runtime reload failed after save: {}", e);
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "partial_failure",
+                "message": format!(
+                    "{} credentials were saved, but the live LLM runtime could not be reloaded: {}",
+                    spec.display_name(), e
+                ),
+            })),
+        ));
     }
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "message": format!("API key saved for {}", endpoint.display_name),
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Credentials saved for {}", spec.display_name()),
+        })),
+    ))
 }
 
 async fn providers_delete_key_handler(
     State(state): State<Arc<GatewayState>>,
     Path(slug): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let endpoint = crate::config::provider_catalog::endpoint_for(&slug)
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     let secrets = state
         .secrets_store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let spec = provider_credential_spec(&slug).ok_or(StatusCode::NOT_FOUND)?;
 
-    secrets
-        .delete(&state.user_id, endpoint.secret_name)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete API key for '{}': {}", slug, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    match &spec {
+        ProviderCredentialSpec::ApiKey { secret_name, .. } => {
+            secrets
+                .delete(&state.user_id, secret_name)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to delete API key for '{}': {}", slug, e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
+    }
 
     // Refresh overlay to remove the deleted key.
     let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
-        "Provider Vault: API key removed and secrets refreshed"
+        "Provider Vault credentials removed and secrets refreshed"
     );
 
     // Remove provider from `providers.enabled` and `providers.fallback_chain`.
     if let Some(ref db) = state.store {
         auto_disable_provider(db.as_ref(), &state.user_id, &slug).await;
     }
+    if let Err(e) = reload_llm_runtime(state.as_ref()).await {
+        tracing::warn!("Provider Vault runtime reload failed after delete: {}", e);
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "partial_failure",
+                "message": format!(
+                    "{} credentials were removed, but the live LLM runtime could not be reloaded: {}",
+                    spec.display_name(), e
+                ),
+            })),
+        ));
+    }
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "message": format!("API key removed for {}", endpoint.display_name),
-    })))
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Credentials removed for {}", spec.display_name()),
+        })),
+    ))
+}
+
+enum ProviderCredentialSpec {
+    ApiKey {
+        display_name: &'static str,
+        secret_name: &'static str,
+        default_model: &'static str,
+    },
+}
+
+impl ProviderCredentialSpec {
+    fn display_name(&self) -> &'static str {
+        match self {
+            Self::ApiKey { display_name, .. } => display_name,
+        }
+    }
+
+    fn default_model(&self) -> &'static str {
+        match self {
+            Self::ApiKey { default_model, .. } => default_model,
+        }
+    }
+}
+
+fn provider_credential_spec(slug: &str) -> Option<ProviderCredentialSpec> {
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
+        return Some(ProviderCredentialSpec::ApiKey {
+            display_name: endpoint.display_name,
+            secret_name: endpoint.secret_name,
+            default_model: endpoint.default_model,
+        });
+    }
+
+    match slug {
+        "openai_compatible" => Some(ProviderCredentialSpec::ApiKey {
+            display_name: "OpenAI-compatible",
+            secret_name: "llm_compatible_api_key",
+            default_model: "default",
+        }),
+        "bedrock" => Some(ProviderCredentialSpec::ApiKey {
+            display_name: "AWS Bedrock",
+            secret_name: "llm_bedrock_api_key",
+            default_model: "anthropic.claude-3-sonnet-20240229-v1:0",
+        }),
+        _ => None,
+    }
 }
 
 /// Auto-add a provider slug to `providers.enabled` and its default model to
@@ -2960,16 +4712,23 @@ async fn auto_enable_provider(
     slug: &str,
     default_model: &str,
 ) {
-
     // --- providers.enabled ---
-    let enabled = db.get_setting(user_id, "providers.enabled").await.ok().flatten();
+    let enabled = db
+        .get_setting(user_id, "providers.enabled")
+        .await
+        .ok()
+        .flatten();
     let mut enabled_list: Vec<String> = enabled
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     if !enabled_list.iter().any(|s| s == slug) {
         enabled_list.push(slug.to_string());
         if let Err(e) = db
-            .set_setting(user_id, "providers.enabled", &serde_json::json!(enabled_list))
+            .set_setting(
+                user_id,
+                "providers.enabled",
+                &serde_json::json!(enabled_list),
+            )
             .await
         {
             tracing::warn!("Failed to auto-enable provider '{}': {}", slug, e);
@@ -2979,18 +4738,33 @@ async fn auto_enable_provider(
     }
 
     // --- providers.fallback_chain ---
-    let chain = db.get_setting(user_id, "providers.fallback_chain").await.ok().flatten();
+    let chain = db
+        .get_setting(user_id, "providers.fallback_chain")
+        .await
+        .ok()
+        .flatten();
     let mut chain_list: Vec<String> = chain
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let fallback_entry = format!("{}/{}", slug, default_model);
-    if !chain_list.iter().any(|s| s.starts_with(&format!("{}/", slug))) {
+    if !chain_list
+        .iter()
+        .any(|s| s.starts_with(&format!("{}/", slug)))
+    {
         chain_list.push(fallback_entry.clone());
         if let Err(e) = db
-            .set_setting(user_id, "providers.fallback_chain", &serde_json::json!(chain_list))
+            .set_setting(
+                user_id,
+                "providers.fallback_chain",
+                &serde_json::json!(chain_list),
+            )
             .await
         {
-            tracing::warn!("Failed to add '{}' to fallback chain: {}", fallback_entry, e);
+            tracing::warn!(
+                "Failed to add '{}' to fallback chain: {}",
+                fallback_entry,
+                e
+            );
         } else {
             tracing::info!(entry = %fallback_entry, "Provider added to fallback chain");
         }
@@ -2999,41 +4773,123 @@ async fn auto_enable_provider(
 
 /// Remove a provider slug from `providers.enabled` and its entries from
 /// `providers.fallback_chain` when an API key is deleted via the Provider Vault.
-async fn auto_disable_provider(
-    db: &dyn crate::db::Database,
-    user_id: &str,
-    slug: &str,
-) {
-
+async fn auto_disable_provider(db: &dyn crate::db::Database, user_id: &str, slug: &str) {
     // --- providers.enabled ---
-    let enabled = db.get_setting(user_id, "providers.enabled").await.ok().flatten();
-    if let Some(mut enabled_list) = enabled.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()) {
+    let enabled = db
+        .get_setting(user_id, "providers.enabled")
+        .await
+        .ok()
+        .flatten();
+    if let Some(mut enabled_list) =
+        enabled.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+    {
         let before = enabled_list.len();
         enabled_list.retain(|s| s != slug);
         if enabled_list.len() != before {
             let _ = db
-                .set_setting(user_id, "providers.enabled", &serde_json::json!(enabled_list))
+                .set_setting(
+                    user_id,
+                    "providers.enabled",
+                    &serde_json::json!(enabled_list),
+                )
                 .await;
             tracing::info!(provider = %slug, "Provider removed from providers.enabled");
         }
     }
 
     // --- providers.fallback_chain ---
-    let chain = db.get_setting(user_id, "providers.fallback_chain").await.ok().flatten();
-    if let Some(mut chain_list) = chain.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()) {
+    let chain = db
+        .get_setting(user_id, "providers.fallback_chain")
+        .await
+        .ok()
+        .flatten();
+    if let Some(mut chain_list) = chain.and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+    {
         let prefix = format!("{}/", slug);
         let before = chain_list.len();
         chain_list.retain(|s| !s.starts_with(&prefix));
         if chain_list.len() != before {
             let _ = db
-                .set_setting(user_id, "providers.fallback_chain", &serde_json::json!(chain_list))
+                .set_setting(
+                    user_id,
+                    "providers.fallback_chain",
+                    &serde_json::json!(chain_list),
+                )
                 .await;
             tracing::info!(provider = %slug, "Provider entries removed from fallback chain");
         }
     }
 }
 
+async fn reload_llm_runtime(state: &GatewayState) -> Result<(), String> {
+    if let Some(ref runtime) = state.llm_runtime {
+        runtime.reload().await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn sync_legacy_llm_settings(settings: &mut crate::settings::Settings) {
+    match settings.providers.primary.as_deref() {
+        Some("openai") => settings.llm_backend = Some("openai".to_string()),
+        Some("anthropic") => settings.llm_backend = Some("anthropic".to_string()),
+        Some("ollama") => settings.llm_backend = Some("ollama".to_string()),
+        Some("gemini") => settings.llm_backend = Some("gemini".to_string()),
+        Some("tinfoil") => settings.llm_backend = Some("tinfoil".to_string()),
+        Some("bedrock") => settings.llm_backend = Some("bedrock".to_string()),
+        Some("llama_cpp") => settings.llm_backend = Some("llama_cpp".to_string()),
+        Some("openrouter") => {
+            settings.llm_backend = Some("openai_compatible".to_string());
+            settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
+        }
+        Some("openai_compatible") => {
+            settings.llm_backend = Some("openai_compatible".to_string());
+        }
+        _ => {
+            settings.llm_backend = None;
+        }
+    }
+
+    if settings.providers.primary_model.is_some() {
+        settings.selected_model = settings.providers.primary_model.clone();
+    } else {
+        settings.selected_model = None;
+    }
+}
+
 // --- Settings handlers ---
+
+const REDACTED_SETTING_VALUE: &str = "[REDACTED]";
+
+fn is_sensitive_settings_key(key: &str) -> bool {
+    matches!(
+        key,
+        "database_url"
+            | "libsql_url"
+            | "tunnel.ngrok_token"
+            | "tunnel.cf_token"
+            | "channels.discord_bot_token"
+            | "channels.slack_bot_token"
+            | "channels.slack_app_token"
+            | "channels.gateway_auth_token"
+    )
+}
+
+fn redact_setting_value(key: &str, value: serde_json::Value) -> serde_json::Value {
+    if is_sensitive_settings_key(key) {
+        serde_json::Value::String(REDACTED_SETTING_VALUE.to_string())
+    } else {
+        value
+    }
+}
+
+fn sanitize_imported_settings(
+    settings: std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    settings
+        .into_iter()
+        .filter(|(key, _)| !is_sensitive_settings_key(key))
+        .collect()
+}
 
 async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -3050,8 +4906,8 @@ async fn settings_list_handler(
     let settings = rows
         .into_iter()
         .map(|r| SettingResponse {
+            value: redact_setting_value(&r.key, r.value),
             key: r.key,
-            value: r.value,
             updated_at: r.updated_at.to_rfc3339(),
         })
         .collect();
@@ -3077,8 +4933,8 @@ async fn settings_get_handler(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(SettingResponse {
+        value: redact_setting_value(&row.key, row.value),
         key: row.key,
-        value: row.value,
         updated_at: row.updated_at.to_rfc3339(),
     }))
 }
@@ -3093,6 +4949,14 @@ async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
+    if is_sensitive_settings_key(&key) {
+        tracing::warn!(
+            key = %key,
+            "Rejected settings write for sensitive key; use the secrets store instead"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     // Extract values for hot-reload before any .await.
     let cc_update: Option<(Option<String>, Option<u32>)> = match key.as_str() {
         "claude_code_model" => body.value.as_str().map(|v| (Some(v.to_string()), None)),
@@ -3103,9 +4967,22 @@ async fn settings_set_handler(
     // Extract stream mode for hot-reload
     // The WebUI sends keys with "channels." prefix (e.g., "channels.telegram_stream_mode")
     // but we also accept the bare key for backwards compatibility.
-    let stream_mode_update: Option<(&'static str, crate::channels::StreamMode)> = match key.as_str() {
-        "telegram_stream_mode" | "channels.telegram_stream_mode" => Some(("telegram", body.value.as_str().map(crate::channels::StreamMode::from_str_value).unwrap_or_default())),
-        "discord_stream_mode" | "channels.discord_stream_mode" => Some(("discord", body.value.as_str().map(crate::channels::StreamMode::from_str_value).unwrap_or_default())),
+    let stream_mode_update: Option<(&'static str, crate::channels::StreamMode)> = match key.as_str()
+    {
+        "telegram_stream_mode" | "channels.telegram_stream_mode" => Some((
+            "telegram",
+            body.value
+                .as_str()
+                .map(crate::channels::StreamMode::from_str_value)
+                .unwrap_or_default(),
+        )),
+        "discord_stream_mode" | "channels.discord_stream_mode" => Some((
+            "discord",
+            body.value
+                .as_str()
+                .map(crate::channels::StreamMode::from_str_value)
+                .unwrap_or_default(),
+        )),
         _ => None,
     };
 
@@ -3125,10 +5002,28 @@ async fn settings_set_handler(
     }
 
     // Hot-reload stream mode into the running channel.
-    if let (Some(cm), Some((channel_name, mode))) = (state.channel_manager.clone(), stream_mode_update) {
+    if let (Some(cm), Some((channel_name, mode))) =
+        (state.channel_manager.clone(), stream_mode_update)
+    {
         tokio::spawn(async move {
             cm.set_channel_stream_mode(channel_name, mode).await;
         });
+    }
+
+    if key.starts_with("providers.")
+        || matches!(
+            key.as_str(),
+            "llm_backend" | "selected_model" | "openai_compatible_base_url" | "ollama_base_url"
+        )
+    {
+        reload_llm_runtime(state.as_ref()).await.map_err(|e| {
+            tracing::error!(
+                "Runtime reload failed after settings update '{}': {}",
+                key,
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -3150,6 +5045,22 @@ async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if key.starts_with("providers.")
+        || matches!(
+            key.as_str(),
+            "llm_backend" | "selected_model" | "openai_compatible_base_url" | "ollama_base_url"
+        )
+    {
+        reload_llm_runtime(state.as_ref()).await.map_err(|e| {
+            tracing::error!(
+                "Runtime reload failed after settings delete '{}': {}",
+                key,
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3165,6 +5076,14 @@ async fn settings_export_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let settings = settings
+        .into_iter()
+        .map(|(key, value)| {
+            let value = redact_setting_value(&key, value);
+            (key, value)
+        })
+        .collect();
+
     Ok(Json(SettingsExportResponse { settings }))
 }
 
@@ -3176,13 +5095,19 @@ async fn settings_import_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let settings = sanitize_imported_settings(body.settings);
     store
-        .set_all_settings(&state.user_id, &body.settings)
+        .set_all_settings(&state.user_id, &settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    reload_llm_runtime(state.as_ref()).await.map_err(|e| {
+        tracing::error!("Runtime reload failed after settings import: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3200,26 +5125,37 @@ async fn gateway_status_handler(
         .unwrap_or(0);
 
     let uptime_secs = state.startup_time.elapsed().as_secs();
+    let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
+    let channel_setup = load_channel_setup_status(state.as_ref()).await;
 
-    let (daily_cost, actions_this_hour, model_usage, budget_limit_usd, hourly_action_limit) = if let Some(ref cg) = state.cost_guard {
-        let cost = cg.daily_spend().await;
-        let actions = cg.actions_this_hour().await;
-        let usage = cg.model_usage().await;
-        let models: Vec<ModelUsageEntry> = usage
-            .into_iter()
-            .map(|(model, tokens)| ModelUsageEntry {
-                model,
-                input_tokens: tokens.input_tokens,
-                output_tokens: tokens.output_tokens,
-                cost: format!("{:.6}", tokens.cost),
-            })
-            .collect();
-        let budget = cg.daily_budget_cents().map(|c| format!("{:.2}", c as f64 / 100.0));
-        let rate_limit = cg.hourly_action_limit();
-        (Some(format!("{:.4}", cost)), Some(actions), Some(models), budget, rate_limit)
-    } else {
-        (None, None, None, None, None)
-    };
+    let (daily_cost, actions_this_hour, model_usage, budget_limit_usd, hourly_action_limit) =
+        if let Some(ref cg) = state.cost_guard {
+            let cost = cg.daily_spend().await;
+            let actions = cg.actions_this_hour().await;
+            let usage = cg.model_usage().await;
+            let models: Vec<ModelUsageEntry> = usage
+                .into_iter()
+                .map(|(model, tokens)| ModelUsageEntry {
+                    model,
+                    input_tokens: tokens.input_tokens,
+                    output_tokens: tokens.output_tokens,
+                    cost: format!("{:.6}", tokens.cost),
+                })
+                .collect();
+            let budget = cg
+                .daily_budget_cents()
+                .map(|c| format!("{:.2}", c as f64 / 100.0));
+            let rate_limit = cg.hourly_action_limit();
+            (
+                Some(format!("{:.4}", cost)),
+                Some(actions),
+                Some(models),
+                budget,
+                rate_limit,
+            )
+        } else {
+            (None, None, None, None, None)
+        };
 
     Json(GatewayStatusResponse {
         sse_connections,
@@ -3231,7 +5167,109 @@ async fn gateway_status_handler(
         model_usage,
         budget_limit_usd,
         hourly_action_limit,
+        runtime_revision: runtime_status.as_ref().map(|status| status.revision),
+        active_model: runtime_status
+            .as_ref()
+            .map(|status| status.primary_model.clone()),
+        active_cheap_model: runtime_status
+            .as_ref()
+            .and_then(|status| status.cheap_model.clone()),
+        routing_enabled: runtime_status.as_ref().map(|status| status.routing_enabled),
+        routing_mode: runtime_status
+            .as_ref()
+            .map(|status| status.routing_mode.as_str().to_string()),
+        primary_provider: runtime_status
+            .as_ref()
+            .and_then(|status| status.primary_provider.clone()),
+        runtime_reload_error: runtime_status.and_then(|status| status.last_error),
+        channel_setup,
     })
+}
+
+async fn load_channel_setup_status(state: &GatewayState) -> ChannelSetupStatus {
+    let settings = if let Some(store) = state.store.as_ref()
+        && let Ok(map) = store.get_all_settings(&state.user_id).await
+    {
+        crate::settings::Settings::from_db_map(&map)
+    } else {
+        crate::settings::Settings::default()
+    };
+
+    ChannelSetupStatus {
+        gmail: build_gmail_setup_status(&settings),
+        nostr: build_nostr_setup_status(&settings),
+    }
+}
+
+fn build_gmail_setup_status(settings: &crate::settings::Settings) -> PartialChannelSetupStatus {
+    let enabled =
+        crate::config::helpers::parse_bool_env("GMAIL_ENABLED", settings.channels.gmail_enabled)
+            .unwrap_or(settings.channels.gmail_enabled);
+    let project_id = crate::config::helpers::optional_env("GMAIL_PROJECT_ID")
+        .ok()
+        .flatten()
+        .or(settings.channels.gmail_project_id.clone())
+        .unwrap_or_default();
+    let subscription_id = crate::config::helpers::optional_env("GMAIL_SUBSCRIPTION_ID")
+        .ok()
+        .flatten()
+        .or(settings.channels.gmail_subscription_id.clone())
+        .unwrap_or_default();
+    let topic_id = crate::config::helpers::optional_env("GMAIL_TOPIC_ID")
+        .ok()
+        .flatten()
+        .or(settings.channels.gmail_topic_id.clone())
+        .unwrap_or_default();
+
+    let mut missing_fields = Vec::new();
+    if enabled {
+        if project_id.trim().is_empty() {
+            missing_fields.push("project_id".to_string());
+        }
+        if subscription_id.trim().is_empty() {
+            missing_fields.push("subscription_id".to_string());
+        }
+        if topic_id.trim().is_empty() {
+            missing_fields.push("topic_id".to_string());
+        }
+    }
+
+    let has_oauth_token = crate::config::helpers::optional_env("GMAIL_OAUTH_TOKEN")
+        .ok()
+        .flatten()
+        .is_some();
+    let needs_oauth = enabled && missing_fields.is_empty() && !has_oauth_token;
+
+    PartialChannelSetupStatus {
+        enabled,
+        configured: enabled && missing_fields.is_empty() && !needs_oauth,
+        missing_fields,
+        needs_oauth,
+        needs_private_key: false,
+    }
+}
+
+fn build_nostr_setup_status(settings: &crate::settings::Settings) -> PartialChannelSetupStatus {
+    let enabled =
+        crate::config::helpers::parse_bool_env("NOSTR_ENABLED", settings.channels.nostr_enabled)
+            .unwrap_or(settings.channels.nostr_enabled);
+    let has_private_key = crate::config::helpers::optional_env("NOSTR_PRIVATE_KEY")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            crate::config::helpers::optional_env("NOSTR_SECRET_KEY")
+                .ok()
+                .flatten()
+        })
+        .is_some();
+
+    PartialChannelSetupStatus {
+        enabled,
+        configured: enabled && has_private_key,
+        missing_fields: Vec::new(),
+        needs_oauth: false,
+        needs_private_key: enabled && !has_private_key,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -3258,11 +5296,538 @@ struct GatewayStatusResponse {
     budget_limit_usd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hourly_action_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_cheap_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_reload_error: Option<String>,
+    channel_setup: ChannelSetupStatus,
+}
+
+#[derive(serde::Serialize)]
+struct ChannelSetupStatus {
+    gmail: PartialChannelSetupStatus,
+    nostr: PartialChannelSetupStatus,
+}
+
+#[derive(serde::Serialize)]
+struct PartialChannelSetupStatus {
+    enabled: bool,
+    configured: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    missing_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    needs_oauth: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    needs_private_key: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+// --- Cost Dashboard handlers (CostTracker-backed) ---
+
+async fn costs_summary_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::llm::cost_tracker::CostSummary>, StatusCode> {
+    let tracker = state
+        .cost_tracker
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let now = chrono::Utc::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let this_month = now.format("%Y-%m").to_string();
+    let guard = tracker.lock().await;
+    Ok(Json(guard.summary(&today, &this_month)))
+}
+
+async fn costs_export_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::header::HeaderName, String); 2],
+        String,
+    ),
+    StatusCode,
+> {
+    let tracker = state
+        .cost_tracker
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let guard = tracker.lock().await;
+    let csv = guard.export_csv();
+    let filename = format!(
+        "thinclaw-costs-{}.csv",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    );
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        csv,
+    ))
+}
+
+async fn costs_reset_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<StatusCode, StatusCode> {
+    let tracker = state
+        .cost_tracker
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    {
+        let mut guard = tracker.lock().await;
+        guard.clear();
+    }
+    // Also reset the real-time CostGuard counters.
+    if let Some(ref cg) = state.cost_guard {
+        cg.reset().await;
+    }
+    // Persist the cleared state to DB.
+    if let Some(ref db) = state.store {
+        let snapshot = tracker.lock().await.to_json();
+        if let Err(e) = db.set_setting("default", "cost_entries", &snapshot).await {
+            tracing::warn!("Failed to persist cleared cost entries: {}", e);
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_provider_model_options_from_discovery_returns_live_models_only() {
+        let discovered = vec![
+            crate::llm::discovery::DiscoveredModel {
+                id: "gpt-4o".to_string(),
+                name: "gpt-4o".to_string(),
+                provider: "openai".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+            crate::llm::discovery::DiscoveredModel {
+                id: "gpt-4o-mini".to_string(),
+                name: "gpt-4o-mini".to_string(),
+                provider: "openai".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+        ];
+
+        let (models, suggested_primary, suggested_cheap, has_live_models) =
+            provider_model_options_from_discovery(
+                "openai",
+                "gpt-4o",
+                discovered,
+                Some("gpt-legacy"),
+                None,
+            );
+
+        let model_ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert!(has_live_models);
+        assert_eq!(model_ids, vec!["gpt-4o", "gpt-4o-mini"]);
+        assert_eq!(suggested_primary.as_deref(), Some("gpt-4o"));
+        assert_eq!(suggested_cheap.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_provider_model_options_from_discovery_rejects_filtered_only_results() {
+        let discovered = vec![crate::llm::discovery::DiscoveredModel {
+            id: "text-embedding-3-small".to_string(),
+            name: "text-embedding-3-small".to_string(),
+            provider: "openai".to_string(),
+            is_chat: false,
+            context_length: None,
+        }];
+
+        let (models, suggested_primary, suggested_cheap, has_live_models) =
+            provider_model_options_from_discovery(
+                "openai",
+                "gpt-4o",
+                discovered,
+                Some("gpt-legacy"),
+                None,
+            );
+
+        assert!(!has_live_models);
+        assert!(models.is_empty());
+        assert_eq!(suggested_primary.as_deref(), Some("gpt-4o"));
+        assert_eq!(suggested_cheap.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_provider_model_options_from_discovery_keeps_large_catalogs() {
+        let discovered = (0..64)
+            .map(|idx| crate::llm::discovery::DiscoveredModel {
+                id: format!("anthropic/model-{idx:02}"),
+                name: format!("Anthropic Model {idx:02}"),
+                provider: "openai_compatible".to_string(),
+                is_chat: true,
+                context_length: Some(200_000),
+            })
+            .collect::<Vec<_>>();
+
+        let (models, _suggested_primary, _suggested_cheap, has_live_models) =
+            provider_model_options_from_discovery(
+                "openrouter",
+                "anthropic/model-00",
+                discovered,
+                None,
+                None,
+            );
+
+        assert!(has_live_models);
+        assert_eq!(models.len(), 64);
+        assert!(
+            models
+                .iter()
+                .all(|model| model.context_length == Some(200_000))
+        );
+        assert!(
+            models.iter().any(
+                |model| model.label == "Anthropic Model 00" && model.id == "anthropic/model-00"
+            )
+        );
+    }
+
+    #[test]
+    fn test_sync_legacy_llm_settings_clears_legacy_when_no_primary_provider() {
+        let mut settings = crate::settings::Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            ..crate::settings::Settings::default()
+        };
+
+        settings.providers.primary = None;
+        settings.providers.primary_model = None;
+
+        sync_legacy_llm_settings(&mut settings);
+
+        assert_eq!(settings.llm_backend, None);
+        assert_eq!(settings.selected_model, None);
+    }
+
+    #[test]
+    fn test_sync_legacy_llm_settings_updates_legacy_for_primary_provider() {
+        let mut settings = crate::settings::Settings::default();
+        settings.providers.primary = Some("anthropic".to_string());
+        settings.providers.primary_model = Some("claude-sonnet-4-6".to_string());
+
+        sync_legacy_llm_settings(&mut settings);
+
+        assert_eq!(settings.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(
+            settings.selected_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn test_route_target_availability_respects_enabled_providers() {
+        let enabled =
+            std::collections::HashSet::from(["anthropic".to_string(), "openai".to_string()]);
+
+        assert!(route_target_is_available_for_enabled_providers(
+            "primary", &enabled
+        ));
+        assert!(route_target_is_available_for_enabled_providers(
+            "cheap", &enabled
+        ));
+        assert!(route_target_is_available_for_enabled_providers(
+            "anthropic@primary",
+            &enabled
+        ));
+        assert!(route_target_is_available_for_enabled_providers(
+            "openai/gpt-4o",
+            &enabled
+        ));
+        assert!(!route_target_is_available_for_enabled_providers(
+            "gemini@cheap",
+            &enabled
+        ));
+        assert!(!route_target_is_available_for_enabled_providers(
+            "gemini/gemini-2.5-pro",
+            &enabled
+        ));
+    }
+
+    #[test]
+    fn test_stale_provider_namespace_keys_detect_removed_provider_entries() {
+        let mut previous_settings = crate::settings::Settings::default();
+        previous_settings.providers.enabled = vec!["openai".to_string()];
+        previous_settings.providers.primary = Some("openai".to_string());
+        previous_settings.providers.primary_model = Some("gpt-4o".to_string());
+        previous_settings
+            .providers
+            .allowed_models
+            .insert("openai".to_string(), vec!["gpt-4o".to_string()]);
+        previous_settings.providers.provider_models.insert(
+            "openai".to_string(),
+            crate::settings::ProviderModelSlots {
+                primary: Some("gpt-4o".to_string()),
+                cheap: Some("gpt-4o-mini".to_string()),
+            },
+        );
+
+        let previous_map = previous_settings.to_db_map();
+        let next_map = crate::settings::Settings::default().to_db_map();
+        let stale = stale_provider_namespace_keys(&previous_map, &next_map);
+
+        assert!(
+            stale
+                .iter()
+                .any(|key| key == "providers.allowed_models.openai")
+        );
+        assert!(
+            stale
+                .iter()
+                .any(|key| key == "providers.provider_models.openai.primary")
+        );
+        assert!(
+            stale
+                .iter()
+                .any(|key| key == "providers.provider_models.openai.cheap")
+        );
+    }
+
+    #[test]
+    fn test_stale_allowed_model_db_rows_can_reenable_provider_without_cleanup() {
+        let mut previous_settings = crate::settings::Settings::default();
+        previous_settings.providers.enabled = vec!["openai".to_string()];
+        previous_settings
+            .providers
+            .allowed_models
+            .insert("openai".to_string(), vec!["gpt-4o".to_string()]);
+
+        let previous_map = previous_settings.to_db_map();
+        let next_map = crate::settings::Settings::default().to_db_map();
+
+        let mut merged_without_cleanup = previous_map.clone();
+        merged_without_cleanup.extend(next_map.clone());
+
+        let restored_without_cleanup =
+            crate::settings::Settings::from_db_map(&merged_without_cleanup);
+        let normalized_without_cleanup =
+            crate::llm::normalize_providers_settings(&restored_without_cleanup);
+        assert!(
+            normalized_without_cleanup
+                .enabled
+                .iter()
+                .any(|slug| slug == "openai")
+        );
+
+        let stale_keys = stale_provider_namespace_keys(&previous_map, &next_map);
+        let mut merged_with_cleanup = merged_without_cleanup;
+        for key in stale_keys {
+            merged_with_cleanup.remove(&key);
+        }
+
+        let restored_with_cleanup = crate::settings::Settings::from_db_map(&merged_with_cleanup);
+        let normalized_with_cleanup =
+            crate::llm::normalize_providers_settings(&restored_with_cleanup);
+        assert!(
+            !normalized_with_cleanup
+                .enabled
+                .iter()
+                .any(|slug| slug == "openai")
+        );
+    }
+
+    #[test]
+    fn test_resolve_saved_provider_models_preserves_previous_slot_values() {
+        let provider = ProviderConfigEntry {
+            slug: "gemini".to_string(),
+            display_name: "Google".to_string(),
+            api_style: "openai".to_string(),
+            default_model: "gemini-2.5-flash".to_string(),
+            env_key_name: "GOOGLE_API_KEY".to_string(),
+            has_key: true,
+            auth_required: true,
+            enabled: true,
+            primary: false,
+            preferred_cheap: false,
+            discovery_supported: true,
+            primary_model: None,
+            cheap_model: None,
+            suggested_primary_model: Some("gemini-2.5-flash".to_string()),
+            suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+        };
+        let previous_slots = crate::settings::ProviderModelSlots {
+            primary: Some("gemini-3.1-flash-live-preview".to_string()),
+            cheap: Some("gemini-2.5-flash-lite-preview".to_string()),
+        };
+
+        let (primary_model, cheap_model, should_persist) =
+            resolve_saved_provider_models(&provider, Some(&previous_slots), None);
+
+        assert_eq!(
+            primary_model.as_deref(),
+            Some("gemini-3.1-flash-live-preview")
+        );
+        assert_eq!(
+            cheap_model.as_deref(),
+            Some("gemini-2.5-flash-lite-preview")
+        );
+        assert!(should_persist);
+    }
+
+    #[test]
+    fn test_resolve_saved_provider_models_prefers_incoming_values() {
+        let provider = ProviderConfigEntry {
+            slug: "gemini".to_string(),
+            display_name: "Google".to_string(),
+            api_style: "openai".to_string(),
+            default_model: "gemini-2.5-flash".to_string(),
+            env_key_name: "GOOGLE_API_KEY".to_string(),
+            has_key: true,
+            auth_required: true,
+            enabled: true,
+            primary: false,
+            preferred_cheap: false,
+            discovery_supported: true,
+            primary_model: Some("gemini-3.1-flash-live-preview".to_string()),
+            cheap_model: Some("gemini-2.5-flash-lite-preview".to_string()),
+            suggested_primary_model: Some("gemini-2.5-flash".to_string()),
+            suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+        };
+        let previous_slots = crate::settings::ProviderModelSlots {
+            primary: Some("gemini-1.5-pro".to_string()),
+            cheap: Some("gemini-1.5-flash".to_string()),
+        };
+
+        let (primary_model, cheap_model, should_persist) =
+            resolve_saved_provider_models(&provider, Some(&previous_slots), None);
+
+        assert_eq!(
+            primary_model.as_deref(),
+            Some("gemini-3.1-flash-live-preview")
+        );
+        assert_eq!(
+            cheap_model.as_deref(),
+            Some("gemini-2.5-flash-lite-preview")
+        );
+        assert!(should_persist);
+    }
+
+    #[tokio::test]
+    #[ignore = "live diagnostic for WebUI provider model discovery"]
+    async fn live_webui_provider_model_discovery_report() {
+        let settings = crate::settings::Settings::default();
+        let providers_settings = crate::settings::ProvidersSettings::default();
+        let visible_providers =
+            build_routing_provider_entries("test-user", &settings, &providers_settings, None)
+                .await
+                .into_iter()
+                .filter(|provider| {
+                    !matches!(provider.slug.as_str(), "llama_cpp" | "openai_compatible")
+                })
+                .collect::<Vec<_>>();
+
+        assert!(
+            !visible_providers.is_empty(),
+            "expected at least one WebUI-visible provider"
+        );
+
+        let mut structural_failures = Vec::new();
+
+        for provider in visible_providers {
+            let response = build_provider_models_response(
+                "test-user",
+                &provider.slug,
+                &settings,
+                &providers_settings,
+                None,
+            )
+            .await;
+
+            let sample_models = response
+                .models
+                .iter()
+                .take(5)
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            eprintln!(
+                "provider={} auth_required={} has_key={} status={} models={} suggested_primary={:?} suggested_cheap={:?} error={} sample=[{}]",
+                provider.slug,
+                provider.auth_required,
+                provider.has_key,
+                response.discovery_status,
+                response.models.len(),
+                response.suggested_primary_model,
+                response.suggested_cheap_model,
+                response.error.as_deref().unwrap_or("-"),
+                sample_models,
+            );
+
+            if provider.auth_required && !provider.has_key {
+                assert_eq!(
+                    response.discovery_status, "fallback",
+                    "expected {} to fall back cleanly when credentials are missing",
+                    provider.slug
+                );
+                assert!(
+                    response
+                        .error
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("credentials are not configured"),
+                    "expected {} to report missing credentials, got {:?}",
+                    provider.slug,
+                    response.error
+                );
+            }
+
+            if response.models.is_empty() {
+                structural_failures.push(format!(
+                    "{} returned no models (status={}, error={:?})",
+                    provider.slug, response.discovery_status, response.error
+                ));
+            }
+
+            if response.suggested_primary_model.is_none() {
+                structural_failures.push(format!(
+                    "{} did not provide a suggested primary model",
+                    provider.slug
+                ));
+            }
+
+            if response.suggested_cheap_model.is_none() {
+                structural_failures.push(format!(
+                    "{} did not provide a suggested cheap model",
+                    provider.slug
+                ));
+            }
+        }
+
+        assert!(
+            structural_failures.is_empty(),
+            "provider model discovery structural issues:\n{}",
+            structural_failures.join("\n")
+        );
+    }
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {

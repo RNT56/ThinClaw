@@ -2,11 +2,12 @@
 
 use std::collections::HashSet;
 
-use crate::channels::wasm::{ChannelCapabilitiesFile, available_channel_names, install_bundled_channel};
+use crate::channels::wasm::{
+    ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
+};
 use crate::setup::prompts::print_info;
 
 use super::SetupError;
-
 
 /// Mask password in a database URL for display.
 #[cfg(feature = "postgres")]
@@ -181,61 +182,13 @@ pub(super) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String
     }
 }
 
+// Delegate to the shared implementation in discovery.rs to avoid drift.
 pub(super) fn is_openai_chat_model(model_id: &str) -> bool {
-    let id = model_id.to_ascii_lowercase();
-
-    let is_chat_family = id.starts_with("gpt-")
-        || id.starts_with("chatgpt-")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
-        || id.starts_with("o5");
-
-    let is_non_chat_variant = id.contains("realtime")
-        || id.contains("audio")
-        || id.contains("transcribe")
-        || id.contains("tts")
-        || id.contains("embedding")
-        || id.contains("moderation")
-        || id.contains("image");
-
-    is_chat_family && !is_non_chat_variant
+    crate::llm::discovery::is_openai_chat_model(model_id)
 }
 
 pub(super) fn openai_model_priority(model_id: &str) -> usize {
-    let id = model_id.to_ascii_lowercase();
-
-    const EXACT_PRIORITY: &[&str] = &[
-        "gpt-5.3-codex",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-mini",
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "o4-mini",
-        "o3",
-        "o1",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
-    ];
-    if let Some(pos) = EXACT_PRIORITY.iter().position(|m| id == *m) {
-        return pos;
-    }
-
-    const PREFIX_PRIORITY: &[&str] = &[
-        "gpt-5.", "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
-    ];
-    if let Some(pos) = PREFIX_PRIORITY
-        .iter()
-        .position(|prefix| id.starts_with(prefix))
-    {
-        return EXACT_PRIORITY.len() + pos;
-    }
-
-    EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
+    crate::llm::discovery::openai_model_priority(model_id)
 }
 
 pub(super) fn sort_openai_models(models: &mut [(String, String)]) {
@@ -301,10 +254,55 @@ pub(super) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)>
     }
 }
 
+/// Fetch models from an OpenAI-compatible endpoint.
+///
+/// Returns `(model_id, display_label)` pairs. Falls back to the provided
+/// defaults when discovery fails or yields no usable chat models.
+pub(super) async fn fetch_openai_compatible_models(
+    base_url: &str,
+    auth_header: Option<&str>,
+    static_defaults: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if base_url.trim().is_empty() {
+        return static_defaults;
+    }
+
+    let result = crate::llm::discovery::ModelDiscovery::new()
+        .discover_openai_compatible(base_url, auth_header)
+        .await;
+
+    let mut seen = HashSet::new();
+    let mut models: Vec<(String, String)> = result
+        .models
+        .into_iter()
+        .filter(|model| model.is_chat)
+        .filter_map(|model| {
+            if seen.insert(model.id.clone()) {
+                Some((model.id.clone(), model.id))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if models.is_empty() {
+        return static_defaults;
+    }
+
+    models.sort_by(|a, b| {
+        openai_model_priority(&a.0)
+            .cmp(&openai_model_priority(&b.0))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    models
+}
+
 /// Discover WASM channels in a directory.
 ///
 /// Returns a list of (channel_name, capabilities_file) pairs.
-pub(super) async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCapabilitiesFile)> {
+pub(super) async fn discover_wasm_channels(
+    dir: &std::path::Path,
+) -> Vec<(String, ChannelCapabilitiesFile)> {
     let mut channels = Vec::new();
 
     if !dir.is_dir() {
@@ -414,7 +412,9 @@ pub(super) async fn install_missing_bundled_channels(
 /// Build channel options from discovered channels + bundled + registry catalog.
 ///
 /// Returns a deduplicated, sorted list of channel names available for selection.
-pub(super) fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
+pub(super) fn build_channel_options(
+    discovered: &[(String, ChannelCapabilitiesFile)],
+) -> Vec<String> {
     let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
 
     // Add channels embedded in the binary (--features bundled-wasm)
@@ -612,4 +612,3 @@ pub(super) async fn install_selected_bundled_channels(
         Ok(Some(installed))
     }
 }
-

@@ -172,9 +172,35 @@ fn is_text_mime(mime: &str) -> bool {
 /// Check if a filename extension is a plain text format.
 fn is_text_extension(filename: &str) -> bool {
     let text_exts = [
-        ".txt", ".csv", ".json", ".xml", ".yaml", ".yml", ".toml", ".md", ".markdown", ".rs",
-        ".py", ".js", ".ts", ".go", ".java", ".c", ".cpp", ".h", ".rb", ".sh", ".bash", ".zsh",
-        ".sql", ".html", ".css", ".ini", ".cfg", ".conf", ".log",
+        ".txt",
+        ".csv",
+        ".json",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".md",
+        ".markdown",
+        ".rs",
+        ".py",
+        ".js",
+        ".ts",
+        ".go",
+        ".java",
+        ".c",
+        ".cpp",
+        ".h",
+        ".rb",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".sql",
+        ".html",
+        ".css",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".log",
     ];
     text_exts.iter().any(|ext| filename.ends_with(ext))
 }
@@ -222,8 +248,7 @@ mod tests {
     #[test]
     fn test_extension_fallback_txt() {
         let data = b"Content from file";
-        let result =
-            extract_text(data, "application/octet-stream", Some("notes.txt")).unwrap();
+        let result = extract_text(data, "application/octet-stream", Some("notes.txt")).unwrap();
         assert_eq!(result, "Content from file");
     }
 

@@ -20,10 +20,11 @@ use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
     CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool,
     HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListAgentsTool, ListDirTool,
-    ListJobsTool, LlmListModelsTool, LlmSelectTool, SharedModelOverride, MemoryDeleteTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool,
-    PromptQueue, ReadFileTool, RemoveAgentTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillReadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptQueue, ReadFileTool,
+    RemoveAgentTool, SharedModelOverride, ShellTool, SkillInstallTool, SkillListTool,
+    SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
     WriteFileTool,
 };
@@ -280,8 +281,7 @@ impl ToolRegistry {
             .join("thinclaw")
             .join("browser-profile");
         let browser_tool = if std::env::var("BROWSER_DOCKER").is_ok() {
-            let docker_config =
-                crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
+            let docker_config = crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
             tracing::info!(
                 image = %docker_config.image,
                 port = docker_config.debug_port,
@@ -305,9 +305,7 @@ impl ToolRegistry {
 
         // Document extraction tool (when feature is enabled)
         #[cfg(feature = "document-extraction")]
-        self.register_sync(Arc::new(
-            crate::tools::builtin::ExtractDocumentTool,
-        ));
+        self.register_sync(Arc::new(crate::tools::builtin::ExtractDocumentTool));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -513,8 +511,9 @@ impl ToolRegistry {
             Arc::clone(&registry),
             Arc::clone(&catalog),
         )));
-        self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
-        tracing::info!("Registered 5 skill management tools");
+        self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillReloadTool::new(registry)));
+        tracing::info!("Registered 6 skill management tools");
     }
 
     /// Register routine management tools.
@@ -581,9 +580,14 @@ impl ToolRegistry {
     ///
     /// These allow the agent to discover available models (`llm_list_models`)
     /// and switch the active model mid-conversation (`llm_select`).
-    pub fn register_llm_tools(&self, model_override: SharedModelOverride) {
+    pub fn register_llm_tools(
+        &self,
+        model_override: SharedModelOverride,
+        primary_llm: Arc<dyn crate::llm::LlmProvider>,
+        cheap_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+    ) {
         self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
-        self.register_sync(Arc::new(LlmListModelsTool));
+        self.register_sync(Arc::new(LlmListModelsTool::new(primary_llm, cheap_llm)));
         tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
     }
 
@@ -624,12 +628,8 @@ impl ToolRegistry {
         self.register_dev_tools_with_config(base_dir, working_dir);
 
         // Create the builder (arg order: config, llm, safety, tools)
-        let mut builder = LlmSoftwareBuilder::new(
-            config.unwrap_or_default(),
-            llm,
-            safety,
-            Arc::clone(self),
-        );
+        let mut builder =
+            LlmSoftwareBuilder::new(config.unwrap_or_default(), llm, safety, Arc::clone(self));
         if let Some(tracker) = cost_tracker {
             builder = builder.with_cost_tracker(tracker);
         }

@@ -76,6 +76,21 @@ impl Default for WebChatConfig {
 }
 
 impl WebChatConfig {
+    /// Build from persisted settings values.
+    pub fn from_settings(settings: &crate::settings::Settings) -> Self {
+        let theme = match settings.webchat_theme.to_lowercase().as_str() {
+            "light" => WebChatTheme::Light,
+            "dark" => WebChatTheme::Dark,
+            _ => WebChatTheme::System,
+        };
+
+        Self {
+            theme,
+            accent_color: settings.webchat_accent_color.clone(),
+            show_branding: settings.webchat_show_branding,
+        }
+    }
+
     /// Load from environment variables.
     pub fn from_env() -> Self {
         let theme = std::env::var("WEBCHAT_THEME")
@@ -104,7 +119,10 @@ impl WebChatConfig {
     pub fn css_variables(&self) -> String {
         let mut vars = format!(":root {{ --webchat-theme: {}; ", self.theme);
         if let Some(ref color) = self.accent_color {
-            vars.push_str(&format!("--webchat-accent: {}; ", color));
+            vars.push_str(&format!(
+                "--webchat-accent: {}; --accent: {}; --accent-hover: {}; ",
+                color, color, color
+            ));
         }
         vars.push('}');
         vars

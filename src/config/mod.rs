@@ -30,9 +30,10 @@ pub mod watcher;
 mod webchat;
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::error::ConfigError;
+use crate::secrets::SecretsStore;
 use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
@@ -62,7 +63,7 @@ pub use self::webchat::{WebChatConfig, WebChatTheme};
 
 /// Thread-safe overlay for secrets injected from the keychain/secrets store.
 ///
-/// Used by `inject_llm_keys_from_secrets()` and `refresh_secrets()` to make
+/// Used by `inject_all_secrets_from_store()` and `refresh_secrets()` to make
 /// API keys available to `optional_env()` without unsafe `set_var` calls.
 ///
 /// Uses `RwLock` (not `OnceLock`) so secrets can be updated at runtime via
@@ -298,20 +299,19 @@ impl Config {
     }
 }
 
-/// Load API keys from the encrypted secrets store into a thread-safe overlay.
-///
-/// This bridges the gap between secrets stored during onboarding and the
-/// env-var-based resolution in `LlmConfig::resolve()`. Keys in the overlay
-/// are checked by `optional_env()` BEFORE `std::env::var()`, so keychain
-/// keys take priority over stale values in `.env` files.
-///
-/// Dynamically queries the provider catalog so new providers added to the
-/// catalog are automatically covered. Falls back to legacy hardcoded
-/// mappings for backwards compatibility.
-pub async fn inject_llm_keys_from_secrets(
+const EXTRA_SECRET_ENV_MAPPINGS: &[(&str, &str)] = &[
+    ("HTTP_WEBHOOK_SECRET", "http_webhook_secret"),
+    ("DISCORD_BOT_TOKEN", "discord_bot_token"),
+    ("SLACK_BOT_TOKEN", "slack_bot_token"),
+    ("SLACK_APP_TOKEN", "slack_app_token"),
+    ("TUNNEL_NGROK_TOKEN", "tunnel_ngrok_token"),
+    ("TUNNEL_CF_TOKEN", "tunnel_cf_token"),
+];
+
+async fn collect_injected_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
-) {
+) -> HashMap<String, String> {
     let mut injected = HashMap::new();
 
     // Dynamically inject keys for ALL known providers from the catalog.
@@ -360,12 +360,51 @@ pub async fn inject_llm_keys_from_secrets(
         tracing::debug!("Loaded legacy llm_compatible_api_key for LLM_API_KEY");
     }
 
+    for (env_var, secret_name) in [
+        ("BEDROCK_API_KEY", "llm_bedrock_api_key"),
+        ("BEDROCK_PROXY_API_KEY", "llm_bedrock_proxy_api_key"),
+    ] {
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
+            injected.insert(env_var.to_string(), decrypted.expose().to_string());
+            tracing::debug!("Loaded secret for {}", env_var);
+        }
+    }
+
+    for (env_var, secret_name) in EXTRA_SECRET_ENV_MAPPINGS {
+        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
+            injected.insert((*env_var).to_string(), decrypted.expose().to_string());
+            tracing::debug!("Loaded secret for {}", env_var);
+        }
+    }
+
+    injected
+}
+
+/// Load runtime secrets from the encrypted secrets store into a thread-safe overlay.
+///
+/// This bridges the gap between secrets stored during onboarding and the
+/// env-var-based resolution in config resolvers. Values in the overlay
+/// are checked by `optional_env()` BEFORE `std::env::var()`, so keychain
+/// and database-backed secrets take priority over stale values in `.env` files.
+pub async fn inject_all_secrets_from_store(
+    secrets: &dyn crate::secrets::SecretsStore,
+    user_id: &str,
+) {
+    let injected = collect_injected_secrets(secrets, user_id).await;
     let count = injected.len();
     update_injected_vars(injected);
     tracing::info!(
         "Secret injection complete: {} key(s) loaded into overlay",
         count
     );
+}
+
+/// Backwards-compatible wrapper for older call sites.
+pub async fn inject_llm_keys_from_secrets(
+    secrets: &dyn crate::secrets::SecretsStore,
+    user_id: &str,
+) {
+    inject_all_secrets_from_store(secrets, user_id).await;
 }
 
 /// Replace the injected vars overlay atomically.
@@ -393,45 +432,66 @@ fn update_injected_vars(new_vars: HashMap<String, String>) {
 ///
 /// Returns the number of secrets that were (re)loaded.
 pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id: &str) -> usize {
-    let mut injected = HashMap::new();
-
-    // Dynamically refresh keys for ALL known providers from the catalog.
-    let catalog = crate::config::provider_catalog::catalog();
-    for (slug, endpoint) in catalog {
-        if let Ok(decrypted) = secrets.get_decrypted(user_id, endpoint.secret_name).await {
-            injected.insert(
-                endpoint.env_key_name.to_string(),
-                decrypted.expose().to_string(),
-            );
-            tracing::debug!(
-                "Refreshed secret for provider '{}' (env: {})",
-                slug,
-                endpoint.env_key_name
-            );
-        } else if endpoint.secret_name != *slug {
-            // Try slug-based lookup as fallback
-            if let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await {
-                injected.insert(
-                    endpoint.env_key_name.to_string(),
-                    decrypted.expose().to_string(),
-                );
-            }
-        }
-    }
-
-    // Legacy generic compatible key
-    if !injected.contains_key("LLM_API_KEY")
-        && let Ok(decrypted) = secrets
-            .get_decrypted(user_id, "llm_compatible_api_key")
-            .await
-    {
-        injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
-    }
-
+    let injected = collect_injected_secrets(secrets, user_id).await;
     let count = injected.len();
     update_injected_vars(injected);
 
     tracing::info!("Secrets refreshed: {} key(s) updated in overlay", count);
 
     count
+}
+
+/// Resolve a provider credential using the same precedence as the WebUI and runtime.
+///
+/// Resolution order:
+/// 1. Env/overlay (`optional_env`)
+/// 2. OS keychain
+/// 3. Encrypted secrets store
+/// 4. Provider-specific legacy env aliases
+pub async fn resolve_provider_secret_value(
+    user_id: &str,
+    env_key: &str,
+    secret_name: &str,
+    secrets: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    if let Ok(Some(value)) = helpers::optional_env(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    if let Some(value) = crate::secrets::keychain::get_api_key(secret_name).await
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    if let Some(store) = secrets
+        && let Ok(secret) = store.get_decrypted(user_id, secret_name).await
+    {
+        let value = secret.expose().trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    match env_key {
+        "OPENROUTER_API_KEY" => {
+            if let Ok(Some(value)) = helpers::optional_env("LLM_API_KEY")
+                && !value.trim().is_empty()
+            {
+                return Some(value);
+            }
+        }
+        "BEDROCK_API_KEY" => {
+            if let Ok(Some(value)) = helpers::optional_env("AWS_BEARER_TOKEN_BEDROCK")
+                && !value.trim().is_empty()
+            {
+                return Some(value);
+            }
+        }
+        _ => {}
+    }
+
+    None
 }

@@ -231,7 +231,9 @@ You can also use the `canvas` tool to display rich structured content (tables, p
 in the user's UI.
 
 Report when the job is complete or if you encounter issues you cannot resolve.{identity}"#,
-            job_ctx.title, job_ctx.description, identity = identity_section
+            job_ctx.title,
+            job_ctx.description,
+            identity = identity_section
         )));
 
         // Main execution loop with timeout
@@ -1373,7 +1375,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                                     .await
                                 {
                                     tracing::warn!(
-                                        "Failed to persist heartbeat self-critique: {}", e
+                                        "Failed to persist heartbeat self-critique: {}",
+                                        e
                                     );
                                 }
                             } else {

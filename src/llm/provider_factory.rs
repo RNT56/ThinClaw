@@ -17,6 +17,7 @@ use super::{
 };
 use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
+use crate::settings::{ProvidersSettings, RoutingMode};
 
 /// Create an LLM provider based on configuration.
 pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -241,12 +242,20 @@ pub fn create_provider_for_catalog_entry(
     })?;
 
     // Retrieve API key from the injected vars overlay
-    let api_key_str = crate::config::helpers::optional_env(endpoint.env_key_name).map_err(|e| {
-        LlmError::RequestFailed {
+    let api_key_str = crate::config::helpers::optional_env(endpoint.env_key_name)
+        .map_err(|e| LlmError::RequestFailed {
             provider: provider_slug.to_string(),
             reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
-        }
-    })?;
+        })?
+        .or_else(|| {
+            if provider_slug == "openrouter" {
+                crate::config::helpers::optional_env("LLM_API_KEY")
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            }
+        });
 
     match endpoint.api_style {
         ApiStyle::OpenAi => {
@@ -349,12 +358,46 @@ pub fn create_provider_for_catalog_entry(
     }
 }
 
+/// Probe a provider/model pair with a tiny completion before switching to it.
+///
+/// This catches runtime-only failures such as invalid or revoked model IDs
+/// before they poison an active conversation with a broken override.
+pub async fn probe_provider_model(provider_slug: &str, model: &str) -> Result<(), LlmError> {
+    let provider = create_provider_for_catalog_entry(provider_slug, model)?;
+    let request = crate::llm::CompletionRequest::new(vec![crate::llm::ChatMessage::user(
+        "Reply with exactly OK.",
+    )])
+    .with_max_tokens(4)
+    .with_temperature(0.0);
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        provider.complete(request),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(LlmError::RequestFailed {
+            provider: provider_slug.to_string(),
+            reason: format!("Timed out while probing model '{}'", model),
+        }),
+    }
+}
+
 /// Create a cheap model provider from a "provider/model" string.
 ///
 /// Used for SmartRoutingProvider's cheap model split.
-fn create_cheap_model_provider(cheap_model_spec: &str) -> Result<Arc<dyn LlmProvider>, LlmError> {
+fn create_cheap_model_provider(
+    cheap_model_spec: &str,
+    config: &LlmConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
     if let Some((provider, model)) = cheap_model_spec.split_once('/') {
-        create_provider_for_catalog_entry(provider, model)
+        if crate::config::provider_catalog::endpoint_for(provider).is_some() {
+            create_provider_for_catalog_entry(provider, model)
+        } else {
+            create_provider_for_non_catalog_slug(provider, model, config)
+        }
     } else {
         Err(LlmError::RequestFailed {
             provider: "smart_routing".to_string(),
@@ -403,10 +446,10 @@ fn create_gemini_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     Ok(Arc::new(RigAdapter::new(model, &gem.model)))
 }
 
-/// Create a Bedrock provider using the native Bedrock Converse API.
+/// Create a Bedrock provider using the native OpenAI-compatible Mantle endpoint.
 ///
-/// Uses `reqwest` with AWS SigV4 request signing. The request/response
-/// format conversion is handled by the adapter types in `bedrock.rs`.
+/// ThinClaw now prefers Bedrock's native OpenAI-compatible API with
+/// `BEDROCK_API_KEY`. A legacy proxy URL remains supported as a fallback.
 fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let br = config
         .bedrock
@@ -415,61 +458,57 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             provider: "bedrock".to_string(),
         })?;
 
-    // Bedrock doesn't fit the rig adapter pattern (it uses AWS SigV4 auth).
-    // Route through the OpenAI-compatible adapter pointed at a Bedrock-compatible
-    // proxy like `litellm`, `bedrock-access-gateway`, or AWS's own OpenAI-compat
-    // endpoint. Direct native Bedrock API calls are available via `llm::bedrock`.
-    //
-    // For now, require a Bedrock-to-OpenAI proxy (e.g. litellm --model bedrock/...).
-    let endpoint_url = format!("https://bedrock-runtime.{}.amazonaws.com", br.region);
-
-    tracing::info!(
-        "Using AWS Bedrock (region: {}, model_id: {}, endpoint: {})",
-        br.region,
-        br.model_id,
-        endpoint_url,
-    );
-
-    // Construct an OpenAI-compatible client pointed at a Bedrock proxy.
-    // Users should set up litellm or similar as a local proxy.
-    // Fall back to the bedrock adapter types for direct API users.
     use rig::providers::openai;
 
-    // Bedrock access requires either a proxy or direct API.
-    // Check for BEDROCK_PROXY_URL first (for litellm/bedrock-access-gateway).
-    let proxy_url = std::env::var("BEDROCK_PROXY_URL").ok();
-
-    if let Some(ref proxy) = proxy_url {
-        let key = br
-            .access_key_id
-            .clone()
-            .unwrap_or_else(|| "no-key".to_string());
+    if let Some(api_key) = br.api_key.as_ref() {
+        let base_url = crate::llm::discovery::bedrock_mantle_base_url(&br.region);
         let client: openai::CompletionsClient = openai::Client::builder()
-            .base_url(proxy)
-            .api_key(&key)
+            .base_url(&base_url)
+            .api_key(api_key.expose_secret())
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "bedrock".to_string(),
-                reason: format!("Failed to create Bedrock proxy client: {}", e),
+                reason: format!("Failed to create Bedrock client: {}", e),
             })?
             .completions_api();
 
         let model = client.completion_model(&br.model_id);
-        tracing::info!("Bedrock routed through proxy: {}", proxy);
+        tracing::info!(
+            "Using AWS Bedrock Mantle (region: {}, base_url: {}, model_id: {})",
+            br.region,
+            base_url,
+            br.model_id,
+        );
+        Ok(Arc::new(RigAdapter::new(model, &br.model_id)))
+    } else if let Some(proxy) = br.proxy_url.clone() {
+        let key = br
+            .proxy_api_key
+            .as_ref()
+            .map(|secret| secret.expose_secret().to_string())
+            .unwrap_or_else(|| "no-key".to_string());
+        let client: openai::CompletionsClient = openai::Client::builder()
+            .base_url(&proxy)
+            .api_key(&key)
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: format!("Failed to create legacy Bedrock proxy client: {}", e),
+            })?
+            .completions_api();
+
+        let model = client.completion_model(&br.model_id);
+        tracing::info!(
+            "Using legacy Bedrock proxy fallback (proxy: {}, model_id: {})",
+            proxy,
+            br.model_id,
+        );
         Ok(Arc::new(RigAdapter::new(model, &br.model_id)))
     } else {
-        // No proxy — use Ollama-style OpenAI-compat with a stub key.
-        // This will fail at request time but gives a clear error message.
-        tracing::warn!(
-            "No BEDROCK_PROXY_URL set. AWS Bedrock requires a proxy (e.g. litellm) \
-             that translates OpenAI-format requests to the Bedrock Converse API. \
-             Set BEDROCK_PROXY_URL to your proxy's base URL."
-        );
         Err(LlmError::RequestFailed {
             provider: "bedrock".to_string(),
-            reason: "BEDROCK_PROXY_URL must be set — AWS Bedrock requires \
-                     a proxy (e.g. litellm, bedrock-access-gateway) to translate \
-                     OpenAI-format requests. Run: litellm --model bedrock/<model_id>"
+            reason: "BEDROCK_API_KEY must be set to use Bedrock's native OpenAI-compatible Mantle endpoint. \
+                     Legacy fallback: configure BEDROCK_PROXY_URL (and optionally BEDROCK_PROXY_API_KEY) \
+                     to use an older proxy-based Bedrock gateway."
                 .to_string(),
         })
     }
@@ -532,11 +571,11 @@ fn create_llama_cpp_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
 #[allow(clippy::type_complexity)]
 pub fn build_provider_chain(
     config: &LlmConfig,
-    providers_settings: Option<&crate::settings::ProvidersSettings>,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), LlmError> {
     let rel = &config.reliability;
 
-    let primary = create_llm_provider(config)?;
+    let primary = create_primary_provider(config, providers_settings)?;
     let primary_model_name = primary.model_name().to_string();
     tracing::info!("Primary LLM provider initialized: {}", primary_model_name);
 
@@ -547,19 +586,14 @@ pub fn build_provider_chain(
         // Determine fallback providers from ProvidersSettings.
         // Use explicit fallback_chain if provided, otherwise auto-build
         // from enabled providers.
-        let fallbacks: Vec<(String, String)> = if !ps.fallback_chain.is_empty() {
-            // Explicit chain: parse "provider/model" entries
+        let mut fallbacks: Vec<(String, String)> = if !ps.fallback_chain.is_empty() {
+            // Explicit chain: parse "provider/model" or "provider@slot" entries
             ps.fallback_chain
                 .iter()
-                .filter_map(|entry| {
-                    entry
-                        .split_once('/')
-                        .map(|(p, m)| (p.to_string(), m.to_string()))
-                })
+                .filter_map(|entry| resolve_fallback_entry(ps, entry))
                 .collect()
         } else {
             // Auto-build: use all enabled providers that aren't the primary
-            let catalog = crate::config::provider_catalog::catalog();
             ps.enabled
                 .iter()
                 .filter(|slug| {
@@ -567,49 +601,23 @@ pub fn build_provider_chain(
                     ps.primary.as_deref() != Some(slug.as_str())
                 })
                 .filter_map(|slug| {
-                    let endpoint = catalog.get(slug.as_str())?;
-                    // Determine model: first from allowed_models, else default
-                    let model = ps
-                        .allowed_models
-                        .get(slug.as_str())
-                        .and_then(|m| m.first().cloned())
-                        .unwrap_or_else(|| endpoint.default_model.to_string());
-                    Some((slug.clone(), model))
+                    fallback_model_for_slug(ps, slug).map(|model| (slug.clone(), model))
                 })
                 .collect()
         };
 
-        for (provider_slug, model) in &fallbacks {
-            match create_provider_for_catalog_entry(provider_slug, model) {
-                Ok(p) => {
-                    tracing::info!(
-                        "Failover provider added: '{}' (model: {})",
-                        provider_slug,
-                        model
-                    );
-                    all_providers.push(p);
-                }
-                Err(e) => {
-                    tracing::warn!("Skipping fallback provider '{}': {}", provider_slug, e);
-                }
+        if let Some(fallback_model) = rel.fallback_model.as_ref()
+            && let Some((provider_slug, model)) = fallback_model.split_once('/')
+        {
+            let extra = (provider_slug.to_string(), model.to_string());
+            if !fallbacks.contains(&extra) {
+                tracing::info!("Adding fallback model from env: {}", fallback_model);
+                fallbacks.push(extra);
             }
         }
 
-        if all_providers.len() > 1 {
-            let cooldown = CooldownConfig {
-                failure_threshold: rel.failover_cooldown_threshold,
-                cooldown_duration: std::time::Duration::from_secs(rel.failover_cooldown_secs),
-            };
-            tracing::info!(
-                "FailoverProvider enabled with {} providers (cooldown: {}s, threshold: {})",
-                all_providers.len(),
-                rel.failover_cooldown_secs,
-                rel.failover_cooldown_threshold,
-            );
-            Arc::new(FailoverProvider::with_cooldown(all_providers, cooldown)?)
-        } else {
-            primary
-        }
+        append_fallbacks(&mut all_providers, &fallbacks, config);
+        wrap_failover(primary, all_providers, rel)?
     } else {
         primary
     };
@@ -636,7 +644,7 @@ pub fn build_provider_chain(
         .or_else(|| providers_settings.and_then(|ps| ps.cheap_model.clone()));
 
     let cheap_llm: Option<Arc<dyn LlmProvider>> = if let Some(ref spec) = cheap_model_spec {
-        match create_cheap_model_provider(spec) {
+        match create_cheap_model_provider(spec, config) {
             Ok(p) => {
                 tracing::info!("Smart routing cheap model: {}", spec);
                 Some(p)
@@ -655,13 +663,27 @@ pub fn build_provider_chain(
         None
     };
 
-    let llm: Arc<dyn LlmProvider> = if let Some(ref cheap) = cheap_llm {
-        tracing::info!("SmartRoutingProvider enabled (primary + cheap model)");
-        Arc::new(SmartRoutingProvider::new(
-            llm,
-            cheap.clone(),
-            SmartRoutingConfig::default(),
-        ))
+    let smart_routing_enabled = providers_settings
+        .map(|ps| ps.smart_routing_enabled && ps.routing_mode == RoutingMode::CheapSplit)
+        .unwrap_or(cheap_model_spec.is_some());
+    let cascade_enabled = providers_settings
+        .map(|ps| ps.smart_routing_cascade)
+        .unwrap_or(rel.smart_routing_cascade);
+
+    let llm: Arc<dyn LlmProvider> = if smart_routing_enabled {
+        if let Some(ref cheap) = cheap_llm {
+            tracing::info!("SmartRoutingProvider enabled (primary + cheap model)");
+            Arc::new(SmartRoutingProvider::new(
+                llm,
+                cheap.clone(),
+                SmartRoutingConfig {
+                    cascade_enabled,
+                    ..SmartRoutingConfig::default()
+                },
+            ))
+        } else {
+            llm
+        }
     } else {
         llm
     };
@@ -700,4 +722,191 @@ pub fn build_provider_chain(
     };
 
     Ok((llm, cheap_llm))
+}
+
+fn create_primary_provider(
+    config: &LlmConfig,
+    providers_settings: Option<&ProvidersSettings>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    if let Some(ps) = providers_settings
+        && let Some(primary_slug) = ps.primary.as_deref()
+    {
+        let model = provider_primary_model_for_slug(ps, primary_slug)
+            .or_else(|| ps.primary_model.clone())
+            .or_else(|| {
+                crate::config::provider_catalog::endpoint_for(primary_slug)
+                    .map(|endpoint| endpoint.default_model.to_string())
+            });
+
+        if let Some(model) = model {
+            if crate::config::provider_catalog::endpoint_for(primary_slug).is_some() {
+                return create_provider_for_catalog_entry(primary_slug, &model);
+            }
+            return create_provider_for_non_catalog_slug(primary_slug, &model, config);
+        }
+    }
+
+    create_llm_provider(config)
+}
+
+fn create_provider_for_non_catalog_slug(
+    provider_slug: &str,
+    model: &str,
+    config: &LlmConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let mut llm_config = config.clone();
+    llm_config.backend = match provider_slug {
+        "ollama" => LlmBackend::Ollama,
+        "openai_compatible" => LlmBackend::OpenAiCompatible,
+        "bedrock" => LlmBackend::Bedrock,
+        "llama_cpp" => LlmBackend::LlamaCpp,
+        other => {
+            return Err(LlmError::RequestFailed {
+                provider: other.to_string(),
+                reason: "Unsupported non-catalog provider slug".to_string(),
+            });
+        }
+    };
+
+    match llm_config.backend {
+        LlmBackend::Ollama => {
+            if let Some(ref mut ollama) = llm_config.ollama {
+                ollama.model = model.to_string();
+            }
+        }
+        LlmBackend::OpenAiCompatible => {
+            if let Some(ref mut compat) = llm_config.openai_compatible {
+                compat.model = model.to_string();
+            }
+        }
+        LlmBackend::Bedrock => {
+            if let Some(ref mut bedrock) = llm_config.bedrock {
+                bedrock.model_id = model.to_string();
+            }
+        }
+        LlmBackend::LlamaCpp => {
+            if let Some(ref mut llama_cpp) = llm_config.llama_cpp {
+                llama_cpp.model = model.to_string();
+            }
+        }
+        _ => {}
+    }
+
+    create_llm_provider(&llm_config)
+}
+
+fn append_fallbacks(
+    all_providers: &mut Vec<Arc<dyn LlmProvider>>,
+    fallbacks: &[(String, String)],
+    config: &LlmConfig,
+) {
+    for (provider_slug, model) in fallbacks {
+        let provider = if crate::config::provider_catalog::endpoint_for(provider_slug).is_some() {
+            create_provider_for_catalog_entry(provider_slug, model)
+        } else {
+            create_provider_for_non_catalog_slug(provider_slug, model, config)
+        };
+
+        match provider {
+            Ok(p) => {
+                tracing::info!(
+                    "Failover provider added: '{}' (model: {})",
+                    provider_slug,
+                    model
+                );
+                all_providers.push(p);
+            }
+            Err(e) => {
+                tracing::warn!("Skipping fallback provider '{}': {}", provider_slug, e);
+            }
+        }
+    }
+}
+
+fn fallback_model_for_slug(ps: &ProvidersSettings, slug: &str) -> Option<String> {
+    provider_primary_model_for_slug(ps, slug).or_else(|| {
+        crate::config::provider_catalog::endpoint_for(slug)
+            .map(|endpoint| endpoint.default_model.to_string())
+    })
+}
+
+fn provider_primary_model_for_slug(ps: &ProvidersSettings, slug: &str) -> Option<String> {
+    ps.provider_models
+        .get(slug)
+        .and_then(|slots| slots.primary.clone())
+        .or_else(|| {
+            if ps.primary.as_deref() == Some(slug) {
+                ps.primary_model.clone()
+            } else {
+                ps.allowed_models
+                    .get(slug)
+                    .and_then(|models| models.first().cloned())
+            }
+        })
+        .or_else(|| match slug {
+            "ollama" => Some("llama3".to_string()),
+            "openai_compatible" => Some("default".to_string()),
+            "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0".to_string()),
+            "llama_cpp" => Some("llama-local".to_string()),
+            _ => None,
+        })
+}
+
+fn provider_cheap_model_for_slug(ps: &ProvidersSettings, slug: &str) -> Option<String> {
+    ps.provider_models
+        .get(slug)
+        .and_then(|slots| slots.cheap.clone())
+        .or_else(|| {
+            ps.cheap_model
+                .as_deref()
+                .and_then(|spec| spec.split_once('/'))
+                .and_then(|(cheap_slug, model)| {
+                    if cheap_slug == slug {
+                        Some(model.to_string())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .or_else(|| provider_primary_model_for_slug(ps, slug))
+}
+
+fn resolve_fallback_entry(ps: &ProvidersSettings, entry: &str) -> Option<(String, String)> {
+    if let Some((provider, model)) = entry.split_once('/') {
+        return Some((provider.to_string(), model.to_string()));
+    }
+    if let Some(provider) = entry.strip_suffix("@primary") {
+        return provider_primary_model_for_slug(ps, provider)
+            .map(|model| (provider.to_string(), model));
+    }
+    if let Some(provider) = entry.strip_suffix("@cheap") {
+        return provider_cheap_model_for_slug(ps, provider)
+            .map(|model| (provider.to_string(), model));
+    }
+    None
+}
+
+fn wrap_failover(
+    primary: Arc<dyn LlmProvider>,
+    all_providers: Vec<Arc<dyn LlmProvider>>,
+    rel: &crate::config::ReliabilityConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    if all_providers.len() > 1 {
+        let cooldown = CooldownConfig {
+            failure_threshold: rel.failover_cooldown_threshold,
+            cooldown_duration: std::time::Duration::from_secs(rel.failover_cooldown_secs),
+        };
+        tracing::info!(
+            "FailoverProvider enabled with {} providers (cooldown: {}s, threshold: {})",
+            all_providers.len(),
+            rel.failover_cooldown_secs,
+            rel.failover_cooldown_threshold,
+        );
+        Ok(Arc::new(FailoverProvider::with_cooldown(
+            all_providers,
+            cooldown,
+        )?))
+    } else {
+        Ok(primary)
+    }
 }

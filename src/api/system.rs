@@ -44,8 +44,8 @@ pub fn get_status(
             .as_ref()
             .map(|_| 1) // placeholder — real count requires async
             .unwrap_or(0),
-        model_name: llm.model_name().to_string(),
-        cheap_model_name: cheap_llm.map(|c| c.model_name().to_string()),
+        model_name: llm.active_model_name(),
+        cheap_model_name: cheap_llm.map(|c| c.active_model_name()),
         db_connected: components.db.is_some(),
         workspace_available: components.workspace.is_some(),
     }
@@ -57,13 +57,13 @@ pub fn list_models(
     cheap_llm: Option<&Arc<dyn LlmProvider>>,
 ) -> ApiResult<Vec<ModelInfo>> {
     let mut models = vec![ModelInfo {
-        name: llm.model_name().to_string(),
+        name: llm.active_model_name(),
         is_primary: true,
     }];
 
     if let Some(cheap) = cheap_llm {
         models.push(ModelInfo {
-            name: cheap.model_name().to_string(),
+            name: cheap.active_model_name(),
             is_primary: false,
         });
     }

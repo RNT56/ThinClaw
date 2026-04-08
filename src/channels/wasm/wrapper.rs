@@ -452,11 +452,13 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
         // Convert WIT media-attachment records to MediaAttachment
         for att in msg.attachments {
-            emitted.attachments.push(crate::channels::wasm::host::MediaAttachment {
-                mime_type: att.mime_type,
-                data: att.data,
-                filename: att.filename,
-            });
+            emitted
+                .attachments
+                .push(crate::channels::wasm::host::MediaAttachment {
+                    mime_type: att.mime_type,
+                    data: att.data,
+                    filename: att.filename,
+                });
         }
 
         match self.host_state.emit_message(emitted) {
@@ -504,6 +506,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         self.pairing_store
             .read_allow_from(&channel)
             .map_err(|e| e.to_string())
+    }
+
+    fn markdown_to_telegram_html(&mut self, markdown: String) -> String {
+        super::telegram_html::markdown_to_telegram_html(&markdown)
     }
 }
 
@@ -2168,7 +2174,9 @@ impl Channel for WasmChannel {
                             return Ok(Some(msg_id.to_string()));
                         }
                     }
-                    tracing::warn!("send_draft: could not extract message_id from sendMessage response");
+                    tracing::warn!(
+                        "send_draft: could not extract message_id from sendMessage response"
+                    );
                     Ok(None)
                 }
                 Err(e) => {
@@ -2193,6 +2201,25 @@ impl Channel for WasmChannel {
             };
 
             let html = super::telegram_html::markdown_to_telegram_html(&draft.accumulated);
+
+            // Telegram's max message length is 4096 chars. Use a lower
+            // threshold (3800) to account for HTML tag expansion and
+            // avoid edge-case truncation. When exceeded, signal overflow
+            // so the dispatcher falls back to on_respond() which splits.
+            const TELEGRAM_MAX_SAFE_EDIT_LENGTH: usize = 3800;
+            if html.len() > TELEGRAM_MAX_SAFE_EDIT_LENGTH {
+                tracing::info!(
+                    channel = %self.name,
+                    html_len = html.len(),
+                    "send_draft: response exceeds Telegram limit, signaling overflow"
+                );
+                return Err(ChannelError::MessageTooLong {
+                    channel: self.name.clone(),
+                    length: html.len(),
+                    max: TELEGRAM_MAX_SAFE_EDIT_LENGTH,
+                });
+            }
+
             let payload = serde_json::json!({
                 "chat_id": chat_id,
                 "message_id": msg_id,
@@ -2246,6 +2273,85 @@ impl Channel for WasmChannel {
                 }
             }
         }
+    }
+
+    async fn delete_message(
+        &self,
+        message_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        // Only Telegram channels support message deletion in this context
+        if !self.name.starts_with("telegram") {
+            return Ok(());
+        }
+
+        // Get bot token from credentials (same pattern as send_draft)
+        let creds = self.credentials.read().await;
+        let token = creds.get("TELEGRAM_BOT_TOKEN").cloned();
+        drop(creds);
+
+        let Some(token) = token else {
+            return Ok(());
+        };
+
+        // Extract chat_id from metadata (same pattern as send_draft)
+        let chat_id = metadata.get("chat_id").and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        });
+
+        let Some(chat_id) = chat_id else {
+            return Ok(());
+        };
+
+        let msg_id: i64 = match message_id.parse() {
+            Ok(id) => id,
+            Err(_) => return Ok(()),
+        };
+
+        let client = reqwest::Client::new();
+        let url = format!("https://api.telegram.org/bot{}/deleteMessage", token);
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": msg_id,
+        });
+
+        match client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    tracing::debug!(
+                        channel = %self.name,
+                        message_id = msg_id,
+                        "delete_message: message deleted successfully"
+                    );
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::debug!(
+                        channel = %self.name,
+                        message_id = msg_id,
+                        body = %body,
+                        "delete_message: deleteMessage API failed (non-fatal)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    channel = %self.name,
+                    error = %e,
+                    "delete_message: HTTP request failed (non-fatal)"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2323,13 +2429,14 @@ impl Channel for WasmChannel {
             "WASM broadcast: sending proactive message via on_respond"
         );
 
-        let result = self.call_on_respond(
-            uuid::Uuid::new_v4(),
-            &response.content,
-            response.thread_id.as_deref(),
-            &metadata_json,
-        )
-        .await;
+        let result = self
+            .call_on_respond(
+                uuid::Uuid::new_v4(),
+                &response.content,
+                response.thread_id.as_deref(),
+                &metadata_json,
+            )
+            .await;
 
         match &result {
             Ok(()) => tracing::info!(
@@ -2434,6 +2541,14 @@ impl Channel for SharedWasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<Option<String>, ChannelError> {
         self.inner.send_draft(draft, metadata).await
+    }
+
+    async fn delete_message(
+        &self,
+        message_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        self.inner.delete_message(message_id, metadata).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {

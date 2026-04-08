@@ -1,6 +1,8 @@
 //! Agent personality wizard steps: identity, tool approval, notification preferences.
 
-use crate::setup::prompts::{confirm, input, optional_input, print_info, print_success, select_one};
+use crate::setup::prompts::{
+    confirm, input, optional_input, print_info, print_success, select_one,
+};
 
 use super::{SetupError, SetupWizard};
 
@@ -23,6 +25,58 @@ impl SetupWizard {
             }
         } else {
             print_success(&format!("Keeping '{}'", current));
+        }
+
+        Ok(())
+    }
+
+    /// Timezone detection and confirmation.
+    ///
+    /// Auto-detects the system timezone via `iana_time_zone` and asks the
+    /// user to confirm. If the detection is wrong (e.g. VPS in UTC but user
+    /// is in Europe/Berlin), the user can enter a different IANA timezone.
+    ///
+    /// The confirmed timezone is stored in `Settings.user_timezone` and used
+    /// by heartbeat active hours, routine scheduling, cost dashboard day
+    /// boundaries, and the boot greeting's time-of-day awareness.
+    pub(super) fn step_timezone(&mut self) -> Result<(), SetupError> {
+        let detected = crate::timezone::detect_system_timezone();
+        let detected_str = detected.to_string();
+
+        // If already set from a previous run, show the current value
+        if let Some(ref existing) = self.settings.user_timezone {
+            if !existing.is_empty() && existing != "UTC" {
+                print_info(&format!("Current timezone: {}", existing));
+                if confirm(&format!("Keep '{}'?", existing), true).map_err(SetupError::Io)? {
+                    print_success(&format!("Timezone: {}", existing));
+                    return Ok(());
+                }
+            }
+        }
+
+        print_info(&format!("Detected system timezone: {}", detected_str));
+
+        if confirm("Is this correct?", true).map_err(SetupError::Io)? {
+            self.settings.user_timezone = Some(detected_str.clone());
+            print_success(&format!("Timezone set to '{}'", detected_str));
+        } else {
+            print_info(
+                "Enter your timezone as an IANA name (e.g. America/New_York, Europe/Berlin, Asia/Tokyo).",
+            );
+            let tz_input = input("Timezone").map_err(SetupError::Io)?;
+            if tz_input.is_empty() {
+                self.settings.user_timezone = Some(detected_str.clone());
+                print_success(&format!("Keeping detected timezone '{}'", detected_str));
+            } else if crate::timezone::parse_timezone(&tz_input).is_some() {
+                self.settings.user_timezone = Some(tz_input.clone());
+                print_success(&format!("Timezone set to '{}'", tz_input));
+            } else {
+                print_info(&format!(
+                    "'{}' is not a valid IANA timezone. Using detected '{}'.",
+                    tz_input, detected_str
+                ));
+                self.settings.user_timezone = Some(detected_str);
+            }
         }
 
         Ok(())
@@ -125,7 +179,10 @@ impl SetupWizard {
     }
 
     /// Collect the recipient identifier for a given notification channel.
-    pub(super) fn collect_notification_recipient(&mut self, channel: &str) -> Result<(), SetupError> {
+    pub(super) fn collect_notification_recipient(
+        &mut self,
+        channel: &str,
+    ) -> Result<(), SetupError> {
         match channel {
             "telegram" => {
                 // Auto-populate from Telegram owner binding
@@ -196,7 +253,9 @@ impl SetupWizard {
 
     /// Step 12: Tool approval mode.
     pub(super) fn step_tool_approval(&mut self) -> Result<(), SetupError> {
-        print_info("ThinClaw can execute tools (shell commands, file operations, etc.) on your behalf.");
+        print_info(
+            "ThinClaw can execute tools (shell commands, file operations, etc.) on your behalf.",
+        );
         print_info("Choose how much autonomy to grant the agent:");
         println!();
 
@@ -206,14 +265,15 @@ impl SetupWizard {
             "Full Auto  — Skip ALL approval checks (for benchmarks/CI only)\n               ⚠️  WARNING: The agent can execute ANY command without asking!",
         ];
         let option_refs: Vec<&str> = options.iter().map(|s| *s).collect();
-        let choice = select_one("Tool approval mode", &option_refs)
-            .map_err(SetupError::Io)?;
+        let choice = select_one("Tool approval mode", &option_refs).map_err(SetupError::Io)?;
 
         match choice {
             0 => {
                 self.settings.agent.auto_approve_tools = false;
                 // Standard mode: keep sandboxed workspace (default)
-                print_success("Standard approval mode — agent will ask before destructive operations.");
+                print_success(
+                    "Standard approval mode — agent will ask before destructive operations.",
+                );
             }
             1 => {
                 self.settings.agent.auto_approve_tools = true;
@@ -233,8 +293,12 @@ impl SetupWizard {
                 self.settings.agent.auto_approve_tools = true;
                 // Full auto: grant unrestricted filesystem/shell access.
                 self.settings.agent.workspace_mode = Some("unrestricted".to_string());
-                print_success("Full auto-approve mode — ALL tool executions will run without asking.");
-                print_info("⚠️  Use with extreme caution. This is intended for benchmarks/CI environments.");
+                print_success(
+                    "Full auto-approve mode — ALL tool executions will run without asking.",
+                );
+                print_info(
+                    "⚠️  Use with extreme caution. This is intended for benchmarks/CI environments.",
+                );
             }
             _ => {
                 self.settings.agent.auto_approve_tools = false;

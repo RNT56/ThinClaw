@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use thinclaw::safety::{LeakDetector, Sanitizer, Validator};
 
 fn bench_safety_pipeline(c: &mut Criterion) {
@@ -14,18 +14,14 @@ fn bench_safety_pipeline(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("safety_pipeline");
     for (label, input) in &inputs {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(label),
-            input,
-            |b, input| {
-                b.iter(|| {
-                    // Full pipeline: validate -> sanitize -> leak detect
-                    let _v = black_box(validator.validate(input));
-                    let _s = black_box(sanitizer.sanitize(input));
-                    let _l = black_box(leak_detector.scan(input));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(label), input, |b, input| {
+            b.iter(|| {
+                // Full pipeline: validate -> sanitize -> leak detect
+                let _v = black_box(validator.validate(input));
+                let _s = black_box(sanitizer.sanitize(input));
+                let _l = black_box(leak_detector.scan(input));
+            });
+        });
     }
     group.finish();
 }

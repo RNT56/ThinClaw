@@ -60,12 +60,10 @@ pub fn markdown_to_telegram_html(md: &str) -> String {
         // ── Blockquotes ─────────────────────────────────────────────
         if line.starts_with("> ") || line == ">" {
             let mut bq_lines = Vec::new();
-            while i < lines.len()
-                && (lines[i].starts_with("> ") || lines[i] == ">")
-            {
-                let content = lines[i].strip_prefix("> ").unwrap_or(
-                    lines[i].strip_prefix(">").unwrap_or(lines[i]),
-                );
+            while i < lines.len() && (lines[i].starts_with("> ") || lines[i] == ">") {
+                let content = lines[i]
+                    .strip_prefix("> ")
+                    .unwrap_or(lines[i].strip_prefix(">").unwrap_or(lines[i]));
                 bq_lines.push(content);
                 i += 1;
             }
@@ -245,10 +243,7 @@ mod tests {
 
     #[test]
     fn test_heading() {
-        assert_eq!(
-            markdown_to_telegram_html("## Status"),
-            "<b>Status</b>"
-        );
+        assert_eq!(markdown_to_telegram_html("## Status"), "<b>Status</b>");
     }
 
     #[test]
@@ -277,10 +272,7 @@ mod tests {
 
     #[test]
     fn test_strikethrough() {
-        assert_eq!(
-            markdown_to_telegram_html("~~deleted~~"),
-            "<s>deleted</s>"
-        );
+        assert_eq!(markdown_to_telegram_html("~~deleted~~"), "<s>deleted</s>");
     }
 
     #[test]

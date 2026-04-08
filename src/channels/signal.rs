@@ -620,9 +620,7 @@ impl SignalChannel {
 
         // Collect media attachments from signal-cli's local file store
         let media_attachments = if has_attachments && !self.config.ignore_attachments {
-            collect_signal_attachments(
-                data_msg.attachments.as_deref().unwrap_or_default(),
-            )
+            collect_signal_attachments(data_msg.attachments.as_deref().unwrap_or_default())
         } else {
             Vec::new()
         };
@@ -2297,7 +2295,10 @@ mod tests {
             "Attachment-only should be processed when ignore_attachments=false"
         );
         let (msg, _) = result.unwrap();
-        assert_eq!(msg.content, "[Media received \u{2014} please analyze the attached content]");
+        assert_eq!(
+            msg.content,
+            "[Media received \u{2014} please analyze the attached content]"
+        );
         Ok(())
     }
 

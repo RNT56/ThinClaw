@@ -14,6 +14,7 @@ use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::tools::builtin::llm_tools::ModelOverride;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -474,6 +475,15 @@ impl Agent {
                 } else {
                     let requested = &args[0];
 
+                    if requested.eq_ignore_ascii_case("reset") {
+                        if let Some(ref override_lock) = self.deps.model_override {
+                            *override_lock.write().await = None;
+                            return Ok(SubmissionResult::response(
+                                "Switched back to the default routed model.".to_string(),
+                            ));
+                        }
+                    }
+
                     // Validate the model exists
                     match self.llm().list_models().await {
                         Ok(models) if !models.is_empty() => {
@@ -493,15 +503,33 @@ impl Agent {
                         }
                     }
 
-                    match self.llm().set_model(requested) {
-                        Ok(()) => Ok(SubmissionResult::response(format!(
-                            "Switched model to: {}",
+                    if !requested.contains('/') {
+                        return Ok(SubmissionResult::error(
+                            "Use /model <provider/model> or /model reset. Example: /model openai/gpt-4o"
+                                .to_string(),
+                        ));
+                    }
+
+                    if let Some(ref override_lock) = self.deps.model_override {
+                        *override_lock.write().await = Some(ModelOverride {
+                            model_spec: requested.to_string(),
+                            reason: Some("manual /model command".to_string()),
+                        });
+                        Ok(SubmissionResult::response(format!(
+                            "Switched model for this conversation to: {}",
                             requested
-                        ))),
-                        Err(e) => Ok(SubmissionResult::error(format!(
-                            "Failed to switch model: {}",
-                            e
-                        ))),
+                        )))
+                    } else {
+                        match self.llm().set_model(requested) {
+                            Ok(()) => Ok(SubmissionResult::response(format!(
+                                "Switched model to: {}",
+                                requested
+                            ))),
+                            Err(e) => Ok(SubmissionResult::error(format!(
+                                "Failed to switch model: {}",
+                                e
+                            ))),
+                        }
                     }
                 }
             }

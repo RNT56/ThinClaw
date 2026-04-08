@@ -62,6 +62,8 @@ Pull a model first: `ollama pull llama3.2`
 
 All providers below use `LLM_BACKEND=openai_compatible`. Set `LLM_BASE_URL` to the
 provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
+ThinClaw also accepts provider-specific aliases such as `OPENROUTER_API_KEY`
+for catalog-driven routing and provider selection.
 
 ### OpenRouter
 

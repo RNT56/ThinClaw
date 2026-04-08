@@ -27,7 +27,7 @@ pub async fn list_skills(
             name: s.manifest.name.clone(),
             description: s.manifest.description.clone(),
             version: s.manifest.version.clone(),
-            trust: format!("{:?}", s.trust),
+            trust: s.trust.to_string(),
             source: format!("{:?}", s.source),
             keywords: s.manifest.activation.keywords.clone(),
         })
@@ -56,7 +56,7 @@ pub async fn search_skills(
             name: s.manifest.name.clone(),
             description: s.manifest.description.clone(),
             version: s.manifest.version.clone(),
-            trust: format!("{:?}", s.trust),
+            trust: s.trust.to_string(),
             source: format!("{:?}", s.source),
             keywords: s.manifest.activation.keywords.clone(),
         })

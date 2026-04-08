@@ -39,7 +39,7 @@ impl ProviderPreset {
         match self {
             Self::Nvidia => "https://integrate.api.nvidia.com/v1",
             Self::Perplexity => "https://api.perplexity.ai",
-            Self::MiniMax => "https://api.minimax.chat/v1",
+            Self::MiniMax => "https://api.minimax.io/v1",
             Self::Glm => "https://open.bigmodel.cn/api/paas/v4",
         }
     }
@@ -49,7 +49,7 @@ impl ProviderPreset {
         match self {
             Self::Nvidia => "meta/llama-3.1-405b-instruct",
             Self::Perplexity => "sonar-pro",
-            Self::MiniMax => "MiniMax-Text-01",
+            Self::MiniMax => "MiniMax-M2.7",
             Self::Glm => "glm-4-plus",
         }
     }
@@ -101,10 +101,7 @@ impl ProviderPreset {
 
     /// Provider-specific extra headers (if any).
     pub fn extra_headers(&self) -> Vec<(String, String)> {
-        match self {
-            Self::MiniMax => vec![("X-MiniMax-Version".to_string(), "2025-01-01".to_string())],
-            _ => vec![],
-        }
+        vec![]
     }
 
     /// All available presets.
@@ -292,14 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn test_minimax_extra_headers() {
-        let headers = ProviderPreset::MiniMax.extra_headers();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].0, "X-MiniMax-Version");
+    fn test_minimax_defaults_match_current_api() {
+        assert_eq!(
+            ProviderPreset::MiniMax.default_base_url(),
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(ProviderPreset::MiniMax.default_model(), "MiniMax-M2.7");
     }
 
     #[test]
-    fn test_other_presets_no_extra_headers() {
+    fn test_presets_do_not_require_extra_headers() {
+        assert!(ProviderPreset::MiniMax.extra_headers().is_empty());
         assert!(ProviderPreset::Nvidia.extra_headers().is_empty());
         assert!(ProviderPreset::Perplexity.extra_headers().is_empty());
         assert!(ProviderPreset::Glm.extra_headers().is_empty());

@@ -91,7 +91,10 @@ mod tests {
             DatabaseError::Migration("version mismatch".to_string()),
             DatabaseError::Serialization("invalid json".to_string()),
         ];
-        let display: Vec<String> = errors.iter().map(|e: &DatabaseError| e.to_string()).collect();
+        let display: Vec<String> = errors
+            .iter()
+            .map(|e: &DatabaseError| e.to_string())
+            .collect();
         assert_yaml_snapshot!("database_error_display", display);
     }
 
@@ -107,8 +110,16 @@ mod tests {
                 name: "slack".to_string(),
                 reason: "rate limited".to_string(),
             },
+            ChannelError::MessageTooLong {
+                channel: "telegram".to_string(),
+                length: 5000,
+                max: 3800,
+            },
         ];
-        let display: Vec<String> = errors.iter().map(|e: &ChannelError| e.to_string()).collect();
+        let display: Vec<String> = errors
+            .iter()
+            .map(|e: &ChannelError| e.to_string())
+            .collect();
         assert_yaml_snapshot!("channel_error_display", display);
     }
 }

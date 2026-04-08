@@ -90,11 +90,13 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
+            cost_tracker: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -128,11 +130,13 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            llm_runtime: self.state.llm_runtime.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
+            cost_tracker: self.state.cost_tracker.clone(),
             routine_engine: self.state.routine_engine.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -225,6 +229,12 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the live LLM runtime manager for hot reload and routing APIs.
+    pub fn with_llm_runtime(mut self, runtime: Arc<crate::llm::LlmRuntimeManager>) -> Self {
+        self.rebuild_state(|s| s.llm_runtime = Some(runtime));
+        self
+    }
+
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
         self.rebuild_state(|s| s.registry_entries = entries);
@@ -234,6 +244,15 @@ impl GatewayChannel {
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
         self.rebuild_state(|s| s.cost_guard = Some(cg));
+        self
+    }
+
+    /// Inject the cost tracker for the rich Cost Dashboard API.
+    pub fn with_cost_tracker(
+        mut self,
+        tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
+    ) -> Self {
+        self.rebuild_state(|s| s.cost_tracker = Some(tracker));
         self
     }
 
@@ -300,7 +319,13 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone(), self.webhook_routes.clone()).await?;
+        server::start_server(
+            addr,
+            self.state.clone(),
+            self.auth_token.clone(),
+            self.webhook_routes.clone(),
+        )
+        .await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

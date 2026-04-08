@@ -142,6 +142,13 @@ pub enum ChannelError {
 
     #[error("Channel configuration error: {0}")]
     Configuration(String),
+
+    #[error("Message too long for channel {channel}: {length} chars exceeds limit of {max}")]
+    MessageTooLong {
+        channel: String,
+        length: usize,
+        max: usize,
+    },
 }
 
 /// LLM provider errors.

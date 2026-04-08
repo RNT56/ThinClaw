@@ -77,9 +77,7 @@ impl AgentRegistryStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                &format!(
-                    "SELECT {AGENT_WS_COLUMNS} FROM agent_workspaces WHERE agent_id = ?1"
-                ),
+                &format!("SELECT {AGENT_WS_COLUMNS} FROM agent_workspaces WHERE agent_id = ?1"),
                 libsql::params![agent_id],
             )
             .await
@@ -98,15 +96,11 @@ impl AgentRegistryStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                &format!(
-                    "SELECT {AGENT_WS_COLUMNS} FROM agent_workspaces ORDER BY created_at ASC"
-                ),
+                &format!("SELECT {AGENT_WS_COLUMNS} FROM agent_workspaces ORDER BY created_at ASC"),
                 (),
             )
             .await
-            .map_err(|e| {
-                DatabaseError::Query(format!("Failed to list agent workspaces: {e}"))
-            })?;
+            .map_err(|e| DatabaseError::Query(format!("Failed to list agent workspaces: {e}")))?;
 
         let mut results = Vec::new();
         while let Ok(Some(row)) = rows.next().await {
@@ -123,17 +117,12 @@ impl AgentRegistryStore for LibSqlBackend {
                 libsql::params![agent_id],
             )
             .await
-            .map_err(|e| {
-                DatabaseError::Query(format!("Failed to delete agent workspace: {e}"))
-            })?;
+            .map_err(|e| DatabaseError::Query(format!("Failed to delete agent workspace: {e}")))?;
 
         Ok(affected > 0)
     }
 
-    async fn update_agent_workspace(
-        &self,
-        ws: &AgentWorkspaceRecord,
-    ) -> Result<(), DatabaseError> {
+    async fn update_agent_workspace(&self, ws: &AgentWorkspaceRecord) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let bound_channels =
             serde_json::to_string(&ws.bound_channels).unwrap_or_else(|_| "[]".into());
@@ -165,9 +154,7 @@ impl AgentRegistryStore for LibSqlBackend {
                 ],
             )
             .await
-            .map_err(|e| {
-                DatabaseError::Query(format!("Failed to update agent workspace: {e}"))
-            })?;
+            .map_err(|e| DatabaseError::Query(format!("Failed to update agent workspace: {e}")))?;
 
         if affected == 0 {
             return Err(DatabaseError::Query(format!(
@@ -255,15 +242,14 @@ mod tests {
             .unwrap();
 
         assert!(backend.delete_agent_workspace("to-delete").await.unwrap());
-        assert!(!backend
-            .delete_agent_workspace("nonexistent")
-            .await
-            .unwrap());
-        assert!(backend
-            .get_agent_workspace("to-delete")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(!backend.delete_agent_workspace("nonexistent").await.unwrap());
+        assert!(
+            backend
+                .get_agent_workspace("to-delete")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

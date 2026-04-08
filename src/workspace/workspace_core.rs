@@ -198,6 +198,10 @@ impl Workspace {
     /// Creates parent directories implicitly (they're virtual in the DB).
     /// Re-indexes the document for search after writing.
     ///
+    /// Reindex failures (e.g. missing vector extension, temporary DB lock) are
+    /// logged as warnings but do NOT fail the write — content is always durably
+    /// persisted even when the search index cannot be updated.
+    ///
     /// # Example
     /// ```ignore
     /// workspace.write("projects/alpha/README.md", "# Project Alpha\n\nDescription here.").await?;
@@ -209,7 +213,17 @@ impl Workspace {
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
         self.storage.update_document(doc.id, content).await?;
-        self.reindex_document(doc.id).await?;
+
+        // Reindex for search — non-fatal: a vector/FTS index failure must not
+        // prevent a successful save (content is already durably written above).
+        if let Err(e) = self.reindex_document(doc.id).await {
+            tracing::warn!(
+                doc_id = %doc.id,
+                path = %path,
+                error = %e,
+                "Reindex failed after write — content saved but search index may be stale"
+            );
+        }
 
         // Return updated doc
         self.storage.get_document_by_id(doc.id).await
@@ -219,6 +233,8 @@ impl Workspace {
     ///
     /// Creates the file if it doesn't exist.
     /// Adds a newline separator between existing and new content.
+    ///
+    /// Reindex failures are logged as warnings but do NOT fail the append.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
         let doc = self
@@ -233,7 +249,17 @@ impl Workspace {
         };
 
         self.storage.update_document(doc.id, &new_content).await?;
-        self.reindex_document(doc.id).await?;
+
+        // Reindex for search — non-fatal (same reasoning as write()).
+        if let Err(e) = self.reindex_document(doc.id).await {
+            tracing::warn!(
+                doc_id = %doc.id,
+                path = %path,
+                error = %e,
+                "Reindex failed after append — content saved but search index may be stale"
+            );
+        }
+
         Ok(())
     }
 
@@ -466,7 +492,10 @@ impl Workspace {
                     if confidence >= 0.6 {
                         // Full profile injection
                         let summary = profile.to_user_md();
-                        parts.push(format!("## User Profile\n\n{}", cap_chars(&summary, FILE_MAX_CHARS)));
+                        parts.push(format!(
+                            "## User Profile\n\n{}",
+                            cap_chars(&summary, FILE_MAX_CHARS)
+                        ));
                     } else if confidence >= 0.3 {
                         // Basics only — just name, communication style, cohort
                         let mut basics = Vec::new();
@@ -485,7 +514,10 @@ impl Workspace {
                                 profile.cohort.cohort, profile.cohort.confidence
                             ));
                         }
-                        parts.push(format!("## User Profile (preliminary)\n\n{}", basics.join("\n")));
+                        parts.push(format!(
+                            "## User Profile (preliminary)\n\n{}",
+                            basics.join("\n")
+                        ));
                     }
                     // confidence < 0.3: skip injection entirely
                 }
@@ -741,19 +773,23 @@ impl Workspace {
     // ==================== Indexing ====================
 
     /// Re-index a document (chunk and generate embeddings).
+    ///
+    /// Chunk counts and embeddings are computed first. The old index is then
+    /// atomically replaced with the new one via `storage.replace_chunks`, which
+    /// wraps the delete + insert in a single BEGIN/COMMIT on libSQL so there is
+    /// never a window where the document has zero search chunks.
     async fn reindex_document(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
-        // Get the document
+        // Get the document content
         let doc = self.storage.get_document_by_id(document_id).await?;
 
         // Chunk the content
-        let chunks = chunk(&doc.content, ChunkConfig::default());
+        let raw_chunks = chunk(&doc.content, ChunkConfig::default());
 
-        // Delete old chunks
-        self.storage.delete_chunks(document_id).await?;
-
-        // Insert new chunks
-        for (index, content) in chunks.into_iter().enumerate() {
-            // Generate embedding if provider available
+        // Build (index, content, embedding) tuples — generate embeddings first so
+        // the expensive work happens before we touch the DB index at all.
+        let mut prepared: Vec<(i32, String, Option<Vec<f32>>)> =
+            Vec::with_capacity(raw_chunks.len());
+        for (index, content) in raw_chunks.into_iter().enumerate() {
             let embedding = if let Some(ref provider) = self.embeddings {
                 match provider.embed(&content).await {
                     Ok(emb) => Some(emb),
@@ -765,16 +801,71 @@ impl Workspace {
             } else {
                 None
             };
-
-            self.storage
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
-                .await?;
+            prepared.push((index as i32, content, embedding));
         }
+
+        // Atomically swap old chunks for new ones (single transaction on libSQL,
+        // fallback sequential delete+insert on Postgres).
+        self.storage.replace_chunks(document_id, &prepared).await?;
 
         Ok(())
     }
 
+
     // ==================== Seeding ====================
+
+
+
+    // ── Timezone <-> USER.md sync ────────────────────────────────────────
+
+    /// Extract the timezone value from `USER.md`'s `**Timezone:**` field.
+    ///
+    /// Returns `Some(tz)` if the field contains a non-empty, valid IANA
+    /// timezone name (e.g. "Europe/Berlin"). Returns `None` if the field
+    /// is empty, missing, or contains an invalid timezone.
+    pub async fn extract_user_timezone(&self) -> Option<String> {
+        let doc = self.read(paths::USER).await.ok()?;
+        for line in doc.content.lines() {
+            let trimmed = line.trim();
+            // Match "- **Timezone:** <value>" or "- **Timezone**: <value>"
+            if let Some(rest) = trimmed
+                .strip_prefix("- **Timezone:**")
+                .or_else(|| trimmed.strip_prefix("- **Timezone**:"))
+            {
+                let value = rest.trim();
+                if !value.is_empty()
+                    && !value.starts_with('_')
+                    && crate::timezone::parse_timezone(value).is_some()
+                {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Pre-populate the `**Timezone:**` field in USER.md with the given value.
+    ///
+    /// Only updates if the field is currently empty (i.e. the seed template
+    /// placeholder). Does not overwrite user-provided values.
+    pub async fn inject_user_timezone(&self, timezone: &str) -> Result<(), WorkspaceError> {
+        let doc = match self.read(paths::USER).await {
+            Ok(d) => d,
+            Err(_) => return Ok(()), // USER.md doesn't exist yet — seeder will create it
+        };
+
+        // Only inject if the field is empty (template placeholder)
+        if doc.content.contains("- **Timezone:**\n") || doc.content.ends_with("- **Timezone:**") {
+            let updated = doc
+                .content
+                .replace("- **Timezone:**", &format!("- **Timezone:** {}", timezone));
+            self.write(paths::USER, &updated).await?;
+            tracing::info!("Pre-populated USER.md timezone with '{}'", timezone);
+        }
+        Ok(())
+    }
+
+    // ── Workspace seeding ────────────────────────────────────────────────
 
     /// Seed any missing core identity files in the workspace.
     ///

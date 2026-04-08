@@ -121,16 +121,15 @@ impl Agent {
         // ── Media attachment handling ────────────────────────────────
         // Images/audio/video → multimodal: attached to ChatMessage for vision/audio LLMs
         // PDFs/documents/unknown → text extraction: prepended to the user content
-        let (multimodal_attachments, text_extract_attachments): (Vec<_>, Vec<_>) = message
-            .attachments
-            .iter()
-            .cloned()
-            .partition(|a| matches!(
-                a.media_type,
-                crate::media::MediaType::Image
-                | crate::media::MediaType::Audio
-                | crate::media::MediaType::Video
-            ));
+        let (multimodal_attachments, text_extract_attachments): (Vec<_>, Vec<_>) =
+            message.attachments.iter().cloned().partition(|a| {
+                matches!(
+                    a.media_type,
+                    crate::media::MediaType::Image
+                        | crate::media::MediaType::Audio
+                        | crate::media::MediaType::Video
+                )
+            });
 
         let content = if !text_extract_attachments.is_empty() {
             let pipeline = crate::media::MediaPipeline::new();
@@ -178,7 +177,6 @@ impl Agent {
                 "Routing media attachments to multimodal LLM processing"
             );
         }
-
 
         // First check thread state without holding lock during I/O
         let thread_state = {
@@ -276,7 +274,8 @@ impl Agent {
                     )
                     .await;
 
-                let mut compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                let mut compactor =
+                    ContextCompactor::new(self.llm().clone(), self.safety().clone());
                 if let Some(ref tracker) = self.deps.cost_tracker {
                     compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
                 }
@@ -829,6 +828,14 @@ impl Agent {
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
+
+            // Sanitize the restored snapshot before appending new results.
+            // The snapshot was captured at approval time; if the hard history
+            // cap had fired in that same iteration and orphaned any Tool
+            // messages, those orphans would be frozen into the snapshot.
+            // Sanitizing here ensures the context is clean before we append
+            // the approved tool result and resume the agentic loop.
+            crate::llm::sanitize_tool_messages(&mut context_messages);
 
             // Record result in thread
             {

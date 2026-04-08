@@ -185,6 +185,16 @@ interface channel-host {
 
     /// Read the allowFrom list (for merging with config allowFrom).
     pairing-read-allow-from: func(channel: string) -> result<list<string>, string>;
+
+    // ==================== Text Formatting ====================
+
+    /// Convert Markdown to Telegram-safe HTML.
+    ///
+    /// Canonical implementation lives on the host side to avoid
+    /// duplicate converters. Handles bold, italic, code, pre,
+    /// headings, links, strikethrough, blockquotes, and HTML
+    /// entity escaping.
+    markdown-to-telegram-html: func(markdown: string) -> string;
 }
 
 /// Channel interface that sandboxed channels must implement.

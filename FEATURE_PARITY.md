@@ -98,7 +98,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | User message reactions | ✅ | ✅ | `TgMessageReaction` + `TgReactionType` parsing; emojis surfaced in `IncomingMessage` metadata |
 | sendPoll | ✅ | ✅ | `send_poll()` helper: question, options, anonymous/multiple-answer flags; wired to `Channel::poll()` trait |
 | Cron/heartbeat topic targeting | ✅ | ✅ | `HEARTBEAT_NOTIFY_TOPIC_ID` config + `message_thread_id` injection in broadcast metadata |
-| sendMessage+editMessageText streaming | ✅ | ✅ | Host-side streaming via `sendMessage` (first chunk) + `editMessageText` (subsequent). Markdown→HTML conversion on host side. Persistent draft across tool-call iterations. Enabled via `/api/settings/telegram_stream_mode` with hot-reload or `TELEGRAM_STREAM_MODE=edit` env var. |
+| sendMessage+editMessageText streaming | ✅ | ✅ | Host-side streaming via `sendMessage` (first chunk) + `editMessageText` (subsequent). Unified Markdown→HTML converter exposed via WIT `markdown-to-telegram-html` — WASM guest delegates to host, eliminating duplicate code. Persistent draft across tool-call iterations. Overflow detection (>3800 chars): deletes partial message and falls back to `on_respond()` message splitting. Enabled via `/api/settings/telegram_stream_mode` with hot-reload or `TELEGRAM_STREAM_MODE=edit` env var. |
 
 ### Discord-Specific Features (since Feb 2025)
 
@@ -236,11 +236,11 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider |
 | Ollama (local) | ✅ | ✅ | - | Via `rig::providers::ollama` (full support) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (ThinClaw-only) |
-| AWS Bedrock | ✅ | ✅ | P3 | OpenAI-to-Bedrock adapter with Converse API translation ([`src/llm/bedrock.rs`](src/llm/bedrock.rs)) |
+| AWS Bedrock | ✅ | ✅ | P3 | Native Bedrock Mantle OpenAI-compatible endpoint is now the primary path, with legacy proxy fallback still supported ([`src/llm/provider_factory.rs`](src/llm/provider_factory.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs)) |
 | Google Gemini | ✅ | ✅ | P3 | AI Studio adapter with system instruction support ([`src/llm/gemini.rs`](src/llm/gemini.rs)) |
 | NVIDIA API | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Nvidia` — pre-configured OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | Perplexity | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Perplexity` — `sonar-pro` default model ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
-| MiniMax | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::MiniMax` with `X-MiniMax-Version` header ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
+| MiniMax | ✅ | ✅ | P3 | Provider preset + catalog updated to the current `api.minimax.io/v1` OpenAI-compatible endpoint and M2-family defaults ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs), [`src/config/provider_catalog.rs`](src/config/provider_catalog.rs)) |
 | GLM-5 | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Glm` — Zhipu `glm-4-plus` default ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | ✅ | P3 | `LlamaModel` trait + `LlamaConfig` + `LlamaCppStub` fallback, ready for `llama-cpp-2` FFI ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs)) |
@@ -256,13 +256,13 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 | Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
 | 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
-| Smart routing WebUI config | ❌ | ✅ | Settings tab: cheap model, cascade mode, enable/disable, failover chain ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
-| Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for API key, stores in OS keychain ([`src/setup/wizard.rs`](src/setup/wizard.rs)) |
+| Smart routing WebUI config | ❌ | ✅ | Providers tab now includes a dedicated Routing editor for enable/disable, mode selection, provider roster, per-provider model slot persistence, drag-and-drop primary/cheap pool reordering, fallback chain, policy rules, route simulation, an opt-in “Separate tool planning from final answer” toggle for two-phase cheap synthesis on main-agent tool turns, where the cheap phase only runs after an explicit `NO_TOOLS_NEEDED` planner signal and any primary-model final answer is returned directly, plus a separate toggle to keep primary planning thinking enabled by default ([`src/channels/web/static/app.js`](src/channels/web/static/app.js), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/agent/dispatcher.rs`](src/agent/dispatcher.rs)) |
+| Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for the missing API key without clobbering the primary backend, and persists canonical provider settings ([`src/setup/wizard/llm.rs`](src/setup/wizard/llm.rs)) |
 | Claude Code runtime model config | ❌ | ✅ | WebUI Settings: change model/max-turns without restart, hot-reloaded into `ContainerJobManager` ([`src/orchestrator/job_manager.rs`](src/orchestrator/job_manager.rs)) |
-| Provider Vault (WebUI key mgmt) | ❌ | ✅ | Settings → Provider Vault: list 17 providers, add/remove API keys with encrypted storage, hot-reload [`src/channels/web/server.rs`](src/channels/web/server.rs) |
-| Agent-initiated model switching | ❌ | ✅ | `llm_select` + `llm_list_models` tools: agent can switch LLM mid-conversation via `SharedModelOverride` [`src/tools/builtin/llm_tools.rs`](src/tools/builtin/llm_tools.rs) |
-| Wizard fallback providers step | ❌ | ✅ | `step_fallback_providers` (Step 6): interactive secondary provider + API key setup, configures `fallback_chain` [`src/setup/wizard.rs`](src/setup/wizard.rs) |
-| RoutingPolicy in dispatcher | ❌ | ✅ | Automatic policy-driven routing (vision, large context, latency) wired into dispatcher pre-Reasoning [`src/agent/dispatcher.rs`](src/agent/dispatcher.rs) |
+| Provider Vault (WebUI key mgmt) | ❌ | ✅ | Providers tab: list providers, add/remove encrypted credentials for catalog providers plus custom OpenAI-compatible endpoints and native Bedrock API keys, auto-enable them for routing, and hot-reload the live LLM runtime ([`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Agent-initiated model switching | ❌ | ✅ | `llm_select` + `llm_list_models` tools: agent can switch LLM mid-conversation via `SharedModelOverride`; runtime probe blocks dead model switches, dispatcher auto-resets failed overrides to the previous working model, and model discovery exposes current primary/cheap config [`src/tools/builtin/llm_tools.rs`](src/tools/builtin/llm_tools.rs) |
+| Wizard fallback providers step | ❌ | ✅ | `step_fallback_providers` adds secondary providers and models into canonical provider routing settings without mutating the chosen primary backend ([`src/setup/wizard/llm.rs`](src/setup/wizard/llm.rs)) |
+| RoutingPolicy in runtime | ❌ | ✅ | Policy rules are resolved by the live LLM runtime manager and applied to request-time routing, explicit fallback chains, cost-aware target selection, OpenAI-compatible calls, and hot-reloaded provider settings ([`src/llm/runtime_manager.rs`](src/llm/runtime_manager.rs), [`src/llm/routing_policy.rs`](src/llm/routing_policy.rs)) |
 
 ### Owner: ThinClaw Agent
 
@@ -444,7 +444,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Feature | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions, costs |
-| Cost Dashboard (WebUI) | ❌ | ✅ | - | Dedicated Costs tab: daily spend with budget progress bar, total tokens, active models, actions/hr summary cards + per-model horizontal bar chart (input/output split) + model breakdown table with cost shares and totals. Wired to `/api/gateway/status` with `budget_limit_usd` + `hourly_action_limit` from `CostGuard` ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Cost Dashboard (WebUI) | ❌ | ✅ | - | Dedicated Costs tab: time‑range selector (Today/7d/30d/All), daily spend bar chart, budget progress, total tokens, active models, actions/hr summary cards + per‑model horizontal bar chart (input/output split) + model breakdown table with requests, cost shares, and totals. Backed by `/api/costs/summary` (CostTracker historical data) + `/api/gateway/status` (CostGuard real-time). SSE `cost_alert` toast notifications. Secure CSV export via `/api/costs/export` (Authorization header). Cost reset via `POST /api/costs/reset` (clears CostTracker + CostGuard). Auto‑refreshes every 30s. Persistent across restarts (60s background flush + shutdown flush). Provider-sourced pricing forwarded to CostGuard budget enforcement. Entry compaction at 50K cap preserves daily/model aggregates. UTC-consistent date handling. ([`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Channel status view | ✅ | ✅ | P2 | `ChannelStatusView` with per-channel state machine, table/JSON format ([`src/channels/status_view.rs`](src/channels/status_view.rs)) |
 | Agent management | ✅ | ✅ | P3 | CLI: `agents list/add/remove/show/set-default`; `AgentRouter` dispatch pipeline |
 | Model selection | ✅ | ✅ | - | TUI only |
@@ -831,7 +831,7 @@ running inside Scrappy.
 - ❌ Matrix channel — E2EE stub
 - ✅ Telegram: forum topic creation + `message_thread_id` threading
 - ✅ Telegram: `channel_post` support + `sender_chat` identification
-- ✅ Streaming draft replies — End-to-end: `respond_with_tools_streaming` in Reasoning, agent loop integration in dispatcher, DraftReplyState send-then-edit with HTML formatting, persistent draft across tool-call iterations, spawn-handle race-condition hardening, Discord + Telegram `send_draft`
+- ✅ Streaming draft replies — End-to-end: `respond_with_tools_streaming` in Reasoning, agent loop integration in dispatcher, DraftReplyState send-then-edit with HTML formatting, persistent draft across tool-call iterations, sequential mpsc chunk processing (FIFO guaranteed), overflow detection with fallback to `on_respond()`, `delete_message` cleanup, Discord + Telegram `send_draft`
 - ✅ Per-channel stream mode config — Hot-reloadable WebUI `/api/settings` integration (`telegram_stream_mode`) or env vars; `ChannelManager::set_channel_stream_mode()` runtime delegation
 - ✅ Telegram: user message reactions — `TgMessageReaction` parsing with emoji/custom emoji support, surfaced in `IncomingMessage` metadata
 - ✅ Telegram: sendPoll — `send_poll()` helper with question, options, anonymous/multiple-answer flags; wired to `Channel::poll()` trait
@@ -849,15 +849,15 @@ running inside Scrappy.
 - ✅ CLI: `update` self-update — check/install/rollback with stable/beta/nightly channels + binary backup ([`src/cli/update.rs`](src/cli/update.rs))
 - ✅ CLI: `browser` automation — headless Chrome open/screenshot/links/check with DOM extraction ([`src/cli/browser.rs`](src/cli/browser.rs))
 - ✅ CLI: `sessions export` — markdown/JSON transcript export with role labels and timestamps ([`src/cli/sessions.rs`](src/cli/sessions.rs))
-- ✅ CLI: `models` — list/info/test with built-in model knowledge + Ollama auto-discovery ([`src/cli/models.rs`](src/cli/models.rs))
+- ✅ CLI: `models` — list/info/test plus `models verify` for live remote provider discovery + chat probes ([`src/cli/models.rs`](src/cli/models.rs))
 
 **LLM & Inference**
 - ✅ Gemini embeddings — `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
 - ✅ Local embeddings (on-device) — `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
-- ✅ AWS Bedrock provider — OpenAI-to-Bedrock Converse API adapter ([`src/llm/bedrock.rs`](src/llm/bedrock.rs))
+- ✅ AWS Bedrock provider — native Mantle OpenAI-compatible path with legacy proxy fallback ([`src/llm/provider_factory.rs`](src/llm/provider_factory.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs))
 - ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
 - ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))
-- ✅ Auto model discovery from endpoints ([`src/llm/discovery.rs`](src/llm/discovery.rs): OpenAI/Anthropic/Ollama endpoint scanning with auto-discover)
+- ✅ Auto model discovery from endpoints ([`src/llm/discovery.rs`](src/llm/discovery.rs): OpenAI/Anthropic/Ollama plus provider-specific Cohere discovery and native Bedrock-compatible endpoint scanning)
 - ✅ `llama.cpp` native interface — `LlamaModel` trait, `LlamaConfig` (GPU layers, sampling, context length), `ModelLoadStatus`, `LlamaCppStub` fallback ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs))
 - ✅ Provider presets — NVIDIA, Perplexity, MiniMax, GLM-5 pre-configured for OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs))
 

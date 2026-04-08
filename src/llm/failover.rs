@@ -392,7 +392,9 @@ impl LlmProvider for FailoverProvider {
         request: ToolCompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
         let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx].complete_stream_with_tools(request).await
+        self.providers[idx]
+            .complete_stream_with_tools(request)
+            .await
     }
 
     fn supports_streaming(&self) -> bool {
@@ -437,6 +439,8 @@ mod tests {
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Ok(CompletionResponse {
                     content: content.to_string(),
+                    provider_model: None,
+                    cost_usd: None,
                     thinking_content: None,
                     input_tokens: 10,
                     output_tokens: 5,
@@ -444,6 +448,8 @@ mod tests {
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
+                    provider_model: None,
+                    cost_usd: None,
                     tool_calls: vec![],
                     thinking_content: None,
                     input_tokens: 10,
@@ -827,6 +833,8 @@ mod tests {
             }
             Ok(CompletionResponse {
                 content: format!("{} ok", self.name),
+                provider_model: None,
+                cost_usd: None,
                 thinking_content: None,
                 input_tokens: 10,
                 output_tokens: 5,
@@ -852,6 +860,8 @@ mod tests {
             }
             Ok(ToolCompletionResponse {
                 content: Some(format!("{} ok", self.name)),
+                provider_model: None,
+                cost_usd: None,
                 tool_calls: vec![],
                 thinking_content: None,
                 input_tokens: 10,

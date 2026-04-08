@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::channels::StreamMode;
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -115,10 +115,23 @@ pub struct NostrConfig {
 
 impl ChannelsConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
+        let http_host = optional_env("HTTP_HOST")?.or(settings.channels.http_host.clone());
+        let http_port = optional_env("HTTP_PORT")?
+            .map(|s| {
+                s.parse::<u16>().map_err(|e| ConfigError::InvalidValue {
+                    key: "HTTP_PORT".to_string(),
+                    message: format!("{e}"),
+                })
+            })
+            .transpose()?
+            .or(settings.channels.http_port);
+        let http_enabled_default =
+            settings.channels.http_enabled || http_host.is_some() || http_port.is_some();
+        let http_enabled = parse_bool_env("HTTP_ENABLED", http_enabled_default)?;
+        let http = if http_enabled {
             Some(HttpConfig {
-                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
-                port: parse_optional_env("HTTP_PORT", 8080)?,
+                host: http_host.unwrap_or_else(|| "0.0.0.0".to_string()),
+                port: http_port.unwrap_or(8080),
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
             })
@@ -130,8 +143,27 @@ impl ChannelsConfig {
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
-                port: parse_optional_env("GATEWAY_PORT", 3000)?,
-                auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
+                port: optional_env("GATEWAY_PORT")?
+                    .map(|s| {
+                        s.parse::<u16>().map_err(|e| ConfigError::InvalidValue {
+                            key: "GATEWAY_PORT".to_string(),
+                            message: format!("{e}"),
+                        })
+                    })
+                    .transpose()?
+                    .or(settings.channels.gateway_port)
+                    .unwrap_or(3000),
+                auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
+                    .or(settings.channels.gateway_auth_token.clone())
+                    .map(|s| {
+                    let trimmed = s.trim().to_string();
+                    if trimmed.len() != s.len() {
+                        tracing::warn!(
+                            "GATEWAY_AUTH_TOKEN has leading/trailing whitespace — trimmed automatically"
+                        );
+                    }
+                    trimmed
+                }),
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
             })
         } else {
@@ -214,10 +246,12 @@ impl ChannelsConfig {
                     message: format!("must be an integer: {e}"),
                 })?
                 .or(settings.channels.telegram_owner_id),
-            telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?.or(settings.channels.telegram_stream_mode.clone()),
-            discord_stream_mode: optional_env("DISCORD_STREAM_MODE")?.or(settings.channels.discord_stream_mode.clone()),
+            telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?
+                .or(settings.channels.telegram_stream_mode.clone()),
+            discord_stream_mode: optional_env("DISCORD_STREAM_MODE")?
+                .or(settings.channels.discord_stream_mode.clone()),
             telegram: Self::resolve_telegram(settings)?,
-            slack: Self::resolve_slack()?,
+            slack: Self::resolve_slack(settings)?,
             discord: Self::resolve_discord(settings)?,
             gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
@@ -228,10 +262,11 @@ impl ChannelsConfig {
     }
 
     fn resolve_nostr() -> Result<Option<NostrConfig>, ConfigError> {
-        let private_key = match optional_env("NOSTR_PRIVATE_KEY")? {
-            Some(k) => secrecy::SecretString::from(k),
-            None => return Ok(None),
-        };
+        let private_key =
+            match optional_env("NOSTR_PRIVATE_KEY")?.or(optional_env("NOSTR_SECRET_KEY")?) {
+                Some(k) => secrecy::SecretString::from(k),
+                None => return Ok(None),
+            };
 
         let relays = optional_env("NOSTR_RELAYS")?
             .map(|s| {
@@ -391,13 +426,21 @@ pub struct GmailChannelConfig {
 }
 
 impl ChannelsConfig {
-    fn resolve_slack() -> Result<Option<SlackChannelConfig>, ConfigError> {
-        let bot_token = match optional_env("SLACK_BOT_TOKEN")? {
-            Some(t) => SecretString::from(t),
-            None => return Ok(None),
-        };
+    fn resolve_slack(settings: &Settings) -> Result<Option<SlackChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("SLACK_ENABLED", settings.channels.slack_enabled)?;
+        if !enabled {
+            return Ok(None);
+        }
 
-        let app_token = match optional_env("SLACK_APP_TOKEN")? {
+        let bot_token =
+            match optional_env("SLACK_BOT_TOKEN")?.or(settings.channels.slack_bot_token.clone()) {
+                Some(t) => SecretString::from(t),
+                None => return Ok(None),
+            };
+
+        let app_token = match optional_env("SLACK_APP_TOKEN")?
+            .or(settings.channels.slack_app_token.clone())
+        {
             Some(t) => SecretString::from(t),
             None => {
                 return Err(ConfigError::InvalidValue {
@@ -408,6 +451,7 @@ impl ChannelsConfig {
         };
 
         let allow_from = optional_env("SLACK_ALLOW_FROM")?
+            .or(settings.channels.slack_allow_from.clone())
             .map(|s| {
                 s.split(',')
                     .map(|e| e.trim().to_string())
@@ -424,14 +468,23 @@ impl ChannelsConfig {
     }
 
     fn resolve_discord(settings: &Settings) -> Result<Option<DiscordChannelConfig>, ConfigError> {
-        let bot_token = match optional_env("DISCORD_BOT_TOKEN")? {
+        let enabled = parse_bool_env("DISCORD_ENABLED", settings.channels.discord_enabled)?;
+        if !enabled {
+            return Ok(None);
+        }
+
+        let bot_token = match optional_env("DISCORD_BOT_TOKEN")?
+            .or(settings.channels.discord_bot_token.clone())
+        {
             Some(t) => SecretString::from(t),
             None => return Ok(None),
         };
 
-        let guild_id = optional_env("DISCORD_GUILD_ID")?;
+        let guild_id =
+            optional_env("DISCORD_GUILD_ID")?.or(settings.channels.discord_guild_id.clone());
 
         let allow_from = optional_env("DISCORD_ALLOW_FROM")?
+            .or(settings.channels.discord_allow_from.clone())
             .map(|s| {
                 s.split(',')
                     .map(|e| e.trim().to_string())
@@ -485,7 +538,9 @@ impl ChannelsConfig {
     }
 
     #[cfg(target_os = "macos")]
-    fn resolve_apple_mail(settings: &Settings) -> Result<Option<AppleMailChannelConfig>, ConfigError> {
+    fn resolve_apple_mail(
+        settings: &Settings,
+    ) -> Result<Option<AppleMailChannelConfig>, ConfigError> {
         // DB setting takes priority (from WebUI), env var as fallback
         let enabled = if settings.channels.apple_mail_enabled {
             true
@@ -502,7 +557,13 @@ impl ChannelsConfig {
             .apple_mail_allow_from
             .as_deref()
             .filter(|s| !s.is_empty())
-            .or_else(|| optional_env("APPLE_MAIL_ALLOW_FROM").ok().flatten().as_deref().map(|_| ""))
+            .or_else(|| {
+                optional_env("APPLE_MAIL_ALLOW_FROM")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .map(|_| "")
+            })
             .map(|_| {
                 // Re-read from whichever source had the value
                 let raw = settings
@@ -609,5 +670,41 @@ impl ChannelsConfig {
             label_filters,
             max_message_size_bytes,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::helpers::ENV_MUTEX;
+    use secrecy::ExposeSecret;
+
+    fn clear_nostr_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("NOSTR_PRIVATE_KEY");
+            std::env::remove_var("NOSTR_SECRET_KEY");
+            std::env::remove_var("NOSTR_RELAYS");
+            std::env::remove_var("NOSTR_ALLOW_FROM");
+        }
+    }
+
+    #[test]
+    fn resolve_nostr_accepts_secret_key_alias() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_nostr_env();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("NOSTR_SECRET_KEY", "nsec_test_alias");
+        }
+
+        let nostr = ChannelsConfig::resolve_nostr()
+            .expect("nostr resolution should succeed")
+            .expect("nostr config should exist");
+
+        assert_eq!(nostr.private_key.expose_secret(), "nsec_test_alias");
+
+        clear_nostr_env();
     }
 }

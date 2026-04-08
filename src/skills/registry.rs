@@ -325,6 +325,26 @@ impl SkillRegistry {
             });
         }
 
+        // ── Safety module pre-check ────────────────────────────────────
+        // Run SkillPathConfig validation (normalize + containment + symlink
+        // detection) before touching the filesystem. This catches edge cases
+        // the inline checks above may miss (e.g. symlink-based escapes on
+        // existing paths) and consolidates the two validation codepaths.
+        {
+            let safety_config = crate::safety::skill_path::SkillPathConfig {
+                base_dir: user_dir.to_path_buf(),
+                allow_symlinks: std::env::var("SKILL_ALLOW_SYMLINKS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false),
+            };
+            safety_config
+                .skill_path(skill_name)
+                .map_err(|e| SkillRegistryError::InvalidName {
+                    name: skill_name.to_string(),
+                    reason: e.to_string(),
+                })?;
+        }
+
         let skill_dir = user_dir.join(skill_name);
 
         // Double-check: after join, the resolved path must still be inside user_dir.
@@ -489,10 +509,153 @@ impl SkillRegistry {
         self.commit_remove(name)
     }
 
+    /// Change a skill's trust level by moving it between directories.
+    ///
+    /// - `Trusted`: moves to `user_dir` (~/.thinclaw/skills/) — full tool access
+    /// - `Installed`: moves to `installed_dir` (~/.thinclaw/installed_skills/) — read-only tools
+    ///
+    /// Trust is location-based, so this physically moves the files. The trust
+    /// change survives restarts because `discover_all()` assigns trust based on
+    /// which directory contains the skill.
+    ///
+    /// Only `User`-sourced skills can be promoted/demoted. Workspace and Bundled
+    /// skills are managed externally and cannot change trust via this interface.
+    pub async fn promote_trust(
+        &mut self,
+        name: &str,
+        target_trust: SkillTrust,
+    ) -> Result<(), SkillRegistryError> {
+        let idx = self
+            .skills
+            .iter()
+            .position(|s| s.manifest.name == name)
+            .ok_or_else(|| SkillRegistryError::NotFound(name.to_string()))?;
+
+        let skill = &self.skills[idx];
+
+        // Only User-sourced skills can change trust
+        let current_path = match &skill.source {
+            SkillSource::User(path) => path.clone(),
+            SkillSource::Workspace(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "workspace skills cannot change trust via this interface".into(),
+                });
+            }
+            SkillSource::Bundled(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "bundled skills cannot change trust".into(),
+                });
+            }
+        };
+
+        // Already at target trust?
+        if skill.trust == target_trust {
+            return Ok(());
+        }
+
+        // Determine the target directory
+        let target_dir = match target_trust {
+            SkillTrust::Trusted => self.user_dir.clone(),
+            SkillTrust::Installed => {
+                self.installed_dir.clone().ok_or_else(|| {
+                    SkillRegistryError::WriteError {
+                        path: name.to_string(),
+                        reason: "no installed_dir configured, cannot demote skill".into(),
+                    }
+                })?
+            }
+        };
+
+        let new_skill_dir = target_dir.join(name);
+
+        // Ensure target directory exists
+        tokio::fs::create_dir_all(&new_skill_dir)
+            .await
+            .map_err(|e| SkillRegistryError::WriteError {
+                path: new_skill_dir.display().to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // Copy the SKILL.md to the new location
+        let src_file = current_path.join("SKILL.md");
+        let dst_file = new_skill_dir.join("SKILL.md");
+
+        tokio::fs::copy(&src_file, &dst_file)
+            .await
+            .map_err(|e| SkillRegistryError::WriteError {
+                path: dst_file.display().to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // Remove old files (best-effort — new files are already in place)
+        let _ = tokio::fs::remove_file(&src_file).await;
+        let _ = tokio::fs::remove_dir(&current_path).await;
+
+        // Update in-memory state
+        let skill = &mut self.skills[idx];
+        skill.trust = target_trust;
+        skill.source = SkillSource::User(new_skill_dir);
+
+        tracing::info!(
+            skill = name,
+            trust = %target_trust,
+            "Skill trust level changed"
+        );
+
+        Ok(())
+    }
+
     /// Clear all loaded skills and re-discover from disk.
     pub async fn reload(&mut self) -> Vec<String> {
         self.skills.clear();
         self.discover_all().await
+    }
+
+    /// Hot-reload a single skill from its current on-disk SKILL.md.
+    ///
+    /// Re-reads the file, re-parses the manifest, recompiles patterns, and
+    /// replaces the in-memory entry atomically. The skill's source and trust
+    /// level are preserved (it stays in the same directory with the same trust).
+    ///
+    /// Returns the skill name on success, or an error if the skill is not found
+    /// in the registry, the file can't be read, or the SKILL.md is invalid.
+    ///
+    /// Use this after editing a skill file on disk so changes take effect
+    /// immediately without a full restart or full registry reload.
+    pub async fn reload_skill(&mut self, name: &str) -> Result<String, SkillRegistryError> {
+        let idx = self
+            .skills
+            .iter()
+            .position(|s| s.manifest.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| SkillRegistryError::NotFound(name.to_string()))?;
+
+        // Derive the SKILL.md path from the current in-memory source
+        let (skill_md_path, trust, source) = {
+            let skill = &self.skills[idx];
+            let md_path = match &skill.source {
+                SkillSource::User(dir) => dir.join("SKILL.md"),
+                SkillSource::Workspace(dir) => dir.join("SKILL.md"),
+                SkillSource::Bundled(dir) => dir.join("SKILL.md"),
+            };
+            (md_path, skill.trust, skill.source.clone())
+        };
+
+        // Re-load and validate from disk (full pipeline: read, parse, hash, compile)
+        let (new_name, new_skill) =
+            load_and_validate_skill(&skill_md_path, trust, source).await?;
+
+        // Replace the in-memory entry atomically
+        self.skills[idx] = new_skill;
+
+        tracing::info!(
+            skill = new_name,
+            path = %skill_md_path.display(),
+            "Skill hot-reloaded from disk"
+        );
+
+        Ok(new_name)
     }
 
     /// Get the user skills directory path.
@@ -623,6 +786,17 @@ async fn load_and_validate_skill(
         .iter()
         .map(|t| t.to_lowercase())
         .collect();
+    // Pre-compute lowercased description words for broad semantic matching.
+    // Filter out short words (< 3 chars) to avoid noisy matches.
+    let lowercased_description_words: Vec<String> = manifest
+        .description
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| w.len() >= 3)
+        .collect();
 
     let name = manifest.name.clone();
     let skill = LoadedSkill {
@@ -634,6 +808,7 @@ async fn load_and_validate_skill(
         compiled_patterns,
         lowercased_keywords,
         lowercased_tags,
+        lowercased_description_words,
     };
 
     Ok((name, skill))

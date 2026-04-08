@@ -169,33 +169,18 @@ impl WorkspaceStorage {
         }
     }
 
-    async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<(), WorkspaceError> {
         match self {
             #[cfg(feature = "postgres")]
-            Self::Repo(repo) => repo.delete_chunks(document_id).await,
-            Self::Db(db) => db.delete_chunks(document_id).await,
+            Self::Repo(repo) => repo.replace_chunks(document_id, chunks).await,
+            Self::Db(db) => db.replace_chunks(document_id, chunks).await,
         }
     }
 
-    async fn insert_chunk(
-        &self,
-        document_id: Uuid,
-        chunk_index: i32,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Uuid, WorkspaceError> {
-        match self {
-            #[cfg(feature = "postgres")]
-            Self::Repo(repo) => {
-                repo.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
-            Self::Db(db) => {
-                db.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
-        }
-    }
 
     async fn update_chunk_embedding(
         &self,

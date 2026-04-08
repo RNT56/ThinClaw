@@ -49,6 +49,8 @@ pub struct ProxyCompletionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionResponse {
     pub content: String,
+    pub provider_model: Option<String>,
+    pub cost_usd: Option<f64>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: String,
@@ -67,6 +69,8 @@ pub struct ProxyToolCompletionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyToolCompletionResponse {
     pub content: Option<String>,
+    pub provider_model: Option<String>,
+    pub cost_usd: Option<f64>,
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -224,6 +228,8 @@ impl WorkerHttpClient {
 
         Ok(CompletionResponse {
             content: proxy_resp.content,
+            provider_model: proxy_resp.provider_model,
+            cost_usd: proxy_resp.cost_usd,
             thinking_content: None, // Worker proxy doesn't forward thinking yet
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
@@ -251,6 +257,8 @@ impl WorkerHttpClient {
 
         Ok(ToolCompletionResponse {
             content: proxy_resp.content,
+            provider_model: proxy_resp.provider_model,
+            cost_usd: proxy_resp.cost_usd,
             tool_calls: proxy_resp.tool_calls,
             thinking_content: None, // Worker proxy doesn't forward thinking yet
             input_tokens: proxy_resp.input_tokens,

@@ -26,6 +26,11 @@ const MAX_TAG_SCORE: u32 = 15;
 /// 20 points each could yield 100 points, dominating keyword+tag scores.
 const MAX_REGEX_SCORE: u32 = 40;
 
+/// Maximum description-word match score. Low weight (2 pts/word) with a
+/// conservative cap so description matches are a last-resort signal, not a
+/// dominant factor that overrides explicit keyword configuration.
+const MAX_DESCRIPTION_SCORE: u32 = 10;
+
 /// Result of prefiltering with score information.
 #[derive(Debug)]
 pub struct ScoredSkill<'a> {
@@ -154,6 +159,23 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += regex_score.min(MAX_REGEX_SCORE);
 
+    // Description-word scoring: broad semantic fallback.
+    // Scores 2 points per description word that appears as an exact word in the
+    // message. This catches near-misses where the user's vocabulary doesn't
+    // overlap with the skill's keywords but does overlap with its description.
+    // Example: user says "kubernetes", skill description mentions "kubernetes"
+    // but keywords only list ["docker", "container"].
+    let mut desc_score: u32 = 0;
+    for desc_word in &skill.lowercased_description_words {
+        if message_lower
+            .split_whitespace()
+            .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == desc_word.as_str())
+        {
+            desc_score += 2;
+        }
+    }
+    score += desc_score.min(MAX_DESCRIPTION_SCORE);
+
     score
 }
 
@@ -170,11 +192,20 @@ mod tests {
         let tag_vec: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
         let lowercased_keywords = kw_vec.iter().map(|k| k.to_lowercase()).collect();
         let lowercased_tags = tag_vec.iter().map(|t| t.to_lowercase()).collect();
+        let description = format!("{} skill", name);
+        let lowercased_description_words: Vec<String> = description
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| w.len() >= 3)
+            .collect();
         LoadedSkill {
             manifest: SkillManifest {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
-                description: format!("{} skill", name),
+                description,
                 activation: ActivationCriteria {
                     keywords: kw_vec,
                     patterns: pattern_strings,
@@ -192,6 +223,7 @@ mod tests {
             compiled_patterns: compiled,
             lowercased_keywords,
             lowercased_tags,
+            lowercased_description_words,
         }
     }
 
@@ -468,5 +500,80 @@ mod tests {
             MAX_SKILL_CONTEXT_TOKENS,
         );
         assert!(result.is_empty());
+    }
+
+    // ── Description-word scoring tests ─────────────────────────────────
+
+    #[test]
+    fn test_description_word_match_activates_skill() {
+        // Skill has NO keywords matching the message, but its description does.
+        // The flagship case: "kubernetes" in message, description mentions "kubernetes"
+        // but keywords only have ["docker", "container"].
+        let mut skill = make_skill("docker-deploy", &["docker", "container"], &[], &[]);
+        // Override description to include "kubernetes"
+        skill.manifest.description =
+            "Assists with Docker container deployments and Kubernetes orchestration".to_string();
+        skill.lowercased_description_words = skill
+            .manifest
+            .description
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| w.len() >= 3)
+            .collect();
+
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "help me set up kubernetes",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1, "skill should activate via description match");
+        assert_eq!(result[0].name(), "docker-deploy");
+    }
+
+    #[test]
+    fn test_description_score_capped() {
+        // Skill description has many words matching the message — score should be capped
+        let mut skill = make_skill("broad", &[], &[], &[]);
+        // Force a description with many matchable words
+        skill.manifest.description =
+            "assists deploy build push pull run test check validate lint format audit review".to_string();
+        skill.lowercased_description_words = skill
+            .manifest
+            .description
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .filter(|w| w.len() >= 3)
+            .collect();
+
+        let skills = vec![skill];
+        // Message hits many description words — should still activate (score ≤ MAX_DESCRIPTION_SCORE)
+        let result = prefilter_skills(
+            "assists deploy build push pull run test check validate lint format audit review",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_description_match_does_not_beat_explicit_keywords() {
+        // A skill with explicit keyword match should outscore one with only description match
+        let kw_skill = make_skill("kw-skill", &["kubernetes"], &[], &[]);
+        let mut desc_skill = make_skill("desc-skill", &[], &[], &[]);
+        desc_skill.manifest.description = "Kubernetes orchestration tool".to_string();
+        desc_skill.lowercased_description_words =
+            vec!["kubernetes".to_string(), "orchestration".to_string(), "tool".to_string()];
+
+        let skills = vec![desc_skill, kw_skill];
+        let result = prefilter_skills("kubernetes cluster setup", &skills, 2, MAX_SKILL_CONTEXT_TOKENS);
+        // Both should match; kw-skill should sort first (higher score)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name(), "kw-skill", "explicit keyword match should rank higher");
     }
 }

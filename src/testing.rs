@@ -165,6 +165,8 @@ impl LlmProvider for StubLlm {
         }
         Ok(CompletionResponse {
             content: self.response.clone(),
+            provider_model: None,
+            cost_usd: None,
             thinking_content: None,
             input_tokens: 10,
             output_tokens: 5,
@@ -182,6 +184,8 @@ impl LlmProvider for StubLlm {
         }
         Ok(ToolCompletionResponse {
             content: Some(self.response.clone()),
+            provider_model: None,
+            cost_usd: None,
             tool_calls: Vec::new(),
             thinking_content: None,
             input_tokens: 10,
@@ -302,6 +306,7 @@ impl TestHarnessBuilder {
             subagent_executor: None,
             cost_tracker: None,
             response_cache: None,
+            llm_runtime: None,
             routing_policy: None,
             model_override: None,
         };
