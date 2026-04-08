@@ -68,7 +68,17 @@ thinclaw run --no-onboard
 
 ## Features
 
-### 🚀 Agent Runtime
+| Area | Highlights |
+|------|------------|
+| **Agent Runtime** | Parallel jobs, subagent orchestration, A2A messaging, cron routines, heartbeat, self-repair |
+| **Security** | WASM sandbox, credential protection, prompt injection defense, Docker isolation, shell sandbox |
+| **Cost Control** | Cost Guard with hard limits, smart model routing, failover, routing policy, live cost dashboard |
+| **Channels** | Telegram, Discord, Signal, WhatsApp, iMessage, Gmail, Apple Mail, Nostr, HTTP, Web Gateway |
+| **Extensibility** | Skills framework with hot-reload, dynamic WASM tool building, MCP protocol, ClawHub registry |
+| **Memory** | Hybrid full-text + vector search (RRF), workspace filesystem, identity files, context compaction |
+| **Hardware** | Camera, microphone, screen capture, voice wake, talk mode (Scrappy desktop bridge) |
+
+### Agent Runtime
 
 - **Parallel jobs** — multiple requests handled concurrently with isolated contexts and priority scheduling
 - **Subagent orchestration** — spawn parallel sub-agents with tool filtering, iteration caps, and timeout enforcement
@@ -77,7 +87,7 @@ thinclaw run --no-onboard
 - **Heartbeat system** — periodic background execution with self-critique feedback loop and stuck-heartbeat recovery
 - **Self-repair** — automatic detection and recovery of stuck operations; `thinclaw doctor` for diagnostics
 
-### 🔒 Security First
+### Security
 
 - **WASM sandbox** — untrusted tools run in isolated WebAssembly containers with capability-based permissions
 - **Credential protection** — secrets are never exposed to tools; injected at the host boundary with outbound leak detection
@@ -86,7 +96,7 @@ thinclaw run --no-onboard
 - **Docker sandbox** — isolated container execution with per-job ephemeral tokens, dropped capabilities, and non-root execution
 - **Shell sandbox** — 3-layer command validation: safe-bins allowlist, workdir confinement, path-traversal detection
 
-### 💡 Smart Cost Control
+### Cost Control
 
 - **Cost Guard** — real-time token and spend tracking per model and per agent, with configurable daily and hard limits
 - **Smart routing** — route lightweight tasks (heartbeats, evaluations) to a cheap model automatically
@@ -94,7 +104,7 @@ thinclaw run --no-onboard
 - **Routing Policy** — fine-grained rules for model selection by task type, cost target, or capability
 - **Live cost dashboard** — WebUI Costs tab with daily spend charts, model breakdown, budget progress, and CSV export
 
-### 🌐 Always Reachable
+### Channels
 
 - **Multi-channel** — REPL, HTTP webhooks, WASM channels (Telegram, Slack, Discord, WhatsApp), Nostr, Signal, Gmail, Apple Mail, iMessage, and web gateway
 - **Web Gateway** — browser UI with real-time SSE/WebSocket streaming, chat threads, memory browser, costs, jobs, logs, and settings
@@ -102,7 +112,7 @@ thinclaw run --no-onboard
 - **Managed tunnels** — ngrok, Cloudflare Tunnel, and Tailscale for public webhook delivery
 - **Standalone or embedded** — headless server binary or embedded inside the Scrappy desktop app (Tauri)
 
-### 🧩 Self-Expanding
+### Extensibility
 
 - **Skills framework** — structured multi-step procedures with frontmatter, trust gating, proactive mid-turn discovery, and hot-reload without restart
 - **Dynamic tool building** — describe what you need; ThinClaw builds it as a WASM tool
@@ -110,14 +120,14 @@ thinclaw run --no-onboard
 - **Plugin architecture** — drop in new WASM tools and channels; watched directory for hot-loading
 - **ClawHub** — extension marketplace to discover, install, and manage tools from a curated catalog
 
-### 🧠 Persistent Memory
+### Memory
 
 - **Hybrid search** — full-text + vector (semantic) search using Reciprocal Rank Fusion with temporal decay and MMR re-ranking
 - **Workspace filesystem** — flexible path-based storage for notes, logs, and context
 - **Identity files** — `AGENTS.md`, `BOOT.md`, `BOOTSTRAP.md` for consistent personality and startup behaviour across sessions
 - **Context management** — automatic window management with intelligent summarisation and post-compaction read audit
 
-### 🎙️ Hardware Bridge
+### Hardware Bridge
 
 - **Sensor access** — camera, microphone, and screen capture via host-provided bridge (Scrappy desktop)
 - **3-tier approval** — Deny / Allow Once / Allow Session permission model for hardware access
@@ -428,7 +438,7 @@ Enable the **Gateway** channel during setup (port 3000 or 18789, host `0.0.0.0`)
 
 ### Securing the Connection
 
-> ⚠️ The gateway uses plain HTTP by default. **Do not expose port 3000/18789 to the public internet without encryption.**
+> **Note:** The gateway uses plain HTTP by default. Do not expose port 3000/18789 to the public internet without encryption.
 
 **Recommended: Tailscale (free mesh VPN)**
 
@@ -464,7 +474,7 @@ thinclaw service status    # Check if it's running
 
 The service runs `thinclaw run --no-onboard` with **all configured channels**. launchd/systemd automatically restarts ThinClaw if it crashes.
 
-📖 **Full deployment guide:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full deployment guide.
 
 ---
 
@@ -661,23 +671,23 @@ ThinClaw can delegate complex coding tasks to Anthropic's [Claude Code](https://
 
 The default build profile is `light` — a minimal, fast-compiling configuration suitable for most use cases. Use `--features full` for the complete feature set.
 
-📖 **Full build profiles guide:** [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
+See [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md) for the full build profiles guide.
 
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `light` | Core agent + databases + HTML/doc extraction | ✅ (default) |
-| `full` | Everything (light + web gateway + REPL + tunnel + Docker) | |
-| `desktop` | Tauri/Scrappy embedding (libSQL, minimal footprint) | |
-| `postgres` | PostgreSQL + pgvector + TLS support | ✅ (via light) |
-| `libsql` | Embedded libSQL/Turso support | ✅ (via light) |
-| `html-to-markdown` | Web page → markdown conversion | ✅ (via light) |
-| `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | ✅ (via light) |
-| `repl` | Interactive terminal REPL + boot screen | ✅ (via full) |
-| `web-gateway` | Browser UI with SSE/WebSocket streaming | ✅ (via full) |
-| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | ✅ (via full) |
-| `docker-sandbox` | Isolated container execution for untrusted code | ✅ (via full) |
-| `voice` | Voice wake word detection (cpal audio capture) | |
-| `bundled-wasm` | Embed all WASM extensions in binary for air-gapped deploys (+6-13 MB) | |
+| Feature | Description | Included by default |
+|---------|-------------|---------------------|
+| `light` | Core agent + databases + HTML/doc extraction | yes (default profile) |
+| `full` | Everything: light + web gateway + REPL + tunnel + Docker | no — opt in |
+| `desktop` | Tauri/Scrappy embedding (libSQL, minimal footprint) | no — opt in |
+| `postgres` | PostgreSQL + pgvector + TLS support | yes (via light) |
+| `libsql` | Embedded libSQL/Turso support | yes (via light) |
+| `html-to-markdown` | Web page to markdown conversion | yes (via light) |
+| `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | yes (via light) |
+| `repl` | Interactive terminal REPL + boot screen | yes (via full) |
+| `web-gateway` | Browser UI with SSE/WebSocket streaming | yes (via full) |
+| `tunnel` | Managed tunnels (ngrok, Cloudflare, Tailscale) for public webhooks | yes (via full) |
+| `docker-sandbox` | Isolated container execution for untrusted code | yes (via full) |
+| `voice` | Voice wake word detection (cpal audio capture) | no — opt in |
+| `bundled-wasm` | Embed all WASM extensions in binary for air-gapped deploys (+6-13 MB) | no — opt in |
 
 ---
 
