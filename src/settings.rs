@@ -19,6 +19,8 @@ pub enum RoutingMode {
     #[default]
     PrimaryOnly,
     CheapSplit,
+    #[serde(alias = "advisor")]
+    AdvisorExecutor,
     Policy,
 }
 
@@ -27,6 +29,7 @@ impl RoutingMode {
         match self {
             Self::PrimaryOnly => "primary_only",
             Self::CheapSplit => "cheap_split",
+            Self::AdvisorExecutor => "advisor_executor",
             Self::Policy => "policy",
         }
     }
@@ -131,6 +134,18 @@ pub struct ProvidersSettings {
     /// Ordered routing policy rules. Evaluated only when routing_mode = policy.
     #[serde(default)]
     pub policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
+
+    /// Maximum advisor consultations per agent turn (AdvisorExecutor mode).
+    #[serde(default = "default_advisor_max_calls")]
+    pub advisor_max_calls: u32,
+
+    /// Custom advisor escalation guidance (optional override of default prompt).
+    #[serde(default)]
+    pub advisor_escalation_prompt: Option<String>,
+}
+
+fn default_advisor_max_calls() -> u32 {
+    3
 }
 
 impl Default for ProvidersSettings {
@@ -152,6 +167,8 @@ impl Default for ProvidersSettings {
             allowed_models: HashMap::new(),
             fallback_chain: Vec::new(),
             policy_rules: Vec::new(),
+            advisor_max_calls: default_advisor_max_calls(),
+            advisor_escalation_prompt: None,
         }
     }
 }

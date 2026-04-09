@@ -29,6 +29,7 @@ pub mod response_cache;
 pub mod response_cache_ext;
 pub mod retry;
 mod rig_adapter;
+pub mod route_planner;
 pub mod routing_policy;
 pub mod runtime_manager;
 pub mod smart_routing;

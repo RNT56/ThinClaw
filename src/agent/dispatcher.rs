@@ -122,7 +122,11 @@ fn tool_phase_synthesis_enabled(
         && runtime_status.cheap_model.is_some()
         && !override_active
         && runtime_status.routing_enabled
-        && runtime_status.routing_mode == crate::settings::RoutingMode::CheapSplit
+        && matches!(
+            runtime_status.routing_mode,
+            crate::settings::RoutingMode::CheapSplit
+                | crate::settings::RoutingMode::AdvisorExecutor
+        )
         && runtime_status.tool_phase_synthesis_enabled
 }
 

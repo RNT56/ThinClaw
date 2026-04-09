@@ -4415,6 +4415,7 @@ async fn providers_config_set_handler(
     settings.providers.smart_routing_enabled = body.routing_enabled;
     settings.providers.routing_mode = match body.routing_mode.as_str() {
         "cheap_split" => crate::settings::RoutingMode::CheapSplit,
+        "advisor_executor" | "advisor" => crate::settings::RoutingMode::AdvisorExecutor,
         "policy" => crate::settings::RoutingMode::Policy,
         _ => crate::settings::RoutingMode::PrimaryOnly,
     };

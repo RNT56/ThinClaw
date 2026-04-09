@@ -1,5 +1,6 @@
 //! Built-in tools that come with the agent.
 
+pub mod advisor;
 pub mod llm_tools;
 
 mod agent_control;

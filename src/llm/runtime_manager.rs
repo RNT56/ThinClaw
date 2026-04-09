@@ -20,6 +20,10 @@ use crate::llm::provider_factory::{
 use crate::llm::routing_policy::{
     RouteCandidate, RoutingContext, RoutingDecision, RoutingPolicy, RoutingRule,
 };
+use crate::llm::route_planner::{
+    RequiredCapabilities, RoutePlanner, RoutePlannerInput,
+    validate_providers_settings as validate_planner_settings,
+};
 use crate::llm::smart_routing::{SmartRoutingConfig, TaskComplexity, classify_message};
 use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
 use crate::secrets::SecretsStore;
@@ -122,6 +126,41 @@ impl RuntimeLlmProvider {
             return self.manager.provider_for_model_spec(model, &snapshot);
         }
 
+        // ── Shadow mode: run route planner in parallel for diff logging ──
+        if snapshot.providers.smart_routing_enabled {
+            if let Some(ctx) = routing_context {
+                let planner_input = RoutePlannerInput {
+                    required_capabilities: RequiredCapabilities::from_routing_context(ctx),
+                    routing_mode: snapshot.providers.routing_mode,
+                    routing_context: ctx.clone(),
+                    model_override: None,
+                    provider_health: std::collections::HashMap::new(),
+                    candidates: self.manager.available_route_candidates(&snapshot),
+                    turn_cost_usd: 0.0,
+                    budget_utilization: None,
+                    last_user_message: None,
+                };
+
+                if let Ok(guard) = self.manager.route_planner.read() {
+                    let planner_decision = guard.plan(
+                        &planner_input,
+                        self.manager.routing_policy.read().ok().as_deref(),
+                    );
+                    let live_target = self.live_routing_target(&snapshot, ctx);
+                    if planner_decision.target != live_target {
+                        tracing::info!(
+                            live = %live_target,
+                            planner = %planner_decision.target,
+                            reason = %planner_decision.reason,
+                            mode = %snapshot.providers.routing_mode.as_str(),
+                            "[route_planner shadow] Decision differs from live path"
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Live path (unchanged existing logic) ──
         if matches!(self.role, RuntimeProviderRole::Primary)
             && snapshot.providers.smart_routing_enabled
             && snapshot.providers.routing_mode == RoutingMode::Policy
@@ -138,6 +177,44 @@ impl RuntimeLlmProvider {
             RuntimeProviderRole::Primary => snapshot.llm,
             RuntimeProviderRole::Cheap => snapshot.cheap_llm.unwrap_or(snapshot.llm),
         })
+    }
+
+    /// Determine the target the live (pre-planner) routing logic would pick.
+    /// Used only by shadow mode for diff logging.
+    fn live_routing_target(
+        &self,
+        snapshot: &LlmRuntimeSnapshot,
+        ctx: &RoutingContext,
+    ) -> String {
+        match snapshot.providers.routing_mode {
+            RoutingMode::PrimaryOnly => "primary".to_string(),
+            RoutingMode::CheapSplit => {
+                // CheapSplit in live mode goes through SmartRoutingProvider
+                // which wraps primary; tools/streaming → primary is built-in
+                if ctx.has_tools || ctx.requires_streaming {
+                    "primary".to_string()
+                } else {
+                    "cheap".to_string() // simplified — actual classification in SmartRouting
+                }
+            }
+            RoutingMode::AdvisorExecutor => {
+                // New mode — no existing live path, treat as cheap
+                if snapshot.cheap_llm.is_some() {
+                    "cheap".to_string()
+                } else {
+                    "primary".to_string()
+                }
+            }
+            RoutingMode::Policy => {
+                let candidates = self.manager.available_route_candidates(snapshot);
+                self.manager
+                    .routing_policy
+                    .read()
+                    .ok()
+                    .map(|policy| policy.select_decision(ctx, &candidates).target)
+                    .unwrap_or_else(|| "primary".to_string())
+            }
+        }
     }
 
     fn resolved_completion_request(mut request: CompletionRequest) -> CompletionRequest {
@@ -311,6 +388,7 @@ pub struct LlmRuntimeManager {
     toml_path: Option<PathBuf>,
     snapshot: RwLock<LlmRuntimeSnapshot>,
     pub routing_policy: Arc<RwLock<RoutingPolicy>>,
+    pub route_planner: Arc<RwLock<RoutePlanner>>,
     revision: AtomicU64,
     last_error: RwLock<Option<String>>,
 }
@@ -331,6 +409,17 @@ impl LlmRuntimeManager {
         );
         let (llm, cheap_llm) = build_provider_chain(&config.llm, Some(&providers))?;
         let routing_policy = Arc::new(RwLock::new(build_routing_policy(&providers)));
+        let route_planner = Arc::new(RwLock::new(RoutePlanner::new(
+            providers.smart_routing_cascade,
+            providers.tool_phase_synthesis_enabled,
+            providers.advisor_max_calls,
+        )));
+
+        // Emit planner config validation warnings
+        for warning in validate_planner_settings(&providers) {
+            tracing::warn!("[route_planner] Config: {}", warning);
+        }
+
         Ok(Arc::new(Self {
             user_id: user_id.into(),
             db,
@@ -343,6 +432,7 @@ impl LlmRuntimeManager {
                 cheap_llm,
             }),
             routing_policy,
+            route_planner,
             revision: AtomicU64::new(1),
             last_error: RwLock::new(None),
         }))
@@ -436,6 +526,17 @@ impl LlmRuntimeManager {
         }
         if let Ok(mut routing_policy) = self.routing_policy.write() {
             *routing_policy = policy;
+        }
+        if let Ok(mut planner) = self.route_planner.write() {
+            planner.update_config(
+                providers.smart_routing_cascade,
+                providers.tool_phase_synthesis_enabled,
+                providers.advisor_max_calls,
+            );
+        }
+        // Emit planner config validation warnings on reload
+        for warning in validate_planner_settings(&providers) {
+            tracing::warn!("[route_planner] Config: {}", warning);
         }
         if let Ok(mut last_error) = self.last_error.write() {
             *last_error = None;
@@ -687,6 +788,13 @@ impl LlmRuntimeManager {
         match snapshot.providers.routing_mode {
             RoutingMode::PrimaryOnly => ("primary".to_string(), "Primary-only mode".to_string()),
             RoutingMode::CheapSplit => simulate_cheap_split_route(&snapshot, &ctx, prompt),
+            RoutingMode::AdvisorExecutor => {
+                if snapshot.cheap_llm.is_some() {
+                    ("cheap".to_string(), "AdvisorExecutor: executor handles request, may consult advisor".to_string())
+                } else {
+                    ("primary".to_string(), "AdvisorExecutor: no executor model, using primary".to_string())
+                }
+            }
             RoutingMode::Policy => {
                 let candidates = self.available_route_candidates(&snapshot);
                 let (decision, reason) = self

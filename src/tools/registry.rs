@@ -92,6 +92,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "remove_agent",
     "message_agent",
     "extract_document",
+    "consult_advisor",
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
@@ -684,6 +685,23 @@ impl ToolRegistry {
         self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
         self.register_sync(Arc::new(LlmListModelsTool::new(primary_llm, cheap_llm)));
         tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
+    }
+
+    /// Register the advisor consultation tool (AdvisorExecutor mode only).
+    ///
+    /// When the routing mode is AdvisorExecutor, this injects the `consult_advisor`
+    /// tool which the executor model can call to get guidance from the advisor.
+    /// In other modes, this is a no-op.
+    pub fn register_advisor_tool(
+        &self,
+        routing_mode: crate::settings::RoutingMode,
+    ) {
+        if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
+            self.register_sync(Arc::new(
+                crate::tools::builtin::advisor::ConsultAdvisorTool,
+            ));
+            tracing::info!("Registered consult_advisor tool (AdvisorExecutor mode)");
+        }
     }
 
     /// Register agent management tools (create, list, update, remove, message).

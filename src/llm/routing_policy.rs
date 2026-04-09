@@ -29,6 +29,7 @@ pub enum RoutingRule {
 }
 
 /// Context for a routing decision.
+#[derive(Debug, Clone)]
 pub struct RoutingContext {
     pub estimated_input_tokens: u32,
     pub has_vision: bool,
