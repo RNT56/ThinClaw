@@ -22,3 +22,32 @@ bench-results/
 # Local analysis/comparison reports
 thinclaw_vs_ironclaw_report.md
 
+# OS System Files
+.DS_Store
+**/.DS_Store
+
+# Databases & Local State
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+db/
+
+# Log Files
+*.log
+logs/
+rust-crash.log
+
+# IDE and Editor Settings
+.vscode/
+.idea/
+*.swp
+*~
+.zed/
+
+# Rust & CI Tooling (Coverage/Profiling)
+*.profraw
+tarpaulin-report.html
+cobertura.xml
