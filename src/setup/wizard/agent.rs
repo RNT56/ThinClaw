@@ -83,7 +83,6 @@ impl SetupWizard {
     }
 
     /// Step 13: Routines (scheduled tasks).
-
     pub(super) fn step_notification_preferences(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw sends proactive notifications (heartbeat alerts, routine results,");
         print_info("self-repair messages) to a channel of your choice.");

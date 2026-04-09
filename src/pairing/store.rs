@@ -423,6 +423,56 @@ impl PairingStore {
         Ok(Some(entry))
     }
 
+    /// Find a pending pairing request by approval code without mutating state.
+    pub fn find_pending_by_code(
+        &self,
+        channel: &str,
+        code: &str,
+    ) -> Result<Option<PairingRequest>, PairingStoreError> {
+        let code = code.trim().to_uppercase();
+        if code.is_empty() {
+            return Ok(None);
+        }
+
+        let requests = self.list_pending(channel)?;
+        Ok(requests
+            .into_iter()
+            .find(|request| request.code.to_uppercase() == code))
+    }
+
+    /// Restore a pending pairing request, preserving its original code and metadata.
+    pub fn restore_pending_request(
+        &self,
+        channel: &str,
+        request: &PairingRequest,
+    ) -> Result<(), PairingStoreError> {
+        let path = pairing_path(&self.base_dir, channel)?;
+        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        file.lock_exclusive()?;
+
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut store: PairingStoreFile =
+            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+                version: 1,
+                requests: Vec::new(),
+            });
+
+        store.requests.retain(|existing| existing.id != request.id);
+        store.requests.push(request.clone());
+
+        self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
+        fs4::FileExt::unlock(&file)?;
+        Ok(())
+    }
+
     /// Read the allowFrom list for a channel.
     pub fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, PairingStoreError> {
         let path = allow_from_path(&self.base_dir, channel)?;
@@ -633,6 +683,39 @@ impl PairingStore {
 
         fs4::FileExt::unlock(&file)?;
         Ok(())
+    }
+
+    pub fn remove_allow_from(&self, channel: &str, entry: &str) -> Result<bool, PairingStoreError> {
+        let entry_lower = entry.trim().to_lowercase();
+        if entry_lower.is_empty() {
+            return Ok(false);
+        }
+
+        let path = allow_from_path(&self.base_dir, channel)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut store: AllowFromStoreFile =
+            serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
+                version: 1,
+                allow_from: Vec::new(),
+            });
+
+        let original_len = store.allow_from.len();
+        store
+            .allow_from
+            .retain(|value| value.trim().to_lowercase() != entry_lower);
+        let removed = store.allow_from.len() != original_len;
+
+        if removed {
+            let json = serde_json::to_string_pretty(&store)?;
+            fs::write(&path, json)?;
+        }
+
+        Ok(removed)
     }
 
     fn write_pairing_file(

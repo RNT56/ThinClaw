@@ -468,10 +468,9 @@ impl AppBuilder {
         {
             tracing::warn!(
                 configured_dimension = self.config.embeddings.dimension,
-                "Embedding dimension {} is not 1536. The libSQL schema uses \
-                 F32_BLOB(1536) which requires exactly 1536 dimensions. \
-                 Embedding storage will fail. Use PostgreSQL or set \
-                 EMBEDDING_DIMENSION=1536.",
+                "Embedding dimension {} is not 1536. libSQL currently uses a fixed \
+                 1536-dim vector index, so ThinClaw will keep storing documents but \
+                 skip vector embeddings/search for that backend and fall back to FTS.",
                 self.config.embeddings.dimension
             );
         }
@@ -940,6 +939,41 @@ impl AppBuilder {
                 max_actions_per_hour: self.config.agent.max_actions_per_hour,
             },
         ));
+        {
+            use rust_decimal::prelude::FromPrimitive;
+
+            let now = chrono::Utc::now();
+            let today = now.format("%Y-%m-%d").to_string();
+            let this_month = now.format("%Y-%m").to_string();
+            let (daily_spend, actions_last_hour, model_usage) = {
+                let tracker = cost_tracker.lock().await;
+                let model_usage = tracker
+                    .summary(&today, &this_month)
+                    .model_details
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            entry.model,
+                            crate::agent::cost_guard::ModelTokens {
+                                input_tokens: entry.input_tokens,
+                                output_tokens: entry.output_tokens,
+                                cost: rust_decimal::Decimal::from_f64(entry.cost_usd)
+                                    .unwrap_or_default(),
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    rust_decimal::Decimal::from_f64(tracker.cost_for_date(&today))
+                        .unwrap_or_default(),
+                    tracker.recent_action_count(now, chrono::Duration::hours(1)),
+                    model_usage,
+                )
+            };
+            cost_guard
+                .hydrate(daily_spend, actions_last_hour, model_usage)
+                .await;
+        }
 
         let llm: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             runtime_llm,
@@ -1064,9 +1098,7 @@ impl AppBuilder {
             //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
             //   2. <workspace_root>/skills/ when workspace_root is configured
             //   3. No workspace skills directory (workspace skills disabled)
-            let workspace_skills_dir = if let Ok(explicit) =
-                std::env::var("SKILLS_WORKSPACE_DIR")
-            {
+            let workspace_skills_dir = if let Ok(explicit) = std::env::var("SKILLS_WORKSPACE_DIR") {
                 if !explicit.is_empty() {
                     Some(std::path::PathBuf::from(explicit))
                 } else {
@@ -1081,10 +1113,7 @@ impl AppBuilder {
             };
 
             if let Some(ws_dir) = workspace_skills_dir {
-                tracing::info!(
-                    "Skills: workspace dir → {}",
-                    ws_dir.display()
-                );
+                tracing::info!("Skills: workspace dir → {}", ws_dir.display());
                 registry = registry.with_workspace_dir(ws_dir);
             }
 

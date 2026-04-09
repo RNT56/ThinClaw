@@ -12,6 +12,7 @@
 //! Model overrides are job-scoped: they persist until the conversation
 //! ends or another `llm_select` call overrides them.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,13 +27,9 @@ use crate::llm::{
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
-/// Shared state for the model override, accessible by both the tool and the dispatcher.
-///
-/// Wrapped in `Arc<tokio::sync::RwLock<Option<ModelOverride>>>` so the tool
-/// can write a new override and the dispatcher can read it before each LLM call.
-///
-/// Lives for the duration of one `run_agentic_loop` call.
-#[derive(Debug, Clone)]
+/// Shared state for per-conversation model overrides, accessible by both the
+/// tool layer and the dispatcher.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelOverride {
     /// Full "provider/model" spec (e.g. "openai/gpt-4o", "gemini/gemini-2.5-flash").
     pub model_spec: String,
@@ -40,12 +37,59 @@ pub struct ModelOverride {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct ConversationModelOverrideStore {
+    overrides: tokio::sync::RwLock<HashMap<String, ModelOverride>>,
+}
+
+impl ConversationModelOverrideStore {
+    pub async fn get(&self, key: &str) -> Option<ModelOverride> {
+        self.overrides.read().await.get(key).cloned()
+    }
+
+    pub async fn set(&self, key: impl Into<String>, value: ModelOverride) {
+        self.overrides.write().await.insert(key.into(), value);
+    }
+
+    pub async fn clear(&self, key: &str) {
+        self.overrides.write().await.remove(key);
+    }
+}
+
 /// Thread-safe shared model override state.
-pub type SharedModelOverride = Arc<tokio::sync::RwLock<Option<ModelOverride>>>;
+pub type SharedModelOverride = Arc<ConversationModelOverrideStore>;
 
 /// Create a new empty shared model override.
 pub fn new_shared_model_override() -> SharedModelOverride {
-    Arc::new(tokio::sync::RwLock::new(None))
+    Arc::new(ConversationModelOverrideStore::default())
+}
+
+pub(crate) fn model_override_scope_key_from_metadata(
+    metadata: &serde_json::Value,
+    fallback_principal_id: Option<&str>,
+    fallback_actor_id: Option<&str>,
+) -> String {
+    if let Some(thread_id) = metadata.get("thread_id").and_then(|v| v.as_str()) {
+        return format!("thread:{thread_id}");
+    }
+    if let Some(scope_id) = metadata
+        .get("conversation_scope_id")
+        .and_then(|v| v.as_str())
+    {
+        return format!("scope:{scope_id}");
+    }
+
+    let principal_id = metadata
+        .get("principal_id")
+        .and_then(|v| v.as_str())
+        .or(fallback_principal_id)
+        .unwrap_or("default");
+    let actor_id = metadata
+        .get("actor_id")
+        .and_then(|v| v.as_str())
+        .or(fallback_actor_id)
+        .unwrap_or(principal_id);
+    format!("identity:{principal_id}:{actor_id}")
 }
 
 pub(crate) fn is_runtime_supported_provider_slug(provider_slug: &str) -> bool {
@@ -198,16 +242,22 @@ impl Tool for LlmSelectTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
 
         let model_spec = require_str(&params, "model")?;
         let reason = params.get("reason").and_then(|v| v.as_str());
 
+        let scope_key = model_override_scope_key_from_metadata(
+            &ctx.metadata,
+            Some(ctx.principal_id.as_str()),
+            ctx.actor_id.as_deref(),
+        );
+
         // Handle reset
         if model_spec.eq_ignore_ascii_case("reset") {
-            *self.model_override.write().await = None;
+            self.model_override.clear(&scope_key).await;
             return Ok(ToolOutput::success(
                 serde_json::json!({
                     "status": "reset",
@@ -267,10 +317,15 @@ impl Tool for LlmSelectTool {
         }
 
         // Store the override
-        *self.model_override.write().await = Some(ModelOverride {
-            model_spec: model_spec.to_string(),
-            reason: reason.map(String::from),
-        });
+        self.model_override
+            .set(
+                scope_key,
+                ModelOverride {
+                    model_spec: model_spec.to_string(),
+                    reason: reason.map(String::from),
+                },
+            )
+            .await;
 
         Ok(ToolOutput::success(
             serde_json::json!({
@@ -519,14 +574,20 @@ mod tests {
     #[tokio::test]
     async fn test_llm_select_reset() {
         let shared = new_shared_model_override();
-        // Set an initial override
-        *shared.write().await = Some(ModelOverride {
-            model_spec: "openai/gpt-4o".to_string(),
-            reason: None,
-        });
+        let scope_key = "thread:test-thread";
+        shared
+            .set(
+                scope_key,
+                ModelOverride {
+                    model_spec: "openai/gpt-4o".to_string(),
+                    reason: None,
+                },
+            )
+            .await;
 
         let tool = LlmSelectTool::new(shared.clone());
-        let ctx = JobContext::default();
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({"thread_id": "test-thread"});
 
         let result = tool
             .execute(serde_json::json!({"model": "reset"}), &ctx)
@@ -534,7 +595,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.result["status"], "reset");
-        assert!(shared.read().await.is_none());
+        assert!(shared.get(scope_key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_llm_select_is_scoped_to_current_thread() {
+        let shared = new_shared_model_override();
+        let tool = LlmSelectTool::new(shared.clone());
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({"thread_id": "thread-a"});
+
+        tool.execute(serde_json::json!({"model": "ollama/test-model"}), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shared.get("thread:thread-a").await,
+            Some(ModelOverride {
+                model_spec: "ollama/test-model".to_string(),
+                reason: None,
+            })
+        );
+        assert!(shared.get("thread:thread-b").await.is_none());
     }
 
     #[tokio::test]

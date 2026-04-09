@@ -22,6 +22,14 @@ pub(crate) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
+    if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name) {
+        return Err(crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: "Tool is not permitted in this agent context".to_string(),
+        }
+        .into());
+    }
+
     let tool = tools
         .get(tool_name)
         .await
@@ -330,6 +338,7 @@ mod tests {
             llm_runtime: None,
             routing_policy: None,
             model_override: None,
+            restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         Agent::new(

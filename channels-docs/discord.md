@@ -1,61 +1,39 @@
-# Discord Channel
+# Discord Integration
 
-> Chat with the agent via Discord Gateway WebSocket.
+Discord has two different documentation paths in ThinClaw:
 
-## Overview
+- native Discord Gateway messaging
+- packaged WASM Discord interactions
 
-The Discord channel connects to the Discord Gateway API using a WebSocket.
-The bot receives messages from channels/DMs and responds via the Discord REST API.
+If you are reading about Discord in ThinClaw, make sure you know which path you mean.
 
-## Prerequisites
+## Native Discord Gateway
 
-1. **Create a Discord Application** at [discord.com/developers/applications](https://discord.com/developers/applications)
-2. **Add a Bot**: Bot → Add Bot
-3. **Copy the Bot Token**
-4. **Enable Intents**: Bot → Privileged Gateway Intents:
-   - ✅ Message Content Intent
-   - ✅ Server Members Intent (optional, for user info)
-5. **Invite the bot** to your server with appropriate permissions:
-   - Send Messages
-   - Read Messages/View Channels
-   - Read Message History
+Use the native path when you want the persistent Gateway WebSocket runtime for normal message handling.
 
-## Configuration
+Characteristics:
 
-```bash
-# Required
-DISCORD_BOT_TOKEN=your-discord-bot-token-here
+- native Rust channel
+- persistent Gateway connection
+- REST API for outbound responses
+- appropriate when long-lived connection state matters
 
-# Optional: restrict to a specific server (guild)
-DISCORD_GUILD_ID=1234567890123456789
+## Discord Interactions Package
 
-# Optional: restrict to specific channel IDs (empty = allow all)
-DISCORD_ALLOW_FROM=1234567890,9876543210
+Use the packaged path when you want webhook-style Discord interactions behavior.
 
-# Optional: stream mode for progressive responses
-# Options: "full" (default), "edit", "typing"
-DISCORD_STREAM_MODE=full
-```
+Characteristics:
 
-## Features
+- WASM channel package
+- webhook-driven interactions model
+- packaged and managed like other WASM channels
 
-- Discord Gateway WebSocket connection
-- DM and server channel support
-- Optional guild restriction
-- Progressive streaming responses (edit-in-place)
-- Channel allow-list
-- Auto-reconnect on disconnect
+## Canonical Architecture Reference
 
-## Stream Modes
+Use [../docs/CHANNEL_ARCHITECTURE.md](../docs/CHANNEL_ARCHITECTURE.md) for the authoritative explanation of why ThinClaw splits Discord this way.
 
-| Mode | Behavior |
-|------|----------|
-| `full` | Send complete response when done |
-| `edit` | Edit message in-place as chunks arrive |
-| `typing` | Send typing indicator during processing |
+## Operator Guidance
 
-## Notes
-
-- Message Content Intent must be enabled for the bot to read message content
-- If `DISCORD_ALLOW_FROM` is empty, the bot responds in all channels it can see
-- The bot ignores its own messages
+- choose the native Gateway path for persistent real-time messaging
+- choose the packaged interactions path for slash-command/webhook flows
+- do not assume a single Discord doc or a single Discord transport model covers both

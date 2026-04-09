@@ -17,7 +17,7 @@
 //! The [`CostSummary`] struct provides the serializable response shape
 //! for the `openclaw_cost_summary` Tauri command (see §17.4 integration contract).
 
-use chrono::{Duration, NaiveDate};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -288,6 +288,24 @@ impl CostTracker {
             keys.insert(date.format("%Y-%m-%d").to_string());
         }
         Some(keys)
+    }
+
+    /// Count live entries that fall within the given trailing window.
+    ///
+    /// This is used to restore real-time `CostGuard` rate limits after a
+    /// restart. Compacted entries are excluded because their exact timestamps
+    /// are intentionally discarded.
+    pub fn recent_action_count(&self, now: DateTime<Utc>, window: Duration) -> u64 {
+        let cutoff = now - window;
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+                    .ok()
+                    .map(|ts| ts.with_timezone(&Utc))
+            })
+            .filter(|ts| *ts >= cutoff)
+            .count() as u64
     }
 
     /// Check if daily budget exceeded.
@@ -826,5 +844,18 @@ mod tests {
         tracker.from_json(&legacy);
         assert_eq!(tracker.entry_count(), 1);
         assert!((tracker.total_cost() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_recent_action_count_counts_only_windowed_live_entries() {
+        let mut tracker = CostTracker::new(BudgetConfig::default());
+        tracker.record(make_entry(1.0, "2026-03-01T10:10:00Z", "gpt-4o"));
+        tracker.record(make_entry(1.0, "2026-03-01T11:25:00Z", "gpt-4o"));
+        tracker.record(make_entry(1.0, "2026-03-01T11:50:00Z", "gpt-4o"));
+
+        let now = DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(tracker.recent_action_count(now, Duration::hours(1)), 2);
     }
 }

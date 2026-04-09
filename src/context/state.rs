@@ -101,6 +101,11 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Principal ID that owns this job.
+    pub principal_id: String,
+    /// Actor that owns this job within the shared principal.
+    #[serde(default)]
+    pub actor_id: Option<String>,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -151,7 +156,7 @@ pub struct JobContext {
 impl JobContext {
     /// Create a new job context.
     pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
-        Self::with_user("default", title, description)
+        Self::with_identity("default", "default", title, description)
     }
 
     /// Create a new job context with a specific user ID.
@@ -160,10 +165,25 @@ impl JobContext {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
+        let user_id = user_id.into();
+        Self::with_identity(user_id.clone(), user_id, title, description)
+    }
+
+    /// Create a new job context with explicit principal and actor ownership.
+    pub fn with_identity(
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let principal_id = principal_id.into();
+        let actor_id = actor_id.into();
         Self {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
-            user_id: user_id.into(),
+            user_id: principal_id.clone(),
+            principal_id,
+            actor_id: Some(actor_id),
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -184,6 +204,24 @@ impl JobContext {
             extra_env: Arc::new(HashMap::new()),
             metadata: serde_json::Value::Null,
         }
+    }
+
+    /// Create a new job context with an explicit actor owner.
+    pub fn with_user_and_actor(
+        user_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            actor_id: Some(actor_id.into()),
+            ..Self::with_user(user_id, title, description)
+        }
+    }
+
+    /// Resolve the actor owner for this job, falling back to the principal.
+    pub fn owner_actor_id(&self) -> &str {
+        self.actor_id.as_deref().unwrap_or(&self.user_id)
     }
 
     /// Transition to a new state.
@@ -285,7 +323,7 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
-        Self::with_user("default", "Untitled", "No description")
+        Self::with_identity("default", "default", "Untitled", "No description")
     }
 }
 

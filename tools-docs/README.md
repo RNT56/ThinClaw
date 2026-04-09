@@ -1,34 +1,36 @@
-# ThinClaw Tool Documentation
+# ThinClaw Tool Guides
 
-This directory contains setup and usage documentation for every WASM tool
-currently in the ThinClaw codebase.
+This directory contains operator-facing guides for ThinClaw's packaged tools.
 
-Each doc covers:
-- What the tool does and its available actions
-- Authentication setup (step-by-step)
-- Secret names and how to store them
-- Prerequisites and permissions
+Use these pages for tool-specific setup and permissions. For the architecture and trust model behind WASM tools, WASM channels, MCP servers, and registry installs, start with [../docs/EXTENSION_SYSTEM.md](../docs/EXTENSION_SYSTEM.md).
 
-## Tools
+## Current Auth Vocabulary
 
-| Tool | Auth Method | Secret Name | Setup Guide |
-|------|-------------|-------------|-------------|
-| [GitHub](github.md) | Personal Access Token | `github_token` | Create account → Generate PAT |
-| [Notion](notion.md) | Internal Integration Token | `notion_token` | Create integration → Share pages |
-| [Gmail](gmail.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth gmail` |
-| [Google Calendar](google-calendar.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth google` |
-| [Google Docs](google-docs.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth google` |
-| [Google Drive](google-drive.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth google` |
-| [Google Sheets](google-sheets.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth google` |
-| [Google Slides](google-slides.md) | Google OAuth 2.0 | `google_oauth_token` | `thinclaw auth google` |
-| [Slack](slack.md) | Bot Token | `slack_bot_token` | Create Slack App → Install to workspace |
-| [Telegram](telegram.md) | MTProto Session | `telegram_api_id` | Create app at my.telegram.org |
-| [Okta](okta.md) | OAuth 2.0 | `okta_oauth_token` | Create Okta integration |
+Do not assume one generic auth flow for every tool.
 
-## General Notes
+- Use `thinclaw tool auth <tool>` when the tool exposes a CLI auth flow.
+- Use the setup guide when a tool relies on manual token entry, workspace files, or deployment-specific secret handling.
+- Use `thinclaw mcp ...` only for MCP servers, not for WASM tools.
 
-All tools are WASM components running in a sandboxed runtime. They:
-- Cannot access the filesystem directly
-- Cannot see secret values (credentials are injected at the host boundary)
-- Are rate-limited per tool
-- Have HTTP requests restricted to allowlisted domains/paths
+## Tool Guides
+
+| Tool | Auth Shape | Secret / Storage | Guide |
+|---|---|---|---|
+| GitHub | manual token / secret-entry flow | `github_token` | [github.md](github.md) |
+| Notion | manual token / secret-entry flow | `notion_token` | [notion.md](notion.md) |
+| Gmail | `thinclaw tool auth gmail` | `google_oauth_token` | [gmail.md](gmail.md) |
+| Google Calendar | shared Google auth | `google_oauth_token` | [google-calendar.md](google-calendar.md) |
+| Google Docs | shared Google auth | `google_oauth_token` | [google-docs.md](google-docs.md) |
+| Google Drive | shared Google auth | `google_oauth_token` | [google-drive.md](google-drive.md) |
+| Google Sheets | shared Google auth | `google_oauth_token` | [google-sheets.md](google-sheets.md) |
+| Google Slides | shared Google auth | `google_oauth_token` | [google-slides.md](google-slides.md) |
+| Slack | `thinclaw tool auth slack` or env-based auth | `slack_bot_token` | [slack.md](slack.md) |
+| Telegram | workspace files + in-tool login flow | `telegram/api_id`, `telegram/api_hash`, `telegram/session.json` | [telegram.md](telegram.md) |
+| Okta | `thinclaw tool auth okta` + workspace domain | `okta_oauth_token`, `okta/domain` | [okta.md](okta.md) |
+| Brave Search | `thinclaw tool auth brave-search` | `brave_search_api_key` | [../tools-src/brave-search/README.md](../tools-src/brave-search/README.md) |
+
+## Notes
+
+- All WASM tools run in the host-managed WASM runtime.
+- Secret values are injected at the host boundary rather than exposed directly to WASM code.
+- MCP servers are a separate extension path with a different trust model.

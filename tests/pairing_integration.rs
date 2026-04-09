@@ -84,6 +84,8 @@ fn test_pairing_flow_cli_approve() {
         PairingCommand::Approve {
             channel: "telegram".to_string(),
             code,
+            actor: None,
+            name: None,
         },
     );
     assert!(result.is_ok());
@@ -107,6 +109,8 @@ fn test_pairing_reject_invalid_code() {
         PairingCommand::Approve {
             channel: "telegram".to_string(),
             code: "BADCODE1".to_string(),
+            actor: None,
+            name: None,
         },
     );
     assert!(result.is_err());

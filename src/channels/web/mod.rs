@@ -87,6 +87,10 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             user_id: config.user_id.clone(),
+            actor_id: config
+                .actor_id
+                .clone()
+                .unwrap_or_else(|| config.user_id.clone()),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -127,6 +131,7 @@ impl GatewayChannel {
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             user_id: self.state.user_id.clone(),
+            actor_id: self.state.actor_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),

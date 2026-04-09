@@ -361,6 +361,26 @@ end tell"#
         chat_id.rsplit(';').next().unwrap_or(chat_id)
     }
 
+    fn conversation_kind(is_group: bool) -> &'static str {
+        if is_group { "group" } else { "direct" }
+    }
+
+    fn conversation_scope_id(chat_id: &str, is_group: bool) -> String {
+        if is_group {
+            format!("imessage:group:{chat_id}")
+        } else {
+            format!("imessage:direct:{chat_id}")
+        }
+    }
+
+    fn external_conversation_key(chat_id: &str, is_group: bool) -> String {
+        if is_group {
+            format!("imessage://group/{chat_id}")
+        } else {
+            format!("imessage://direct/{chat_id}")
+        }
+    }
+
     /// Determine if a sender identifier looks like a phone number.
     fn is_phone_number(s: &str) -> bool {
         let cleaned: String = s
@@ -459,6 +479,12 @@ impl Channel for IMessageChannel {
                                 msg.text.clone()
                             };
 
+                            let conversation_kind = Self::conversation_kind(msg.is_group);
+                            let conversation_scope_id =
+                                Self::conversation_scope_id(&msg.chat_id, msg.is_group);
+                            let external_conversation_key =
+                                Self::external_conversation_key(&msg.chat_id, msg.is_group);
+
                             let incoming = IncomingMessage::new(NAME, &msg.sender, &content)
                                 .with_metadata(serde_json::json!({
                                     "chat_id": msg.chat_id,
@@ -466,6 +492,11 @@ impl Channel for IMessageChannel {
                                     "recipient": recipient,
                                     "is_group": msg.is_group,
                                     "attachment_count": msg.attachment_count,
+                                    "conversation_kind": conversation_kind,
+                                    "conversation_scope_id": conversation_scope_id,
+                                    "external_conversation_key": external_conversation_key,
+                                    "raw_sender_id": msg.sender.clone(),
+                                    "stable_sender_id": msg.sender.clone(),
                                     "sender_type": if Self::is_phone_number(&msg.sender) {
                                         "phone"
                                     } else if Self::is_email(&msg.sender) {

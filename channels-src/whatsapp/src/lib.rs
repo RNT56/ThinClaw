@@ -268,6 +268,26 @@ struct WhatsAppMessageMetadata {
 
     /// Timestamp of original message
     timestamp: String,
+
+    /// Normalized conversation kind for downstream resolver logic.
+    #[serde(default)]
+    conversation_kind: Option<String>,
+
+    /// Stable scope identifier for this DM conversation.
+    #[serde(default)]
+    conversation_scope_id: Option<String>,
+
+    /// Stable external conversation key used for cross-channel continuity.
+    #[serde(default)]
+    external_conversation_key: Option<String>,
+
+    /// Raw sender identifier from the webhook payload.
+    #[serde(default)]
+    raw_sender_id: Option<String>,
+
+    /// Stable sender identifier used for continuity within WhatsApp.
+    #[serde(default)]
+    stable_sender_id: Option<String>,
 }
 
 /// Workspace path for persisting owner_id across WASM callbacks.
@@ -306,6 +326,14 @@ fn default_api_version() -> String {
 
 fn default_reply_to_message() -> bool {
     true
+}
+
+fn conversation_scope_id(phone_number_id: &str, sender_phone: &str) -> String {
+    format!("whatsapp:direct:{phone_number_id}:{sender_phone}")
+}
+
+fn external_conversation_key(phone_number_id: &str, sender_phone: &str) -> String {
+    format!("whatsapp://direct/{phone_number_id}/{sender_phone}")
 }
 
 // ============================================================================
@@ -814,6 +842,11 @@ fn handle_message(
         sender_phone: message.from.clone(),
         message_id: message.id.clone(),
         timestamp: message.timestamp.clone(),
+        conversation_kind: Some("direct".to_string()),
+        conversation_scope_id: Some(conversation_scope_id(phone_number_id, &message.from)),
+        external_conversation_key: Some(external_conversation_key(phone_number_id, &message.from)),
+        raw_sender_id: Some(message.from.clone()),
+        stable_sender_id: Some(message.from.clone()),
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -951,6 +984,11 @@ fn check_sender_permission(
         let meta = serde_json::json!({
             "phone": sender_phone,
             "name": user_name,
+            "conversation_kind": "direct",
+            "conversation_scope_id": conversation_scope_id(phone_number_id, sender_phone),
+            "external_conversation_key": external_conversation_key(phone_number_id, sender_phone),
+            "raw_sender_id": sender_phone,
+            "stable_sender_id": sender_phone,
         })
         .to_string();
 
@@ -1437,6 +1475,13 @@ mod tests {
             sender_phone: "15551234567".to_string(),
             message_id: "wamid.abc".to_string(),
             timestamp: "1234567890".to_string(),
+            conversation_kind: Some("direct".to_string()),
+            conversation_scope_id: Some("whatsapp:direct:123456:15551234567".to_string()),
+            external_conversation_key: Some(
+                "whatsapp://direct/123456/15551234567".to_string(),
+            ),
+            raw_sender_id: Some("15551234567".to_string()),
+            stable_sender_id: Some("15551234567".to_string()),
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -1444,5 +1489,6 @@ mod tests {
 
         assert_eq!(parsed.phone_number_id, "123456");
         assert_eq!(parsed.sender_phone, "15551234567");
+        assert_eq!(parsed.conversation_kind.as_deref(), Some("direct"));
     }
 }

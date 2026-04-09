@@ -113,6 +113,8 @@ impl SearchConfig {
 pub struct SearchResult {
     /// Document ID containing this chunk.
     pub document_id: Uuid,
+    /// Source path for the matching document.
+    pub path: String,
     /// Chunk ID.
     pub chunk_id: Uuid,
     /// Chunk content.
@@ -147,6 +149,7 @@ impl SearchResult {
 pub struct RankedResult {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
+    pub path: String,
     pub content: String,
     pub rank: u32, // 1-based rank
     /// Optional creation timestamp for temporal decay.
@@ -179,6 +182,7 @@ pub fn reciprocal_rank_fusion(
     // Track scores and metadata for each chunk
     struct ChunkInfo {
         document_id: Uuid,
+        path: String,
         content: String,
         score: f32,
         fts_rank: Option<u32>,
@@ -198,6 +202,7 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                path: result.path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: Some(result.rank),
@@ -216,6 +221,7 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                path: result.path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: None,
@@ -228,6 +234,7 @@ pub fn reciprocal_rank_fusion(
         .into_iter()
         .map(|(chunk_id, info)| SearchResult {
             document_id: info.document_id,
+            path: info.path,
             chunk_id,
             content: info.content,
             score: info.score,
@@ -433,6 +440,7 @@ mod tests {
         RankedResult {
             chunk_id,
             document_id: doc_id,
+            path: format!("docs/{}.md", doc_id),
             content: format!("content for chunk {}", chunk_id),
             rank,
             created_at: None,
@@ -598,6 +606,7 @@ mod tests {
         let mut results = vec![
             SearchResult {
                 document_id: doc_id,
+                path: "docs/old.md".to_string(),
                 chunk_id: chunk_old,
                 content: "old".to_string(),
                 score: 1.0,
@@ -606,6 +615,7 @@ mod tests {
             },
             SearchResult {
                 document_id: doc_id,
+                path: "docs/new.md".to_string(),
                 chunk_id: chunk_new,
                 content: "new".to_string(),
                 score: 0.8,
@@ -632,6 +642,7 @@ mod tests {
         let results = vec![
             SearchResult {
                 document_id: Uuid::new_v4(),
+                path: "docs/a.md".to_string(),
                 chunk_id: chunk1,
                 content: "a".to_string(),
                 score: 1.0,
@@ -640,6 +651,7 @@ mod tests {
             },
             SearchResult {
                 document_id: Uuid::new_v4(),
+                path: "docs/b.md".to_string(),
                 chunk_id: chunk2,
                 content: "b".to_string(),
                 score: 0.9,
@@ -648,6 +660,7 @@ mod tests {
             },
             SearchResult {
                 document_id: Uuid::new_v4(),
+                path: "docs/c.md".to_string(),
                 chunk_id: chunk3,
                 content: "c".to_string(),
                 score: 0.8,

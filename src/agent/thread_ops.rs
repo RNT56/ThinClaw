@@ -14,14 +14,258 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
-use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::session::{
+    PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
+};
 use crate::agent::submission::SubmissionResult;
+use crate::agent::{load_thread_runtime, mutate_thread_runtime};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::error::Error;
+use crate::history::ConversationKind as HistoryConversationKind;
+use crate::identity::ResolvedIdentity;
 use crate::llm::ChatMessage;
 
+fn to_history_conversation_kind(
+    kind: crate::identity::ConversationKind,
+) -> HistoryConversationKind {
+    match kind {
+        crate::identity::ConversationKind::Direct => HistoryConversationKind::Direct,
+        crate::identity::ConversationKind::Group => HistoryConversationKind::Group,
+    }
+}
+
 impl Agent {
+    async fn conversation_visible_to_identity(
+        &self,
+        store: &Arc<dyn Database>,
+        conversation_id: Uuid,
+        identity: &ResolvedIdentity,
+    ) -> bool {
+        let metadata = match store.get_conversation_metadata(conversation_id).await {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                tracing::warn!(
+                    thread = %conversation_id,
+                    error = %err,
+                    "Failed to read conversation metadata while checking ownership"
+                );
+                return false;
+            }
+        };
+        if metadata.is_none() {
+            return true;
+        }
+
+        match store
+            .conversation_belongs_to_actor(
+                conversation_id,
+                &identity.principal_id,
+                &identity.actor_id,
+            )
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) if identity.actor_id == identity.principal_id => store
+                .conversation_belongs_to_user(conversation_id, &identity.principal_id)
+                .await
+                .unwrap_or(false),
+            Ok(false) => false,
+            Err(err) => {
+                tracing::warn!(
+                    thread = %conversation_id,
+                    error = %err,
+                    "Failed to verify actor ownership while hydrating thread"
+                );
+                false
+            }
+        }
+    }
+
+    async fn ensure_persisted_conversation(
+        &self,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+    ) -> Option<Arc<dyn Database>> {
+        let store = self.store().map(Arc::clone)?;
+        if let Err(err) = store
+            .ensure_conversation(
+                thread_id,
+                &message.channel,
+                &identity.principal_id,
+                message.thread_id.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, err);
+            return None;
+        }
+        if let Err(err) = store
+            .update_conversation_identity(
+                thread_id,
+                Some(&identity.actor_id),
+                Some(identity.conversation_scope_id),
+                to_history_conversation_kind(identity.conversation_kind),
+                Some(&identity.stable_external_conversation_key),
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to persist conversation identity for {}: {}",
+                thread_id,
+                err
+            );
+            return None;
+        }
+        Some(store)
+    }
+
+    pub(super) async fn persist_thread_runtime_snapshot(
+        &self,
+        message: &IncomingMessage,
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+    ) {
+        let (thread, auto_approved_tools) = {
+            let sess = session.lock().await;
+            (
+                sess.threads.get(&thread_id).cloned(),
+                Some(sess.auto_approved_tools.iter().cloned().collect::<Vec<_>>()),
+            )
+        };
+        let Some(thread) = thread else {
+            return;
+        };
+        self.persist_thread_runtime_with_thread(message, thread_id, &thread, auto_approved_tools)
+            .await;
+    }
+
+    async fn persist_thread_runtime_with_thread(
+        &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
+        thread: &Thread,
+        auto_approved_tools: Option<Vec<String>>,
+    ) {
+        let identity = message.resolved_identity();
+        let Some(store) = self
+            .ensure_persisted_conversation(thread_id, message, &identity)
+            .await
+        else {
+            return;
+        };
+
+        let owner_agent_id = match self.session_manager.get_thread_owner(thread_id).await {
+            Some(owner) => Some(owner),
+            None => self.agent_router.get_thread_owner(thread_id).await,
+        };
+        let model_override = if let Some(ref overrides) = self.deps.model_override {
+            overrides.get(&format!("thread:{thread_id}")).await
+        } else {
+            None
+        };
+
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            let active_subagents = runtime.active_subagents.clone();
+            let preserved_auto_approved = runtime.auto_approved_tools.clone();
+            *runtime = thread.runtime_state(
+                owner_agent_id.clone(),
+                model_override.clone(),
+                auto_approved_tools
+                    .clone()
+                    .unwrap_or(preserved_auto_approved),
+                active_subagents,
+            );
+        })
+        .await
+        {
+            tracing::warn!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to persist thread runtime snapshot"
+            );
+        }
+    }
+
+    async fn resume_persisted_subagents(
+        &self,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+        thread_id: Uuid,
+        pending: &[PersistedSubagentState],
+    ) {
+        let Some(executor) = self.subagent_executor.as_ref() else {
+            return;
+        };
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        let mut resumed = pending.to_vec();
+        let mut changed = false;
+        let mut spawn_metadata = message.metadata.clone();
+        if !spawn_metadata.is_object() {
+            spawn_metadata = serde_json::json!({});
+        }
+        if let Some(metadata) = spawn_metadata.as_object_mut() {
+            metadata.insert(
+                "thread_id".to_string(),
+                serde_json::json!(thread_id.to_string()),
+            );
+            metadata.insert(
+                "principal_id".to_string(),
+                serde_json::json!(identity.principal_id.clone()),
+            );
+            metadata.insert(
+                "actor_id".to_string(),
+                serde_json::json!(identity.actor_id.clone()),
+            );
+            metadata.insert(
+                "conversation_kind".to_string(),
+                serde_json::json!(identity.conversation_kind.as_str()),
+            );
+        }
+
+        for entry in &mut resumed {
+            match executor
+                .spawn(
+                    entry.request.clone(),
+                    &message.channel,
+                    &spawn_metadata,
+                    &message.user_id,
+                    Some(identity),
+                    Some(&thread_id.to_string()),
+                )
+                .await
+            {
+                Ok(result) => {
+                    entry.agent_id = result.agent_id;
+                    changed = true;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        thread = %thread_id,
+                        task = %entry.request.name,
+                        error = %err,
+                        "Failed to resume persisted subagent after hydration"
+                    );
+                }
+            }
+        }
+
+        if changed {
+            let _ = mutate_thread_runtime(&store, thread_id, |runtime| {
+                runtime.active_subagents = resumed;
+            })
+            .await;
+        }
+    }
+
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
     /// Called before `resolve_thread` so that the session manager finds the
@@ -42,10 +286,26 @@ impl Agent {
             Err(_) => return,
         };
 
+        let identity = message.resolved_identity();
+        let store = self.store().map(Arc::clone);
+        if let Some(ref store) = store
+            && !self
+                .conversation_visible_to_identity(store, thread_uuid, &identity)
+                .await
+        {
+            tracing::warn!(
+                thread = %thread_uuid,
+                principal = %identity.principal_id,
+                actor = %identity.actor_id,
+                "Refusing to hydrate thread outside the caller's identity scope"
+            );
+            return;
+        }
+
         // Check if already in memory
         let session = self
             .session_manager
-            .get_or_create_session(&message.user_id)
+            .get_or_create_session_for_identity(&identity)
             .await;
         {
             let sess = session.lock().await;
@@ -58,7 +318,7 @@ impl Agent {
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
         let msg_count;
 
-        if let Some(store) = self.store() {
+        let runtime = if let Some(ref store) = store {
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
@@ -72,9 +332,13 @@ impl Agent {
                     _ => None,
                 })
                 .collect();
+            load_thread_runtime(store, thread_uuid)
+                .await
+                .unwrap_or(None)
         } else {
             msg_count = 0;
-        }
+            None
+        };
 
         // Create thread with the historical ID and restore messages
         let session_id = {
@@ -86,6 +350,9 @@ impl Agent {
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
+        if let Some(runtime) = runtime.as_ref() {
+            thread.restore_runtime_state(runtime.clone());
+        }
 
         // Insert into session and register with session manager
         {
@@ -96,13 +363,37 @@ impl Agent {
         }
 
         self.session_manager
-            .register_thread(
-                &message.user_id,
+            .register_thread_for_scope(
+                identity.conversation_scope_id,
                 &message.channel,
                 thread_uuid,
                 Arc::clone(&session),
             )
             .await;
+
+        if let Some(runtime) = runtime {
+            if let Some(owner) = runtime.owner_agent_id.clone() {
+                let _ = self.agent_router.claim_thread(thread_uuid, &owner).await;
+                let _ = self
+                    .session_manager
+                    .set_thread_owner(thread_uuid, &owner)
+                    .await;
+            }
+            if let Some(model_override) = runtime.model_override.clone()
+                && let Some(ref overrides) = self.deps.model_override
+            {
+                overrides
+                    .set(format!("thread:{thread_uuid}"), model_override)
+                    .await;
+            }
+            self.resume_persisted_subagents(
+                message,
+                &identity,
+                thread_uuid,
+                &runtime.active_subagents,
+            )
+            .await;
+        }
 
         tracing::debug!(
             "Hydrated thread {} from DB ({} messages)",
@@ -242,7 +533,7 @@ impl Agent {
 
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
-            return self.handle_job_or_command(intent, message).await;
+            return self.handle_job_or_command(intent, message, thread_id).await;
         }
 
         // Natural language goes through the agentic loop
@@ -329,7 +620,8 @@ impl Agent {
         }
 
         // Persist user message to DB immediately so it survives crashes
-        self.persist_user_message(thread_id, &message.user_id, content)
+        self.persist_user_message(thread_id, message, content).await;
+        self.persist_thread_runtime_snapshot(message, &session, thread_id)
             .await;
 
         // ── Lifecycle: start ─────────────────────────────────────────
@@ -420,6 +712,7 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
+                let thread_snapshot = thread.clone();
                 let _ = self
                     .channels
                     .send_status(
@@ -430,7 +723,11 @@ impl Agent {
                     .await;
 
                 // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(thread_id, &message.user_id, &response)
+                self.persist_assistant_response(thread_id, message, &response)
+                    .await;
+                drop(sess);
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
 
                 // Lifecycle end: response
@@ -459,6 +756,7 @@ impl Agent {
                 let description = pending.description.clone();
                 let parameters = pending.parameters.clone();
                 thread.await_approval(pending);
+                let thread_snapshot = thread.clone();
                 let _ = self
                     .channels
                     .send_status(
@@ -466,6 +764,10 @@ impl Agent {
                         StatusUpdate::Status("Awaiting approval".into()),
                         &message.metadata,
                     )
+                    .await;
+                drop(sess);
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
                 Ok(SubmissionResult::NeedApproval {
                     request_id,
@@ -476,6 +778,7 @@ impl Agent {
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
+                let thread_snapshot = thread.clone();
                 // User message already persisted at turn start; nothing else to save
                 // Lifecycle end: error
                 let _ = self
@@ -489,6 +792,10 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
+                drop(sess);
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
@@ -501,24 +808,27 @@ impl Agent {
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
-        user_id: &str,
+        message: &IncomingMessage,
         user_input: &str,
     ) {
-        let store = match self.store() {
-            Some(s) => Arc::clone(s),
-            None => return,
+        let identity = message.resolved_identity();
+        let Some(store) = self
+            .ensure_persisted_conversation(thread_id, message, &identity)
+            .await
+        else {
+            return;
         };
 
         if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
-            .await
-        {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-            return;
-        }
-
-        if let Err(e) = store
-            .add_conversation_message(thread_id, "user", user_input)
+            .add_conversation_message_with_attribution(
+                thread_id,
+                "user",
+                user_input,
+                Some(&identity.actor_id),
+                message.user_name.as_deref(),
+                Some(&identity.raw_sender_id),
+                Some(&message.metadata),
+            )
             .await
         {
             tracing::warn!("Failed to persist user message: {}", e);
@@ -533,24 +843,27 @@ impl Agent {
     pub(super) async fn persist_assistant_response(
         &self,
         thread_id: Uuid,
-        user_id: &str,
+        message: &IncomingMessage,
         response: &str,
     ) {
-        let store = match self.store() {
-            Some(s) => Arc::clone(s),
-            None => return,
+        let identity = message.resolved_identity();
+        let Some(store) = self
+            .ensure_persisted_conversation(thread_id, message, &identity)
+            .await
+        else {
+            return;
         };
 
         if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
-            .await
-        {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-            return;
-        }
-
-        if let Err(e) = store
-            .add_conversation_message(thread_id, "assistant", response)
+            .add_conversation_message_with_attribution(
+                thread_id,
+                "assistant",
+                response,
+                None,
+                None,
+                None,
+                Some(&message.metadata),
+            )
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
@@ -629,6 +942,7 @@ impl Agent {
 
     pub(super) async fn process_interrupt(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
@@ -641,6 +955,11 @@ impl Agent {
         match thread.state {
             ThreadState::Processing | ThreadState::AwaitingApproval => {
                 thread.interrupt();
+                let thread_snapshot = thread.clone();
+                drop(sess);
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
             }
             _ => Ok(SubmissionResult::ok_with_message("Nothing to interrupt.")),
@@ -744,9 +1063,19 @@ impl Agent {
             && req_id != pending.request_id
         {
             // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.await_approval(pending);
+            let thread_snapshot = {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.await_approval(pending);
+                    Some(thread.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(thread_snapshot) = thread_snapshot {
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
             }
             return Ok(SubmissionResult::error(
                 "Request ID mismatch. Use the correct request ID.",
@@ -766,16 +1095,79 @@ impl Agent {
             }
 
             // Reset thread state to processing
-            {
+            let processing_snapshot = {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.state = ThreadState::Processing;
+                    Some(thread.clone())
+                } else {
+                    None
                 }
+            };
+            if let Some(thread_snapshot) = processing_snapshot {
+                let _ = thread_snapshot;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
             }
 
             // Execute the approved tool and continue the loop
-            let job_ctx =
-                JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+            let identity = message.resolved_identity();
+            let mut job_ctx = JobContext::with_identity(
+                identity.principal_id.clone(),
+                identity.actor_id.clone(),
+                "chat",
+                "Interactive chat session",
+            );
+            job_ctx.metadata = message.metadata.clone();
+            if !job_ctx.metadata.is_object() {
+                job_ctx.metadata = serde_json::json!({});
+            }
+            if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+                metadata.insert(
+                    "thread_id".to_string(),
+                    serde_json::json!(thread_id.to_string()),
+                );
+                metadata.insert(
+                    "conversation_kind".to_string(),
+                    serde_json::json!(identity.conversation_kind.as_str()),
+                );
+                metadata.insert(
+                    "conversation_scope_id".to_string(),
+                    serde_json::json!(identity.conversation_scope_id.to_string()),
+                );
+                metadata.insert(
+                    "principal_id".to_string(),
+                    serde_json::json!(identity.principal_id.clone()),
+                );
+                metadata.insert(
+                    "actor_id".to_string(),
+                    serde_json::json!(identity.actor_id.clone()),
+                );
+                if let Some(owner) = self.agent_router.get_thread_owner(thread_id).await {
+                    metadata.insert("agent_id".to_string(), serde_json::json!(owner.clone()));
+                    if let Some(agent) = self.agent_router.get_agent(&owner).await
+                    {
+                        if let Some(workspace_id) = agent.workspace_id {
+                            metadata.insert(
+                                "agent_workspace_id".to_string(),
+                                serde_json::json!(workspace_id.to_string()),
+                            );
+                        }
+                        if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
+                            metadata.insert(
+                                "allowed_tools".to_string(),
+                                serde_json::json!(allowed_tools),
+                            );
+                        }
+                        if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
+                            metadata.insert(
+                                "allowed_skills".to_string(),
+                                serde_json::json!(allowed_skills),
+                            );
+                        }
+                    }
+                }
+            }
 
             let _ = self
                 .channels
@@ -1165,6 +1557,8 @@ impl Agent {
                         thread.await_approval(new_pending);
                     }
                 }
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
 
                 let _ = self
                     .channels
@@ -1200,8 +1594,13 @@ impl Agent {
                 Ok(AgenticLoopResult::Response(response))
                 | Ok(AgenticLoopResult::Streamed(response)) => {
                     thread.complete_turn(&response);
+                    let thread_snapshot = thread.clone();
                     // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(thread_id, &message.user_id, &response)
+                    self.persist_assistant_response(thread_id, message, &response)
+                        .await;
+                    drop(sess);
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                     let _ = self
                         .channels
@@ -1225,6 +1624,7 @@ impl Agent {
                     let description = new_pending.description.clone();
                     let parameters = new_pending.parameters.clone();
                     thread.await_approval(new_pending);
+                    let thread_snapshot = thread.clone();
                     let _ = self
                         .channels
                         .send_status(
@@ -1232,6 +1632,10 @@ impl Agent {
                             StatusUpdate::Status("Awaiting approval".into()),
                             &message.metadata,
                         )
+                        .await;
+                    drop(sess);
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                     Ok(SubmissionResult::NeedApproval {
                         request_id,
@@ -1242,7 +1646,12 @@ impl Agent {
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
+                    let thread_snapshot = thread.clone();
                     // User message already persisted at turn start
+                    drop(sess);
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
@@ -1258,8 +1667,13 @@ impl Agent {
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
+                    let thread_snapshot = thread.clone();
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, &message.user_id, &rejection)
+                    self.persist_assistant_response(thread_id, message, &rejection)
+                        .await;
+                    drop(sess);
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                 }
             }
@@ -1292,15 +1706,23 @@ impl Agent {
         instructions: String,
     ) {
         let auth_data = parse_auth_result(tool_result);
-        {
+        let thread_snapshot = {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
                 // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(thread_id, &message.user_id, &instructions)
+                self.persist_assistant_response(thread_id, message, &instructions)
                     .await;
+                Some(thread.clone())
+            } else {
+                None
             }
+        };
+        if let Some(thread_snapshot) = thread_snapshot {
+            let _ = thread_snapshot;
+            self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                .await;
         }
         let _ = self
             .channels
@@ -1332,11 +1754,19 @@ impl Agent {
         let token = token.trim();
 
         // Clear auth mode regardless of outcome
-        {
+        let cleared_snapshot = {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.pending_auth = None;
+                Some(thread.clone())
+            } else {
+                None
             }
+        };
+        if let Some(thread_snapshot) = cleared_snapshot {
+            let _ = thread_snapshot;
+            self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                .await;
         }
 
         let ext_mgr = match self.deps.extension_manager.as_ref() {
@@ -1413,6 +1843,8 @@ impl Agent {
                         thread.enter_auth_mode(pending.extension_name.clone());
                     }
                 }
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
                 let msg = result
                     .instructions
                     .clone()
@@ -1459,9 +1891,10 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<SubmissionResult, Error> {
+        let identity = message.resolved_identity();
         let session = self
             .session_manager
-            .get_or_create_session(&message.user_id)
+            .get_or_create_session_for_identity(&identity)
             .await;
         let mut sess = session.lock().await;
         let thread = sess.create_thread();
@@ -1477,9 +1910,10 @@ impl Agent {
         message: &IncomingMessage,
         target_thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        let identity = message.resolved_identity();
         let session = self
             .session_manager
-            .get_or_create_session(&message.user_id)
+            .get_or_create_session_for_identity(&identity)
             .await;
         let mut sess = session.lock().await;
 

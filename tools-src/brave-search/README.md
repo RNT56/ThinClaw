@@ -30,20 +30,16 @@ Or configure via the **WebUI**: the first time the agent needs to search, it wil
 
 ## Install
 
-The tool is included in the ThinClaw registry. Install it with:
+The tool is published in the ThinClaw registry. Install it with:
 
 ```bash
 thinclaw registry install brave-search
 ```
 
-Or build from source:
+Or install directly from a local source checkout:
 
 ```bash
-cd tools-src/brave-search
-bash build.sh
-mkdir -p ~/.thinclaw/tools
-cp brave-search.wasm ~/.thinclaw/tools/brave-search.wasm
-cp brave-search-tool.capabilities.json ~/.thinclaw/tools/brave-search.capabilities.json
+thinclaw tool install tools-src/brave-search
 thinclaw tool auth brave-search
 ```
 

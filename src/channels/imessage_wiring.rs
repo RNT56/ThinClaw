@@ -136,9 +136,24 @@ impl IMessageStartupInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
+
+    /// Clear iMessage-related env vars under the crate-wide env mutex.
+    fn clear_imessage_env() {
+        // SAFETY: Only called under lock_env() guard.
+        unsafe {
+            std::env::remove_var("IMESSAGE_ENABLED");
+            std::env::remove_var("IMESSAGE_CHAT_DB");
+            std::env::remove_var("IMESSAGE_POLL_INTERVAL");
+            std::env::remove_var("IMESSAGE_CONTACTS");
+            std::env::remove_var("IMESSAGE_MAX_AGE");
+        }
+    }
 
     #[test]
     fn test_default_config() {
+        let _guard = lock_env();
+        clear_imessage_env();
         let config = IMessageConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.poll_interval_secs, 5);
@@ -147,6 +162,8 @@ mod tests {
 
     #[test]
     fn test_disabled_not_ready() {
+        let _guard = lock_env();
+        clear_imessage_env();
         let config = IMessageConfig::default();
         assert!(!config.is_ready());
     }
@@ -163,6 +180,8 @@ mod tests {
 
     #[test]
     fn test_startup_disabled() {
+        let _guard = lock_env();
+        clear_imessage_env();
         let config = IMessageConfig::default();
         let info = IMessageStartupInfo::from_config(config);
         assert_eq!(info.status, IMessageStatus::Disabled);

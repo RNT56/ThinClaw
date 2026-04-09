@@ -68,6 +68,16 @@ impl Tool for CreateAgentTool {
                     "items": { "type": "string" },
                     "description": "Optional: trigger keywords that route messages to this agent."
                 },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: tool allowlist for this agent. When set, only these tools plus core internal tools are exposed."
+                },
+                "allowed_skills": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: skill allowlist for this agent. When set, only these skills are visible/readable."
+                },
                 "is_default": {
                     "type": "boolean",
                     "description": "Whether this is the default agent that receives unrouted messages. Default: false."
@@ -108,6 +118,12 @@ impl Tool for CreateAgentTool {
             .get("keywords")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let allowed_tools: Option<Vec<String>> = params
+            .get("allowed_tools")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let allowed_skills: Option<Vec<String>> = params
+            .get("allowed_skills")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let is_default = params
             .get("is_default")
             .and_then(|v| v.as_bool())
@@ -123,6 +139,8 @@ impl Tool for CreateAgentTool {
                 channels,
                 keywords,
                 is_default,
+                allowed_tools,
+                allowed_skills,
             )
             .await
         {
@@ -133,6 +151,8 @@ impl Tool for CreateAgentTool {
                     "display_name": record.display_name,
                     "model": record.model,
                     "is_default": record.is_default,
+                    "allowed_tools": record.allowed_tools,
+                    "allowed_skills": record.allowed_skills,
                     "workspace_seeded": true,
                     "duration_ms": start.elapsed().as_millis(),
                 }))
@@ -196,6 +216,8 @@ impl Tool for ListAgentsTool {
                     "is_default": ws.is_default,
                     "bound_channels": ws.bound_channels,
                     "trigger_keywords": ws.trigger_keywords,
+                    "allowed_tools": ws.allowed_tools,
+                    "allowed_skills": ws.allowed_skills,
                     "has_system_prompt": ws.system_prompt.is_some(),
                 })
             })
@@ -272,6 +294,16 @@ impl Tool for UpdateAgentTool {
                     "items": { "type": "string" },
                     "description": "New trigger keywords"
                 },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "New tool allowlist (set to null to clear)"
+                },
+                "allowed_skills": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "New skill allowlist (set to null to clear)"
+                },
                 "is_default": {
                     "type": "boolean",
                     "description": "Set as default agent"
@@ -312,6 +344,25 @@ impl Tool for UpdateAgentTool {
         let keywords: Option<Vec<String>> = params
             .get("keywords")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let allowed_tools: Option<Option<Vec<String>>> = if params.get("allowed_tools").is_some() {
+            Some(
+                params
+                    .get("allowed_tools")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            )
+        } else {
+            None
+        };
+        let allowed_skills: Option<Option<Vec<String>>> =
+            if params.get("allowed_skills").is_some() {
+                Some(
+                    params
+                        .get("allowed_skills")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                )
+            } else {
+                None
+            };
         let is_default = params.get("is_default").and_then(|v| v.as_bool());
 
         match self
@@ -324,6 +375,8 @@ impl Tool for UpdateAgentTool {
                 channels,
                 keywords,
                 is_default,
+                allowed_tools,
+                allowed_skills,
             )
             .await
         {
@@ -332,6 +385,8 @@ impl Tool for UpdateAgentTool {
                     "status": "updated",
                     "agent_id": record.agent_id,
                     "display_name": record.display_name,
+                    "allowed_tools": record.allowed_tools,
+                    "allowed_skills": record.allowed_skills,
                 }))
                 .unwrap(),
                 start.elapsed(),
@@ -561,8 +616,11 @@ impl Tool for MessageAgentTool {
             serde_json::to_string_pretty(&json!({
                 "a2a_request": true,
                 "target_agent_id": agent_id,
+                "target_workspace_id": record.id.to_string(),
                 "target_display_name": record.display_name,
                 "target_model": record.model,
+                "target_allowed_tools": record.allowed_tools,
+                "target_allowed_skills": record.allowed_skills,
                 "target_system_prompt": full_context,
                 "message": message,
                 "timeout_secs": timeout_secs,

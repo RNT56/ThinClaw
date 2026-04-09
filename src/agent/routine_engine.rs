@@ -241,22 +241,24 @@ impl RoutineEngine {
                             routine = %routine.name,
                             "Injected system event into heartbeat queue"
                         );
+                        // Update runtime state only after the event was
+                        // actually enqueued; otherwise we would silently skip
+                        // a scheduled heartbeat on channel/backpressure errors.
+                        let next = detail
+                            .as_ref()
+                            .and_then(|s| next_cron_fire(s).unwrap_or(None));
+                        let _ = self
+                            .store
+                            .update_routine_runtime(
+                                routine.id,
+                                Utc::now(),
+                                next,
+                                routine.run_count + 1,
+                                routine.consecutive_failures,
+                                &routine.state,
+                            )
+                            .await;
                     }
-                    // Update runtime state: advance next_fire_at, bump run_count
-                    let next = detail
-                        .as_ref()
-                        .and_then(|s| next_cron_fire(s).unwrap_or(None));
-                    let _ = self
-                        .store
-                        .update_routine_runtime(
-                            routine.id,
-                            Utc::now(),
-                            next,
-                            routine.run_count + 1,
-                            routine.consecutive_failures,
-                            &routine.state,
-                        )
-                        .await;
                 } else {
                     tracing::warn!(
                         routine = %routine.name,
@@ -327,10 +329,12 @@ impl RoutineEngine {
             subagent_executor: self.subagent_executor.clone(),
             user_timezone: self.user_timezone.clone(),
         };
+        let routine_name = routine.name.clone();
 
-        tokio::spawn(async move {
+        self.spawn_tracked_task(&routine_name, async move {
             execute_routine(engine, routine, run).await;
-        });
+        })
+        .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
 
         Ok(run_id)
     }
@@ -371,19 +375,16 @@ impl RoutineEngine {
 
         // Record the run in DB, then spawn execution (IC-018: tracked via JoinSet)
         let store = self.store.clone();
-        let tasks = self.active_tasks.clone();
-        // Bug 14 fix: use std::sync::Mutex (sync lock) so we never hold an async
-        // lock across the synchronous JoinSet::spawn() call.
-        if let Ok(mut guard) = tasks.lock() {
-            guard.spawn(async move {
-                if let Err(e) = store.create_routine_run(&run).await {
-                    tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
-                    return;
-                }
-                execute_routine(engine, routine, run).await;
-            });
-        } else {
-            tracing::error!(routine = %routine.name, "active_tasks mutex poisoned — routine not spawned");
+        let routine_name = routine.name.clone();
+        let log_routine_name = routine_name.clone();
+        if let Err(reason) = self.spawn_tracked_task(&routine_name, async move {
+            if let Err(e) = store.create_routine_run(&run).await {
+                tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
+                return;
+            }
+            execute_routine(engine, routine, run).await;
+        }) {
+            tracing::error!(routine = %log_routine_name, "{}", reason);
         }
     }
 
@@ -455,6 +456,20 @@ impl RoutineEngine {
             }
         }
     }
+
+    fn spawn_tracked_task<F>(&self, routine_name: &str, task: F) -> Result<(), String>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self.active_tasks.lock().map_err(|_| {
+            format!(
+                "active_tasks mutex poisoned — routine '{}' not spawned",
+                routine_name
+            )
+        })?;
+        guard.spawn(task);
+        Ok(())
+    }
 }
 
 /// Shared context passed to the execution function.
@@ -520,11 +535,32 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             title,
             description,
             max_iterations,
+            allowed_tools,
+            allowed_skills,
         } => {
             if ctx.subagent_executor.is_some() {
-                execute_as_subagent(&ctx, &routine, &run, title, description).await
+                execute_as_subagent(
+                    &ctx,
+                    &routine,
+                    &run,
+                    title,
+                    description,
+                    allowed_tools.as_deref(),
+                    allowed_skills.as_deref(),
+                )
+                .await
             } else {
-                execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await
+                execute_full_job(
+                    &ctx,
+                    &routine,
+                    &run,
+                    title,
+                    description,
+                    *max_iterations,
+                    allowed_tools.as_deref(),
+                    allowed_skills.as_deref(),
+                )
+                .await
             }
         }
         RoutineAction::Heartbeat {
@@ -678,6 +714,8 @@ async fn execute_as_subagent(
     run: &RoutineRun,
     title: &str,
     description: &str,
+    allowed_tools: Option<&[String]>,
+    allowed_skills: Option<&[String]>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let executor = ctx
         .subagent_executor
@@ -697,7 +735,11 @@ async fn execute_as_subagent(
             routine.name, title, description
         )),
         model: None,
-        allowed_tools: None,
+        allowed_tools: allowed_tools.map(|tools| tools.to_vec()),
+        allowed_skills: allowed_skills.map(|skills| skills.to_vec()),
+        principal_id: Some(routine.user_id.clone()),
+        actor_id: Some(routine.owner_actor_id().to_string()),
+        agent_workspace_id: None,
         timeout_secs: Some(300),
         wait: false,
     };
@@ -708,9 +750,20 @@ async fn execute_as_subagent(
         "thread_id": "agent:main",
         "routine_name": routine.name,
         "routine_run_id": run.id.to_string(),
+        "reinject_result": false,
     });
 
-    match executor.spawn(request, "tauri", &channel_metadata).await {
+    match executor
+        .spawn(
+            request,
+            "tauri",
+            &channel_metadata,
+            routine.owner_actor_id(),
+            None,
+            Some("agent:main"),
+        )
+        .await
+    {
         Ok(result) => {
             // Broadcast "dispatched" SSE so the UI shows the subagent panel
             ctx.broadcast_sse(SseEvent::RoutineLifecycle {
@@ -748,6 +801,8 @@ async fn execute_full_job(
     title: &str,
     description: &str,
     max_iterations: u32,
+    allowed_tools: Option<&[String]>,
+    allowed_skills: Option<&[String]>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let scheduler = ctx
         .scheduler
@@ -756,7 +811,15 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({ "max_iterations": max_iterations });
+    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
+    if let Some(obj) = metadata.as_object_mut() {
+        if let Some(allowed_tools) = allowed_tools {
+            obj.insert("allowed_tools".to_string(), serde_json::json!(allowed_tools));
+        }
+        if let Some(allowed_skills) = allowed_skills {
+            obj.insert("allowed_skills".to_string(), serde_json::json!(allowed_skills));
+        }
+    }
 
     let job_id = scheduler
         .dispatch_job_for_routine(
@@ -1220,7 +1283,105 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use rust_decimal::Decimal;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::*;
     use crate::agent::routine::{NotifyConfig, RunStatus};
+    use crate::error::LlmError;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use crate::testing::StubLlm;
+    #[cfg(feature = "libsql")]
+    use crate::testing::test_db;
+
+    struct BlockingLlm {
+        started_tx: Mutex<Option<oneshot::Sender<()>>>,
+        dropped_tx: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl BlockingLlm {
+        fn new(started_tx: oneshot::Sender<()>, dropped_tx: oneshot::Sender<()>) -> Self {
+            Self {
+                started_tx: Mutex::new(Some(started_tx)),
+                dropped_tx: Mutex::new(Some(dropped_tx)),
+            }
+        }
+    }
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingLlm {
+        fn model_name(&self) -> &str {
+            "blocking-llm"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            if let Some(tx) = self.started_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let _drop_signal = DropSignal(self.dropped_tx.lock().unwrap().take());
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            if let Some(tx) = self.started_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let _drop_signal = DropSignal(self.dropped_tx.lock().unwrap().take());
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    fn make_test_routine(name: &str, trigger: Trigger, action: RoutineAction) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: "test routine".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger,
+            action,
+            guardrails: crate::agent::routine::RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn test_notification_gating() {
@@ -1248,5 +1409,105 @@ mod tests {
         ] {
             let _ = status.to_string();
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn fire_manual_tasks_are_tracked_for_abort_all() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let llm = Arc::new(BlockingLlm::new(started_tx, dropped_tx));
+
+        let engine = RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            llm,
+            workspace,
+            notify_tx,
+            None,
+        );
+
+        let routine = make_test_routine(
+            "manual-abort",
+            Trigger::Manual,
+            RoutineAction::Lightweight {
+                prompt: "wait forever".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        db.create_routine(&routine).await.unwrap();
+
+        engine.fire_manual(routine.id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("manual run should start")
+            .unwrap();
+
+        engine.abort_all().await;
+
+        tokio::time::timeout(Duration::from_secs(2), dropped_rx)
+            .await
+            .expect("abort_all should cancel tracked manual routine")
+            .unwrap();
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn system_event_does_not_advance_runtime_when_enqueue_fails() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+        let (system_event_tx, system_event_rx) = mpsc::channel(1);
+        drop(system_event_rx);
+
+        let engine = RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("ok")),
+            workspace,
+            notify_tx,
+            None,
+        )
+        .with_system_event_tx(system_event_tx);
+
+        let due_at = Utc::now() - ChronoDuration::minutes(1);
+        let mut routine = make_test_routine(
+            "system-event-fail",
+            Trigger::SystemEvent {
+                message: "run heartbeat".to_string(),
+                schedule: Some("*/5 * * * *".to_string()),
+            },
+            RoutineAction::Lightweight {
+                prompt: "unused".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.next_fire_at = Some(due_at);
+        db.create_routine(&routine).await.unwrap();
+
+        engine.check_cron_triggers().await;
+
+        let refreshed = db.get_routine(routine.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.run_count, 0);
+        assert_eq!(refreshed.last_run_at, None);
+        let refreshed_next = refreshed
+            .next_fire_at
+            .expect("next_fire_at should stay due");
+        assert!(refreshed_next <= Utc::now());
+        assert!(
+            (refreshed_next - due_at).num_milliseconds().abs() < 1_000,
+            "next_fire_at should remain effectively unchanged"
+        );
     }
 }

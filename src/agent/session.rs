@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, ToolCall};
 
 /// A session containing one or more threads.
@@ -25,6 +26,14 @@ pub struct Session {
     pub id: Uuid,
     /// User ID that owns this session.
     pub user_id: String,
+    /// Principal ID for shared household ownership.
+    pub principal_id: String,
+    /// Actor ID owning this conversation scope.
+    pub actor_id: String,
+    /// Stable conversation scope ID.
+    pub conversation_scope_id: Uuid,
+    /// Direct/group conversation classification.
+    pub conversation_kind: ConversationKind,
     /// Active thread ID.
     pub active_thread: Option<Uuid>,
     /// All threads in this session.
@@ -43,10 +52,16 @@ pub struct Session {
 impl Session {
     /// Create a new session.
     pub fn new(user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+        let scope_id = scope_id_from_key(&format!("principal:{user_id}"));
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            user_id: user_id.into(),
+            user_id: user_id.clone(),
+            principal_id: user_id.clone(),
+            actor_id: user_id,
+            conversation_scope_id: scope_id,
+            conversation_kind: ConversationKind::Direct,
             active_thread: None,
             threads: HashMap::new(),
             created_at: now,
@@ -54,6 +69,42 @@ impl Session {
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
         }
+    }
+
+    /// Create a session with explicit principal/actor identity.
+    pub fn new_scoped(
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+    ) -> Self {
+        let principal_id = principal_id.into();
+        let actor_id = actor_id.into();
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            user_id: principal_id.clone(),
+            principal_id,
+            actor_id,
+            conversation_scope_id,
+            conversation_kind,
+            active_thread: None,
+            threads: HashMap::new(),
+            created_at: now,
+            last_active_at: now,
+            metadata: serde_json::Value::Null,
+            auto_approved_tools: HashSet::new(),
+        }
+    }
+
+    /// Create a session directly from a resolved identity.
+    pub fn from_identity(identity: &ResolvedIdentity) -> Self {
+        Self::new_scoped(
+            identity.principal_id.clone(),
+            identity.actor_id.clone(),
+            identity.conversation_scope_id,
+            identity.conversation_kind,
+        )
     }
 
     /// Check if a tool has been auto-approved for this session.
@@ -131,13 +182,19 @@ pub enum ThreadState {
     Interrupted,
 }
 
+impl Default for ThreadState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
 /// Pending auth token request.
 ///
 /// When `tool_auth` returns `awaiting_token`, the thread enters auth mode.
 /// The next user message is intercepted before entering the normal pipeline
 /// (no logging, no turn creation, no history) and routed directly to the
 /// credential store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuth {
     /// Extension name to authenticate.
     pub extension_name: String,
@@ -162,6 +219,46 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Persisted record of a sub-agent that was active for a conversation thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSubagentState {
+    pub agent_id: Uuid,
+    pub name: String,
+    pub request: crate::agent::subagent_executor::SubagentSpawnRequest,
+    pub channel_name: String,
+    #[serde(default)]
+    pub channel_metadata: serde_json::Value,
+    pub parent_user_id: String,
+    #[serde(default)]
+    pub parent_identity: Option<ResolvedIdentity>,
+    pub parent_thread_id: String,
+    #[serde(default = "default_true")]
+    pub reinject_result: bool,
+}
+
+/// Durable runtime envelope stored in conversation metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreadRuntimeState {
+    #[serde(default)]
+    pub state: ThreadState,
+    #[serde(default)]
+    pub pending_approval: Option<PendingApproval>,
+    #[serde(default)]
+    pub pending_auth: Option<PendingAuth>,
+    #[serde(default)]
+    pub owner_agent_id: Option<String>,
+    #[serde(default)]
+    pub model_override: Option<crate::tools::builtin::llm_tools::ModelOverride>,
+    #[serde(default)]
+    pub auto_approved_tools: Vec<String>,
+    #[serde(default)]
+    pub active_subagents: Vec<PersistedSubagentState>,
 }
 
 /// A conversation thread within a session.
@@ -220,6 +317,45 @@ impl Thread {
             pending_approval: None,
             pending_auth: None,
         }
+    }
+
+    pub fn runtime_state(
+        &self,
+        owner_agent_id: Option<String>,
+        model_override: Option<crate::tools::builtin::llm_tools::ModelOverride>,
+        auto_approved_tools: impl IntoIterator<Item = String>,
+        active_subagents: Vec<PersistedSubagentState>,
+    ) -> ThreadRuntimeState {
+        let mut auto_approved_tools: Vec<String> = auto_approved_tools.into_iter().collect();
+        auto_approved_tools.sort();
+        auto_approved_tools.dedup();
+        ThreadRuntimeState {
+            state: self.state,
+            pending_approval: self.pending_approval.clone(),
+            pending_auth: self.pending_auth.clone(),
+            owner_agent_id,
+            model_override,
+            auto_approved_tools,
+            active_subagents,
+        }
+    }
+
+    pub fn restore_runtime_state(&mut self, runtime: ThreadRuntimeState) {
+        self.pending_approval = runtime.pending_approval;
+        self.pending_auth = runtime.pending_auth;
+        self.state = match runtime.state {
+            ThreadState::Processing => {
+                if let Some(turn) = self.turns.last_mut() {
+                    turn.interrupt();
+                }
+                ThreadState::Interrupted
+            }
+            other => other,
+        };
+        if self.pending_approval.is_some() {
+            self.state = ThreadState::AwaitingApproval;
+        }
+        self.updated_at = Utc::now();
     }
 
     /// Get the current turn number (1-indexed for display).
@@ -625,6 +761,103 @@ mod tests {
         let json = json.replace(",\"pending_auth\":null", "");
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_none());
+    }
+
+    #[test]
+    fn test_runtime_state_roundtrip_preserves_resume_fields() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("inspect restart handling");
+        thread.state = ThreadState::AwaitingApproval;
+        thread.pending_approval = Some(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "pwd"}),
+            description: "inspect workspace".to_string(),
+            tool_call_id: "call_runtime".to_string(),
+            context_messages: vec![ChatMessage::user("inspect restart handling")],
+            deferred_tool_calls: vec![],
+        });
+        thread.pending_auth = Some(PendingAuth {
+            extension_name: "github".to_string(),
+        });
+
+        let runtime = thread.runtime_state(
+            Some("agent-ops".to_string()),
+            Some(crate::tools::builtin::llm_tools::ModelOverride {
+                model_spec: "openai/gpt-4.1".to_string(),
+                reason: Some("need stronger reasoning".to_string()),
+            }),
+            vec!["shell".to_string(), "read_file".to_string()],
+            vec![PersistedSubagentState {
+                agent_id: Uuid::new_v4(),
+                name: "background-check".to_string(),
+                request: crate::agent::subagent_executor::SubagentSpawnRequest {
+                    name: "background-check".to_string(),
+                    task: "verify restart state".to_string(),
+                    system_prompt: None,
+                    model: None,
+                    allowed_tools: Some(vec!["read_file".to_string()]),
+                    allowed_skills: Some(vec!["github".to_string()]),
+                    principal_id: Some("principal-1".to_string()),
+                    actor_id: Some("actor-1".to_string()),
+                    agent_workspace_id: None,
+                    timeout_secs: Some(30),
+                    wait: false,
+                },
+                channel_name: "gateway".to_string(),
+                channel_metadata: serde_json::json!({"thread_id": "thread-1"}),
+                parent_user_id: "principal-1".to_string(),
+                parent_identity: None,
+                parent_thread_id: "thread-1".to_string(),
+                reinject_result: true,
+            }],
+        );
+
+        let json = serde_json::to_value(&runtime).expect("serialize runtime");
+        let restored: ThreadRuntimeState = serde_json::from_value(json).expect("deserialize runtime");
+
+        assert_eq!(restored.state, ThreadState::AwaitingApproval);
+        assert_eq!(
+            restored.pending_auth.as_ref().map(|auth| auth.extension_name.as_str()),
+            Some("github")
+        );
+        assert_eq!(restored.owner_agent_id.as_deref(), Some("agent-ops"));
+        assert_eq!(
+            restored.model_override.as_ref().map(|m| m.model_spec.as_str()),
+            Some("openai/gpt-4.1")
+        );
+        assert_eq!(
+            restored.auto_approved_tools,
+            vec!["read_file".to_string(), "shell".to_string()]
+        );
+        assert_eq!(restored.active_subagents.len(), 1);
+        assert_eq!(
+            restored.active_subagents[0]
+                .request
+                .allowed_skills
+                .as_ref()
+                .map(|skills| skills.as_slice()),
+            Some(&["github".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_restore_runtime_state_interrupts_processing_turns_on_resume() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("long-running work");
+
+        thread.restore_runtime_state(ThreadRuntimeState {
+            state: ThreadState::Processing,
+            pending_approval: None,
+            pending_auth: None,
+            owner_agent_id: None,
+            model_override: None,
+            auto_approved_tools: vec![],
+            active_subagents: vec![],
+        });
+
+        assert_eq!(thread.state, ThreadState::Interrupted);
+        assert_eq!(thread.last_turn().map(|turn| turn.state), Some(TurnState::Interrupted));
     }
 
     #[test]

@@ -531,7 +531,11 @@ mod tests {
             3,
             MAX_SKILL_CONTEXT_TOKENS,
         );
-        assert_eq!(result.len(), 1, "skill should activate via description match");
+        assert_eq!(
+            result.len(),
+            1,
+            "skill should activate via description match"
+        );
         assert_eq!(result[0].name(), "docker-deploy");
     }
 
@@ -541,7 +545,8 @@ mod tests {
         let mut skill = make_skill("broad", &[], &[], &[]);
         // Force a description with many matchable words
         skill.manifest.description =
-            "assists deploy build push pull run test check validate lint format audit review".to_string();
+            "assists deploy build push pull run test check validate lint format audit review"
+                .to_string();
         skill.lowercased_description_words = skill
             .manifest
             .description
@@ -567,13 +572,25 @@ mod tests {
         let kw_skill = make_skill("kw-skill", &["kubernetes"], &[], &[]);
         let mut desc_skill = make_skill("desc-skill", &[], &[], &[]);
         desc_skill.manifest.description = "Kubernetes orchestration tool".to_string();
-        desc_skill.lowercased_description_words =
-            vec!["kubernetes".to_string(), "orchestration".to_string(), "tool".to_string()];
+        desc_skill.lowercased_description_words = vec![
+            "kubernetes".to_string(),
+            "orchestration".to_string(),
+            "tool".to_string(),
+        ];
 
         let skills = vec![desc_skill, kw_skill];
-        let result = prefilter_skills("kubernetes cluster setup", &skills, 2, MAX_SKILL_CONTEXT_TOKENS);
+        let result = prefilter_skills(
+            "kubernetes cluster setup",
+            &skills,
+            2,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
         // Both should match; kw-skill should sort first (higher score)
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name(), "kw-skill", "explicit keyword match should rank higher");
+        assert_eq!(
+            result[0].name(),
+            "kw-skill",
+            "explicit keyword match should rank higher"
+        );
     }
 }

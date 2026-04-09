@@ -5,14 +5,11 @@
 ## Overview
 
 The REPL (Read-Eval-Print Loop) channel provides a terminal-based chat interface.
-It's enabled by default and is the primary channel when running `thinclaw` interactively.
+When ThinClaw is built with the CLI surface available, running `thinclaw`
+opens the interactive prompt by default.
 
-## Configuration
-
-```bash
-# Enabled by default. To disable:
-CLI_ENABLED=false
-```
+Availability follows the build profile. Source builds that omit the CLI surface
+may not include this interactive mode.
 
 ## Features
 
@@ -25,14 +22,13 @@ CLI_ENABLED=false
 ## Usage
 
 ```bash
-# Interactive mode (default)
+# Interactive mode
 thinclaw
 
 # Single message mode (exits after response)
 thinclaw --message "Summarize the project README"
 
-# Disable CLI in favor of other channels
-CLI_ENABLED=false thinclaw
+# If your build omits the CLI surface, use the Gateway or another channel
 ```
 
 ## Notes
@@ -40,4 +36,4 @@ CLI_ENABLED=false thinclaw
 - No authentication required (local terminal access is the auth boundary)
 - When other channels are active, the REPL runs alongside them
 - The boot screen is displayed when REPL mode is active
-- Not available when running as a headless daemon — use the Gateway or other channels instead
+- Not available when running as a headless daemon or a build without the CLI surface

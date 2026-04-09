@@ -59,6 +59,7 @@ pub mod extensions;
 pub mod history;
 pub mod hooks;
 pub mod i18n;
+pub mod identity;
 pub mod llm;
 pub mod media;
 pub mod observability;
@@ -115,6 +116,9 @@ pub mod prelude {
     pub use crate::config::Config;
     pub use crate::context::{JobContext, JobState};
     pub use crate::error::{Error, Result};
+    pub use crate::identity::{
+        ConversationKind, ConversationScope, LinkedConversationRecall, ResolvedIdentity,
+    };
     pub use crate::llm::LlmProvider;
     pub use crate::safety::{SanitizedOutput, Sanitizer};
     pub use crate::tools::{Tool, ToolOutput, ToolRegistry};

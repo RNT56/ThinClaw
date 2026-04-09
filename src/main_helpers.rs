@@ -41,10 +41,9 @@ pub(crate) async fn run_memory_command(
     {
         tracing::warn!(
             configured_dimension = config.embeddings.dimension,
-            "Embedding dimension {} is not 1536. The libSQL schema uses \
-             F32_BLOB(1536) which requires exactly 1536 dimensions. \
-             Embedding storage will fail. Use PostgreSQL or set \
-             EMBEDDING_DIMENSION=1536.",
+            "Embedding dimension {} is not 1536. libSQL currently uses a fixed \
+             1536-dim vector index, so ThinClaw will keep storing documents but \
+             skip vector embeddings/search for that backend and fall back to FTS.",
             config.embeddings.dimension
         );
     }

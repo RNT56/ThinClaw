@@ -147,25 +147,25 @@ fn from_cache(cache: &PricingCache) -> HashMap<String, (Decimal, Decimal)> {
 }
 
 /// Attempt to load cached pricing from the database.
-pub async fn load_from_db(db: &dyn crate::db::Database) -> Option<HashMap<String, (Decimal, Decimal)>> {
+pub async fn load_from_db(
+    db: &dyn crate::db::Database,
+) -> Option<HashMap<String, (Decimal, Decimal)>> {
     match db.get_setting(PRICING_DB_NAMESPACE, PRICING_DB_KEY).await {
-        Ok(Some(json_value)) => {
-            match serde_json::from_value::<PricingCache>(json_value) {
-                Ok(cache) => {
-                    let pricing = from_cache(&cache);
-                    tracing::info!(
-                        models = pricing.len(),
-                        fetched_at = %cache.fetched_at,
-                        "Loaded pricing cache from database"
-                    );
-                    Some(pricing)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse pricing cache from DB: {}", e);
-                    None
-                }
+        Ok(Some(json_value)) => match serde_json::from_value::<PricingCache>(json_value) {
+            Ok(cache) => {
+                let pricing = from_cache(&cache);
+                tracing::info!(
+                    models = pricing.len(),
+                    fetched_at = %cache.fetched_at,
+                    "Loaded pricing cache from database"
+                );
+                Some(pricing)
             }
-        }
+            Err(e) => {
+                tracing::warn!("Failed to parse pricing cache from DB: {}", e);
+                None
+            }
+        },
         Ok(None) => {
             tracing::debug!("No pricing cache found in database");
             None
@@ -263,8 +263,8 @@ mod tests {
         pricing.insert(
             "openai/gpt-4o".to_string(),
             (
-                Decimal::new(25, 7),  // 0.0000025
-                Decimal::new(10, 5),  // 0.00010
+                Decimal::new(25, 7), // 0.0000025
+                Decimal::new(10, 5), // 0.00010
             ),
         );
 
@@ -283,8 +283,14 @@ mod tests {
             fetched_at: "2026-04-07T00:00:00Z".to_string(),
             models: {
                 let mut m = HashMap::new();
-                m.insert("good-model".to_string(), ("0.001".to_string(), "0.002".to_string()));
-                m.insert("bad-model".to_string(), ("not-a-number".to_string(), "0.002".to_string()));
+                m.insert(
+                    "good-model".to_string(),
+                    ("0.001".to_string(), "0.002".to_string()),
+                );
+                m.insert(
+                    "bad-model".to_string(),
+                    ("not-a-number".to_string(), "0.002".to_string()),
+                );
                 m
             },
         };

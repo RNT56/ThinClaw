@@ -8,6 +8,7 @@
 
 mod agent_registry;
 mod conversations;
+mod identity;
 mod jobs;
 mod routines;
 mod sandbox;
@@ -35,7 +36,7 @@ use crate::db::libsql_migrations;
 
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
-    id, name, description, user_id, enabled, \
+    id, name, description, user_id, actor_id, enabled, \
     trigger_type, trigger_config, action_type, action_config, \
     cooldown_secs, max_concurrent, dedup_window_secs, \
     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention, \
@@ -301,12 +302,59 @@ impl Database for LibSqlBackend {
         conn.query("PRAGMA journal_mode=WAL", ())
             .await
             .map_err(|e| DatabaseError::Migration(format!("Failed to enable WAL mode: {}", e)))?;
+
+        // ── Step 1: column upgrades ────────────────────────────────────────
+        // Run ALTER TABLE ADD COLUMN statements BEFORE the main schema batch.
+        //
+        // Why before?  SCHEMA uses CREATE TABLE IF NOT EXISTS (no-op on existing
+        // tables) followed by CREATE INDEX statements that reference the new
+        // columns.  If those columns don't exist yet the index creation fails.
+        // Running upgrades first ensures the columns are present before any
+        // indexing is attempted.
+        //
+        // On a brand-new database the tables don't exist yet, so every ALTER
+        // TABLE fails with "no such table" — those are silently ignored here
+        // and SCHEMA (step 2) creates the complete, correct table layout.
+        for stmt in libsql_migrations::UPGRADES {
+            match conn.execute(stmt, ()).await {
+                Ok(_) => {
+                    tracing::debug!(stmt, "Applied column upgrade");
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("duplicate column")
+                        || msg.contains("already exists")
+                        || msg.contains("no such table")
+                        || msg.contains("no such column")
+                    {
+                        tracing::trace!(stmt, "Column upgrade skipped (expected): {}", msg);
+                    } else {
+                        return Err(DatabaseError::Migration(format!(
+                            "libSQL upgrade failed on `{}`: {}",
+                            stmt, e
+                        )));
+                    }
+                }
+            }
+        }
+
+        // ── Step 2: full schema ────────────────────────────────────────────
+        // CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS.
+        // On existing databases the TABLEs are skipped; the INDEXes are
+        // created (or skipped if already present) — all columns now exist
+        // because step 1 just added any that were missing.
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+
+        for stmt in libsql_migrations::DATA_REPAIRS {
+            conn.execute(stmt, ()).await.map_err(|e| {
+                DatabaseError::Migration(format!("libSQL data repair failed on `{}`: {}", stmt, e))
+            })?;
+        }
+
         Ok(())
     }
-
     async fn snapshot(&self, dest: &std::path::Path) -> Result<u64, DatabaseError> {
         let db_path = self.file_path.as_ref().ok_or_else(|| {
             DatabaseError::Pool("Cannot snapshot an in-memory database".to_string())
@@ -370,13 +418,13 @@ pub(crate) fn row_to_memory_document(row: &libsql::Row) -> MemoryDocument {
 }
 
 pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, DatabaseError> {
-    let trigger_type = get_text(row, 5);
-    let trigger_config = get_json(row, 6);
-    let action_type = get_text(row, 7);
-    let action_config = get_json(row, 8);
-    let cooldown_secs = get_i64(row, 9);
-    let max_concurrent = get_i64(row, 10);
-    let dedup_window_secs: Option<i64> = row.get::<i64>(11).ok();
+    let trigger_type = get_text(row, 6);
+    let trigger_config = get_json(row, 7);
+    let action_type = get_text(row, 8);
+    let action_config = get_json(row, 9);
+    let cooldown_secs = get_i64(row, 10);
+    let max_concurrent = get_i64(row, 11);
+    let dedup_window_secs: Option<i64> = row.get::<i64>(12).ok();
 
     let trigger = Trigger::from_db(&trigger_type, trigger_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -388,7 +436,8 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
         name: get_text(row, 1),
         description: get_text(row, 2),
         user_id: get_text(row, 3),
-        enabled: get_i64(row, 4) != 0,
+        actor_id: get_text(row, 4),
+        enabled: get_i64(row, 5) != 0,
         trigger,
         action,
         guardrails: RoutineGuardrails {
@@ -397,19 +446,19 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             dedup_window: dedup_window_secs.map(|s| std::time::Duration::from_secs(s as u64)),
         },
         notify: NotifyConfig {
-            channel: get_opt_text(row, 12),
-            user: get_text(row, 13),
-            on_success: get_i64(row, 14) != 0,
-            on_failure: get_i64(row, 15) != 0,
-            on_attention: get_i64(row, 16) != 0,
+            channel: get_opt_text(row, 13),
+            user: get_text(row, 14),
+            on_success: get_i64(row, 15) != 0,
+            on_failure: get_i64(row, 16) != 0,
+            on_attention: get_i64(row, 17) != 0,
         },
-        state: get_json(row, 17),
-        last_run_at: get_opt_ts(row, 18),
-        next_fire_at: get_opt_ts(row, 19),
-        run_count: get_i64(row, 20) as u64,
-        consecutive_failures: get_i64(row, 21) as u32,
-        created_at: get_ts(row, 22),
-        updated_at: get_ts(row, 23),
+        state: get_json(row, 18),
+        last_run_at: get_opt_ts(row, 19),
+        next_fire_at: get_opt_ts(row, 20),
+        run_count: get_i64(row, 21) as u64,
+        consecutive_failures: get_i64(row, 22) as u32,
+        created_at: get_ts(row, 23),
+        updated_at: get_ts(row, 24),
     })
 }
 
@@ -437,7 +486,9 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 #[cfg(test)]
 mod tests {
     use crate::db::Database;
+    use crate::db::WorkspaceStore;
     use crate::db::libsql::LibSqlBackend;
+    use crate::workspace::SearchConfig;
 
     #[tokio::test]
     async fn test_wal_mode_after_migrations() {
@@ -573,5 +624,347 @@ mod tests {
 
         let mem_backend = LibSqlBackend::new_memory().await.unwrap();
         assert_eq!(mem_backend.db_path(), None);
+    }
+    /// Regression test: run_migrations must not fail on an existing database that
+    /// was created without actor_id columns (pre-V11 schema).
+    ///
+    /// The bug: SCHEMA ran first, hit `CREATE INDEX … ON conversations(actor_id)`,
+    /// and failed because the table existed but the column did not.  Fix: UPGRADES
+    /// run before SCHEMA so columns are present when indexes are created.
+    ///
+    /// Uses a file-backed DB because libsql `:memory:` gives each `connect()`
+    /// call its own isolated SQLite database — a file-backed DB shares state
+    /// across all connections on the same path.
+    #[tokio::test]
+    async fn test_migration_upgrades_existing_pre_v11_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pre_v11.db");
+
+        // Seed a pre-V11 schema directly via a raw libsql connection.
+        // The schema matches what a deployment upgraded through V1→V9 would have
+        // (V1 base + V4 sandbox columns + V5 job_mode + V6 routines), but
+        // deliberately omits all V10/V11 additions (actor_id, etc.).
+        {
+            let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+            let conn = raw_db.connect().unwrap();
+            conn.execute_batch(
+                "
+                -- V1 conversations (no actor_id, conversation_scope_id, etc.)
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    channel TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+                    metadata TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX idx_conversations_channel ON conversations(channel);
+                CREATE INDEX idx_conversations_user ON conversations(user_id);
+                CREATE INDEX idx_conversations_last_activity ON conversations(last_activity);
+
+                -- V1 conversation_messages (no actor_id, actor_display_name, etc.)
+                CREATE TABLE conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX idx_conversation_messages_conversation ON conversation_messages(conversation_id);
+
+                -- V1+V4+V5 agent_jobs (no actor_id)
+                CREATE TABLE agent_jobs (
+                    id TEXT PRIMARY KEY,
+                    marketplace_job_id TEXT,
+                    conversation_id TEXT REFERENCES conversations(id),
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    category TEXT,
+                    status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    user_id TEXT NOT NULL DEFAULT 'default',
+                    project_dir TEXT,
+                    job_mode TEXT NOT NULL DEFAULT 'worker',
+                    budget_amount TEXT,
+                    budget_token TEXT,
+                    bid_amount TEXT,
+                    estimated_cost TEXT,
+                    estimated_time_secs INTEGER,
+                    estimated_value TEXT,
+                    actual_cost TEXT,
+                    actual_time_secs INTEGER,
+                    success INTEGER,
+                    failure_reason TEXT,
+                    stuck_since TEXT,
+                    repair_attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    started_at TEXT,
+                    completed_at TEXT
+                );
+                CREATE INDEX idx_agent_jobs_status ON agent_jobs(status);
+                CREATE INDEX idx_agent_jobs_marketplace ON agent_jobs(marketplace_job_id);
+                CREATE INDEX idx_agent_jobs_conversation ON agent_jobs(conversation_id);
+                CREATE INDEX idx_agent_jobs_source ON agent_jobs(source);
+                CREATE INDEX idx_agent_jobs_user ON agent_jobs(user_id);
+                CREATE INDEX idx_agent_jobs_created ON agent_jobs(created_at DESC);
+
+                -- V6 routines (no actor_id)
+                CREATE TABLE routines (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    user_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    trigger_type TEXT NOT NULL,
+                    trigger_config TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    action_config TEXT NOT NULL,
+                    cooldown_secs INTEGER NOT NULL DEFAULT 300,
+                    max_concurrent INTEGER NOT NULL DEFAULT 1,
+                    dedup_window_secs INTEGER,
+                    notify_channel TEXT,
+                    notify_user TEXT NOT NULL DEFAULT 'default',
+                    notify_on_success INTEGER NOT NULL DEFAULT 0,
+                    notify_on_failure INTEGER NOT NULL DEFAULT 1,
+                    notify_on_attention INTEGER NOT NULL DEFAULT 1,
+                    state TEXT NOT NULL DEFAULT '{}',
+                    last_run_at TEXT,
+                    next_fire_at TEXT,
+                    run_count INTEGER NOT NULL DEFAULT 0,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                ",
+            )
+            .await
+            .expect("pre-V11 schema setup should succeed");
+
+            conn.execute(
+                "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ('legacy-conv', 'gateway', 'legacy-user', '{}')",
+                (),
+            )
+            .await
+            .expect("legacy conversation seed should succeed");
+            conn.execute(
+                "INSERT INTO agent_jobs (id, title, description, status, source, user_id) VALUES ('legacy-job', 'Legacy job', 'desc', 'pending', 'sandbox', 'legacy-user')",
+                (),
+            )
+            .await
+            .expect("legacy job seed should succeed");
+            conn.execute(
+                "INSERT INTO routines (id, name, description, user_id, trigger_type, trigger_config, action_type, action_config) \
+                 VALUES ('legacy-routine', 'Legacy routine', '', 'legacy-user', 'manual', '{}', 'notify', '{}')",
+                (),
+            )
+            .await
+            .expect("legacy routine seed should succeed");
+        } // raw_db dropped here, file is flushed
+
+        // Open the same file via LibSqlBackend and run migrations.
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+
+        // This must not fail — previously it would crash on
+        // `CREATE INDEX … ON conversations(actor_id)` before the column existed.
+        backend
+            .run_migrations()
+            .await
+            .expect("run_migrations must succeed on a pre-V11 database");
+
+        // Verify actor_id column is actually usable after migration.
+        let conn = backend.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, actor_id) VALUES ('c1', 'test', 'u1', 'actor1')",
+            (),
+        )
+        .await
+        .expect("actor_id column should exist and accept values after migration");
+
+        let mut rows = conn
+            .query("SELECT actor_id FROM conversations WHERE id = 'c1'", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let actor_id: String = row.get(0).unwrap();
+        assert_eq!(actor_id, "actor1");
+
+        let mut rows = conn
+            .query(
+                "SELECT actor_id, conversation_scope_id, stable_external_conversation_key \
+                 FROM conversations WHERE id = 'legacy-conv'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let legacy_actor_id: String = row.get(0).unwrap();
+        let legacy_scope_id: String = row.get(1).unwrap();
+        let legacy_key: String = row.get(2).unwrap();
+        assert_eq!(legacy_actor_id, "legacy-user");
+        assert_eq!(legacy_scope_id, "legacy-conv");
+        assert_eq!(legacy_key, "gateway:legacy-conv");
+
+        let mut rows = conn
+            .query(
+                "SELECT principal_id, actor_id FROM agent_jobs WHERE id = 'legacy-job'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let principal_id: String = row.get(0).unwrap();
+        let actor_id: String = row.get(1).unwrap();
+        assert_eq!(principal_id, "legacy-user");
+        assert_eq!(actor_id, "legacy-user");
+
+        let mut rows = conn
+            .query(
+                "SELECT actor_id FROM routines WHERE id = 'legacy-routine'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let actor_id: String = row.get(0).unwrap();
+        assert_eq!(actor_id, "legacy-user");
+    }
+
+    /// Regression test: fresh-database migration must still work after the
+    /// UPGRADES-before-SCHEMA reorder.  UPGRADES will hit "no such table" errors
+    /// (tables don't exist yet) — those must be silently ignored so that SCHEMA
+    /// can then create everything from scratch.
+    ///
+    /// Uses a file-backed DB for the same reason as the pre-V11 test (shared
+    /// state across connections).
+    #[tokio::test]
+    async fn test_migration_fresh_database_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fresh.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+
+        backend
+            .run_migrations()
+            .await
+            .expect("run_migrations must succeed on a fresh database");
+
+        let conn = backend.connect().await.unwrap();
+
+        // Verify the schema is usable with all new columns present.
+        conn.execute(
+            "INSERT INTO conversations \
+             (id, channel, user_id, actor_id, conversation_kind, conversation_scope_id) \
+             VALUES ('c1', 'test', 'u1', 'a1', 'direct', 'scope1')",
+            (),
+        )
+        .await
+        .expect("Fresh database should have all V11 columns");
+    }
+
+    #[tokio::test]
+    async fn test_non_1536_embeddings_survive_roundtrip_and_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("non_1536.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let document = backend
+            .get_or_create_document_by_path("vector-user", None, "notes/parity.md")
+            .await
+            .unwrap();
+        let embedding = vec![0.25, 0.5, 0.75, 1.0];
+        backend
+            .replace_chunks(
+                document.id,
+                &[(
+                    0,
+                    "variable-dimension chunk".to_string(),
+                    Some(embedding.clone()),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT embedding, embedding_blob, embedding_dim FROM memory_chunks WHERE document_id = ?1",
+                libsql::params![document.id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let indexed_embedding: Option<Vec<u8>> = row.get(0).ok();
+        let canonical_embedding: Vec<u8> = row.get(1).unwrap();
+        let embedding_dim: i64 = row.get(2).unwrap();
+        assert!(indexed_embedding.is_none());
+        assert_eq!(embedding_dim, 4);
+        assert_eq!(
+            canonical_embedding.len(),
+            embedding.len() * std::mem::size_of::<f32>()
+        );
+
+        let results = backend
+            .hybrid_search(
+                "vector-user",
+                None,
+                "variable",
+                Some(&embedding),
+                &SearchConfig::default().vector_only().with_limit(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "variable-dimension chunk");
+    }
+
+    #[tokio::test]
+    async fn test_1536_embeddings_still_use_indexed_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("dim_1536.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let document = backend
+            .get_or_create_document_by_path("vector-user", None, "notes/indexed.md")
+            .await
+            .unwrap();
+        let embedding = vec![1.0f32; 1536];
+        backend
+            .replace_chunks(
+                document.id,
+                &[(0, "indexed chunk".to_string(), Some(embedding.clone()))],
+            )
+            .await
+            .unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT embedding, embedding_blob, embedding_dim FROM memory_chunks WHERE document_id = ?1",
+                libsql::params![document.id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let indexed_embedding: Vec<u8> = row.get(0).unwrap();
+        let canonical_embedding: Vec<u8> = row.get(1).unwrap();
+        let embedding_dim: i64 = row.get(2).unwrap();
+        assert_eq!(embedding_dim, 1536);
+        assert_eq!(indexed_embedding.len(), 1536 * std::mem::size_of::<f32>());
+        assert_eq!(canonical_embedding.len(), indexed_embedding.len());
+
+        let results = backend
+            .hybrid_search(
+                "vector-user",
+                None,
+                "indexed",
+                Some(&embedding),
+                &SearchConfig::default().vector_only().with_limit(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "indexed chunk");
     }
 }

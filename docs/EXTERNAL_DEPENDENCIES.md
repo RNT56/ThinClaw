@@ -63,7 +63,7 @@ This document lists every **optional external tool and service** that ThinClaw f
 
 ## VPN / Tunnel Providers
 
-ThinClaw's `tunnel` feature flag (`--features tunnel`, enabled by default) provides managed tunnel lifecycle. The gateway automatically starts the tunnel on boot and populates the public URL for webhook channels (Telegram, Slack, etc.).
+ThinClaw supports managed tunnel integrations when the relevant feature/profile is enabled. Tunnel support should be treated as an optional deployment capability, not as something every default build automatically starts.
 
 ### Tailscale
 

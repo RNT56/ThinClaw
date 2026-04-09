@@ -1861,6 +1861,11 @@ html[data-show-branding="false"] .webchat-branding {
   color: var(--text-secondary);
 }
 
+.chat-empty-state {
+  align-self: stretch;
+  margin: auto 0;
+}
+
 /* Routines Tab */
 .routines-container {
   min-width: 0;

@@ -181,8 +181,7 @@ pub async fn skills_install_handler(
             // If any step fails, fall through — the install will fail with
             // AlreadyExists, which is the correct behavior.
             if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
-                let _ =
-                    crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
                 let _ = guard.commit_remove(&skill_name_from_parse);
                 tracing::info!(
                     skill = %skill_name_from_parse,
@@ -225,10 +224,8 @@ pub async fn skills_install_handler(
                     skill = %skill_name,
                     "Cleaning up orphaned skill files after failed commit"
                 );
-                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
-                    &orphan_dir,
-                )
-                .await;
+                let _ =
+                    crate::skills::registry::SkillRegistry::delete_skill_files(&orphan_dir).await;
             }
             Ok(Json(ActionResponse::fail(e.to_string())))
         }

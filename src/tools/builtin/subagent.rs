@@ -34,12 +34,11 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a focused sub-agent to handle a specific task in the background. \
-         The sub-agent runs its own agentic loop with an isolated context and \
-         reports results back automatically when done. You can continue working \
-         while sub-agents operate in parallel. Use this to delegate parallel \
-         work, break down complex tasks, or run independent research/analysis. \
-         Results will be injected back as a new message when the sub-agent finishes."
+        "Spawn a focused sub-agent to handle a specific task. \
+         With wait=true (default), the tool returns the sub-agent's result inline. \
+         With wait=false, the sub-agent continues in the background and its result \
+         is injected back automatically when it finishes. Use this to delegate \
+         parallel work, break down complex tasks, or run independent research/analysis."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -58,6 +57,11 @@ impl Tool for SpawnSubagentTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Optional: specific tools the sub-agent can use (e.g. ['http', 'shell', 'read_file']). If omitted, all tools are available."
+                },
+                "skills": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional: specific skills the sub-agent can read/list. If omitted, all skills remain visible."
                 },
                 "system_prompt": {
                     "type": "string",
@@ -104,6 +108,11 @@ impl Tool for SpawnSubagentTool {
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect::<Vec<_>>()
         });
+        let skills = params.get("skills").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        });
 
         let system_prompt = params
             .get("system_prompt")
@@ -120,6 +129,10 @@ impl Tool for SpawnSubagentTool {
             system_prompt,
             model: None,
             allowed_tools: tools,
+            allowed_skills: skills,
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
             timeout_secs,
             wait,
         };
@@ -299,6 +312,10 @@ mod tests {
             system_prompt: None,
             model: None,
             allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
+            allowed_skills: None,
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
             timeout_secs: Some(120),
             wait: true,
         };

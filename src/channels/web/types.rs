@@ -9,8 +9,13 @@ use crate::api::system::ModelInfo;
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
+    #[serde(alias = "message")]
     pub content: String,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +85,10 @@ pub struct ApprovalRequest {
     pub action: String,
     /// Thread that owns the pending approval (so the agent loop finds the right session).
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
 }
 
 // --- SSE Event Types ---
@@ -1012,6 +1021,15 @@ mod tests {
             }
             _ => panic!("Expected Event variant"),
         }
+    }
+
+    #[test]
+    fn test_send_message_request_accepts_legacy_message_field() {
+        let json = r#"{"message":"hello","user_id":"family-1"}"#;
+        let req: SendMessageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.content, "hello");
+        assert_eq!(req.user_id.as_deref(), Some("family-1"));
+        assert!(req.thread_id.is_none());
     }
 
     #[test]

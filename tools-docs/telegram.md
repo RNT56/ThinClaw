@@ -17,10 +17,9 @@ and act as a regular user.
    - Note your **API ID** (numeric) and **API Hash** (hex string)
 
 2. **Store the credentials**
-   ```bash
-   thinclaw secret set telegram_api_id 12345678
-   thinclaw secret set telegram_api_hash 0123456789abcdef0123456789abcdef
-   ```
+   Store them in the tool workspace:
+   - write your numeric API ID to `telegram/api_id`
+   - write your API hash string to `telegram/api_hash`
 
 3. **Authenticate via the tool**
    - Ask the agent to log in:
@@ -37,7 +36,7 @@ and act as a regular user.
    ```
 
 4. **Session persistence**
-   - The session is stored in the workspace at `telegram/session.json`
+   - Save the returned session JSON to `telegram/session.json`
    - Subsequent startups reuse the session without re-authentication
 
 ## Available Actions (11)

@@ -3,6 +3,7 @@
 mod main_helpers;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -17,8 +18,8 @@ use thinclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_channels_command, run_gateway_command, run_mcp_command,
-        run_pairing_command, run_status_command, run_tool_command,
+        Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
+        run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -45,6 +46,26 @@ fn init_cli_tracing() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .init();
+}
+
+fn restart_is_managed_by_service() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
+        || std::env::var_os("JOURNAL_STREAM").is_some()
+        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
+        || std::env::var_os("LAUNCH_JOB_NAME").is_some()
+}
+
+fn relaunch_current_process() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(std::env::args_os().skip(1));
+    let child = cmd.spawn()?;
+    eprintln!(
+        "Restarting ThinClaw (spawned PID {} from {})...",
+        child.id(),
+        exe.display()
+    );
+    Ok(())
 }
 
 #[tokio::main]
@@ -75,7 +96,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
-            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
+            return run_pairing_command(pairing_cmd.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e));
         }
         #[cfg(feature = "repl")]
         Some(Command::Service(service_cmd)) => {
@@ -105,6 +128,12 @@ async fn main() -> anyhow::Result<()> {
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_gateway_command(gw_cmd.clone()).await;
+        }
+        Some(Command::Identity(identity_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            return run_identity_command(identity_cmd.clone()).await;
         }
         Some(Command::Channels(ch_cmd)) => {
             init_cli_tracing();
@@ -1051,7 +1080,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sub-agent system ────────────────────────────────────────────────
     let subagent_executor = {
-        let (executor, _result_rx) = thinclaw::agent::SubagentExecutor::new(
+        let (executor, mut result_rx) = thinclaw::agent::SubagentExecutor::new(
             components.llm.clone(),
             components.safety.clone(),
             components.tools.clone(),
@@ -1070,6 +1099,71 @@ async fn main() -> anyhow::Result<()> {
         executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
 
         let executor = std::sync::Arc::new(executor);
+        let inject_tx = channels.inject_sender();
+        let db_for_subagent_results = components.db.as_ref().map(Arc::clone);
+
+        tokio::spawn(async move {
+            while let Some(msg) = result_rx.recv().await {
+                let summary = if msg.result.success {
+                    msg.result.response.clone()
+                } else {
+                    msg.result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Sub-agent failed without an error message.".to_string())
+                };
+
+                let mut metadata = msg.channel_metadata.clone();
+                if !metadata.is_object() {
+                    metadata = serde_json::json!({});
+                }
+                if let Some(map) = metadata.as_object_mut() {
+                    map.insert(
+                        "thread_id".to_string(),
+                        serde_json::json!(msg.parent_thread_id.clone()),
+                    );
+                    map.insert(
+                        "subagent_result".to_string(),
+                        serde_json::to_value(&msg.result).unwrap_or_default(),
+                    );
+                }
+
+                let content = if msg.result.success {
+                    format!("[Sub-agent result from {}]\n\n{}", msg.result.name, summary)
+                } else {
+                    format!("[Sub-agent {} failed]\n\n{}", msg.result.name, summary)
+                };
+
+                let parent_thread_id = msg.parent_thread_id.clone();
+                let mut injected = thinclaw::channels::IncomingMessage::new(
+                    msg.channel_name,
+                    msg.parent_user_id,
+                    content,
+                )
+                .with_thread(parent_thread_id.clone())
+                .with_metadata(metadata);
+                if let Some(identity) = msg.parent_identity {
+                    injected = injected.with_identity(identity);
+                }
+
+                if inject_tx.send(injected).await.is_err() {
+                    tracing::warn!("Sub-agent result injection channel closed");
+                    break;
+                }
+                if let Some(ref db) = db_for_subagent_results
+                    && let Ok(parent_thread_id) = uuid::Uuid::parse_str(&parent_thread_id)
+                {
+                    let agent_id = msg.result.agent_id.to_string();
+                    let _ =
+                        thinclaw::agent::mutate_thread_runtime(db, parent_thread_id, |runtime| {
+                            runtime
+                                .active_subagents
+                                .retain(|entry| entry.agent_id.to_string() != agent_id);
+                        })
+                        .await;
+                }
+            }
+        });
 
         // Register sub-agent tools with the executor
         components.tools.register_sync(std::sync::Arc::new(
@@ -1181,6 +1275,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_db = components.db.as_ref().map(Arc::clone);
     let shutdown_tracker = Arc::clone(&components.cost_tracker);
 
+    let restart_requested = Arc::new(AtomicBool::new(false));
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -1204,6 +1299,7 @@ async fn main() -> anyhow::Result<()> {
         llm_runtime: Some(components.llm_runtime),
         routing_policy: Some(components.routing_policy),
         model_override: Some(model_override),
+        restart_requested: Arc::clone(&restart_requested),
     };
 
     let agent = Agent::new(
@@ -1244,13 +1340,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Agent shutdown complete");
 
     // Check if a restart was requested via the gateway API.
-    if let Some(ref gw_state) = gateway_state
-        && gw_state
+    let gateway_restart_requested = gateway_state.as_ref().is_some_and(|gw_state| {
+        gw_state
             .restart_requested
-            .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        eprintln!("Restarting ThinClaw (exit code 75)...");
-        std::process::exit(75);
+            .load(std::sync::atomic::Ordering::SeqCst)
+    });
+    if restart_requested.load(Ordering::SeqCst) || gateway_restart_requested {
+        if restart_is_managed_by_service() {
+            eprintln!("Restarting ThinClaw (exit code 75 for service manager)...");
+            std::process::exit(75);
+        }
+        relaunch_current_process()?;
     }
 
     Ok(())

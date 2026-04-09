@@ -74,6 +74,7 @@ use crate::error::WorkspaceError;
 ///
 /// Allows Workspace to work with either a PostgreSQL `Repository` (the original
 /// path) or any `Database` trait implementation (e.g. libSQL backend).
+#[derive(Clone)]
 enum WorkspaceStorage {
     /// PostgreSQL-backed repository (uses connection pool directly).
     #[cfg(feature = "postgres")]
@@ -180,7 +181,6 @@ impl WorkspaceStorage {
             Self::Db(db) => db.replace_chunks(document_id, chunks).await,
         }
     }
-
 
     async fn update_chunk_embedding(
         &self,

@@ -20,6 +20,10 @@ pub enum CronCommand {
         /// Output format: table (default) or json
         #[arg(long, default_value = "table")]
         format: String,
+
+        /// Actor owner to scope routines to
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Create a new lightweight routine
@@ -38,6 +42,10 @@ pub enum CronCommand {
         /// Optional description
         #[arg(short, long)]
         description: Option<String>,
+
+        /// Actor owner for the new routine
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Edit an existing routine
@@ -68,18 +76,30 @@ pub enum CronCommand {
         /// Thinking budget tokens (0 = disabled)
         #[arg(long)]
         thinking_budget: Option<u32>,
+
+        /// Actor owner to scope this lookup to
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Delete a routine by UUID or name
     Remove {
         /// Routine UUID or name
         id_or_name: String,
+
+        /// Actor owner to scope this lookup to
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Manually trigger a routine
     Trigger {
         /// Routine UUID or name
         id_or_name: String,
+
+        /// Actor owner to scope this lookup to
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Show recent runs for a routine
@@ -90,6 +110,10 @@ pub enum CronCommand {
         /// Number of runs to show (default: 10)
         #[arg(short = 'n', long, default_value = "10")]
         limit: i64,
+
+        /// Actor owner to scope this lookup to
+        #[arg(long, default_value = DEFAULT_USER_ID)]
+        actor: String,
     },
 
     /// Validate a cron expression and show next fire times
@@ -113,13 +137,14 @@ pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
     let db = connect_db().await?;
 
     match cmd {
-        CronCommand::List { format } => list_routines(&*db, &format).await,
+        CronCommand::List { format, actor } => list_routines(&*db, &format, &actor).await,
         CronCommand::Add {
             name,
             schedule,
             prompt,
             description,
-        } => add_routine(&*db, name, schedule, prompt, description).await,
+            actor,
+        } => add_routine(&*db, &actor, name, schedule, prompt, description).await,
         CronCommand::Edit {
             id_or_name,
             schedule,
@@ -128,9 +153,11 @@ pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
             enabled,
             model,
             thinking_budget,
+            actor,
         } => {
             edit_routine(
                 &*db,
+                &actor,
                 &id_or_name,
                 schedule,
                 prompt,
@@ -141,9 +168,17 @@ pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
             )
             .await
         }
-        CronCommand::Remove { id_or_name } => remove_routine(&*db, &id_or_name).await,
-        CronCommand::Trigger { id_or_name } => trigger_routine(&*db, &id_or_name).await,
-        CronCommand::Runs { id_or_name, limit } => show_runs(&*db, &id_or_name, limit).await,
+        CronCommand::Remove { id_or_name, actor } => {
+            remove_routine(&*db, &actor, &id_or_name).await
+        }
+        CronCommand::Trigger { id_or_name, actor } => {
+            trigger_routine(&*db, &actor, &id_or_name).await
+        }
+        CronCommand::Runs {
+            id_or_name,
+            limit,
+            actor,
+        } => show_runs(&*db, &actor, &id_or_name, limit).await,
         CronCommand::Lint { .. } => unreachable!(), // handled above
     }
 }
@@ -163,6 +198,7 @@ async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
 /// Resolve a routine by UUID or name.
 async fn resolve_routine(
     db: &dyn crate::db::Database,
+    actor_id: &str,
     id_or_name: &str,
 ) -> anyhow::Result<crate::agent::routine::Routine> {
     // Try UUID first
@@ -172,25 +208,35 @@ async fn resolve_routine(
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     {
-        return Ok(r);
+        if r.owner_actor_id() == actor_id {
+            return Ok(r);
+        }
     }
 
     // Try by name
     if let Some(r) = db
-        .get_routine_by_name(DEFAULT_USER_ID, id_or_name)
+        .get_routine_by_name_for_actor(DEFAULT_USER_ID, actor_id, id_or_name)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?
     {
         return Ok(r);
     }
 
-    anyhow::bail!("Routine not found: '{}'", id_or_name)
+    anyhow::bail!(
+        "Routine not found for actor '{}': '{}'",
+        actor_id,
+        id_or_name
+    )
 }
 
 /// List all routines.
-async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Result<()> {
+async fn list_routines(
+    db: &dyn crate::db::Database,
+    format: &str,
+    actor_id: &str,
+) -> anyhow::Result<()> {
     let routines = db
-        .list_routines(DEFAULT_USER_ID)
+        .list_routines_for_actor(DEFAULT_USER_ID, actor_id)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -286,6 +332,7 @@ async fn list_routines(db: &dyn crate::db::Database, format: &str) -> anyhow::Re
 /// Add a new lightweight routine.
 async fn add_routine(
     db: &dyn crate::db::Database,
+    actor_id: &str,
     name: String,
     schedule: String,
     prompt: String,
@@ -303,6 +350,7 @@ async fn add_routine(
         name: name.clone(),
         description: description.unwrap_or_default(),
         user_id: DEFAULT_USER_ID.to_string(),
+        actor_id: actor_id.to_string(),
         enabled: true,
         trigger: crate::agent::routine::Trigger::Cron { schedule },
         action: crate::agent::routine::RoutineAction::Lightweight {
@@ -337,6 +385,7 @@ async fn add_routine(
 #[allow(clippy::too_many_arguments)]
 async fn edit_routine(
     db: &dyn crate::db::Database,
+    actor_id: &str,
     id_or_name: &str,
     schedule: Option<String>,
     prompt: Option<String>,
@@ -345,7 +394,7 @@ async fn edit_routine(
     model: Option<String>,
     thinking_budget: Option<u32>,
 ) -> anyhow::Result<()> {
-    let mut routine = resolve_routine(db, id_or_name).await?;
+    let mut routine = resolve_routine(db, actor_id, id_or_name).await?;
     let mut changes = Vec::new();
 
     if let Some(new_schedule) = schedule {
@@ -425,8 +474,12 @@ async fn edit_routine(
 }
 
 /// Remove a routine.
-async fn remove_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyhow::Result<()> {
-    let routine = resolve_routine(db, id_or_name).await?;
+async fn remove_routine(
+    db: &dyn crate::db::Database,
+    actor_id: &str,
+    id_or_name: &str,
+) -> anyhow::Result<()> {
+    let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let deleted = db
         .delete_routine(routine.id)
@@ -443,8 +496,12 @@ async fn remove_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyho
 }
 
 /// Trigger a routine manually.
-async fn trigger_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyhow::Result<()> {
-    let routine = resolve_routine(db, id_or_name).await?;
+async fn trigger_routine(
+    db: &dyn crate::db::Database,
+    actor_id: &str,
+    id_or_name: &str,
+) -> anyhow::Result<()> {
+    let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
@@ -486,10 +543,11 @@ async fn trigger_routine(db: &dyn crate::db::Database, id_or_name: &str) -> anyh
 /// Show recent runs for a routine.
 async fn show_runs(
     db: &dyn crate::db::Database,
+    actor_id: &str,
     id_or_name: &str,
     limit: i64,
 ) -> anyhow::Result<()> {
-    let routine = resolve_routine(db, id_or_name).await?;
+    let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let runs = db
         .list_routine_runs(routine.id, limit)

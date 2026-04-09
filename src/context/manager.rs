@@ -45,6 +45,19 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
+        let user_id = user_id.into();
+        self.create_job_for_identity(user_id.clone(), user_id, title, description)
+            .await
+    }
+
+    /// Create a new job context for an explicit principal/actor pair.
+    pub async fn create_job_for_identity(
+        &self,
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Uuid, JobError> {
         // Hold write lock for the entire check-insert to prevent TOCTOU races
         // where two concurrent calls both pass the active_count check.
         let mut contexts = self.contexts.write().await;
@@ -54,7 +67,7 @@ impl ContextManager {
             return Err(JobError::MaxJobsExceeded { max: self.max_jobs });
         }
 
-        let context = JobContext::with_user(user_id, title, description);
+        let context = JobContext::with_identity(principal_id, actor_id, title, description);
         let job_id = context.job_id;
         contexts.insert(job_id, context);
         drop(contexts);
@@ -77,6 +90,19 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
+        let user_id = user_id.into();
+        self.create_job_reserved_for_identity(user_id.clone(), user_id, title, description)
+            .await
+    }
+
+    /// Create a new job in the reserved overflow slot for an explicit principal/actor pair.
+    pub async fn create_job_reserved_for_identity(
+        &self,
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Uuid, JobError> {
         let mut contexts = self.contexts.write().await;
         let active_count = contexts.values().filter(|c| c.state.is_active()).count();
 
@@ -88,7 +114,7 @@ impl ContextManager {
             });
         }
 
-        let context = JobContext::with_user(user_id, title, description);
+        let context = JobContext::with_identity(principal_id, actor_id, title, description);
         let job_id = context.job_id;
         contexts.insert(job_id, context);
         drop(contexts);
@@ -170,6 +196,19 @@ impl ContextManager {
             .collect()
     }
 
+    /// List all active job IDs for a specific principal/actor pair.
+    pub async fn active_jobs_for_actor(&self, user_id: &str, actor_id: &str) -> Vec<Uuid> {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| {
+                c.user_id == user_id && c.owner_actor_id() == actor_id && c.state.is_active()
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// List all job IDs for a specific user.
     pub async fn all_jobs_for(&self, user_id: &str) -> Vec<Uuid> {
         self.contexts
@@ -177,6 +216,17 @@ impl ContextManager {
             .await
             .iter()
             .filter(|(_, c)| c.user_id == user_id)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// List all job IDs for a specific principal/actor pair.
+    pub async fn all_jobs_for_actor(&self, user_id: &str, actor_id: &str) -> Vec<Uuid> {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id && c.owner_actor_id() == actor_id)
             .map(|(id, _)| *id)
             .collect()
     }
@@ -249,6 +299,38 @@ impl ContextManager {
 
         let mut summary = ContextSummary::default();
         for ctx in contexts.values().filter(|c| c.user_id == user_id) {
+            match ctx.state {
+                crate::context::JobState::Pending => summary.pending += 1,
+                crate::context::JobState::InProgress => summary.in_progress += 1,
+                crate::context::JobState::Completed => summary.completed += 1,
+                crate::context::JobState::Submitted => summary.submitted += 1,
+                crate::context::JobState::Accepted => summary.accepted += 1,
+                crate::context::JobState::Failed => summary.failed += 1,
+                crate::context::JobState::Stuck => summary.stuck += 1,
+                crate::context::JobState::Cancelled => summary.cancelled += 1,
+            }
+        }
+
+        summary.total = summary.pending
+            + summary.in_progress
+            + summary.completed
+            + summary.submitted
+            + summary.accepted
+            + summary.failed
+            + summary.stuck
+            + summary.cancelled;
+        summary
+    }
+
+    /// Get summary of all jobs for a specific principal/actor pair.
+    pub async fn summary_for_actor(&self, user_id: &str, actor_id: &str) -> ContextSummary {
+        let contexts = self.contexts.read().await;
+
+        let mut summary = ContextSummary::default();
+        for ctx in contexts
+            .values()
+            .filter(|c| c.user_id == user_id && c.owner_actor_id() == actor_id)
+        {
             match ctx.state {
                 crate::context::JobState::Pending => summary.pending += 1,
                 crate::context::JobState::InProgress => summary.in_progress += 1,

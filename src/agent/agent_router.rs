@@ -24,6 +24,8 @@ use uuid::Uuid;
 /// Configuration for a single agent workspace.
 #[derive(Debug, Clone)]
 pub struct AgentWorkspace {
+    /// Persistent workspace UUID used for isolated memory scope.
+    pub workspace_id: Option<Uuid>,
     /// Unique agent identifier.
     pub agent_id: String,
     /// Display name for the agent.
@@ -34,6 +36,10 @@ pub struct AgentWorkspace {
     pub bound_channels: Vec<String>,
     /// Keywords/mentions that trigger routing to this agent.
     pub trigger_keywords: Vec<String>,
+    /// Optional per-agent tool allowlist.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional per-agent skill allowlist.
+    pub allowed_skills: Option<Vec<String>>,
     /// Whether this is the default agent (receives unrouted messages).
     pub is_default: bool,
     /// Model override for this agent.
@@ -202,6 +208,12 @@ impl AgentRouter {
         true
     }
 
+    /// Restore thread ownership from persisted state, replacing any stale in-memory value.
+    pub async fn restore_thread_owner(&self, thread_id: Uuid, agent_id: &str) {
+        let mut ownership = self.thread_ownership.write().await;
+        ownership.insert(thread_id, agent_id.to_string());
+    }
+
     /// Get the owner of a thread.
     pub async fn get_thread_owner(&self, thread_id: Uuid) -> Option<String> {
         let ownership = self.thread_ownership.read().await;
@@ -274,11 +286,14 @@ mod tests {
 
     fn test_workspace(id: &str, is_default: bool) -> AgentWorkspace {
         AgentWorkspace {
+            workspace_id: None,
             agent_id: id.to_string(),
             display_name: id.to_string(),
             system_prompt: None,
             bound_channels: vec![],
             trigger_keywords: vec![],
+            allowed_tools: None,
+            allowed_skills: None,
             is_default,
             model: None,
         }

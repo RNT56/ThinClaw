@@ -8,7 +8,76 @@ use uuid::Uuid;
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
 use crate::db::ConversationStore;
 use crate::error::DatabaseError;
-use crate::history::{ConversationMessage, ConversationSummary};
+use crate::history::{
+    ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
+};
+
+fn handoff_from_metadata(metadata: &serde_json::Value) -> Option<ConversationHandoffMetadata> {
+    let value = metadata.get("handoff").cloned().or_else(|| {
+        let direct = serde_json::json!({
+            "last_actor_id": metadata.get("last_actor_id"),
+            "task_state": metadata.get("task_state"),
+            "last_user_goal": metadata.get("last_user_goal"),
+            "handoff_summary": metadata.get("handoff_summary"),
+        });
+        if direct
+            .as_object()
+            .map(|m| m.values().any(|v| !v.is_null()))
+            .unwrap_or(false)
+        {
+            Some(direct)
+        } else {
+            None
+        }
+    })?;
+
+    serde_json::from_value(value)
+        .ok()
+        .filter(|handoff: &ConversationHandoffMetadata| !handoff.is_empty())
+}
+
+fn kind_from_row(row: &libsql::Row) -> ConversationKind {
+    ConversationKind::from_db(row.get::<String>(5).ok().as_deref())
+}
+
+fn summary_from_row(row: &libsql::Row) -> ConversationSummary {
+    let metadata = get_json(row, 8);
+    ConversationSummary {
+        id: row
+            .get::<String>(0)
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or_default(),
+        user_id: get_text(row, 1),
+        actor_id: get_opt_text(row, 2),
+        conversation_scope_id: get_opt_text(row, 3).and_then(|s| s.parse().ok()),
+        conversation_kind: kind_from_row(row),
+        channel: get_text(row, 4),
+        title: get_opt_text(row, 12),
+        message_count: get_i64(row, 10),
+        started_at: get_ts(row, 6),
+        last_activity: get_ts(row, 7),
+        thread_type: metadata
+            .get("thread_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        handoff: handoff_from_metadata(&metadata),
+        stable_external_conversation_key: get_opt_text(row, 9),
+    }
+}
+
+fn message_from_row(row: &libsql::Row) -> ConversationMessage {
+    ConversationMessage {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        role: get_text(row, 1),
+        content: get_text(row, 2),
+        actor_id: get_opt_text(row, 3),
+        actor_display_name: get_opt_text(row, 4),
+        raw_sender_id: get_opt_text(row, 5),
+        metadata: get_json(row, 6),
+        created_at: get_ts(row, 7),
+    }
+}
 
 #[async_trait]
 impl ConversationStore for LibSqlBackend {
@@ -20,9 +89,27 @@ impl ConversationStore for LibSqlBackend {
     ) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
         let id = Uuid::new_v4();
+        let stable_external_conversation_key = match thread_id {
+            Some(thread_id) if !thread_id.is_empty() => format!("{channel}:{thread_id}"),
+            _ => format!("{channel}:{id}"),
+        };
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, thread_id) VALUES (?1, ?2, ?3, ?4)",
-            params![id.to_string(), channel, user_id, opt_text(thread_id)],
+            r#"
+            INSERT INTO conversations (
+                id, channel, user_id, actor_id, conversation_scope_id, conversation_kind,
+                thread_id, stable_external_conversation_key, metadata
+            ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                id.to_string(),
+                channel,
+                user_id,
+                id.to_string(),
+                ConversationKind::Direct.as_str(),
+                opt_text(thread_id),
+                stable_external_conversation_key,
+                serde_json::json!({}).to_string(),
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -47,15 +134,55 @@ impl ConversationStore for LibSqlBackend {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
+        self.add_conversation_message_with_attribution(
+            conversation_id,
+            role,
+            content,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn add_conversation_message_with_attribution(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        actor_id: Option<&str>,
+        actor_display_name: Option<&str>,
+        raw_sender_id: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
         let id = Uuid::new_v4();
         let now = fmt_ts(&Utc::now());
         conn.execute(
-                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.to_string(), conversation_id.to_string(), role, content, now],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            r#"
+            INSERT INTO conversation_messages (
+                id, conversation_id, role, content, actor_id, actor_display_name,
+                raw_sender_id, metadata, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                id.to_string(),
+                conversation_id.to_string(),
+                role,
+                content,
+                actor_id,
+                actor_display_name,
+                raw_sender_id,
+                metadata
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}))
+                    .to_string(),
+                now,
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
         self.touch_conversation(conversation_id).await?;
         Ok(id)
     }
@@ -69,13 +196,30 @@ impl ConversationStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
+        let stable_external_conversation_key = match thread_id {
+            Some(thread_id) if !thread_id.is_empty() => format!("{channel}:{thread_id}"),
+            _ => format!("{channel}:{id}"),
+        };
         conn.execute(
             r#"
-                INSERT INTO conversations (id, channel, user_id, thread_id)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT (id) DO UPDATE SET last_activity = ?5
+                INSERT INTO conversations (
+                    id, channel, user_id, actor_id, conversation_scope_id, conversation_kind,
+                    thread_id, stable_external_conversation_key, metadata
+                )
+                VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT (id) DO UPDATE SET last_activity = ?9
                 "#,
-            params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+            params![
+                id.to_string(),
+                channel,
+                user_id,
+                id.to_string(),
+                ConversationKind::Direct.as_str(),
+                opt_text(thread_id),
+                stable_external_conversation_key,
+                serde_json::json!({}).to_string(),
+                now,
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -94,10 +238,17 @@ impl ConversationStore for LibSqlBackend {
                 r#"
                 SELECT
                     c.id,
+                    c.user_id,
+                    c.actor_id,
+                    c.conversation_scope_id,
+                    c.channel,
+                    c.conversation_kind,
                     c.started_at,
                     c.last_activity,
                     c.metadata,
+                    c.stable_external_conversation_key,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                    c.thread_id,
                     (SELECT substr(m2.content, 1, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
@@ -120,25 +271,54 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            let metadata = get_json(&row, 3);
-            let thread_type = metadata
-                .get("thread_type")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            results.push(ConversationSummary {
-                id: row
-                    .get::<String>(0)
-                    .unwrap_or_default()
-                    .parse()
-                    .unwrap_or_default(),
-                started_at: get_ts(&row, 1),
-                last_activity: get_ts(&row, 2),
-                message_count: get_i64(&row, 4),
-                title: get_opt_text(&row, 5),
-                thread_type,
-            });
+            results.push(summary_from_row(&row));
         }
         Ok(results)
+    }
+
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT c.user_id
+                FROM conversations c
+                WHERE c.channel = ?1
+                  AND c.user_id IS NOT NULL
+                  AND trim(c.user_id) <> ''
+                GROUP BY c.user_id
+                ORDER BY COUNT(*) DESC, MAX(c.last_activity) DESC, c.user_id ASC
+                LIMIT 2
+                "#,
+                params![channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let user_id = row.get::<String>(0).unwrap_or_default();
+            if !user_id.trim().is_empty() {
+                candidates.push(user_id);
+            }
+        }
+
+        let Some(primary) = candidates.first() else {
+            return Ok(None);
+        };
+
+        if primary == "default" && candidates.len() > 1 {
+            return Ok(candidates.get(1).cloned());
+        }
+
+        Ok(Some(primary.clone()))
     }
 
     async fn get_or_create_assistant_conversation(
@@ -201,6 +381,114 @@ impl ConversationStore for LibSqlBackend {
         Ok(id)
     }
 
+    async fn update_conversation_identity(
+        &self,
+        id: Uuid,
+        actor_id: Option<&str>,
+        conversation_scope_id: Option<Uuid>,
+        conversation_kind: ConversationKind,
+        stable_external_conversation_key: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let scope_id = conversation_scope_id.map(|scope| scope.to_string());
+        conn.execute(
+            r#"
+            UPDATE conversations
+            SET actor_id = ?2,
+                conversation_scope_id = COALESCE(?3, conversation_scope_id),
+                conversation_kind = ?4,
+                stable_external_conversation_key = COALESCE(?5, stable_external_conversation_key)
+            WHERE id = ?1
+            "#,
+            params![
+                id.to_string(),
+                opt_text(actor_id),
+                opt_text(scope_id.as_deref()),
+                conversation_kind.as_str(),
+                opt_text(stable_external_conversation_key),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn set_conversation_handoff_metadata(
+        &self,
+        id: Uuid,
+        handoff: &ConversationHandoffMetadata,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let patch = serde_json::json!({ "handoff": handoff });
+        conn.execute(
+            "UPDATE conversations SET metadata = json_patch(coalesce(metadata, '{}'), ?2) WHERE id = ?1",
+            params![id.to_string(), patch.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_actor_conversations_for_recall(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        include_group_history: bool,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        let conn = self.connect().await?;
+        let kind_predicate = if include_group_history {
+            "c.conversation_kind IN ('direct', 'group')"
+        } else {
+            "c.conversation_kind = 'direct'"
+        };
+        let mut rows = conn
+            .query(
+                &format!(
+                    r#"
+                    SELECT
+                        c.id,
+                        c.user_id,
+                        c.actor_id,
+                        c.conversation_scope_id,
+                        c.channel,
+                        c.conversation_kind,
+                        c.started_at,
+                        c.last_activity,
+                        c.metadata,
+                        c.stable_external_conversation_key,
+                        (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                        c.thread_id,
+                        (SELECT substr(m2.content, 1, 100)
+                         FROM conversation_messages m2
+                         WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                         ORDER BY m2.created_at ASC, m2.rowid ASC
+                         LIMIT 1
+                        ) AS title
+                    FROM conversations c
+                    WHERE c.user_id = ?1
+                      AND c.actor_id = ?2
+                      AND {kind_predicate}
+                    ORDER BY c.last_activity DESC
+                    LIMIT ?3
+                    "#
+                ),
+                params![principal_id, actor_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            results.push(summary_from_row(&row));
+        }
+        Ok(results)
+    }
+
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
@@ -214,7 +502,7 @@ impl ConversationStore for LibSqlBackend {
         let mut rows = if let Some(before_ts) = before {
             conn.query(
                 r#"
-                    SELECT id, role, content, created_at
+                    SELECT id, role, content, actor_id, actor_display_name, raw_sender_id, metadata, created_at
                     FROM conversation_messages
                     WHERE conversation_id = ?1 AND created_at < ?2
                     ORDER BY created_at DESC, rowid DESC
@@ -226,7 +514,7 @@ impl ConversationStore for LibSqlBackend {
         } else {
             conn.query(
                 r#"
-                    SELECT id, role, content, created_at
+                    SELECT id, role, content, actor_id, actor_display_name, raw_sender_id, metadata, created_at
                     FROM conversation_messages
                     WHERE conversation_id = ?1
                     ORDER BY created_at DESC, rowid DESC
@@ -244,12 +532,7 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            all.push(ConversationMessage {
-                id: get_text(&row, 0).parse().unwrap_or_default(),
-                role: get_text(&row, 1),
-                content: get_text(&row, 2),
-                created_at: get_ts(&row, 3),
-            });
+            all.push(message_from_row(&row));
         }
 
         let has_more = all.len() as i64 > limit;
@@ -307,7 +590,7 @@ impl ConversationStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id, metadata, created_at
                 FROM conversation_messages
                 WHERE conversation_id = ?1
                 ORDER BY created_at ASC, rowid ASC
@@ -323,12 +606,7 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            messages.push(ConversationMessage {
-                id: get_text(&row, 0).parse().unwrap_or_default(),
-                role: get_text(&row, 1),
-                content: get_text(&row, 2),
-                created_at: get_ts(&row, 3),
-            });
+            messages.push(message_from_row(&row));
         }
         Ok(messages)
     }
@@ -343,6 +621,36 @@ impl ConversationStore for LibSqlBackend {
             .query(
                 "SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2",
                 libsql::params![conversation_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let found = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    async fn conversation_belongs_to_actor(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT 1
+                FROM conversations
+                WHERE id = ?1
+                  AND user_id = ?2
+                  AND (
+                    actor_id = ?3
+                    OR ((actor_id IS NULL OR trim(actor_id) = '') AND ?3 = ?2)
+                  )
+                "#,
+                params![conversation_id.to_string(), principal_id, actor_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

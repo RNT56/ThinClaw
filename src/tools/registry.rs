@@ -1,6 +1,6 @@
 //! Tool registry for managing available tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,9 +24,8 @@ use crate::tools::builtin::{
     MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptQueue, ReadFileTool,
     RemoveAgentTool, SharedModelOverride, ShellTool, SkillInstallTool, SkillListTool,
     SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
-    ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
-    WriteFileTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
+    UpdateAgentTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -94,6 +93,10 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message_agent",
     "extract_document",
 ];
+
+const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
+const SKILL_ADMIN_TOOLS: &[&str] =
+    &["skill_search", "skill_install", "skill_remove", "skill_reload"];
 
 /// Registry of available tools.
 pub struct ToolRegistry {
@@ -214,6 +217,88 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Parse an optional string-array allowlist from metadata.
+    pub fn metadata_string_list(
+        metadata: &serde_json::Value,
+        key: &str,
+    ) -> Option<Vec<String>> {
+        metadata.get(key).and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+    }
+
+    /// Check whether a skill is allowed by metadata-scoped capabilities.
+    pub fn skill_name_allowed_by_metadata(metadata: &serde_json::Value, skill_name: &str) -> bool {
+        match Self::metadata_string_list(metadata, "allowed_skills") {
+            Some(allowed_skills) => {
+                let allowed: HashSet<&str> = allowed_skills.iter().map(String::as_str).collect();
+                allowed.contains(skill_name)
+            }
+            None => true,
+        }
+    }
+
+    /// Check whether a tool name is allowed by the provided capability bundle.
+    pub fn tool_name_allowed_for_capabilities(
+        tool_name: &str,
+        allowed_tools: Option<&[String]>,
+        allowed_skills: Option<&[String]>,
+    ) -> bool {
+        if allowed_skills.is_some() && SKILL_ADMIN_TOOLS.contains(&tool_name) {
+            return false;
+        }
+
+        match allowed_tools {
+            Some(allowed_tools) => {
+                allowed_tools.iter().any(|name| name == tool_name)
+                    || IMPLICIT_CAPABILITY_TOOLS.contains(&tool_name)
+            }
+            None => true,
+        }
+    }
+
+    /// Check whether a tool name is allowed by metadata-scoped capabilities.
+    pub fn tool_name_allowed_by_metadata(metadata: &serde_json::Value, tool_name: &str) -> bool {
+        let allowed_tools = Self::metadata_string_list(metadata, "allowed_tools");
+        let allowed_skills = Self::metadata_string_list(metadata, "allowed_skills");
+        Self::tool_name_allowed_for_capabilities(
+            tool_name,
+            allowed_tools.as_deref(),
+            allowed_skills.as_deref(),
+        )
+    }
+
+    fn filter_tool_definitions_for_capabilities(
+        defs: Vec<ToolDefinition>,
+        allowed_tools: Option<&[String]>,
+        allowed_skills: Option<&[String]>,
+    ) -> Vec<ToolDefinition> {
+        defs.into_iter()
+            .filter(|def| {
+                Self::tool_name_allowed_for_capabilities(
+                    &def.name,
+                    allowed_tools,
+                    allowed_skills,
+                )
+            })
+            .collect()
+    }
+
+    /// Get tool definitions filtered for a routed agent/subagent capability bundle.
+    pub async fn tool_definitions_for_capabilities(
+        &self,
+        allowed_tools: Option<&[String]>,
+        allowed_skills: Option<&[String]>,
+    ) -> Vec<ToolDefinition> {
+        let defs = self.tool_definitions().await;
+        Self::filter_tool_definitions_for_capabilities(defs, allowed_tools, allowed_skills)
+    }
+
     /// Get tool definitions filtered for autonomous execution (routines, workers).
     ///
     /// Excludes:
@@ -249,6 +334,16 @@ impl ToolRegistry {
                 parameters: tool.parameters_schema(),
             })
             .collect()
+    }
+
+    /// Get autonomous tool definitions filtered by a capability bundle.
+    pub async fn tool_definitions_for_autonomous_capabilities(
+        &self,
+        allowed_tools: Option<&[String]>,
+        allowed_skills: Option<&[String]>,
+    ) -> Vec<ToolDefinition> {
+        let defs = self.tool_definitions_for_autonomous().await;
+        Self::filter_tool_definitions_for_capabilities(defs, allowed_tools, allowed_skills)
     }
 
     /// Get tool definitions for specific tools.
@@ -854,6 +949,35 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[test]
+    fn test_tool_name_allowed_for_capabilities_blocks_skill_admin_tools() {
+        assert!(!ToolRegistry::tool_name_allowed_for_capabilities(
+            "skill_search",
+            None,
+            Some(&["github".to_string()]),
+        ));
+        assert!(ToolRegistry::tool_name_allowed_for_capabilities(
+            "skill_read",
+            None,
+            Some(&["github".to_string()]),
+        ));
+    }
+
+    #[test]
+    fn test_tool_name_allowed_by_metadata_respects_allowlists() {
+        let metadata = serde_json::json!({
+            "allowed_tools": ["read_file"],
+            "allowed_skills": ["github"]
+        });
+
+        assert!(ToolRegistry::tool_name_allowed_by_metadata(&metadata, "read_file"));
+        assert!(ToolRegistry::tool_name_allowed_by_metadata(&metadata, "agent_think"));
+        assert!(!ToolRegistry::tool_name_allowed_by_metadata(&metadata, "shell"));
+        assert!(!ToolRegistry::tool_name_allowed_by_metadata(&metadata, "skill_install"));
+        assert!(ToolRegistry::skill_name_allowed_by_metadata(&metadata, "github"));
+        assert!(!ToolRegistry::skill_name_allowed_by_metadata(&metadata, "openai-docs"));
     }
 
     #[tokio::test]

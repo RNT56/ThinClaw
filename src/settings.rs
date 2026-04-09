@@ -1089,9 +1089,8 @@ impl Settings {
         // cannot create intermediate map keys that don't exist in the default
         // struct.  By rebuilding the tree first, all nested structures —
         // including dynamic HashMap entries — roundtrip correctly.
-        let mut tree = serde_json::to_value(Self::default()).unwrap_or(serde_json::Value::Object(
-            serde_json::Map::new(),
-        ));
+        let mut tree = serde_json::to_value(Self::default())
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
         for (key, value) in map {
             if matches!(value, serde_json::Value::Null) {
@@ -1103,7 +1102,10 @@ impl Settings {
         match serde_json::from_value::<Self>(tree.clone()) {
             Ok(settings) => settings,
             Err(e) => {
-                tracing::warn!("from_db_map full-tree deserialize failed, falling back to per-key set(): {}", e);
+                tracing::warn!(
+                    "from_db_map full-tree deserialize failed, falling back to per-key set(): {}",
+                    e
+                );
                 // Fall back to the legacy per-key approach so we don't lose
                 // everything on a single bad key.
                 let mut settings = Self::default();

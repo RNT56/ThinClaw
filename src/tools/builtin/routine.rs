@@ -216,6 +216,8 @@ impl Tool for RoutineCreateTool {
                 title: name.to_string(),
                 description: prompt.to_string(),
                 max_iterations: 10,
+                allowed_tools: None,
+                allowed_skills: None,
             },
             other => {
                 return Err(ToolError::InvalidParameters(format!(
@@ -241,6 +243,7 @@ impl Tool for RoutineCreateTool {
             name: name.to_string(),
             description: description.to_string(),
             user_id: ctx.user_id.clone(),
+            actor_id: ctx.actor_id.clone().unwrap_or_else(|| ctx.user_id.clone()),
             enabled: true,
             trigger,
             action,
@@ -321,10 +324,11 @@ impl Tool for RoutineListTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let actor_id = ctx.owner_actor_id();
 
         let routines = self
             .store
-            .list_routines(&ctx.user_id)
+            .list_routines_for_actor(&ctx.user_id, actor_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to list routines: {e}")))?;
 
@@ -420,10 +424,11 @@ impl Tool for RoutineUpdateTool {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        let actor_id = ctx.owner_actor_id();
 
         let mut routine = self
             .store
-            .get_routine_by_name(&ctx.user_id, name)
+            .get_routine_by_name_for_actor(&ctx.user_id, actor_id, name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
@@ -525,10 +530,11 @@ impl Tool for RoutineDeleteTool {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        let actor_id = ctx.owner_actor_id();
 
         let routine = self
             .store
-            .get_routine_by_name(&ctx.user_id, name)
+            .get_routine_by_name_for_actor(&ctx.user_id, actor_id, name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
@@ -603,6 +609,7 @@ impl Tool for RoutineHistoryTool {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        let actor_id = ctx.owner_actor_id();
 
         let limit = params
             .get("limit")
@@ -612,7 +619,7 @@ impl Tool for RoutineHistoryTool {
 
         let routine = self
             .store
-            .get_routine_by_name(&ctx.user_id, name)
+            .get_routine_by_name_for_actor(&ctx.user_id, actor_id, name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;

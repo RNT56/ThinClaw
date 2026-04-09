@@ -327,6 +327,58 @@ struct TelegramMessageMetadata {
     /// When present, all replies must include this to target the correct topic.
     #[serde(default)]
     message_thread_id: Option<i64>,
+
+    /// Normalized conversation kind for downstream resolver logic.
+    #[serde(default)]
+    conversation_kind: Option<String>,
+
+    /// Stable scope identifier for the direct chat or group topic.
+    #[serde(default)]
+    conversation_scope_id: Option<String>,
+
+    /// Stable external conversation key used for cross-channel continuity.
+    #[serde(default)]
+    external_conversation_key: Option<String>,
+
+    /// Raw sender identifier from Telegram.
+    #[serde(default)]
+    raw_sender_id: Option<String>,
+
+    /// Stable sender identifier used for continuity within Telegram.
+    #[serde(default)]
+    stable_sender_id: Option<String>,
+}
+
+fn conversation_kind(is_private: bool) -> &'static str {
+    if is_private { "direct" } else { "group" }
+}
+
+fn conversation_scope_id(
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+    is_private: bool,
+) -> String {
+    if is_private {
+        format!("telegram:direct:{chat_id}")
+    } else if let Some(thread_id) = message_thread_id {
+        format!("telegram:group:{chat_id}:topic:{thread_id}")
+    } else {
+        format!("telegram:group:{chat_id}")
+    }
+}
+
+fn external_conversation_key(
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+    is_private: bool,
+) -> String {
+    if is_private {
+        format!("telegram://direct/{chat_id}")
+    } else if let Some(thread_id) = message_thread_id {
+        format!("telegram://group/{chat_id}/topic/{thread_id}")
+    } else {
+        format!("telegram://group/{chat_id}")
+    }
 }
 
 /// Channel configuration injected by host.
@@ -1301,6 +1353,24 @@ fn handle_message(message: TelegramMessage) {
                         "chat_id": message.chat.id,
                         "user_id": from.id,
                         "username": username_opt,
+                        "display_name": if let Some(ref last) = from.last_name {
+                            format!("{} {}", from.first_name, last)
+                        } else {
+                            from.first_name.clone()
+                        },
+                        "conversation_kind": conversation_kind(is_private),
+                        "conversation_scope_id": conversation_scope_id(
+                            message.chat.id,
+                            message.message_thread_id,
+                            is_private,
+                        ),
+                        "external_conversation_key": external_conversation_key(
+                            message.chat.id,
+                            message.message_thread_id,
+                            is_private,
+                        ),
+                        "raw_sender_id": from.id.to_string(),
+                        "stable_sender_id": from.id.to_string(),
                     })
                     .to_string();
 
@@ -1366,12 +1436,26 @@ fn handle_message(message: TelegramMessage) {
     };
 
     // Build metadata for response routing
+    let stable_sender_id = from.id.to_string();
     let metadata = TelegramMessageMetadata {
         chat_id: message.chat.id,
         message_id: message.message_id,
         user_id: from.id,
         is_private,
         message_thread_id: message.message_thread_id,
+        conversation_kind: Some(conversation_kind(is_private).to_string()),
+        conversation_scope_id: Some(conversation_scope_id(
+            message.chat.id,
+            message.message_thread_id,
+            is_private,
+        )),
+        external_conversation_key: Some(external_conversation_key(
+            message.chat.id,
+            message.message_thread_id,
+            is_private,
+        )),
+        raw_sender_id: Some(stable_sender_id.clone()),
+        stable_sender_id: Some(stable_sender_id),
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -1989,6 +2073,24 @@ mod tests {
         assert!(url.contains("offset=444809884"));
         assert!(url.contains("timeout=30"));
         assert!(url.contains("allowed_updates=[\"message\",\"edited_message\"]"));
+    }
+
+    #[test]
+    fn test_normalized_conversation_metadata() {
+        assert_eq!(conversation_kind(true), "direct");
+        assert_eq!(conversation_kind(false), "group");
+        assert_eq!(
+            conversation_scope_id(42, None, true),
+            "telegram:direct:42"
+        );
+        assert_eq!(
+            conversation_scope_id(42, Some(7), false),
+            "telegram:group:42:topic:7"
+        );
+        assert_eq!(
+            external_conversation_key(42, Some(7), false),
+            "telegram://group/42/topic/7"
+        );
     }
 
     #[test]

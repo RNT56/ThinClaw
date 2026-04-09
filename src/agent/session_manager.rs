@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::agent::session::Session;
 use crate::agent::undo::UndoManager;
 use crate::hooks::HookRegistry;
+use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 /// Warn when session count exceeds this threshold.
 const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
@@ -19,14 +20,14 @@ const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct ThreadKey {
-    user_id: String,
+    scope_id: Uuid,
     channel: String,
     external_thread_id: Option<String>,
 }
 
 /// Manages sessions, threads, and undo state for all users.
 pub struct SessionManager {
-    sessions: RwLock<HashMap<String, Arc<Mutex<Session>>>>,
+    sessions: RwLock<HashMap<Uuid, Arc<Mutex<Session>>>>,
     thread_map: RwLock<HashMap<ThreadKey, Uuid>>,
     undo_managers: RwLock<HashMap<Uuid, Arc<Mutex<UndoManager>>>>,
     /// Thread ownership: maps thread UUID → owner agent/channel name.
@@ -74,27 +75,55 @@ impl SessionManager {
             .clone()
     }
 
+    /// Resolve the stable session scope for a principal-only legacy user ID.
+    pub fn scope_id_for_user_id(user_id: &str) -> Uuid {
+        scope_id_from_key(&format!("principal:{user_id}"))
+    }
+
+    /// Resolve or create a session for a full ingress identity.
+    pub async fn get_or_create_session_for_identity(
+        &self,
+        identity: &ResolvedIdentity,
+    ) -> Arc<Mutex<Session>> {
+        self.get_or_create_session_scoped(
+            identity.conversation_scope_id,
+            identity.principal_id.as_str(),
+            identity.actor_id.as_str(),
+            identity.conversation_kind,
+        )
+        .await
+    }
+
     /// Get or create a session for a user.
     pub async fn get_or_create_session(&self, user_id: &str) -> Arc<Mutex<Session>> {
-        // Fast path: check if session exists
+        let scope_id = Self::scope_id_for_user_id(user_id);
+        self.get_or_create_session_scoped(scope_id, user_id, user_id, ConversationKind::Direct)
+            .await
+    }
+
+    async fn get_or_create_session_scoped(
+        &self,
+        scope_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_kind: ConversationKind,
+    ) -> Arc<Mutex<Session>> {
         {
             let sessions = self.sessions.read().await;
-            if let Some(session) = sessions.get(user_id) {
+            if let Some(session) = sessions.get(&scope_id) {
                 return Arc::clone(session);
             }
         }
 
-        // Slow path: create new session
         let mut sessions = self.sessions.write().await;
-        // Double-check after acquiring write lock
-        if let Some(session) = sessions.get(user_id) {
+        if let Some(session) = sessions.get(&scope_id) {
             return Arc::clone(session);
         }
 
-        let new_session = Session::new(user_id);
+        let new_session = Session::new_scoped(principal_id, actor_id, scope_id, conversation_kind);
         let session_id = new_session.id.to_string();
         let session = Arc::new(Mutex::new(new_session));
-        sessions.insert(user_id.to_string(), Arc::clone(&session));
+        sessions.insert(scope_id, Arc::clone(&session));
 
         if sessions.len() >= SESSION_COUNT_WARNING_THRESHOLD && sessions.len() % 100 == 0 {
             tracing::warn!(
@@ -104,10 +133,9 @@ impl SessionManager {
             );
         }
 
-        // Fire OnSessionStart hook (fire-and-forget)
         if let Some(ref hooks) = self.hooks {
             let hooks = hooks.clone();
-            let uid = user_id.to_string();
+            let uid = principal_id.to_string();
             let sid = session_id;
             tokio::spawn(async move {
                 use crate::hooks::HookEvent;
@@ -134,9 +162,37 @@ impl SessionManager {
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
         let session = self.get_or_create_session(user_id).await;
+        let scope_id = Self::scope_id_for_user_id(user_id);
+        self.resolve_thread_with_scope(scope_id, session, channel, external_thread_id)
+            .await
+    }
 
+    /// Resolve a thread using a resolved ingress identity.
+    pub async fn resolve_thread_for_identity(
+        &self,
+        identity: &ResolvedIdentity,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
+        let session = self.get_or_create_session_for_identity(identity).await;
+        self.resolve_thread_with_scope(
+            identity.conversation_scope_id,
+            session,
+            channel,
+            external_thread_id,
+        )
+        .await
+    }
+
+    async fn resolve_thread_with_scope(
+        &self,
+        scope_id: Uuid,
+        session: Arc<Mutex<Session>>,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
         let key = ThreadKey {
-            user_id: user_id.to_string(),
+            scope_id,
             channel: channel.to_string(),
             external_thread_id: external_thread_id.map(String::from),
         };
@@ -221,8 +277,21 @@ impl SessionManager {
         thread_id: Uuid,
         session: Arc<Mutex<Session>>,
     ) {
+        let scope_id = Self::scope_id_for_user_id(user_id);
+        self.register_thread_for_scope(scope_id, channel, thread_id, session)
+            .await;
+    }
+
+    /// Register a hydrated thread for a specific conversation scope.
+    pub async fn register_thread_for_scope(
+        &self,
+        scope_id: Uuid,
+        channel: &str,
+        thread_id: Uuid,
+        session: Arc<Mutex<Session>>,
+    ) {
         let key = ThreadKey {
-            user_id: user_id.to_string(),
+            scope_id,
             channel: channel.to_string(),
             external_thread_id: Some(thread_id.to_string()),
         };
@@ -242,7 +311,7 @@ impl SessionManager {
         // Ensure the session is tracked
         {
             let mut sessions = self.sessions.write().await;
-            sessions.entry(user_id.to_string()).or_insert(session);
+            sessions.entry(scope_id).or_insert(session);
         }
     }
 
@@ -279,10 +348,22 @@ impl SessionManager {
         true
     }
 
+    /// Restore thread ownership from persisted state, replacing any stale in-memory value.
+    pub async fn restore_thread_owner(&self, thread_id: Uuid, owner: &str) {
+        let mut owners = self.thread_owners.write().await;
+        owners.insert(thread_id, owner.to_string());
+    }
+
     /// Get the owner of a thread, if any.
     pub async fn get_thread_owner(&self, thread_id: Uuid) -> Option<String> {
         let owners = self.thread_owners.read().await;
         owners.get(&thread_id).cloned()
+    }
+
+    /// Restore an undo manager snapshot for a hydrated thread.
+    pub async fn restore_undo_manager(&self, thread_id: Uuid, undo: UndoManager) {
+        let mut managers = self.undo_managers.write().await;
+        managers.insert(thread_id, Arc::new(Mutex::new(undo)));
     }
 
     /// Check if a thread is owned by a specific agent.
@@ -297,18 +378,23 @@ impl SessionManager {
     pub async fn prune_stale_sessions(&self, max_idle: std::time::Duration) -> usize {
         let cutoff = chrono::Utc::now() - chrono::TimeDelta::seconds(max_idle.as_secs() as i64);
 
-        // Collect stale sessions (user_id, session_id, thread_ids) in one pass
+        // Collect stale sessions (scope_id, principal_id, session_id, thread_ids) in one pass
         // to avoid TOCTOU between finding stale sessions and reading their threads (Bug 25).
-        let stale: Vec<(String, String, Vec<Uuid>)> = {
+        let stale: Vec<(Uuid, String, String, Vec<Uuid>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
-                .filter_map(|(user_id, session)| {
+                .filter_map(|(scope_id, session)| {
                     // Try to lock; skip if contended (someone is actively using it)
                     let sess = session.try_lock().ok()?;
                     if sess.last_active_at < cutoff {
                         let thread_ids: Vec<Uuid> = sess.threads.keys().cloned().collect();
-                        Some((user_id.clone(), sess.id.to_string(), thread_ids))
+                        Some((
+                            *scope_id,
+                            sess.principal_id.clone(),
+                            sess.id.to_string(),
+                            thread_ids,
+                        ))
                     } else {
                         None
                     }
@@ -316,14 +402,19 @@ impl SessionManager {
                 .collect()
         };
 
-        let stale_users: Vec<String> = stale.iter().map(|(uid, _, _)| uid.clone()).collect();
+        let stale_scopes: Vec<Uuid> = stale.iter().map(|(scope_id, _, _, _)| *scope_id).collect();
+        let stale_principals: Vec<String> = stale
+            .iter()
+            .map(|(_, principal, _, _)| principal.clone())
+            .collect();
         let stale_sessions: Vec<(String, String)> = stale
             .iter()
-            .map(|(uid, sid, _)| (uid.clone(), sid.clone()))
+            .map(|(_, principal, sid, _)| (principal.clone(), sid.clone()))
             .collect();
-        let stale_thread_ids: Vec<Uuid> = stale.into_iter().flat_map(|(_, _, tids)| tids).collect();
+        let stale_thread_ids: Vec<Uuid> =
+            stale.into_iter().flat_map(|(_, _, _, tids)| tids).collect();
 
-        if stale_users.is_empty() {
+        if stale_scopes.is_empty() {
             return 0;
         }
 
@@ -350,8 +441,8 @@ impl SessionManager {
         let count = {
             let mut sessions = self.sessions.write().await;
             let before = sessions.len();
-            for user_id in &stale_users {
-                sessions.remove(user_id);
+            for scope_id in &stale_scopes {
+                sessions.remove(scope_id);
             }
             before - sessions.len()
         };
@@ -359,7 +450,7 @@ impl SessionManager {
         // Clean up thread mappings that point to stale sessions
         {
             let mut thread_map = self.thread_map.write().await;
-            thread_map.retain(|key, _| !stale_users.contains(&key.user_id));
+            thread_map.retain(|key, _| !stale_scopes.contains(&key.scope_id));
         }
 
         // Clean up undo managers for stale threads
@@ -382,7 +473,7 @@ impl SessionManager {
         // Without this, per-user locks accumulate forever in multi-user deployments.
         {
             let mut locks = self.workspace_locks.write().await;
-            for user_id in &stale_users {
+            for user_id in &stale_principals {
                 locks.remove(user_id);
             }
         }
@@ -400,13 +491,13 @@ impl SessionManager {
 
     /// List all active sessions as a summary suitable for CLI display.
     ///
-    /// Returns a vec of JSON values with user_id, channel, thread_count, last_active, and owner.
+    /// Returns a vec of JSON values with scope/principal details, channel, thread_count, last_active, and owner.
     pub async fn list_sessions(&self) -> Vec<serde_json::Value> {
         let sessions = self.sessions.read().await;
         let thread_owners = self.thread_owners.read().await;
         let mut result = Vec::new();
 
-        for (user_id, session_arc) in sessions.iter() {
+        for (scope_id, session_arc) in sessions.iter() {
             let session = session_arc.lock().await;
             let thread_count = session.threads.len();
 
@@ -427,10 +518,12 @@ impl SessionManager {
                 .unwrap_or_else(|| "—".to_string());
 
             result.push(serde_json::json!({
-                "user_id": user_id,
-                "channel": session.threads.keys().next()
-                    .map(|_| user_id.split('@').next_back().unwrap_or("unknown"))
-                    .unwrap_or("unknown"),
+                "session_scope_id": scope_id.to_string(),
+                "user_id": session.user_id.clone(),
+                "principal_id": session.principal_id.clone(),
+                "actor_id": session.actor_id.clone(),
+                "conversation_kind": session.conversation_kind.as_str(),
+                "channel": "unknown",
                 "thread_count": thread_count,
                 "last_active": last_active,
                 "owner": owner,
@@ -449,7 +542,8 @@ impl SessionManager {
         _channel: &str,
     ) -> Option<serde_json::Value> {
         let sessions = self.sessions.read().await;
-        let session_arc = sessions.get(user_id)?;
+        let scope_id = Self::scope_id_for_user_id(user_id);
+        let session_arc = sessions.get(&scope_id)?;
         let session = session_arc.lock().await;
         let thread_owners = self.thread_owners.read().await;
 
@@ -474,7 +568,11 @@ impl SessionManager {
             .collect();
 
         Some(serde_json::json!({
-            "user_id": user_id,
+            "session_scope_id": scope_id.to_string(),
+            "user_id": session.user_id.clone(),
+            "principal_id": session.principal_id.clone(),
+            "actor_id": session.actor_id.clone(),
+            "conversation_kind": session.conversation_kind.as_str(),
             "thread_count": threads.len(),
             "threads": threads,
         }))
@@ -490,6 +588,10 @@ impl Default for SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope_id(user_id: &str) -> Uuid {
+        SessionManager::scope_id_for_user_id(user_id)
+    }
 
     #[tokio::test]
     async fn test_get_or_create_session() {
@@ -554,8 +656,8 @@ mod tests {
 
         // Active session should still exist
         let sessions = manager.sessions.read().await;
-        assert!(sessions.contains_key("user-active"));
-        assert!(!sessions.contains_key("user-stale"));
+        assert!(sessions.contains_key(&scope_id("user-active")));
+        assert!(!sessions.contains_key(&scope_id("user-stale")));
     }
 
     #[tokio::test]
@@ -792,7 +894,7 @@ mod tests {
         // The user has no session yet in the manager
         {
             let sessions = manager.sessions.read().await;
-            assert!(!sessions.contains_key("user-new"));
+            assert!(!sessions.contains_key(&scope_id("user-new")));
         }
 
         manager
@@ -802,7 +904,7 @@ mod tests {
         // Now the session should be tracked
         {
             let sessions = manager.sessions.read().await;
-            assert!(sessions.contains_key("user-new"));
+            assert!(sessions.contains_key(&scope_id("user-new")));
         }
     }
 
@@ -927,7 +1029,7 @@ mod tests {
         }
         {
             let mut sessions = manager.sessions.write().await;
-            sessions.insert("user-direct".to_string(), Arc::clone(&session));
+            sessions.insert(scope_id("user-direct"), Arc::clone(&session));
         }
 
         // resolve_thread should find the existing thread by UUID

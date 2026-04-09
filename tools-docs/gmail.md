@@ -11,7 +11,7 @@ for consent, then stores refresh + access tokens encrypted in the secret store.
 
 1. **Run the OAuth flow**
    ```bash
-   thinclaw auth gmail
+   thinclaw tool auth gmail
    ```
    This opens a browser window for Google consent. Sign in with the Gmail account
    the agent should use and grant the requested permissions.
@@ -23,7 +23,7 @@ for consent, then stores refresh + access tokens encrypted in the secret store.
    ssh -L 9876:127.0.0.1:9876 user@server
 
    # On the server:
-   thinclaw auth gmail
+   thinclaw tool auth gmail
    ```
    The OAuth callback URL (`http://127.0.0.1:9876/callback`) is forwarded to
    the server. The auth URL is printed to the terminal — copy it to your local browser.
@@ -44,7 +44,7 @@ for consent, then stores refresh + access tokens encrypted in the secret store.
 ### Secret Name
 
 `google_oauth_token` — shared with all Google tools (Calendar, Docs, Drive, Sheets, Slides).
-Authenticating once with `thinclaw auth google` gives all Google tools access.
+Authenticating once with `thinclaw tool auth gmail` gives the shared Google token to the other Google tools too.
 
 ## Available Actions (6)
 

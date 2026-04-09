@@ -1,59 +1,35 @@
-# Telegram Channel
+# Telegram Channel Package
 
-> Chat with the agent via Telegram Bot API.
+> Telegram is a packaged WASM channel in ThinClaw's channel runtime.
 
-## Overview
+## What This Page Covers
 
-The Telegram channel connects to the Telegram Bot API using long polling.
-Create a bot via @BotFather, set the token, and the agent accepts messages from Telegram.
+This page is about the operator-facing Telegram setup path. For the architecture behind the native/WASM split, use [../docs/CHANNEL_ARCHITECTURE.md](../docs/CHANNEL_ARCHITECTURE.md).
 
-## Prerequisites
+## Runtime Shape
 
-1. **Create a Telegram bot**: Message [@BotFather](https://t.me/BotFather) on Telegram
-2. **Copy the bot token** (format: `123456789:ABCDEfghijklMNOpqrstUVWxyz`)
+- channel type: WASM package
+- transport shape: Telegram Bot API over webhook or polling-style host callbacks
+- secret handling: bot credentials stay at the host boundary and are injected into the package runtime
 
-## Configuration
+## What Telegram Is Not
 
-```bash
-# Required
-TELEGRAM_BOT_TOKEN=123456789:ABCDEfghijklMNOpqrstUVWxyz
+Telegram is not a native Rust channel in the current ThinClaw architecture. If another doc describes it that way, prefer the canonical architecture doc.
 
-# Optional: restrict to a single owner (numeric user ID)
-TELEGRAM_OWNER_ID=123456789
+## Setup Notes
 
-# Optional: restrict to specific user IDs (comma-separated)
-TELEGRAM_ALLOW_FROM=123456789,987654321
+- create the bot with `@BotFather`
+- configure the required Telegram credentials in ThinClaw's channel setup path
+- ensure the user has started the bot before expecting inbound messages
 
-# Optional: stream mode for progressive responses
-# Options: "full" (default), "edit", "typing"
-TELEGRAM_STREAM_MODE=full
-```
+## Behavior Highlights
 
-### Finding your Telegram User ID
+- operator-facing messaging through the Telegram Bot API
+- host-managed formatting and streaming behavior
+- package-based deployment under the WASM channel runtime
 
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It replies with your numeric user ID
+## Related Docs
 
-## Features
-
-- Long polling (no webhook server needed)
-- Progressive streaming responses (edit-in-place)
-- Owner-only mode via `TELEGRAM_OWNER_ID`
-- Allow-list for multi-user access
-- Rate-limited message editing for streaming
-- Rich HTML formatting (Markdown auto-converted to Telegram HTML: bold, italic, code, links, headings)
-- Auto-reconnect on disconnect
-
-## Stream Modes
-
-| Mode | Behavior |
-|------|----------|
-| `full` | Send complete response when done |
-| `edit` | Edit message in-place as chunks arrive |
-| `typing` | Send typing indicator during processing |
-
-## Notes
-
-- If `TELEGRAM_OWNER_ID` is set, it takes precedence (only that user can interact)
-- If both `TELEGRAM_OWNER_ID` and `TELEGRAM_ALLOW_FROM` are empty, all Telegram users can message the bot
-- The bot must be started by the user first (`/start` in the bot chat)
+- [README.md](README.md)
+- [../docs/CHANNEL_ARCHITECTURE.md](../docs/CHANNEL_ARCHITECTURE.md)
+- [../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)

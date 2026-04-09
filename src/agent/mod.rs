@@ -41,6 +41,7 @@ pub mod submission;
 pub mod task;
 pub mod thread_inheritance;
 mod thread_ops;
+pub mod thread_runtime;
 pub mod undo;
 pub mod worker;
 
@@ -57,7 +58,10 @@ pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::RoutineEngine;
 pub use scheduler::Scheduler;
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
-pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
+pub use session::{
+    PendingApproval, PendingAuth, PersistedSubagentState, Session, Thread, ThreadRuntimeState,
+    ThreadState, Turn, TurnState,
+};
 pub use session_manager::SessionManager;
 pub use subagent_executor::{
     SubagentConfig, SubagentExecutor, SubagentInfo, SubagentResult, SubagentSpawnRequest,
@@ -65,5 +69,6 @@ pub use subagent_executor::{
 };
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
+pub use thread_runtime::{load_thread_runtime, mutate_thread_runtime, save_thread_runtime};
 pub use undo::{Checkpoint, UndoManager};
 pub use worker::{Worker, WorkerDeps};

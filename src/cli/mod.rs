@@ -21,6 +21,7 @@ mod config;
 mod cron;
 mod doctor;
 mod gateway;
+mod identity;
 mod logs;
 mod mcp;
 pub mod memory;
@@ -47,6 +48,7 @@ pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command};
 pub use doctor::run_doctor_command;
 pub use gateway::{GatewayCommand, run_gateway_command};
+pub use identity::{IdentityCommand, run_identity_command};
 pub use logs::{LogCommand, run_log_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
@@ -124,6 +126,10 @@ pub enum Command {
     /// Manage the web gateway
     #[command(subcommand)]
     Gateway(GatewayCommand),
+
+    /// Manage household actors and linked endpoints
+    #[command(subcommand)]
+    Identity(IdentityCommand),
 
     /// Manage messaging channels
     #[command(subcommand)]

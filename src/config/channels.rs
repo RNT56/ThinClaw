@@ -56,6 +56,7 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    pub actor_id: Option<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -165,6 +166,7 @@ impl ChannelsConfig {
                     trimmed
                 }),
                 user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
+                actor_id: optional_env("GATEWAY_ACTOR_ID")?,
             })
         } else {
             None
@@ -676,7 +678,7 @@ impl ChannelsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use secrecy::ExposeSecret;
 
     fn clear_nostr_env() {
@@ -691,7 +693,7 @@ mod tests {
 
     #[test]
     fn resolve_nostr_accepts_secret_key_alias() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_nostr_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.

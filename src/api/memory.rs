@@ -115,7 +115,7 @@ pub async fn search(
     let hits: Vec<SearchHit> = results
         .iter()
         .map(|r| SearchHit {
-            path: r.document_id.to_string(),
+            path: r.path.clone(),
             content: r.content.clone(),
             score: r.score as f64,
         })

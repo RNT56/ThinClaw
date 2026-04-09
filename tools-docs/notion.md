@@ -25,9 +25,7 @@ from the Notion developer portal. This is similar to GitHub's PAT model.
    - Keep it secure — anyone with this token can read/write your Notion content
 
 3. **Store the token**
-   ```bash
-   thinclaw secret set notion_token ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
+   Save the token using your current ThinClaw secret-entry flow for `notion_token` or via env-based secret management if your deployment relies on environment variables.
 
 4. **Share pages/databases with the integration**
    - This is the most commonly missed step!

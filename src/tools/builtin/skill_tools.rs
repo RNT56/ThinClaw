@@ -10,7 +10,35 @@ use async_trait::async_trait;
 use crate::context::JobContext;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
+use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+
+fn restricted_skill_names(ctx: &JobContext) -> Option<std::collections::HashSet<String>> {
+    ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills")
+        .map(|skills| skills.into_iter().collect())
+}
+
+fn ensure_skill_allowed(ctx: &JobContext, skill_name: &str) -> Result<(), ToolError> {
+    if ToolRegistry::skill_name_allowed_by_metadata(&ctx.metadata, skill_name) {
+        Ok(())
+    } else {
+        Err(ToolError::ExecutionFailed(format!(
+            "Skill '{}' is not allowed in this agent context.",
+            skill_name
+        )))
+    }
+}
+
+fn ensure_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(), ToolError> {
+    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
+        Err(ToolError::ExecutionFailed(format!(
+            "Tool '{}' is not available when the current agent is restricted to a specific skill allowlist.",
+            tool_name
+        )))
+    } else {
+        Ok(())
+    }
+}
 
 // ── skill_read ──────────────────────────────────────────────────────────
 
@@ -55,10 +83,11 @@ impl Tool for SkillReadTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
+        ensure_skill_allowed(ctx, name)?;
 
         let guard = self.registry.read().await;
         let skill = guard
@@ -135,19 +164,25 @@ impl Tool for SkillListTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let verbose = params
             .get("verbose")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let allowed_skills = restricted_skill_names(ctx);
 
         let guard = self.registry.read().await;
 
         let skills: Vec<serde_json::Value> = guard
             .skills()
             .iter()
+            .filter(|s| {
+                allowed_skills.as_ref().is_none_or(|allowed| {
+                    allowed.contains(s.manifest.name.as_str())
+                })
+            })
             .map(|s| {
                 let mut entry = serde_json::json!({
                     "name": s.manifest.name,
@@ -231,8 +266,9 @@ impl Tool for SkillSearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
         let query = require_str(&params, "query")?;
 
@@ -373,8 +409,9 @@ impl Tool for SkillInstallTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
         let force = params
@@ -420,8 +457,7 @@ impl Tool for SkillInstallTool {
             let mut guard = self.registry.write().await;
             if guard.has(&skill_name_from_parse) {
                 if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
-                    let _ =
-                        crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                    let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
                     let _ = guard.commit_remove(&skill_name_from_parse);
                     tracing::info!(
                         skill = %skill_name_from_parse,
@@ -457,10 +493,9 @@ impl Tool for SkillInstallTool {
                             skill = %skill_name,
                             "Cleaning up orphaned skill files after failed commit"
                         );
-                        let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
-                            &orphan_dir,
-                        )
-                        .await;
+                        let _ =
+                            crate::skills::registry::SkillRegistry::delete_skill_files(&orphan_dir)
+                                .await;
                     }
                     return Err(ToolError::ExecutionFailed(e.to_string()));
                 }
@@ -781,8 +816,9 @@ impl Tool for SkillRemoveTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
 
@@ -875,13 +911,11 @@ impl Tool for SkillReloadTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let reload_all = params
-            .get("all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let reload_all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if reload_all {
             let mut guard = self.registry.write().await;

@@ -11,6 +11,15 @@ use super::{BRIDGE_VARS, INJECTED_VARS};
 #[cfg(test)]
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquire the crate-wide env-variable mutex for tests.
+///
+/// Recovers a poisoned mutex rather than panicking — a single failing test
+/// should never cascade into mass failures across the entire test suite.
+#[cfg(test)]
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     // IC-007: Check bridge overlay FIRST (Tauri UI config — highest priority).
     //

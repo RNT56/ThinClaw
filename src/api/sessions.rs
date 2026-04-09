@@ -10,6 +10,8 @@ use uuid::Uuid;
 use crate::agent::SessionManager;
 use crate::channels::web::types::*;
 use crate::db::Database;
+use crate::history::ConversationKind;
+use crate::identity::scope_id_from_key;
 
 use super::error::{ApiError, ApiResult};
 
@@ -255,6 +257,20 @@ pub async fn create_thread(
                 .await
             {
                 tracing::warn!("Failed to persist new thread: {}", e);
+            }
+            let stable_external_conversation_key =
+                format!("tauri://direct/{user_id}/actor/{user_id}/thread/{thread_id}");
+            if let Err(e) = store
+                .update_conversation_identity(
+                    thread_id,
+                    Some(&user_id),
+                    Some(scope_id_from_key(&stable_external_conversation_key)),
+                    ConversationKind::Direct,
+                    Some(&stable_external_conversation_key),
+                )
+                .await
+            {
+                tracing::warn!("Failed to set thread identity metadata: {}", e);
             }
             let metadata_val = serde_json::json!("thread");
             if let Err(e) = store

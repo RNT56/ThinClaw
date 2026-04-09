@@ -1,150 +1,108 @@
 # Channel Architecture
 
-ThinClaw uses a **hybrid channel architecture**: some channels are native Rust modules compiled into the binary, while others are WASM components loaded at runtime from `~/.thinclaw/channels/`.
+ThinClaw uses a hybrid channel model.
 
-This is not a migration in progress — the two approaches serve different transport models with different requirements.
+Some delivery surfaces are compiled into the trusted Rust host. Others are packaged as WASM channels and loaded at runtime. The split is deliberate: it follows transport shape, lifecycle needs, local-system access, and trust-boundary requirements.
+
+## The Short Version
+
+- Use **native Rust channels** when the integration needs persistent connections, local filesystem access, or the full host `Channel` behavior.
+- Use **WASM channels** when the integration is stateless, HTTP-driven, and benefits from credential isolation and hot reload.
+- Treat the **gateway** as the operator control plane, not just another chat surface.
 
 ## Channel Inventory
 
-| Channel    | Approach | Transport         | Why This Approach                              |
-|------------|----------|-------------------|------------------------------------------------|
-| Telegram   | WASM     | Webhook + Polling | Stateless, webhook-driven; credential isolation |
-| WhatsApp   | WASM     | Webhook           | Stateless, webhook-driven; credential isolation |
-| Slack       | WASM     | Events API webhook | Stateless, webhook-driven; credential isolation |
-| Discord (interactions) | WASM | Interactions webhook | Stateless slash commands; credential isolation |
-| Discord (Gateway)      | Native | WebSocket            | Requires persistent connection; full `Channel` trait |
-| Signal     | Native   | HTTP bridge       | Long-polling HTTP bridge; binary IPC            |
-| Gmail      | Native   | Pub/Sub pull      | Google Pub/Sub subscription; OAuth token mgmt   |
-| Nostr      | Native   | WebSocket relay   | Persistent relay connections; NIP-04 crypto      |
-| iMessage   | Native   | SQLite polling    | Local `chat.db` file access (macOS only)         |
-| Apple Mail | Native   | Envelope Index    | Local filesystem access (macOS only)             |
-| REPL/CLI   | Native   | stdin/stdout      | Process-local I/O                                |
-| HTTP API   | Native   | HTTP server       | Inline with the webhook server                   |
-| Gateway    | Native   | SSE + WebSocket   | WebUI real-time; deep integration with host state |
+| Surface | Implementation | Why |
+|---|---|---|
+| Gateway | native | operator UI, API, SSE, WebSocket, deep host integration |
+| HTTP webhook | native | host-owned ingress and webhook handling |
+| REPL | native | local process surface |
+| Signal | native | long-lived bridge and daemon integration |
+| Nostr | native | persistent relay connections |
+| Gmail | native | Pub/Sub pull and OAuth-heavy host integration |
+| iMessage | native | local `chat.db` access on macOS |
+| Apple Mail | native | local mail index access on macOS |
+| Discord Gateway | native | persistent Gateway connection |
+| Telegram | WASM package | stateless Bot API path, host-managed credentials |
+| Slack | WASM package | stateless Events API path, host-managed credentials |
+| WhatsApp | WASM package | webhook-driven packaged channel |
+| Discord interactions | WASM package | slash-command / webhook path |
 
-## When to Use WASM vs Native
+The installable WASM packages are represented in `registry/channels/`. The host runtime loads them from `~/.thinclaw/channels/`.
 
-### Use WASM when ALL of these are true:
+## When ThinClaw Uses Native Channels
 
-1. **Webhook/polling transport** — The channel receives messages via stateless HTTP callbacks or periodic API polling. No persistent connection needed.
+Native Rust is the right path when any of these are true:
 
-2. **Platform API is HTTP-only** — All interaction with the platform (send/receive/status) happens through REST API calls that the WASM host can proxy.
+1. The integration needs a persistent connection.
+2. The integration needs local-system access.
+3. The integration needs host-level `Channel` behavior directly.
+4. The integration has stateful reconnection, token refresh, or complex lifecycle management that is simpler and safer in the trusted host runtime.
 
-3. **Credential isolation matters** — The channel uses API tokens (bot tokens, access tokens) that should never be visible to the channel code. WASM channels use `{PLACEHOLDER}` syntax and the host substitutes credentials at request time.
+Examples:
 
-### Use native Rust when ANY of these are true:
+- Discord Gateway
+- Nostr
+- Signal
+- iMessage
+- Apple Mail
 
-1. **Persistent connections** — Discord Gateway (WebSocket), Nostr relays (WebSocket), Signal (HTTP long-poll bridge). WASM modules are invoked per-callback; they cannot hold open connections between invocations.
+## When ThinClaw Uses WASM Channels
 
-2. **Local system access** — iMessage (`chat.db` SQLite), Apple Mail (Envelope Index files). WASM has no filesystem access.
+WASM is the right path when all of these are true:
 
-3. **Full `Channel` trait features** — Streaming (`send_draft`), reactions (`react`), polls — these are host-level trait methods. WASM channels cannot implement them directly; the host must bridge them (adding complexity with no isolation benefit).
+1. The integration is webhook-driven or otherwise stateless between callbacks.
+2. The platform API is HTTP-based.
+3. Credential isolation and package hot-reload are valuable.
 
-4. **Complex state management** — OAuth token refresh, connection reconnection with backoff, sequence tracking. While WASM has `workspace_read`/`workspace_write`, native Rust is far simpler for stateful protocols.
+Examples:
 
-## Why Telegram and WhatsApp Are WASM
+- Telegram
+- Slack
+- WhatsApp
+- Discord interactions
 
-These two channels exemplify the ideal WASM use case:
+## Why The Split Exists
 
-### 1. Perfect Transport Fit
+This is not a leftover transition state.
 
-Both use **stateless webhook + REST API** patterns:
+ThinClaw intentionally uses different execution paths because they solve different problems:
 
-```
-Telegram → POST /webhook/telegram → WASM on_http_request() → emit_message()
-                                              ↓
-Agent response → WASM on_respond() → HTTP POST api.telegram.org/sendMessage
-```
+- **Native channels** are best when the runtime must hold connection state or access the local machine.
+- **WASM channels** are best when ThinClaw can keep credentials and policy in the host while letting the channel logic ship as a hot-loadable package.
 
-The WASM callback model (`on_http_request`, `on_poll`, `on_respond`) maps 1:1 to the platform's interaction pattern. There is no "connection to maintain" between callbacks.
+That gives ThinClaw a cleaner trust model than pretending every integration is equivalent.
 
-### 2. Credential Security
+## Trust And Runtime Boundaries
 
-Bot tokens for Telegram and WhatsApp are **full-access tokens** — anyone with the token can impersonate the bot. WASM credential injection ensures:
+- Native channels run in the trusted host runtime.
+- WASM channels are package-based and host-managed.
+- The host owns routing, policy, timing, and secret injection.
+- A packaged channel should not be documented as if it were a native Rust transport just because the external service supports that transport.
 
-- The WASM module **never sees** the raw token value
-- URLs like `https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage` are populated by the host at request time
-- Error messages are redacted to prevent token leakage in logs
-- If a WASM module were malicious, it couldn't extract the token from its own code
+For example:
 
-A native Rust channel handles credentials via `SecretString` (zeroizable memory), but the token is still in-process and accessible to the channel code.
+- Telegram should be documented as a WASM channel package in ThinClaw.
+- Slack should be documented as a WASM channel package in ThinClaw.
+- Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
-### 3. Dynamic Deployment & Hot-Reload
+## Operator Docs
 
-WASM channels are `.wasm` files loaded at runtime, with automatic hot-reload:
+Use these pages for operator setup:
 
-```bash
-# Deploy a new channel — the channel watcher detects it automatically
-cp telegram.wasm telegram.capabilities.json ~/.thinclaw/channels/
-# Channel is loaded within ~3 seconds (no restart required)
+- [../channels-docs/README.md](../channels-docs/README.md)
+- [../channels-docs/gateway.md](../channels-docs/gateway.md)
+- [../channels-docs/telegram.md](../channels-docs/telegram.md)
+- [../channels-docs/slack.md](../channels-docs/slack.md)
+- [../channels-docs/discord.md](../channels-docs/discord.md)
 
-# Update a channel — watcher detects mtime change, swaps it live
-cp updated-telegram.wasm ~/.thinclaw/channels/telegram.wasm
+The operator docs should describe setup and usage. This page owns the architecture boundary.
 
-# Remove a channel — watcher detects deletion, shuts it down
-rm ~/.thinclaw/channels/telegram.wasm
-```
+## Building New Channels
 
-The `ChannelWatcher` ([`src/channels/wasm/channel_watcher.rs`](../src/channels/wasm/channel_watcher.rs)) polls the channels directory every 3 seconds using mtime comparison (same approach as `ConfigWatcher`). Changes are debounced with a 1-second minimum interval.
+If you are authoring a new channel:
 
-This enables:
-- Users building custom channel variants (e.g., different message formatting)
-- Third-party channel distribution (install via file copy, not code merge)
-- Separate channel build pipeline (faster iteration)
-- **Zero-downtime updates** — channels are swapped live without restarting the agent
+- build a **native channel** when you need persistent or local capabilities
+- build a **WASM channel** when you need stateless packaged delivery
 
-### 4. Crash Isolation
-
-A bug in the Telegram WASM channel (e.g., a panic on malformed webhook JSON) is contained within the WASM sandbox. The host process continues running — other channels (Signal, Discord, etc.) are unaffected.
-
-Native Rust: a panic in a channel's `async fn respond()` would be caught by the tokio runtime but could leave the channel in an inconsistent state.
-
-## What WASM Cannot Do (and How We Handle It)
-
-### Streaming (sendMessageDraft)
-
-The `Channel::send_draft()` trait method operates at the **host level** — the dispatcher calls it on the `Channel` object during LLM streaming. WASM channels can't be called mid-stream because they use synchronous callbacks.
-
-**Solution**: The WASM wrapper (`wrapper.rs`) implements `send_draft()` on the host side, making direct HTTP calls to `sendMessageDraft` using injected credentials. The WASM module is not involved in streaming at all.
-
-```
-Dispatcher → ChannelManager::send_draft() → WasmChannel::send_draft()
-                                                    ↓ (host-side only)
-                                              reqwest POST to Telegram API
-```
-
-This is an acceptable trade-off: streaming is a host-level concern (rate limiting, debouncing, accumulation), and the WASM module's job is message formatting and routing.
-
-### Persistent WebSocket Connections
-
-WASM channels are invoked per-event. They cannot hold a WebSocket connection open between callbacks. This is why Discord uses a **native** Gateway channel for real-time events and a separate WASM channel for slash command webhooks.
-
-### Local File Access
-
-WASM has no filesystem. Channels that read local files (iMessage, Apple Mail) must be native.
-
-## Infrastructure Cost
-
-The WASM sandbox infrastructure:
-
-| Component          | Lines | Purpose                              |
-|--------------------|-------|--------------------------------------|
-| `wasm/wrapper.rs`  | 3,716 | Lifecycle, credentials, callbacks    |
-| `wasm/host.rs`     | 1,524 | Host state, emit, workspace, HTTP    |
-| `wasm/router.rs`   | 671   | Webhook routing to WASM channels     |
-| `wasm/schema.rs`   | 588   | Capabilities file parsing            |
-| `wasm/runtime.rs`  | 302   | WASM runtime initialization          |
-| `wit/channel.wit`  | 367   | WIT interface contract               |
-| **Total**          | **~7,200** | Shared by all WASM channels    |
-
-This is amortized across Telegram (2,385 LOC), WhatsApp (1,448 LOC), Slack (962 LOC), and Discord interactions (744 LOC). The infrastructure also supports future third-party channels.
-
-## Adding a New Channel
-
-**Webhook/polling-based?** → Build a WASM channel. See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md).
-
-**Persistent connection / local access / full trait?** → Build a native Rust channel:
-1. Create `src/channels/my_channel.rs`
-2. Implement the `Channel` trait
-3. Add `mod my_channel` to `src/channels/mod.rs`
-4. Wire startup in `src/main.rs`
+See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for the implementation guide.

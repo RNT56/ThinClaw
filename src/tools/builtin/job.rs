@@ -28,6 +28,7 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, requi
 ///
 /// Tries full UUID parse first. If that fails, treats the input as a hex prefix
 /// and searches the context manager for a unique match.
+#[cfg(test)]
 async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result<Uuid, ToolError> {
     // Fast path: full UUID
     if let Ok(id) = Uuid::parse_str(input) {
@@ -60,6 +61,48 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
         ))),
         n => Err(ToolError::InvalidParameters(format!(
             "ambiguous prefix '{}' matches {} jobs, provide more characters",
+            input, n
+        ))),
+    }
+}
+
+async fn resolve_owned_job_id(
+    input: &str,
+    context_manager: &ContextManager,
+    principal_id: &str,
+    actor_id: &str,
+) -> Result<Uuid, ToolError> {
+    let owned_ids = context_manager
+        .all_jobs_for_actor(principal_id, actor_id)
+        .await;
+
+    if let Ok(id) = Uuid::parse_str(input) {
+        return owned_ids
+            .into_iter()
+            .find(|owned| *owned == id)
+            .ok_or_else(|| ToolError::InvalidParameters("job not found".to_string()));
+    }
+
+    if input.len() < 4 {
+        return Err(ToolError::InvalidParameters(
+            "job ID prefix must be at least 4 hex characters".to_string(),
+        ));
+    }
+
+    let input_lower = input.to_lowercase();
+    let matches: Vec<Uuid> = owned_ids
+        .into_iter()
+        .filter(|id| id.to_string().replace('-', "").starts_with(&input_lower))
+        .collect();
+
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(ToolError::InvalidParameters(format!(
+            "no owned job found matching prefix '{}'",
+            input
+        ))),
+        n => Err(ToolError::InvalidParameters(format!(
+            "ambiguous prefix '{}' matches {} owned jobs, provide more characters",
             input, n
         ))),
     }
@@ -248,7 +291,7 @@ impl CreateJobTool {
         let start = std::time::Instant::now();
         match self
             .context_manager
-            .create_job_for_user(&ctx.user_id, title, description)
+            .create_job_for_identity(&ctx.user_id, ctx.owner_actor_id(), title, description)
             .await
         {
             Ok(job_id) => {
@@ -306,6 +349,7 @@ impl CreateJobTool {
             task: task.to_string(),
             status: "creating".to_string(),
             user_id: ctx.user_id.clone(),
+            actor_id: ctx.owner_actor_id().to_string(),
             project_dir: project_dir_str.clone(),
             success: None,
             failure_reason: None,
@@ -803,10 +847,19 @@ impl Tool for ListJobsTool {
             .get("filter")
             .and_then(|v| v.as_str())
             .unwrap_or("all");
+        let actor_id = ctx.owner_actor_id();
 
         let job_ids = match filter {
-            "active" => self.context_manager.active_jobs_for(&ctx.user_id).await,
-            _ => self.context_manager.all_jobs_for(&ctx.user_id).await,
+            "active" => {
+                self.context_manager
+                    .active_jobs_for_actor(&ctx.user_id, actor_id)
+                    .await
+            }
+            _ => {
+                self.context_manager
+                    .all_jobs_for_actor(&ctx.user_id, actor_id)
+                    .await
+            }
         };
 
         let mut jobs = Vec::new();
@@ -830,7 +883,10 @@ impl Tool for ListJobsTool {
             }
         }
 
-        let summary = self.context_manager.summary_for(&ctx.user_id).await;
+        let summary = self
+            .context_manager
+            .summary_for_actor(&ctx.user_id, actor_id)
+            .await;
 
         let result = serde_json::json!({
             "jobs": jobs,
@@ -892,13 +948,21 @@ impl Tool for JobStatusTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let requester_id = ctx.user_id.clone();
+        let requester_actor_id = ctx.owner_actor_id().to_string();
 
         let job_id_str = require_str(&params, "job_id")?;
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+        let job_id = resolve_owned_job_id(
+            job_id_str,
+            &self.context_manager,
+            &requester_id,
+            &requester_actor_id,
+        )
+        .await?;
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id {
+                if job_ctx.user_id != requester_id || job_ctx.owner_actor_id() != requester_actor_id
+                {
                     let result = serde_json::json!({
                         "error": "Job not found".to_string()
                     });
@@ -971,15 +1035,22 @@ impl Tool for CancelJobTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let requester_id = ctx.user_id.clone();
+        let requester_actor_id = ctx.owner_actor_id().to_string();
 
         let job_id_str = require_str(&params, "job_id")?;
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+        let job_id = resolve_owned_job_id(
+            job_id_str,
+            &self.context_manager,
+            &requester_id,
+            &requester_actor_id,
+        )
+        .await?;
 
         // Transition to cancelled state
         match self
             .context_manager
             .update_context(job_id, |ctx| {
-                if ctx.user_id != requester_id {
+                if ctx.user_id != requester_id || ctx.owner_actor_id() != requester_actor_id {
                     return Err("Job not found".to_string());
                 }
                 ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
@@ -1082,7 +1153,13 @@ impl Tool for JobEventsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+        let job_id = resolve_owned_job_id(
+            job_id_str,
+            &self.context_manager,
+            &ctx.user_id,
+            ctx.owner_actor_id(),
+        )
+        .await?;
 
         // Verify the caller owns this job. A missing context is treated as
         // unauthorized to prevent leaking events after process restarts.
@@ -1097,7 +1174,7 @@ impl Tool for JobEventsTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if job_ctx.user_id != ctx.user_id || job_ctx.owner_actor_id() != ctx.owner_actor_id() {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1220,7 +1297,13 @@ impl Tool for JobPromptTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+        let job_id = resolve_owned_job_id(
+            job_id_str,
+            &self.context_manager,
+            &ctx.user_id,
+            ctx.owner_actor_id(),
+        )
+        .await?;
 
         // Verify the caller owns this job. A missing context is treated as
         // unauthorized to prevent sending prompts to jobs after process restarts.
@@ -1235,7 +1318,7 @@ impl Tool for JobPromptTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if job_ctx.user_id != ctx.user_id || job_ctx.owner_actor_id() != ctx.owner_actor_id() {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1366,6 +1449,70 @@ mod tests {
         assert_eq!(
             result.result.get("title").unwrap().as_str().unwrap(),
             "Test Job"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_status_tool_rejects_same_user_different_actor() {
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job_for_identity("household", "alex", "Secret Job", "Description")
+            .await
+            .unwrap();
+
+        let tool = JobStatusTool::new(manager);
+        let params = serde_json::json!({
+            "job_id": job_id.to_string()
+        });
+        let ctx = JobContext {
+            user_id: "household".to_string(),
+            principal_id: "household".to_string(),
+            actor_id: Some("sam".to_string()),
+            ..Default::default()
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("job not found"),
+            "expected actor ownership rejection, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_job_tool_rejects_same_user_different_actor() {
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job_for_identity("household", "alex", "Secret Job", "Description")
+            .await
+            .unwrap();
+
+        let tool = CancelJobTool::new(Arc::clone(&manager));
+        let params = serde_json::json!({
+            "job_id": job_id.to_string()
+        });
+        let ctx = JobContext {
+            user_id: "household".to_string(),
+            principal_id: "household".to_string(),
+            actor_id: Some("sam".to_string()),
+            ..Default::default()
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("job not found"),
+            "expected actor ownership rejection, got: {}",
+            err
+        );
+
+        let job_ctx = manager.get_context(job_id).await.unwrap();
+        assert!(
+            job_ctx.state.is_active(),
+            "other actor must not cancel the job"
         );
     }
 
@@ -1675,6 +1822,8 @@ mod tests {
         // simulate what execute() does.
         let attacker_ctx = JobContext {
             user_id: "attacker".to_string(),
+            principal_id: "attacker".to_string(),
+            actor_id: Some("attacker".to_string()),
             ..Default::default()
         };
 
@@ -1729,6 +1878,8 @@ mod tests {
         // Attacker context with a different user_id.
         let ctx = JobContext {
             user_id: "attacker".to_string(),
+            principal_id: "attacker".to_string(),
+            actor_id: Some("attacker".to_string()),
             ..Default::default()
         };
 
@@ -1739,6 +1890,46 @@ mod tests {
             err.contains("does not belong to current user"),
             "expected ownership error, got: {}",
             err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_prompt_tool_rejects_same_user_different_actor_job() {
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm
+            .create_job_for_identity("household", "alex", "Test Job", "desc")
+            .await
+            .unwrap();
+
+        let queue: PromptQueue =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let tool = JobPromptTool::new(Arc::clone(&queue), Arc::clone(&cm));
+
+        let params = serde_json::json!({
+            "job_id": job_id.to_string(),
+            "content": "sneaky prompt",
+        });
+
+        let ctx = JobContext {
+            user_id: "household".to_string(),
+            principal_id: "household".to_string(),
+            actor_id: Some("sam".to_string()),
+            ..Default::default()
+        };
+
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("job not found"),
+            "expected actor ownership rejection, got: {}",
+            err
+        );
+
+        let q = queue.lock().await;
+        assert!(
+            q.get(&job_id).is_none(),
+            "prompt must not be queued for another actor's job"
         );
     }
 
@@ -1783,5 +1974,21 @@ mod tests {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_owned_job_id_filters_other_actor_jobs() {
+        let cm = ContextManager::new(5);
+        let alex_job = cm
+            .create_job_for_identity("household", "alex", "Test", "Desc")
+            .await
+            .unwrap();
+        cm.create_job_for_identity("household", "sam", "Other", "Desc")
+            .await
+            .unwrap();
+
+        let result = resolve_owned_job_id(&alex_job.to_string(), &cm, "household", "sam").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("job not found"));
     }
 }

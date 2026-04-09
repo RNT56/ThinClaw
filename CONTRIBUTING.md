@@ -1,63 +1,59 @@
 # Contributing to ThinClaw
 
-## Quick Start
+## Local Checks
+
+Run the Rust checks before opening a PR:
 
 ```bash
-# Run the full CI pipeline locally:
-npm run ci
-
-# Or individual checks:
-cargo clippy --all-targets -- -D warnings   # lint (warnings = errors)
-cargo fmt --check                            # formatting check
-cargo test                                   # run tests
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
-## Before Opening a PR
-
-1. **Run clippy + fmt + tests** — must pass cleanly (no clippy warnings, no fmt diffs, all tests green).
-2. **Review the relevant parity rows in `FEATURE_PARITY.md`** if your change affects a tracked capability.
-3. **Update `CHANGELOG.md`** for user-facing changes.
-
-## Code Quality
-
-- **Zero clippy warnings** — CI runs `cargo clippy --all-targets -- -D warnings`.
-  Intentionally allowed lints are configured in `Cargo.toml` under `[lints.clippy]`.
-- **Zero production `.unwrap()` calls** — use `.expect("descriptive reason")` or proper error handling.
-- **Formatting** — `cargo fmt` with the project's `rustfmt.toml` rules.
-
-### Fixing Lint Issues
-
-```bash
-cargo clippy --fix --allow-dirty    # Auto-fix clippy suggestions
-cargo fmt                           # Auto-format code
-```
-
-## Building WASM Channels
-
-After modifying any channel source code in `channels-src/`, rebuild everything:
+If you changed packaged WASM channels or tools, also rebuild the artifacts that depend on them:
 
 ```bash
 ./scripts/build-all.sh
 ```
 
-This rebuilds all WASM channels and the main ThinClaw binary. See [docs/BUILDING_CHANNELS.md](docs/BUILDING_CHANNELS.md) for the full guide.
+## Before Opening a PR
+
+1. Run `fmt`, `clippy`, and `test` locally.
+2. Update the relevant docs when behavior, defaults, commands, or trust boundaries changed.
+3. Review `FEATURE_PARITY.md` if the change affects a tracked capability.
+4. Update `CHANGELOG.md` for user-facing changes.
+
+## Code Quality
+
+- Keep clippy clean.
+- Prefer explicit error handling over unchecked production `unwrap()`.
+- Avoid adding stale inventories or brittle counts to docs.
+- Treat code-adjacent docs as part of the change, not follow-up work.
 
 ## Feature Parity Requirement
 
-When your change affects a tracked capability, update `FEATURE_PARITY.md` in the same branch.
+When a change affects tracked ThinClaw behavior, update `FEATURE_PARITY.md` in the same branch.
 
-1. Review the relevant parity rows in `FEATURE_PARITY.md`.
-2. Update status/notes if behavior changed.
-3. Include the `FEATURE_PARITY.md` diff in your commit when applicable.
+This includes:
 
-## CI Workflows
+- status changes such as `❌`, `🚧`, or `✅`
+- notes that describe changed behavior or scope
+- references that point readers to the new implementation
 
-| Workflow | Trigger | Duration | Purpose |
-|----------|---------|----------|---------|
-| `ci.yml` | Push/PR to `main`, `develop` | ~3 min | Lint + test quality gate |
-| `build-release.yml` | Tags / manual | ~20 min | Multi-platform build + release |
+## Docs and Canonicals
 
-## Dependency Security
+Before editing broad docs, check the canonical doc for the subsystem:
 
-Run `cargo audit` periodically to check for known vulnerabilities.
-Known advisories are tracked in the project audit report.
+- onboarding: `src/setup/README.md`
+- runtime flow: `Agent_flow.md`
+- deployment: `docs/DEPLOYMENT.md`
+- channels: `docs/CHANNEL_ARCHITECTURE.md`
+- extensions: `docs/EXTENSION_SYSTEM.md`
+- tools: `src/tools/README.md`
+- security/networking: `src/NETWORK_SECURITY.md`
+
+## Dependency and Security Hygiene
+
+- Run `cargo audit` periodically when working on dependency-heavy areas.
+- Treat MCP integrations as operator-trusted external surfaces, not sandboxed extensions.
+- Keep secret-handling and trust-boundary docs aligned with the real implementation.

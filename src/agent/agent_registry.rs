@@ -100,6 +100,8 @@ impl AgentRegistry {
         bound_channels: Vec<String>,
         trigger_keywords: Vec<String>,
         is_default: bool,
+        allowed_tools: Option<Vec<String>>,
+        allowed_skills: Option<Vec<String>>,
     ) -> Result<AgentWorkspaceRecord, AgentRegistryError> {
         // Validate
         self.validate_agent_id(agent_id)?;
@@ -128,6 +130,8 @@ impl AgentRegistry {
             model: model.map(String::from),
             bound_channels,
             trigger_keywords,
+            allowed_tools,
+            allowed_skills,
             is_default,
             created_at: now,
             updated_at: now,
@@ -198,6 +202,8 @@ impl AgentRegistry {
         bound_channels: Option<Vec<String>>,
         trigger_keywords: Option<Vec<String>>,
         is_default: Option<bool>,
+        allowed_tools: Option<Option<Vec<String>>>,
+        allowed_skills: Option<Option<Vec<String>>>,
     ) -> Result<AgentWorkspaceRecord, AgentRegistryError> {
         // Get current record from DB (or construct from router)
         let mut record = if let Some(ref db) = self.db {
@@ -232,6 +238,12 @@ impl AgentRegistry {
         }
         if let Some(keywords) = trigger_keywords {
             record.trigger_keywords = keywords;
+        }
+        if let Some(allowed_tools) = allowed_tools {
+            record.allowed_tools = allowed_tools;
+        }
+        if let Some(allowed_skills) = allowed_skills {
+            record.allowed_skills = allowed_skills;
         }
         if let Some(default) = is_default {
             record.is_default = default;
@@ -348,11 +360,14 @@ impl AgentRegistry {
 /// Convert an `AgentWorkspaceRecord` (DB) to an `AgentWorkspace` (router).
 fn record_to_workspace(record: &AgentWorkspaceRecord) -> AgentWorkspace {
     AgentWorkspace {
+        workspace_id: Some(record.id),
         agent_id: record.agent_id.clone(),
         display_name: record.display_name.clone(),
         system_prompt: record.system_prompt.clone(),
         bound_channels: record.bound_channels.clone(),
         trigger_keywords: record.trigger_keywords.clone(),
+        allowed_tools: record.allowed_tools.clone(),
+        allowed_skills: record.allowed_skills.clone(),
         is_default: record.is_default,
         model: record.model.clone(),
     }
@@ -363,13 +378,15 @@ fn record_to_workspace(record: &AgentWorkspaceRecord) -> AgentWorkspace {
 fn workspace_to_record(ws: &AgentWorkspace) -> AgentWorkspaceRecord {
     let now = Utc::now();
     AgentWorkspaceRecord {
-        id: Uuid::new_v4(),
+        id: ws.workspace_id.unwrap_or_else(Uuid::new_v4),
         agent_id: ws.agent_id.clone(),
         display_name: ws.display_name.clone(),
         system_prompt: ws.system_prompt.clone(),
         model: ws.model.clone(),
         bound_channels: ws.bound_channels.clone(),
         trigger_keywords: ws.trigger_keywords.clone(),
+        allowed_tools: ws.allowed_tools.clone(),
+        allowed_skills: ws.allowed_skills.clone(),
         is_default: ws.is_default,
         created_at: now,
         updated_at: now,
@@ -400,6 +417,8 @@ mod tests {
                 vec![],
                 vec![],
                 false,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -413,17 +432,27 @@ mod tests {
     async fn test_invalid_agent_id() {
         let reg = make_registry();
         assert!(
-            reg.create_agent("UPPER", "Name", None, None, vec![], vec![], false)
+            reg.create_agent("UPPER", "Name", None, None, vec![], vec![], false, None, None)
                 .await
                 .is_err()
         );
         assert!(
-            reg.create_agent("a", "Name", None, None, vec![], vec![], false)
+            reg.create_agent("a", "Name", None, None, vec![], vec![], false, None, None)
                 .await
                 .is_err()
         );
         assert!(
-            reg.create_agent("spaces here", "Name", None, None, vec![], vec![], false)
+            reg.create_agent(
+                "spaces here",
+                "Name",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None,
+            )
                 .await
                 .is_err()
         );
@@ -433,12 +462,32 @@ mod tests {
     async fn test_reserved_agent_id() {
         let reg = make_registry();
         assert!(
-            reg.create_agent("default", "Default", None, None, vec![], vec![], false)
+            reg.create_agent(
+                "default",
+                "Default",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None,
+            )
                 .await
                 .is_err()
         );
         assert!(
-            reg.create_agent("system", "System", None, None, vec![], vec![], false)
+            reg.create_agent(
+                "system",
+                "System",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None,
+            )
                 .await
                 .is_err()
         );
@@ -447,11 +496,21 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_rejected() {
         let reg = make_registry();
-        reg.create_agent("bot-a", "Bot A", None, None, vec![], vec![], false)
+        reg.create_agent("bot-a", "Bot A", None, None, vec![], vec![], false, None, None)
             .await
             .unwrap();
         assert!(
-            reg.create_agent("bot-a", "Bot A Again", None, None, vec![], vec![], false)
+            reg.create_agent(
+                "bot-a",
+                "Bot A Again",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None,
+            )
                 .await
                 .is_err()
         );
@@ -460,7 +519,17 @@ mod tests {
     #[tokio::test]
     async fn test_remove_agent() {
         let reg = make_registry();
-        reg.create_agent("to-remove", "Remove Me", None, None, vec![], vec![], false)
+        reg.create_agent(
+            "to-remove",
+            "Remove Me",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        )
             .await
             .unwrap();
         assert!(reg.remove_agent("to-remove", false).await.unwrap());
@@ -470,7 +539,7 @@ mod tests {
     #[tokio::test]
     async fn test_default_agent_protected() {
         let reg = make_registry();
-        reg.create_agent("main-bot", "Main", None, None, vec![], vec![], true)
+        reg.create_agent("main-bot", "Main", None, None, vec![], vec![], true, None, None)
             .await
             .unwrap();
         assert!(reg.remove_agent("main-bot", false).await.is_err());
@@ -480,7 +549,17 @@ mod tests {
     #[tokio::test]
     async fn test_update_agent() {
         let reg = make_registry();
-        reg.create_agent("updatable", "Original", None, None, vec![], vec![], false)
+        reg.create_agent(
+            "updatable",
+            "Original",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        )
             .await
             .unwrap();
 
@@ -490,6 +569,8 @@ mod tests {
                 Some("Updated Name"),
                 Some(Some("New prompt")),
                 Some(Some("openai/gpt-4o")),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -507,12 +588,59 @@ mod tests {
     #[tokio::test]
     async fn test_list_agents() {
         let reg = make_registry();
-        reg.create_agent("bot-1", "Bot 1", None, None, vec![], vec![], false)
+        reg.create_agent("bot-1", "Bot 1", None, None, vec![], vec![], false, None, None)
             .await
             .unwrap();
-        reg.create_agent("bot-2", "Bot 2", None, None, vec![], vec![], false)
+        reg.create_agent("bot-2", "Bot 2", None, None, vec![], vec![], false, None, None)
             .await
             .unwrap();
         assert_eq!(reg.list_agents().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_capability_allowlists_propagate_to_router() {
+        let reg = make_registry();
+        let record = reg
+            .create_agent(
+                "bounded",
+                "Bounded",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                Some(vec!["read_file".to_string(), "memory_read".to_string()]),
+                Some(vec!["github".to_string()]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            record.allowed_tools,
+            Some(vec!["read_file".to_string(), "memory_read".to_string()])
+        );
+        assert_eq!(record.allowed_skills, Some(vec!["github".to_string()]));
+
+        let updated = reg
+            .update_agent(
+                "bounded",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Some(vec!["shell".to_string()])),
+                Some(Some(vec!["openai-docs".to_string()])),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.allowed_tools, Some(vec!["shell".to_string()]));
+        assert_eq!(updated.allowed_skills, Some(vec!["openai-docs".to_string()]));
+
+        let ws = reg.router.get_agent("bounded").await.unwrap();
+        assert_eq!(ws.allowed_tools, Some(vec!["shell".to_string()]));
+        assert_eq!(ws.allowed_skills, Some(vec!["openai-docs".to_string()]));
     }
 }

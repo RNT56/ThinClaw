@@ -73,6 +73,28 @@ enum ToolPhaseTextOutcome {
     PrimaryNeedsFinalization,
 }
 
+fn merge_capability_allowlist(
+    inherited: Option<&[String]>,
+    requested: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (inherited, requested) {
+        (None, None) => None,
+        (Some(inherited), None) => Some(inherited.to_vec()),
+        (None, Some(requested)) => Some(requested),
+        (Some(inherited), Some(requested)) => {
+            let inherited: std::collections::HashSet<&str> =
+                inherited.iter().map(String::as_str).collect();
+            let mut merged: Vec<String> = requested
+                .into_iter()
+                .filter(|name| inherited.contains(name.as_str()))
+                .collect();
+            merged.sort();
+            merged.dedup();
+            Some(merged)
+        }
+    }
+}
+
 fn is_tool_phase_no_tools_signal(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed == TOOL_PHASE_NO_TOOLS_SENTINEL
@@ -133,6 +155,8 @@ impl Agent {
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
     ) -> Result<AgenticLoopResult, Error> {
+        let identity = message.resolved_identity();
+
         // Detect group chat from channel metadata (needed before loading system prompt)
         let is_group_chat = message
             .metadata
@@ -140,9 +164,32 @@ impl Agent {
             .and_then(|v| v.as_str())
             .is_some_and(|t| t == "group" || t == "channel" || t == "supergroup");
 
+        let routed_agent =
+            if let Some(owner_id) = self.agent_router.get_thread_owner(thread_id).await {
+                self.agent_router.get_agent(&owner_id).await
+            } else {
+                None
+            };
+        let routed_agent_workspace_id = routed_agent.as_ref().and_then(|agent| agent.workspace_id);
+        let routed_allowed_tools = routed_agent
+            .as_ref()
+            .and_then(|agent| agent.allowed_tools.as_deref());
+        let routed_allowed_skills = routed_agent
+            .as_ref()
+            .and_then(|agent| agent.allowed_skills.as_deref());
+        let effective_workspace = if let (Some(base_workspace), Some(workspace_id)) =
+            (self.workspace(), routed_agent_workspace_id)
+        {
+            Some(Arc::new(
+                base_workspace.as_ref().clone().with_agent(workspace_id),
+            ))
+        } else {
+            self.workspace().map(Arc::clone)
+        };
+
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
-        let system_prompt = if let Some(ws) = self.workspace() {
+        let mut system_prompt = if let Some(ws) = effective_workspace.as_ref() {
             match ws.system_prompt_for_context(is_group_chat).await {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
@@ -154,14 +201,27 @@ impl Agent {
         } else {
             None
         };
+        if let Some(agent_prompt) = routed_agent
+            .as_ref()
+            .and_then(|agent| agent.system_prompt.as_ref())
+        {
+            system_prompt = Some(match system_prompt.take() {
+                Some(prompt) if !prompt.is_empty() => {
+                    format!("{}\n\n## Agent Override\n\n{}", prompt, agent_prompt)
+                }
+                _ => agent_prompt.clone(),
+            });
+        }
 
         // Select and prepare active skills (if skills system is enabled)
-        let active_skills = self.select_active_skills(&message.content).await;
+        let active_skills = self
+            .select_active_skills(&message.content, routed_allowed_skills)
+            .await;
 
         // Collect the full skill directory (all loaded skills, not just matched ones).
         // This powers the always-on ## Skills section so the agent always knows
         // what skills are installed, even when none keyword-matched this message.
-        let all_skills = self.collect_all_skills().await;
+        let all_skills = self.collect_all_skills(routed_allowed_skills).await;
 
         // Build skill context block.
         //
@@ -230,7 +290,9 @@ impl Agent {
                 parts.push(dir_lines.join("\n"));
             } else if !active_skills.is_empty() {
                 // All loaded skills are already active — nothing extra to show
-                parts.push("### Available Skills\n(all installed skills are already active)".to_string());
+                parts.push(
+                    "### Available Skills\n(all installed skills are already active)".to_string(),
+                );
             }
 
             Some(parts.join("\n"))
@@ -240,7 +302,16 @@ impl Agent {
 
         // Request-time provider routing now happens inside the runtime LLM wrapper,
         // which sees the full canonical provider config and live-reload state.
-        let routed_llm: Arc<dyn crate::llm::LlmProvider> = self.llm().clone();
+        let routed_llm: Arc<dyn crate::llm::LlmProvider> = if let Some(model_spec) =
+            routed_agent.as_ref().and_then(|agent| agent.model.as_ref())
+        {
+            crate::tools::builtin::llm_tools::wrap_model_spec_override(
+                self.llm().clone(),
+                model_spec.clone(),
+            )
+        } else {
+            self.llm().clone()
+        };
 
         let active_channel_names = self.channels.channel_names().await;
 
@@ -285,7 +356,68 @@ impl Agent {
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx = JobContext::with_identity(
+            identity.principal_id.clone(),
+            identity.actor_id.clone(),
+            "chat",
+            "Interactive chat session",
+        );
+        job_ctx.metadata = message.metadata.clone();
+        if !job_ctx.metadata.is_object() {
+            job_ctx.metadata = serde_json::json!({});
+        }
+        if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+            metadata.insert(
+                "thread_id".to_string(),
+                serde_json::json!(thread_id.to_string()),
+            );
+            metadata.insert(
+                "conversation_kind".to_string(),
+                serde_json::json!(identity.conversation_kind.as_str()),
+            );
+            metadata.insert(
+                "conversation_scope_id".to_string(),
+                serde_json::json!(identity.conversation_scope_id.to_string()),
+            );
+            metadata.insert(
+                "principal_id".to_string(),
+                serde_json::json!(identity.principal_id.clone()),
+            );
+                metadata.insert(
+                    "actor_id".to_string(),
+                    serde_json::json!(identity.actor_id.clone()),
+                );
+                if let Some(agent) = routed_agent.as_ref() {
+                metadata.insert(
+                    "agent_id".to_string(),
+                    serde_json::json!(agent.agent_id.clone()),
+                );
+                if let Some(workspace_id) = agent.workspace_id {
+                    metadata.insert(
+                        "agent_workspace_id".to_string(),
+                        serde_json::json!(workspace_id.to_string()),
+                    );
+                }
+                    if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
+                        metadata.insert(
+                            "allowed_tools".to_string(),
+                            serde_json::json!(allowed_tools),
+                        );
+                    }
+                    if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
+                        metadata.insert(
+                            "allowed_skills".to_string(),
+                            serde_json::json!(allowed_skills),
+                        );
+                    }
+                }
+            }
+        let model_override_scope_key =
+            crate::tools::builtin::llm_tools::model_override_scope_key_from_metadata(
+                &job_ctx.metadata,
+                Some(identity.principal_id.as_str()),
+                Some(identity.actor_id.as_str()),
+            );
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -337,7 +469,7 @@ impl Agent {
             // so subsequent calls carry a per-request model override that the
             // live runtime can resolve across catalog and non-catalog backends.
             if let Some(ref override_lock) = self.deps.model_override {
-                let current_override = override_lock.read().await.clone();
+                let current_override = override_lock.get(&model_override_scope_key).await;
                 let current_spec = current_override.as_ref().map(|mo| mo.model_spec.clone());
                 if current_spec != last_applied_model_override {
                     if let Some(ref mo) = current_override {
@@ -366,7 +498,7 @@ impl Agent {
                                 model = %new_model,
                                 "Failed to apply agent model override because the provider slug is unsupported"
                             );
-                            *override_lock.write().await = None;
+                            override_lock.clear(&model_override_scope_key).await;
                             reasoning.swap_llm(original_llm.clone());
                             context_messages.push(ChatMessage::system(format!(
                                 "Runtime note: requested model override '{}' could not be activated and was cleared because the provider slug is unsupported.",
@@ -383,7 +515,9 @@ impl Agent {
                 }
             }
 
-            // Check if interrupted — preserve partial output
+            // Interrupts are cooperative at iteration boundaries. We check
+            // before each new LLM/tool step and after responses return, but we
+            // intentionally do not try to cancel an in-flight provider call.
             {
                 let sess = session.lock().await;
                 if let Some(thread) = sess.threads.get(&thread_id)
@@ -632,7 +766,10 @@ impl Agent {
             }
 
             // Refresh tool definitions each iteration so newly built tools become visible
-            let tool_defs = self.tools().tool_definitions().await;
+            let tool_defs = self
+                .tools()
+                .tool_definitions_for_capabilities(routed_allowed_tools, routed_allowed_skills)
+                .await;
 
             // Apply trust-based tool attenuation if skills are active.
             let tool_defs = if !active_skills.is_empty() {
@@ -1319,26 +1456,83 @@ impl Agent {
                                     && parsed.get("action").and_then(|v| v.as_str())
                                         == Some("spawn_subagent")
                                 {
-                                    if let Some(executor) = self.subagent_executor.as_ref() {
+                                        if let Some(executor) = self.subagent_executor.as_ref() {
                                         if let Some(req_val) = parsed.get("request")
-                                                        && let Ok(request) = serde_json::from_value::<
+                                                        && let Ok(mut request) = serde_json::from_value::<
                                                             crate::agent::subagent_executor::SubagentSpawnRequest,
                                                         >(
                                                             req_val.clone()
                                                         ) {
+                                                            request.principal_id.get_or_insert_with(|| identity.principal_id.clone());
+                                                            request.actor_id.get_or_insert_with(|| identity.actor_id.clone());
+                                                            request.allowed_tools = merge_capability_allowlist(
+                                                                routed_allowed_tools,
+                                                                request.allowed_tools.take(),
+                                                            );
+                                                            request.allowed_skills = merge_capability_allowlist(
+                                                                routed_allowed_skills,
+                                                                request.allowed_skills.take(),
+                                                            );
+                                                            if request.agent_workspace_id.is_none() {
+                                                                request.agent_workspace_id = routed_agent_workspace_id;
+                                                            }
+                                                            let pending_resume_request = if request.wait {
+                                                                None
+                                                            } else {
+                                                                Some(request.clone())
+                                                            };
+                                                            let mut spawn_metadata = message.metadata.clone();
+                                                            if !spawn_metadata.is_object() {
+                                                                spawn_metadata = serde_json::json!({});
+                                                            }
+                                                            if let Some(metadata) = spawn_metadata.as_object_mut() {
+                                                                metadata.insert("thread_id".to_string(), serde_json::json!(thread_id.to_string()));
+                                                                metadata.insert("principal_id".to_string(), serde_json::json!(identity.principal_id.clone()));
+                                                                metadata.insert("actor_id".to_string(), serde_json::json!(identity.actor_id.clone()));
+                                                                metadata.insert("conversation_kind".to_string(), serde_json::json!(identity.conversation_kind.as_str()));
+                                                            }
                                                             let exec_result = executor
                                                                 .spawn(
                                                                     request,
                                                                     &message.channel,
-                                                                    &message.metadata,
+                                                                    &spawn_metadata,
+                                                                    &message.user_id,
+                                                                    Some(&identity),
+                                                                    Some(&thread_id.to_string()),
                                                                 )
                                                                 .await;
 
                                                             tool_result = match exec_result {
-                                                                Ok(result) => Ok(
-                                                                    serde_json::to_string(&result)
-                                                                        .unwrap_or_default(),
-                                                                ),
+                                                                Ok(result) => {
+                                                                    if let (Some(store), Some(request)) =
+                                                                        (self.store(), pending_resume_request)
+                                                                    {
+                                                                        let _ = crate::agent::mutate_thread_runtime(
+                                                                            store,
+                                                                            thread_id,
+                                                                            |runtime| {
+                                                                                runtime.active_subagents.push(
+                                                                                    crate::agent::PersistedSubagentState {
+                                                                                        agent_id: result.agent_id,
+                                                                                        name: request.name.clone(),
+                                                                                        request,
+                                                                                        channel_name: message.channel.clone(),
+                                                                                        channel_metadata: spawn_metadata.clone(),
+                                                                                        parent_user_id: message.user_id.clone(),
+                                                                                        parent_identity: Some(identity.clone()),
+                                                                                        parent_thread_id: thread_id.to_string(),
+                                                                                        reinject_result: true,
+                                                                                    },
+                                                                                );
+                                                                            },
+                                                                        )
+                                                                        .await;
+                                                                    }
+                                                                    Ok(
+                                                                        serde_json::to_string(&result)
+                                                                            .unwrap_or_default(),
+                                                                    )
+                                                                }
                                                                 Err(e) => Ok(
                                                                     serde_json::json!({
                                                                         "error": e.to_string(),
@@ -1387,10 +1581,21 @@ impl Agent {
                                         .unwrap_or("");
                                     let target_model =
                                         parsed.get("target_model").and_then(|v| v.as_str());
+                                    let target_allowed_tools = parsed
+                                        .get("target_allowed_tools")
+                                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                                    let target_allowed_skills = parsed
+                                        .get("target_allowed_skills")
+                                        .and_then(|v| serde_json::from_value(v.clone()).ok());
                                     let timeout_secs = parsed
                                         .get("timeout_secs")
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(120);
+                                    let target_workspace_id = parsed
+                                        .get("target_workspace_id")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|v| Uuid::parse_str(v).ok());
+                                    let parent_identity = message.resolved_identity();
 
                                     if let Some(executor) = self.subagent_executor.as_ref() {
                                         let request =
@@ -1398,14 +1603,59 @@ impl Agent {
                                                 name: format!("a2a:{}", target_id),
                                                 task: a2a_message.to_string(),
                                                 system_prompt: Some(system_prompt.to_string()),
-                                                allowed_tools: None,
+                                                allowed_tools: merge_capability_allowlist(
+                                                    routed_allowed_tools,
+                                                    target_allowed_tools,
+                                                ),
+                                                allowed_skills: merge_capability_allowlist(
+                                                    routed_allowed_skills,
+                                                    target_allowed_skills,
+                                                ),
+                                                principal_id: Some(
+                                                    parent_identity.principal_id.clone(),
+                                                ),
+                                                actor_id: Some(parent_identity.actor_id.clone()),
+                                                agent_workspace_id: target_workspace_id,
                                                 model: target_model.map(String::from),
                                                 wait: true,
                                                 timeout_secs: Some(timeout_secs),
                                             };
+                                        let mut spawn_metadata = message.metadata.clone();
+                                        if !spawn_metadata.is_object() {
+                                            spawn_metadata = serde_json::json!({});
+                                        }
+                                        if let Some(metadata) = spawn_metadata.as_object_mut() {
+                                            metadata.insert(
+                                                "thread_id".to_string(),
+                                                serde_json::json!(thread_id.to_string()),
+                                            );
+                                            metadata.insert(
+                                                "principal_id".to_string(),
+                                                serde_json::json!(
+                                                    parent_identity.principal_id.clone()
+                                                ),
+                                            );
+                                            metadata.insert(
+                                                "actor_id".to_string(),
+                                                serde_json::json!(parent_identity.actor_id.clone()),
+                                            );
+                                            metadata.insert(
+                                                "conversation_kind".to_string(),
+                                                serde_json::json!(
+                                                    parent_identity.conversation_kind.as_str()
+                                                ),
+                                            );
+                                        }
 
                                         let exec_result = executor
-                                            .spawn(request, &message.channel, &message.metadata)
+                                            .spawn(
+                                                request,
+                                                &message.channel,
+                                                &spawn_metadata,
+                                                &message.user_id,
+                                                Some(&parent_identity),
+                                                Some(&thread_id.to_string()),
+                                            )
                                             .await;
 
                                         tool_result = match exec_result {
@@ -1651,6 +1901,13 @@ impl Agent {
         options: LlmTurnOptions,
     ) -> Result<LlmTurnResult, Error> {
         let request_model_name = reasoning.current_llm().active_model_name();
+        let identity = message.resolved_identity();
+        let model_override_scope_key =
+            crate::tools::builtin::llm_tools::model_override_scope_key_from_metadata(
+                &message.metadata,
+                Some(identity.principal_id.as_str()),
+                Some(identity.actor_id.as_str()),
+            );
         let mut context = self.build_turn_context(
             context_messages,
             available_tools.clone(),
@@ -1917,8 +2174,10 @@ impl Agent {
                 Err(err) => {
                     if !recovered_from_override_failure
                         && let Some(ref override_lock) = self.deps.model_override
-                        && let Some(failed_override) = override_lock.write().await.take()
+                        && let Some(failed_override) =
+                            override_lock.get(&model_override_scope_key).await
                     {
+                        override_lock.clear(&model_override_scope_key).await;
                         tracing::warn!(
                             model = %failed_override.model_spec,
                             error = %err,
@@ -2554,6 +2813,7 @@ mod tests {
             llm_runtime,
             routing_policy: None,
             model_override: None,
+            restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let agent = Agent::new(

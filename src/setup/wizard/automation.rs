@@ -40,7 +40,6 @@ impl SetupWizard {
     }
 
     /// Step 11: Claude Code sandbox.
-
     pub(super) fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc, watch};
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
+use crate::identity::ResolvedIdentity;
 use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
 };
@@ -82,6 +83,10 @@ pub struct SubagentResultMessage {
     pub result: SubagentResult,
     /// Channel the parent agent was on when it spawned this sub-agent.
     pub channel_name: String,
+    /// User ID to re-inject the result under.
+    pub parent_user_id: String,
+    /// Resolved identity so the re-injected message lands in the same session scope.
+    pub parent_identity: Option<ResolvedIdentity>,
     /// Metadata for routing (contains thread_id etc).
     pub channel_metadata: serde_json::Value,
     /// Thread ID of the parent conversation.
@@ -143,16 +148,28 @@ pub struct SubagentSpawnRequest {
     pub model: Option<String>,
     /// Optional list of allowed tool names. If None, all tools are available.
     pub allowed_tools: Option<Vec<String>>,
+    /// Optional list of allowed skill names. If None, all skills remain visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_skills: Option<Vec<String>>,
+    /// Optional principal owner for workspace-scoped tool access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    /// Optional actor owner for actor-scoped memory overlays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Optional routed agent workspace UUID for memory/tool isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_workspace_id: Option<Uuid>,
     /// Timeout in seconds. Falls back to config default.
     pub timeout_secs: Option<u64>,
-    /// If true, the parent waits for the sub-agent to complete.
-    /// DEPRECATED: Sub-agents always run fire-and-forget now.
-    /// Results are injected back via the result channel.
+    /// If true, wait for the sub-agent to complete and return its result inline.
+    /// If false, return immediately and re-inject the result on completion.
     #[serde(default)]
     pub wait: bool,
 }
 
 /// The sub-agent executor manages sub-agent lifecycle.
+#[derive(Clone)]
 pub struct SubagentExecutor {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
@@ -220,19 +237,23 @@ impl SubagentExecutor {
         self
     }
 
-    /// Spawn a sub-agent as a fire-and-forget background task.
+    /// Spawn a sub-agent.
     ///
-    /// Always returns immediately with the agent ID. The sub-agent runs in
-    /// the background and its result is sent through the `result_tx` channel
-    /// when it completes. The `wait` field on the request is ignored.
+    /// When `request.wait` is true, waits for the sub-agent to finish and
+    /// returns the final result inline. Otherwise returns immediately and
+    /// re-injects the result through the `result_tx` channel on completion.
     pub async fn spawn(
         &self,
         request: SubagentSpawnRequest,
         channel_name: &str,
         channel_metadata: &serde_json::Value,
+        parent_user_id: &str,
+        parent_identity: Option<&ResolvedIdentity>,
+        parent_thread_id: Option<&str>,
     ) -> Result<SubagentResult, Error> {
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (completion_tx, completion_rx) = oneshot::channel::<SubagentResult>();
         // Bidirectional: parent → sub-agent message channel
         let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
 
@@ -277,6 +298,7 @@ impl SubagentExecutor {
                 .unwrap_or(self.config.default_timeout_secs),
         );
         let max_iterations = self.config.max_tool_iterations;
+        let wait_for_completion = request.wait;
 
         // Build system prompt
         let system_prompt = request.system_prompt.clone().unwrap_or_else(|| {
@@ -294,21 +316,38 @@ impl SubagentExecutor {
         let task = request.task.clone();
 
         // Clone shared deps for the spawned task
-        let llm = self.llm.clone();
+        let llm = if let Some(model_spec) = request.model.as_ref() {
+            crate::tools::builtin::llm_tools::wrap_model_spec_override(
+                self.llm.clone(),
+                model_spec.clone(),
+            )
+        } else {
+            self.llm.clone()
+        };
         let safety = self.safety.clone();
         let tools = self.tools.clone();
         let channels = self.channels.clone();
         let ch_name = channel_name.to_string();
         let ch_meta = channel_metadata.clone();
         let allowed = request.allowed_tools.clone();
+        let allowed_skills = request.allowed_skills.clone();
         let result_tx = self.result_tx.clone();
+        let principal_id = request.principal_id.clone();
+        let actor_id = request.actor_id.clone();
+        let agent_workspace_id = request.agent_workspace_id;
+        let parent_user_id = parent_user_id.to_string();
+        let parent_identity = parent_identity.cloned();
 
         // For the result injection message
-        let parent_thread_id = channel_metadata
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent:main")
-            .to_string();
+        let parent_thread_id = parent_thread_id
+            .map(str::to_string)
+            .or_else(|| {
+                channel_metadata
+                    .get("thread_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "agent:main".to_string());
 
         let agent_name = name.clone();
         let agent_task = task.clone();
@@ -332,6 +371,7 @@ impl SubagentExecutor {
             .await;
 
         let active_ref = self.active.clone();
+        let active_for_task = self.active.clone();
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
 
@@ -350,6 +390,10 @@ impl SubagentExecutor {
                     parent_to_sub_rx,
                     max_iterations,
                     allowed.as_deref(),
+                    allowed_skills.as_deref(),
+                    principal_id.as_deref(),
+                    actor_id.as_deref(),
+                    agent_workspace_id,
                     &id.to_string(),
                     cost_tracker_for_task.clone(),
                 ),
@@ -501,15 +545,44 @@ impl SubagentExecutor {
                 }
             }
 
+            {
+                let mut active = active_for_task.write().await;
+                if let Some(handle) = active.get_mut(&id) {
+                    handle.status = if subagent_result.success {
+                        SubagentStatus::Completed
+                    } else if subagent_result.error.as_deref() == Some("Timed out") {
+                        SubagentStatus::TimedOut
+                    } else {
+                        SubagentStatus::Failed(
+                            subagent_result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "Unknown error".to_string()),
+                        )
+                    };
+                    handle.join_handle = None;
+                }
+            }
+
+            let _ = completion_tx.send(subagent_result.clone());
+
             // Inject result back to parent agent via the result channel
-            let _ = result_tx
-                .send(SubagentResultMessage {
-                    result: subagent_result.clone(),
-                    channel_name: ch_name,
-                    channel_metadata: ch_meta,
-                    parent_thread_id,
-                })
-                .await;
+            let reinject_result = ch_meta
+                .get("reinject_result")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !wait_for_completion && reinject_result {
+                let _ = result_tx
+                    .send(SubagentResultMessage {
+                        result: subagent_result.clone(),
+                        channel_name: ch_name,
+                        parent_user_id,
+                        parent_identity,
+                        channel_metadata: ch_meta,
+                        parent_thread_id,
+                    })
+                    .await;
+            }
 
             subagent_result
         });
@@ -517,24 +590,34 @@ impl SubagentExecutor {
         // Store the JoinHandle now that we have it (Bug 38 — entry was pre-inserted above).
         {
             let mut active = active_ref.write().await;
-            if let Some(handle) = active.get_mut(&id) {
+            if let Some(handle) = active.get_mut(&id)
+                && handle.status == SubagentStatus::Running
+            {
                 handle.join_handle = Some(join_handle);
             }
         }
 
-        // Always return immediately (fire-and-forget)
-        Ok(SubagentResult {
-            agent_id: id,
-            name,
-            response: format!(
-                "Sub-agent spawned (id: {}). Results will arrive when complete.",
-                id
-            ),
-            iterations: 0,
-            duration_ms: 0,
-            success: true,
-            error: None,
-        })
+        if wait_for_completion {
+            completion_rx.await.map_err(|_| {
+                Error::Tool(crate::error::ToolError::ExecutionFailed {
+                    name: "spawn_subagent".to_string(),
+                    reason: "Sub-agent task ended unexpectedly".to_string(),
+                })
+            })
+        } else {
+            Ok(SubagentResult {
+                agent_id: id,
+                name,
+                response: format!(
+                    "Sub-agent spawned (id: {}). Results will arrive when complete.",
+                    id
+                ),
+                iterations: 0,
+                duration_ms: 0,
+                success: true,
+                error: None,
+            })
+        }
     }
 
     /// Send a message from the parent agent to a running sub-agent.
@@ -641,29 +724,56 @@ async fn run_subagent_loop(
     mut parent_rx: mpsc::Receiver<String>,
     max_iterations: usize,
     allowed_tools: Option<&[String]>,
+    allowed_skills: Option<&[String]>,
+    principal_id: Option<&str>,
+    actor_id: Option<&str>,
+    agent_workspace_id: Option<Uuid>,
     agent_id: &str,
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
 
-    let job_ctx = JobContext::with_user("subagent", "subagent", "Sub-agent task");
+    let principal_id = principal_id.unwrap_or("subagent");
+    let actor_id = actor_id.unwrap_or(principal_id);
+    let mut job_ctx =
+        JobContext::with_identity(principal_id, actor_id, "subagent", "Sub-agent task");
+    job_ctx.metadata = channel_metadata.clone();
+    if !job_ctx.metadata.is_object() {
+        job_ctx.metadata = serde_json::json!({});
+    }
+    if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+        metadata
+            .entry("conversation_kind".to_string())
+            .or_insert_with(|| serde_json::json!("direct"));
+        metadata
+            .entry("principal_id".to_string())
+            .or_insert_with(|| serde_json::json!(principal_id));
+        metadata
+            .entry("actor_id".to_string())
+            .or_insert_with(|| serde_json::json!(actor_id));
+        if let Some(agent_workspace_id) = agent_workspace_id {
+            metadata.insert(
+                "agent_workspace_id".to_string(),
+                serde_json::json!(agent_workspace_id.to_string()),
+            );
+        }
+        if let Some(allowed_tools) = allowed_tools {
+            metadata.insert("allowed_tools".to_string(), serde_json::json!(allowed_tools));
+        }
+        if let Some(allowed_skills) = allowed_skills {
+            metadata.insert("allowed_skills".to_string(), serde_json::json!(allowed_skills));
+        }
+    }
 
     // Build tool definitions (filtered if needed)
-    let all_defs = tools.tool_definitions().await;
-    let tool_defs: Vec<ToolDefinition> = match allowed_tools {
-        Some(names) => all_defs
-            .into_iter()
-            .filter(|d| {
-                names.iter().any(|n| n == &d.name)
-                    || d.name == "agent_think"
-                    || d.name == "emit_user_message"
-            })
-            .collect(),
-        None => all_defs,
-    };
+    let tool_defs: Vec<ToolDefinition> = tools
+        .tool_definitions_for_capabilities(allowed_tools, allowed_skills)
+        .await;
 
-    let mut reasoning =
-        Reasoning::new(llm, safety.clone()).with_system_prompt(system_prompt.to_string());
+    let model_name = llm.active_model_name();
+    let mut reasoning = Reasoning::new(llm, safety.clone())
+        .with_system_prompt(system_prompt.to_string())
+        .with_model_name(model_name);
     // Wire cost tracker so sub-agent LLM calls appear in the Cost Dashboard
     if let Some(ref tracker) = cost_tracker {
         reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
@@ -794,6 +904,18 @@ async fn run_subagent_loop(
                         )
                         .await;
 
+                    if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(
+                        &job_ctx.metadata,
+                        &tc.name,
+                    ) {
+                        context_messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            format!("Error: tool '{}' not allowed for this sub-agent", tc.name),
+                        ));
+                        continue;
+                    }
+
                     // Execute normal tool
                     let tool = match tools.get(&tc.name).await {
                         Some(t) => t,
@@ -806,18 +928,6 @@ async fn run_subagent_loop(
                             continue;
                         }
                     };
-
-                    // Check tool is in allowed list
-                    if let Some(names) = allowed_tools
-                        && !names.iter().any(|n| n == &tc.name)
-                    {
-                        context_messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            &tc.name,
-                            format!("Error: tool '{}' not allowed for this sub-agent", tc.name),
-                        ));
-                        continue;
-                    }
 
                     let tool_timeout = tool.execution_timeout();
                     let result = tokio::time::timeout(
@@ -855,6 +965,8 @@ async fn run_subagent_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SafetyConfig;
+    use crate::testing::StubLlm;
 
     #[test]
     fn test_subagent_config_defaults() {
@@ -903,6 +1015,10 @@ mod tests {
             system_prompt: None,
             model: None,
             allowed_tools: None,
+            allowed_skills: None,
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
             timeout_secs: None,
             wait: true,
         };
@@ -919,6 +1035,10 @@ mod tests {
             system_prompt: None,
             model: None,
             allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
+            allowed_skills: None,
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
             timeout_secs: Some(120),
             wait: true,
         };
@@ -941,5 +1061,68 @@ mod tests {
         assert!(request.allowed_tools.is_none());
         assert!(request.timeout_secs.is_none());
         assert!(!request.wait);
+    }
+
+    #[tokio::test]
+    async fn completed_subagent_is_marked_completed_and_not_running() {
+        let llm = Arc::new(StubLlm::new("done"));
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let tools = Arc::new(ToolRegistry::new());
+        let channels = Arc::new(ChannelManager::new());
+        let (executor, mut result_rx) =
+            SubagentExecutor::new(llm, safety, tools, channels, SubagentConfig::default());
+
+        let spawned = executor
+            .spawn(
+                SubagentSpawnRequest {
+                    name: "test".to_string(),
+                    task: "say done".to_string(),
+                    system_prompt: None,
+                    model: None,
+                    allowed_tools: None,
+                    allowed_skills: None,
+                    principal_id: None,
+                    actor_id: None,
+                    agent_workspace_id: None,
+                    timeout_secs: Some(5),
+                    wait: false,
+                },
+                "web",
+                &serde_json::json!({ "thread_id": "agent:main" }),
+                "default",
+                None,
+                Some("agent:main"),
+            )
+            .await
+            .expect("subagent should spawn");
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), result_rx.recv())
+            .await
+            .expect("result should arrive")
+            .expect("channel should stay open");
+        assert_eq!(completed.result.agent_id, spawned.agent_id);
+        assert!(completed.result.success);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if executor.running_count().await == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("running count should drop after completion");
+
+        let info = executor
+            .list()
+            .await
+            .into_iter()
+            .find(|entry| entry.id == spawned.agent_id)
+            .expect("spawned agent should stay listed");
+        assert_eq!(info.status, SubagentStatus::Completed);
     }
 }

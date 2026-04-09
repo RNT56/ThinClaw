@@ -12,7 +12,7 @@
 /// - `BYTEA` -> `BLOB`
 /// - `NUMERIC` -> `TEXT` (preserve precision for rust_decimal)
 /// - `TEXT[]` -> `TEXT` (JSON array)
-/// - `VECTOR(1536)` -> `F32_BLOB(1536)` (libsql native)
+/// - `VECTOR(1536)` -> `F32_BLOB(1536)` plus canonical `BLOB` + `dim`
 /// - `TSVECTOR` -> FTS5 virtual table
 /// - `BIGSERIAL` -> `INTEGER PRIMARY KEY AUTOINCREMENT`
 /// - PL/pgSQL functions -> SQLite triggers
@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     channel TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    actor_id TEXT,
+    conversation_scope_id TEXT,
+    conversation_kind TEXT NOT NULL DEFAULT 'direct',
     thread_id TEXT,
+    stable_external_conversation_key TEXT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_activity TEXT NOT NULL DEFAULT (datetime('now')),
     metadata TEXT NOT NULL DEFAULT '{}'
@@ -40,6 +44,8 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_actor ON conversations(actor_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations(conversation_scope_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -47,11 +53,53 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    actor_id TEXT,
+    actor_display_name TEXT,
+    raw_sender_id TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
     ON conversation_messages(conversation_id);
+
+-- ==================== Identity Registry ====================
+
+CREATE TABLE IF NOT EXISTS actors (
+    actor_id TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL DEFAULT 'default',
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    preferred_delivery_channel TEXT,
+    preferred_delivery_external_user_id TEXT,
+    last_active_direct_channel TEXT,
+    last_active_direct_external_user_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (
+        (preferred_delivery_channel IS NULL) = (preferred_delivery_external_user_id IS NULL)
+    ),
+    CHECK (
+        (last_active_direct_channel IS NULL) = (last_active_direct_external_user_id IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_actors_principal ON actors(principal_id);
+CREATE INDEX IF NOT EXISTS idx_actors_status ON actors(status);
+
+CREATE TABLE IF NOT EXISTS actor_endpoints (
+    channel TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL REFERENCES actors(actor_id) ON DELETE CASCADE,
+    endpoint_metadata TEXT NOT NULL DEFAULT '{}',
+    approval_status TEXT NOT NULL DEFAULT 'approved',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (channel, external_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_actor_endpoints_actor_id ON actor_endpoints(actor_id);
+CREATE INDEX IF NOT EXISTS idx_actor_endpoints_status ON actor_endpoints(approval_status);
 
 -- ==================== Agent Jobs ====================
 
@@ -65,6 +113,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     status TEXT NOT NULL,
     source TEXT NOT NULL,
     user_id TEXT NOT NULL DEFAULT 'default',
+    principal_id TEXT NOT NULL DEFAULT 'default',
+    actor_id TEXT NOT NULL DEFAULT 'default',
     project_dir TEXT,
     job_mode TEXT NOT NULL DEFAULT 'worker',
     budget_amount TEXT,
@@ -78,6 +128,10 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     success INTEGER,
     failure_reason TEXT,
     stuck_since TEXT,
+    total_tokens_used INTEGER NOT NULL DEFAULT 0,
+    max_tokens INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    transitions TEXT NOT NULL DEFAULT '[]',
     repair_attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     started_at TEXT,
@@ -89,6 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_jobs_marketplace ON agent_jobs(marketplace_
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_source ON agent_jobs(source);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_user ON agent_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_actor ON agent_jobs(actor_id);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_created ON agent_jobs(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS job_actions (
@@ -222,11 +277,14 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     embedding F32_BLOB(1536),
+    embedding_blob BLOB,
+    embedding_dim INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_dim ON memory_chunks(embedding_dim);
 
 -- Vector index for semantic search (libSQL native)
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding
@@ -422,6 +480,7 @@ CREATE TABLE IF NOT EXISTS routines (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL DEFAULT 'default',
     enabled INTEGER NOT NULL DEFAULT 1,
     trigger_type TEXT NOT NULL,
     trigger_config TEXT NOT NULL,
@@ -442,10 +501,11 @@ CREATE TABLE IF NOT EXISTS routines (
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (user_id, name)
+    UNIQUE (user_id, actor_id, name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_routines_user ON routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_routines_actor ON routines(actor_id);
 
 -- ==================== Routine Runs ====================
 
@@ -556,6 +616,8 @@ CREATE TABLE IF NOT EXISTS agent_workspaces (
     model TEXT,
     bound_channels TEXT NOT NULL DEFAULT '[]',
     trigger_keywords TEXT NOT NULL DEFAULT '[]',
+    allowed_tools TEXT,
+    allowed_skills TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -565,3 +627,108 @@ CREATE INDEX IF NOT EXISTS idx_agent_ws_agent_id ON agent_workspaces(agent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_ws_default ON agent_workspaces(is_default);
 
 "#;
+
+/// Idempotent column-upgrade statements for existing libSQL databases.
+///
+/// The consolidated `SCHEMA` uses `CREATE TABLE IF NOT EXISTS`, which is a no-op
+/// when the table already exists.  These `ALTER TABLE ADD COLUMN` statements
+/// bring pre-V10/V11 tables up to date.  Each is run individually so that
+/// "duplicate column" errors (column already present) can be safely ignored.
+pub const UPGRADES: &[&str] = &[
+    // ── V11: conversations ──────────────────────────────────────────────
+    "ALTER TABLE conversations ADD COLUMN actor_id TEXT",
+    "ALTER TABLE conversations ADD COLUMN conversation_scope_id TEXT",
+    "ALTER TABLE conversations ADD COLUMN conversation_kind TEXT NOT NULL DEFAULT 'direct'",
+    "ALTER TABLE conversations ADD COLUMN stable_external_conversation_key TEXT",
+    // ── V11: conversation_messages ───────────────────────────────────────
+    "ALTER TABLE conversation_messages ADD COLUMN actor_id TEXT",
+    "ALTER TABLE conversation_messages ADD COLUMN actor_display_name TEXT",
+    "ALTER TABLE conversation_messages ADD COLUMN raw_sender_id TEXT",
+    "ALTER TABLE conversation_messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+    // ── V10: actors + actor_endpoints (handled by CREATE TABLE IF NOT EXISTS) ──
+    // ── V11: agent_jobs ─────────────────────────────────────────────────
+    "ALTER TABLE agent_jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE agent_jobs ADD COLUMN principal_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE agent_jobs ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE agent_jobs ADD COLUMN project_dir TEXT",
+    "ALTER TABLE agent_jobs ADD COLUMN job_mode TEXT NOT NULL DEFAULT 'worker'",
+    "ALTER TABLE agent_jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'sandbox'",
+    "ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE agent_jobs ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE agent_jobs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE agent_jobs ADD COLUMN transitions TEXT NOT NULL DEFAULT '[]'",
+    "UPDATE agent_jobs SET principal_id = user_id WHERE user_id IS NOT NULL AND (principal_id IS NULL OR principal_id = 'default')",
+    // ── V11: routines ───────────────────────────────────────────────────
+    "ALTER TABLE routines ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
+    // ── V13: agent capability isolation ────────────────────────────────
+    "ALTER TABLE agent_workspaces ADD COLUMN allowed_tools TEXT",
+    "ALTER TABLE agent_workspaces ADD COLUMN allowed_skills TEXT",
+    // ── V11: memory_chunks embedding parity ─────────────────────────────
+    "ALTER TABLE memory_chunks ADD COLUMN embedding_blob BLOB",
+    "ALTER TABLE memory_chunks ADD COLUMN embedding_dim INTEGER",
+    "CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_dim ON memory_chunks(embedding_dim)",
+];
+
+/// Idempotent data repairs for legacy libSQL databases.
+///
+/// libSQL uses a consolidated schema rather than numbered per-version
+/// migrations, so older deployments can pick up the new columns without
+/// receiving the PostgreSQL-style backfill that populates them. Run these on
+/// every startup after `SCHEMA` so null/empty legacy identity fields are
+/// repaired in place.
+pub const DATA_REPAIRS: &[&str] = &[
+    r#"
+    UPDATE conversations
+    SET actor_id = COALESCE(NULLIF(actor_id, ''), user_id),
+        conversation_scope_id = COALESCE(NULLIF(conversation_scope_id, ''), id),
+        conversation_kind = COALESCE(NULLIF(conversation_kind, ''), 'direct'),
+        stable_external_conversation_key = COALESCE(
+            NULLIF(stable_external_conversation_key, ''),
+            channel || ':' || COALESCE(NULLIF(thread_id, ''), id)
+        )
+    WHERE actor_id IS NULL
+       OR actor_id = ''
+       OR conversation_scope_id IS NULL
+       OR conversation_scope_id = ''
+       OR conversation_kind IS NULL
+       OR conversation_kind = ''
+       OR stable_external_conversation_key IS NULL
+       OR stable_external_conversation_key = ''
+    "#,
+    r#"
+    UPDATE agent_jobs
+    SET principal_id = CASE
+            WHEN principal_id IS NULL OR principal_id = '' OR principal_id = 'default'
+                THEN COALESCE(user_id, 'default')
+            ELSE principal_id
+        END,
+        actor_id = CASE
+            WHEN actor_id IS NULL OR actor_id = '' OR actor_id = 'default'
+                THEN COALESCE(user_id, NULLIF(principal_id, ''), 'default')
+            ELSE actor_id
+        END
+    WHERE principal_id IS NULL
+       OR principal_id = ''
+       OR actor_id IS NULL
+       OR actor_id = ''
+       OR actor_id = 'default'
+    "#,
+    r#"
+    UPDATE routines
+    SET actor_id = CASE
+            WHEN actor_id IS NULL OR actor_id = '' OR actor_id = 'default'
+                THEN COALESCE(user_id, 'default')
+            ELSE actor_id
+        END
+    WHERE actor_id IS NULL
+       OR actor_id = ''
+       OR actor_id = 'default'
+    "#,
+    r#"
+    UPDATE memory_chunks
+    SET embedding_blob = COALESCE(embedding_blob, embedding),
+        embedding_dim = COALESCE(embedding_dim, 1536)
+    WHERE embedding IS NOT NULL
+      AND (embedding_blob IS NULL OR embedding_dim IS NULL)
+    "#,
+];

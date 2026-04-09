@@ -457,15 +457,11 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use crate::cli::oauth_defaults::{
         GmailOAuthConfig, builtin_credentials, callback_host, callback_url, is_loopback_host,
         landing_html,
     };
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_is_loopback_host() {
@@ -482,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_callback_host_default() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -499,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_callback_host_env_override() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
         let original_url = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -526,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_callback_url_default() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // Clear both env vars to test default behavior
         let original_url = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
@@ -550,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_callback_url_env_override() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("THINCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {

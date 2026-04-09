@@ -68,8 +68,7 @@ async fn record_guard_only(
     output_tokens: u32,
 ) {
     let model = resolve_model(fallback_model, provider_model);
-    let cost =
-        cost_usd.unwrap_or_else(|| fallback_cost_usd(&model, input_tokens, output_tokens));
+    let cost = cost_usd.unwrap_or_else(|| fallback_cost_usd(&model, input_tokens, output_tokens));
     use rust_decimal::prelude::FromPrimitive;
     let cost_decimal = rust_decimal::Decimal::from_f64(cost).unwrap_or_default();
     let _ = guard

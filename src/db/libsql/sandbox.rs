@@ -20,13 +20,14 @@ impl SandboxStore for LibSqlBackend {
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
-                    id, title, description, status, source, user_id, project_dir,
+                    id, title, description, status, source, user_id, actor_id, project_dir,
                     success, failure_reason, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
                     success = excluded.success,
                     failure_reason = excluded.failure_reason,
+                    actor_id = excluded.actor_id,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at
                 "#,
@@ -36,6 +37,7 @@ impl SandboxStore for LibSqlBackend {
                 job.credential_grants_json.as_str(),
                 job.status.as_str(),
                 job.user_id.as_str(),
+                job.actor_id.as_str(),
                 job.project_dir.as_str(),
                 job.success.map(|b| b as i64),
                 opt_text(job.failure_reason.as_deref()),
@@ -54,7 +56,7 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
                 "#,
@@ -74,12 +76,13 @@ impl SandboxStore for LibSqlBackend {
                 credential_grants_json: get_text(&row, 2),
                 status: get_text(&row, 3),
                 user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
+                actor_id: get_text(&row, 5),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
             })),
             None => Ok(None),
         }
@@ -90,7 +93,7 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
@@ -112,12 +115,13 @@ impl SandboxStore for LibSqlBackend {
                 credential_grants_json: get_text(&row, 2),
                 status: get_text(&row, 3),
                 user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
+                actor_id: get_text(&row, 5),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
             });
         }
         Ok(jobs)
@@ -218,7 +222,7 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
                 ORDER BY created_at DESC
@@ -240,12 +244,13 @@ impl SandboxStore for LibSqlBackend {
                 credential_grants_json: get_text(&row, 2),
                 status: get_text(&row, 3),
                 user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
+                actor_id: get_text(&row, 5),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
             });
         }
         Ok(jobs)

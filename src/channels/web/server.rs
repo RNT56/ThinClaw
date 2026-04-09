@@ -29,14 +29,16 @@ use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
 use crate::channels::web::handlers::skills::{
-    skills_install_handler, skills_list_handler, skills_reload_all_handler,
-    skills_reload_handler, skills_remove_handler, skills_search_handler, skills_trust_handler,
+    skills_install_handler, skills_list_handler, skills_reload_all_handler, skills_reload_handler,
+    skills_remove_handler, skills_search_handler, skills_trust_handler,
 };
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::history::ConversationKind as HistoryConversationKind;
+use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -147,6 +149,8 @@ pub struct GatewayState {
     pub prompt_queue: Option<PromptQueue>,
     /// User ID for this gateway.
     pub user_id: String,
+    /// Actor ID this gateway session should act as by default.
+    pub actor_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -589,6 +593,141 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+fn requested_identity_override(requested: Option<&str>) -> Option<String> {
+    requested
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+async fn request_user_id(state: &GatewayState, requested: Option<&str>) -> String {
+    if let Some(requested) = requested_identity_override(requested) {
+        return requested;
+    }
+
+    if !state.user_id.trim().is_empty() && state.user_id != "default" {
+        return state.user_id.clone();
+    }
+
+    if let Some(store) = state.store.as_ref() {
+        match store.infer_primary_user_id_for_channel("gateway").await {
+            Ok(Some(inferred)) if !inferred.trim().is_empty() => {
+                if inferred != state.user_id {
+                    tracing::info!(
+                        configured_user_id = %state.user_id,
+                        inferred_user_id = %inferred,
+                        "Using inferred gateway chat principal from persistent history"
+                    );
+                }
+                return inferred;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Failed to infer gateway chat principal");
+            }
+        }
+    }
+
+    state.user_id.clone()
+}
+
+fn request_actor_id(
+    state: &GatewayState,
+    requested: Option<&str>,
+    resolved_user_id: &str,
+) -> String {
+    if let Some(requested) = requested_identity_override(requested) {
+        return requested;
+    }
+
+    if state.actor_id.trim().is_empty() || state.actor_id == state.user_id {
+        return resolved_user_id.to_string();
+    }
+
+    state.actor_id.clone()
+}
+
+fn conversation_visible_to_actor(
+    conversation_actor_id: Option<&str>,
+    principal_id: &str,
+    actor_id: &str,
+) -> bool {
+    match conversation_actor_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(conversation_actor_id) => conversation_actor_id == actor_id,
+        None => actor_id == principal_id,
+    }
+}
+
+fn gateway_identity(
+    principal_id: &str,
+    actor_id: &str,
+    thread_id: Option<&str>,
+) -> ResolvedIdentity {
+    let stable_external_conversation_key = match thread_id {
+        Some(thread_id) => {
+            format!("gateway://direct/{principal_id}/actor/{actor_id}/thread/{thread_id}")
+        }
+        None => format!("gateway://direct/{principal_id}/actor/{actor_id}"),
+    };
+
+    ResolvedIdentity {
+        principal_id: principal_id.to_string(),
+        actor_id: actor_id.to_string(),
+        conversation_scope_id: scope_id_from_key(&stable_external_conversation_key),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: actor_id.to_string(),
+        stable_external_conversation_key,
+    }
+}
+
+async fn get_or_create_gateway_assistant_conversation(
+    store: &dyn Database,
+    user_id: &str,
+    actor_id: &str,
+) -> Result<Uuid, crate::error::DatabaseError> {
+    if actor_id == user_id {
+        return store
+            .get_or_create_assistant_conversation(user_id, "gateway")
+            .await;
+    }
+
+    let existing = store
+        .list_conversations_with_preview(user_id, "gateway", 200)
+        .await?
+        .into_iter()
+        .find(|summary| {
+            summary.thread_type.as_deref() == Some("assistant")
+                && summary.actor_id.as_deref() == Some(actor_id)
+        });
+
+    if let Some(summary) = existing {
+        return Ok(summary.id);
+    }
+
+    let id = store
+        .create_conversation_with_metadata(
+            "gateway",
+            user_id,
+            &serde_json::json!({"thread_type": "assistant", "title": "Assistant"}),
+        )
+        .await?;
+    let stable_external_conversation_key =
+        format!("gateway://direct/{user_id}/actor/{actor_id}/assistant");
+    store
+        .update_conversation_identity(
+            id,
+            Some(actor_id),
+            Some(scope_id_from_key(&stable_external_conversation_key)),
+            HistoryConversationKind::Direct,
+            Some(&stable_external_conversation_key),
+        )
+        .await?;
+    Ok(id)
+}
+
 // --- Chat handlers ---
 
 async fn chat_send_handler(
@@ -602,11 +741,18 @@ async fn chat_send_handler(
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    let user_id = request_user_id(&state, req.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, req.actor_id.as_deref(), &user_id);
+    let mut msg = IncomingMessage::new("gateway", &user_id, &req.content);
+    let identity = gateway_identity(&user_id, &actor_id, req.thread_id.as_deref());
+    msg = msg.with_identity(identity);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
+        msg = msg.with_metadata(serde_json::json!({
+            "thread_id": thread_id,
+            "actor_id": actor_id,
+        }));
     }
 
     let msg_id = msg.id;
@@ -670,7 +816,11 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let user_id = request_user_id(&state, req.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, req.actor_id.as_deref(), &user_id);
+    let mut msg = IncomingMessage::new("gateway", &user_id, content);
+    let identity = gateway_identity(&user_id, &actor_id, req.thread_id.as_deref());
+    msg = msg.with_identity(identity);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -769,7 +919,10 @@ async fn chat_auth_cancel_handler(
 /// Clear pending auth mode on the active thread.
 pub async fn clear_auth_mode(state: &GatewayState) {
     if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(&state.user_id).await;
+        let user_id = request_user_id(state, None).await;
+        let actor_id = request_actor_id(state, None, &user_id);
+        let identity = gateway_identity(&user_id, &actor_id, None);
+        let session = sm.get_or_create_session_for_identity(&identity).await;
         let mut sess = session.lock().await;
         if let Some(thread_id) = sess.active_thread
             && let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -834,6 +987,8 @@ struct HistoryQuery {
     thread_id: Option<String>,
     limit: Option<usize>,
     before: Option<String>,
+    user_id: Option<String>,
+    actor_id: Option<String>,
 }
 
 async fn chat_history_handler(
@@ -845,7 +1000,12 @@ async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
+    let identity = gateway_identity(&user_id, &actor_id, None);
+    let session = session_manager
+        .get_or_create_session_for_identity(&identity)
+        .await;
     let sess = session.lock().await;
 
     let limit = query.limit.unwrap_or(50);
@@ -880,7 +1040,7 @@ async fn chat_history_handler(
         && let Some(ref store) = state.store
     {
         let owned = store
-            .conversation_belongs_to_user(thread_id, &state.user_id)
+            .conversation_belongs_to_actor(thread_id, &user_id, &actor_id)
             .await
             .unwrap_or(false);
         if !owned && !sess.threads.contains_key(&thread_id) {
@@ -1013,31 +1173,38 @@ pub fn build_turns_from_db_messages(
 
 async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
+    let identity = gateway_identity(&user_id, &actor_id, None);
+    let session = session_manager
+        .get_or_create_session_for_identity(&identity)
+        .await;
     let sess = session.lock().await;
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
-        // Auto-create assistant thread if it doesn't exist
-        let assistant_id = store
-            .get_or_create_assistant_conversation(&state.user_id, "gateway")
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let assistant_id =
+            get_or_create_gateway_assistant_conversation(store.as_ref(), &user_id, &actor_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_with_preview(&user_id, "gateway", 50)
             .await
         {
             let mut assistant_thread = None;
             let mut threads = Vec::new();
 
-            for s in &summaries {
+            for s in summaries.iter().filter(|summary| {
+                conversation_visible_to_actor(summary.actor_id.as_deref(), &user_id, &actor_id)
+            }) {
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
@@ -1100,13 +1267,19 @@ async fn chat_threads_handler(
 
 async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
+    let identity = gateway_identity(&user_id, &actor_id, None);
+    let session = session_manager
+        .get_or_create_session_for_identity(&identity)
+        .await;
     let mut sess = session.lock().await;
     let thread = sess.create_thread();
     let thread_id = thread.id;
@@ -1123,13 +1296,29 @@ async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata
     if let Some(ref store) = state.store {
         let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
+        let user_id = user_id.clone();
         tokio::spawn(async move {
             if let Err(e) = store
                 .ensure_conversation(thread_id, "gateway", &user_id, None)
                 .await
             {
                 tracing::warn!("Failed to persist new thread: {}", e);
+            }
+            let stable_external_conversation_key = format!(
+                "gateway://direct/{}/actor/{}/thread/{}",
+                user_id, actor_id, thread_id
+            );
+            if let Err(e) = store
+                .update_conversation_identity(
+                    thread_id,
+                    Some(&actor_id),
+                    Some(scope_id_from_key(&stable_external_conversation_key)),
+                    HistoryConversationKind::Direct,
+                    Some(&stable_external_conversation_key),
+                )
+                .await
+            {
+                tracing::warn!("Failed to set conversation identity: {}", e);
             }
             let metadata_val = serde_json::json!("thread");
             if let Err(e) = store
@@ -1150,10 +1339,13 @@ async fn chat_new_thread_handler(
 async fn chat_delete_thread_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let thread_id: Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread ID".to_string()))?;
+    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
 
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1161,10 +1353,10 @@ async fn chat_delete_thread_handler(
     ))?;
 
     // Prevent deleting the assistant thread
-    let assistant_id = store
-        .get_or_create_assistant_conversation(&state.user_id, "gateway")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let assistant_id =
+        get_or_create_gateway_assistant_conversation(store.as_ref(), &user_id, &actor_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if thread_id == assistant_id {
         return Err((
@@ -1175,7 +1367,7 @@ async fn chat_delete_thread_handler(
 
     // Verify ownership
     let belongs = store
-        .conversation_belongs_to_user(thread_id, &state.user_id)
+        .conversation_belongs_to_actor(thread_id, &user_id, &actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1191,7 +1383,10 @@ async fn chat_delete_thread_handler(
 
     // Also remove from in-memory session if present
     if let Some(ref session_manager) = state.session_manager {
-        let session = session_manager.get_or_create_session(&state.user_id).await;
+        let identity = gateway_identity(&user_id, &actor_id, None);
+        let session = session_manager
+            .get_or_create_session_for_identity(&identity)
+            .await;
         let mut sess = session.lock().await;
         sess.threads.remove(&thread_id);
     }
@@ -1355,7 +1550,7 @@ async fn memory_search_handler(
     let hits: Vec<SearchHit> = results
         .iter()
         .map(|r| SearchHit {
-            path: r.document_id.to_string(),
+            path: r.path.clone(),
             content: r.content.clone(),
             score: r.score as f64,
         })
@@ -1376,14 +1571,12 @@ async fn jobs_list_handler(
 
     // Fetch sandbox jobs scoped to the authenticated user.
     let sandbox_jobs = store
-        .list_sandbox_jobs_for_user(&state.user_id)
+        .list_sandbox_jobs_for_actor(&state.user_id, &state.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Scope jobs to the authenticated user.
     let mut jobs: Vec<JobInfo> = sandbox_jobs
         .iter()
-        .filter(|j| j.user_id == state.user_id)
         .map(|j| {
             let ui_state = match j.status.as_str() {
                 "creating" => "pending",
@@ -1416,7 +1609,7 @@ async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary_for_user(&state.user_id)
+        .sandbox_job_summary_for_actor(&state.user_id, &state.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1441,7 +1634,7 @@ async fn jobs_detail_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != state.user_id || job.actor_id != state.actor_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         let browse_id = std::path::Path::new(&job.project_dir)
@@ -1513,7 +1706,7 @@ async fn jobs_cancel_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != state.user_id || job.actor_id != state.actor_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         if job.status == "running" || job.status == "creating" {
@@ -1567,7 +1760,7 @@ async fn jobs_restart_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Scope to the authenticated user.
-    if old_job.user_id != state.user_id {
+    if old_job.user_id != state.user_id || old_job.actor_id != state.actor_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -1587,6 +1780,7 @@ async fn jobs_restart_handler(
         task: old_job.task.clone(),
         status: "creating".to_string(),
         user_id: old_job.user_id.clone(),
+        actor_id: old_job.actor_id.clone(),
         project_dir: old_job.project_dir.clone(),
         success: None,
         failure_reason: None,
@@ -1668,7 +1862,7 @@ async fn jobs_prompt_handler(
     // Verify user owns this job.
     if let Some(ref store) = state.store
         && !store
-            .sandbox_job_belongs_to_user(job_id, &state.user_id)
+            .sandbox_job_belongs_to_actor(job_id, &state.user_id, &state.actor_id)
             .await
             .unwrap_or(false)
     {
@@ -1715,7 +1909,7 @@ async fn jobs_events_handler(
 
     // Verify user owns this job.
     if !store
-        .sandbox_job_belongs_to_user(job_id, &state.user_id)
+        .sandbox_job_belongs_to_actor(job_id, &state.user_id, &state.actor_id)
         .await
         .unwrap_or(false)
     {
@@ -1772,7 +1966,7 @@ async fn job_files_list_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != state.user_id || job.actor_id != state.actor_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -1840,7 +2034,7 @@ async fn job_files_read_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != state.user_id || job.actor_id != state.actor_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -2409,7 +2603,7 @@ async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines_for_actor(&state.user_id, &state.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2427,7 +2621,7 @@ async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines_for_actor(&state.user_id, &state.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2478,6 +2672,9 @@ async fn routines_detail_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if routine.owner_actor_id() != state.actor_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let runs = store
         .list_routine_runs(routine_id, 20)
@@ -2532,6 +2729,9 @@ async fn routines_trigger_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if routine.owner_actor_id() != state.actor_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     // Send the routine prompt through the message pipeline as a manual trigger.
     let prompt = match &routine.action {
@@ -2589,6 +2789,9 @@ async fn routines_toggle_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if routine.owner_actor_id() != state.actor_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
@@ -2619,6 +2822,15 @@ async fn routines_delete_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if routine.owner_actor_id() != state.actor_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     let deleted = store
         .delete_routine(routine_id)
         .await
@@ -2645,6 +2857,15 @@ async fn routines_runs_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if routine.owner_actor_id() != state.actor_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let runs = store
         .list_routine_runs(routine_id, 50)
@@ -5415,6 +5636,7 @@ async fn costs_reset_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::ConversationStore;
 
     #[test]
     fn test_provider_model_options_from_discovery_returns_live_models_only() {
@@ -5837,24 +6059,40 @@ mod tests {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi there!".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now + chrono::TimeDelta::seconds(1),
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "How are you?".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now + chrono::TimeDelta::seconds(2),
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Doing well!".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now + chrono::TimeDelta::seconds(3),
             },
         ];
@@ -5876,18 +6114,30 @@ mod tests {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi!".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now + chrono::TimeDelta::seconds(1),
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "Lost message".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
                 created_at: now + chrono::TimeDelta::seconds(2),
             },
         ];
@@ -5903,5 +6153,165 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn test_conversation_visible_to_actor_treats_missing_actor_as_legacy_base_user() {
+        assert!(conversation_visible_to_actor(
+            None,
+            "base-user",
+            "base-user"
+        ));
+        assert!(!conversation_visible_to_actor(
+            None,
+            "base-user",
+            "family-member"
+        ));
+        assert!(conversation_visible_to_actor(
+            Some("family-member"),
+            "base-user",
+            "family-member"
+        ));
+    }
+
+    fn test_gateway_state(
+        user_id: &str,
+        actor_id: &str,
+        store: Option<Arc<dyn Database>>,
+    ) -> GatewayState {
+        GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store,
+            job_manager: None,
+            prompt_queue: None,
+            user_id: user_id.to_string(),
+            actor_id: actor_id.to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            llm_runtime: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            cost_tracker: None,
+            routine_engine: None,
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: None,
+            channel_manager: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_user_id_prefers_non_empty_request_value() {
+        let state = test_gateway_state("gateway-default", "gateway-actor", None);
+
+        assert_eq!(request_user_id(&state, Some("family-1")).await, "family-1");
+        assert_eq!(
+            request_user_id(&state, Some("   ")).await,
+            "gateway-default"
+        );
+        assert_eq!(request_user_id(&state, None).await, "gateway-default");
+    }
+
+    #[tokio::test]
+    async fn test_request_user_id_infers_primary_gateway_principal_from_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("gateway-history.db");
+        let backend = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .unwrap(),
+        );
+        backend.run_migrations().await.unwrap();
+
+        backend
+            .create_conversation_with_metadata(
+                "gateway",
+                "default",
+                &serde_json::json!({"thread_type": "thread"}),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..3 {
+            backend
+                .create_conversation_with_metadata(
+                    "gateway",
+                    "legacy-base-user",
+                    &serde_json::json!({"thread_type": "thread"}),
+                )
+                .await
+                .unwrap();
+        }
+
+        let state = test_gateway_state("default", "default", Some(backend));
+
+        let user_id = request_user_id(&state, None).await;
+        assert_eq!(user_id, "legacy-base-user");
+        assert_eq!(request_actor_id(&state, None, &user_id), "legacy-base-user");
+    }
+
+    #[tokio::test]
+    async fn test_request_user_id_prefers_configured_non_default_principal() {
+        let state = test_gateway_state("configured-user", "configured-user", None);
+
+        assert_eq!(request_user_id(&state, None).await, "configured-user");
+        assert_eq!(
+            request_actor_id(&state, None, "configured-user"),
+            "configured-user"
+        );
+    }
+
+    #[test]
+    fn test_request_actor_id_preserves_explicit_family_member_default() {
+        let state = GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            user_id: "gateway-default".to_string(),
+            actor_id: "gateway-actor".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            llm_runtime: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            cost_tracker: None,
+            routine_engine: None,
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: None,
+            channel_manager: None,
+        };
+
+        assert_eq!(
+            request_actor_id(&state, Some("family-2"), "gateway-default"),
+            "family-2"
+        );
+        assert_eq!(
+            request_actor_id(&state, None, "gateway-default"),
+            "gateway-actor"
+        );
     }
 }

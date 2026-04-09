@@ -18,6 +18,7 @@ use crate::workspace::search::{
 };
 
 /// Database repository for workspace operations.
+#[derive(Clone)]
 pub struct Repository {
     pool: Pool,
 }
@@ -371,14 +372,14 @@ impl Repository {
             })?;
         }
 
-
-        tx.commit().await.map_err(|e| WorkspaceError::ChunkingFailed {
-            reason: format!("COMMIT failed: {}", e),
-        })?;
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("COMMIT failed: {}", e),
+            })?;
 
         Ok(())
     }
-
 
     /// Update a chunk's embedding.
     pub async fn update_chunk_embedding(
@@ -539,7 +540,7 @@ impl Repository {
         let rows = conn
             .query(
                 r#"
-                SELECT c.id as chunk_id, c.document_id, c.content,
+                SELECT c.id as chunk_id, c.document_id, d.path, c.content,
                        ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank,
                        c.created_at
                 FROM memory_chunks c
@@ -562,6 +563,7 @@ impl Repository {
             .map(|(i, row)| RankedResult {
                 chunk_id: row.get("chunk_id"),
                 document_id: row.get("document_id"),
+                path: row.get("path"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
                 created_at: row.get("created_at"),
@@ -588,7 +590,7 @@ impl Repository {
         // When MMR is enabled we also need the raw embedding vectors.
         let query_sql = if include_embeddings {
             r#"
-            SELECT c.id as chunk_id, c.document_id, c.content,
+            SELECT c.id as chunk_id, c.document_id, d.path, c.content,
                    1 - (c.embedding <=> $3) as similarity,
                    c.created_at, c.embedding
             FROM memory_chunks c
@@ -600,7 +602,7 @@ impl Repository {
             "#
         } else {
             r#"
-            SELECT c.id as chunk_id, c.document_id, c.content,
+            SELECT c.id as chunk_id, c.document_id, d.path, c.content,
                    1 - (c.embedding <=> $3) as similarity,
                    c.created_at
             FROM memory_chunks c
@@ -636,6 +638,7 @@ impl Repository {
                 RankedResult {
                     chunk_id: row.get("chunk_id"),
                     document_id: row.get("document_id"),
+                    path: row.get("path"),
                     content: row.get("content"),
                     rank: (i + 1) as u32,
                     created_at: row.get("created_at"),

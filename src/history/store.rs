@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool, Runtime};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 use uuid::Uuid;
@@ -11,7 +12,7 @@ use uuid::Uuid;
 #[cfg(feature = "postgres")]
 use crate::config::DatabaseConfig;
 #[cfg(feature = "postgres")]
-use crate::context::{ActionRecord, JobContext, JobState};
+use crate::context::{ActionRecord, JobContext, JobState, StateTransition};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
 
@@ -26,6 +27,95 @@ pub struct LlmCallRecord<'a> {
     pub output_tokens: u32,
     pub cost: Decimal,
     pub purpose: Option<&'a str>,
+}
+
+/// Whether a conversation is a one-to-one direct thread or a shared group thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationKind {
+    Direct,
+    Group,
+}
+
+impl ConversationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Group => "group",
+        }
+    }
+
+    pub fn from_db(value: Option<&str>) -> Self {
+        match value {
+            Some("group") => Self::Group,
+            _ => Self::Direct,
+        }
+    }
+}
+
+/// Stable conversation scope shared across channels for the same direct or group thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationScope {
+    pub conversation_scope_id: Uuid,
+    pub conversation_kind: ConversationKind,
+    pub channel: String,
+    pub stable_external_conversation_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_conversation_id: Option<String>,
+}
+
+impl ConversationScope {
+    pub fn direct(
+        conversation_scope_id: Uuid,
+        channel: impl Into<String>,
+        stable_external_conversation_key: impl Into<String>,
+        external_conversation_id: Option<String>,
+    ) -> Self {
+        Self {
+            conversation_scope_id,
+            conversation_kind: ConversationKind::Direct,
+            channel: channel.into(),
+            stable_external_conversation_key: stable_external_conversation_key.into(),
+            external_conversation_id,
+        }
+    }
+
+    pub fn group(
+        conversation_scope_id: Uuid,
+        channel: impl Into<String>,
+        stable_external_conversation_key: impl Into<String>,
+        external_conversation_id: Option<String>,
+    ) -> Self {
+        Self {
+            conversation_scope_id,
+            conversation_kind: ConversationKind::Group,
+            channel: channel.into(),
+            stable_external_conversation_key: stable_external_conversation_key.into(),
+            external_conversation_id,
+        }
+    }
+}
+
+/// Compact metadata used to carry work forward between turns and channels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationHandoffMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_summary: Option<String>,
+}
+
+impl ConversationHandoffMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.last_actor_id.is_none()
+            && self.task_state.is_none()
+            && self.last_user_goal.is_none()
+            && self.handoff_summary.is_none()
+    }
 }
 
 /// Database store for the agent.
@@ -121,10 +211,24 @@ impl Store {
     ) -> Result<Uuid, DatabaseError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
+        let stable_external_conversation_key = conversation_stable_key(channel, thread_id, id);
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, thread_id) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, &thread_id],
+            r#"
+            INSERT INTO conversations (
+                id, channel, user_id, actor_id, conversation_scope_id, conversation_kind,
+                thread_id, stable_external_conversation_key, metadata
+            ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, '{}'::jsonb)
+            "#,
+            &[
+                &id,
+                &channel,
+                &user_id,
+                &id,
+                &ConversationKind::Direct.as_str(),
+                &thread_id,
+                &stable_external_conversation_key,
+            ],
         )
         .await?;
 
@@ -149,12 +253,50 @@ impl Store {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
+        self.add_conversation_message_with_attribution(
+            conversation_id,
+            role,
+            content,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Add a message with actor attribution and message-level metadata.
+    pub async fn add_conversation_message_with_attribution(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        actor_id: Option<&str>,
+        actor_display_name: Option<&str>,
+        raw_sender_id: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<Uuid, DatabaseError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
+        let metadata_value = metadata.cloned().unwrap_or_else(|| serde_json::json!({}));
 
         conn.execute(
-            "INSERT INTO conversation_messages (id, conversation_id, role, content) VALUES ($1, $2, $3, $4)",
-            &[&id, &conversation_id, &role, &content],
+            r#"
+            INSERT INTO conversation_messages (
+                id, conversation_id, role, content, actor_id, actor_display_name,
+                raw_sender_id, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+            &[
+                &id,
+                &conversation_id,
+                &role,
+                &content,
+                &actor_id,
+                &actor_display_name,
+                &raw_sender_id,
+                &metadata_value,
+            ],
         )
         .await?;
 
@@ -188,6 +330,134 @@ impl Store {
         Ok(rows)
     }
 
+    /// Update the actor-aware identity fields for a conversation.
+    pub async fn update_conversation_identity(
+        &self,
+        id: Uuid,
+        actor_id: Option<&str>,
+        conversation_scope_id: Option<Uuid>,
+        conversation_kind: ConversationKind,
+        stable_external_conversation_key: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE conversations
+            SET actor_id = $2,
+                conversation_scope_id = COALESCE($3, conversation_scope_id),
+                conversation_kind = $4,
+                stable_external_conversation_key = COALESCE($5, stable_external_conversation_key)
+            WHERE id = $1
+            "#,
+            &[
+                &id,
+                &actor_id,
+                &conversation_scope_id,
+                &conversation_kind.as_str(),
+                &stable_external_conversation_key,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update the compact handoff metadata for a conversation.
+    pub async fn set_conversation_handoff_metadata(
+        &self,
+        id: Uuid,
+        handoff: &ConversationHandoffMetadata,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let handoff_value = serde_json::to_value(handoff)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        conn.execute(
+            "UPDATE conversations SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{handoff}', $2::jsonb, true) WHERE id = $1",
+            &[&id, &handoff_value],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// List conversations that are linked to an actor across channels.
+    ///
+    /// When `include_group_history` is false, this intentionally filters to
+    /// direct conversations only so automatic recall never pulls group history.
+    pub async fn list_actor_conversations_for_recall(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        include_group_history: bool,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        let conn = self.conn().await?;
+        let kind_filter = if include_group_history {
+            "('direct', 'group')"
+        } else {
+            "('direct')"
+        };
+        let rows = conn
+            .query(
+                &format!(
+                    r#"
+                    SELECT
+                        c.id,
+                        c.user_id,
+                        c.actor_id,
+                        c.conversation_scope_id,
+                        c.conversation_kind,
+                        c.channel,
+                        c.started_at,
+                        c.last_activity,
+                        c.metadata,
+                        c.stable_external_conversation_key,
+                        (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                        (SELECT LEFT(m2.content, 100)
+                         FROM conversation_messages m2
+                         WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                         ORDER BY m2.created_at ASC
+                         LIMIT 1
+                        ) AS title
+                    FROM conversations c
+                    WHERE c.user_id = $1
+                      AND c.actor_id = $2
+                      AND c.conversation_kind IN {}
+                    ORDER BY c.last_activity DESC
+                    LIMIT $3
+                    "#,
+                    kind_filter
+                ),
+                &[&principal_id, &actor_id, &limit],
+            )
+            .await?;
+
+        Ok(rows.iter().map(conversation_summary_from_row).collect())
+    }
+
+    /// Check whether a conversation belongs to the given actor.
+    pub async fn conversation_belongs_to_actor(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT 1 FROM conversations
+                WHERE id = $1
+                  AND user_id = $2
+                  AND (
+                    actor_id = $3
+                    OR ((actor_id IS NULL OR btrim(actor_id) = '') AND $3 = $2)
+                  )
+                "#,
+                &[&conversation_id, &principal_id, &actor_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
     // ==================== Jobs ====================
 
     /// Save a job context to the database.
@@ -196,22 +466,34 @@ impl Store {
 
         let status = ctx.state.to_string();
         let estimated_time_secs = ctx.estimated_duration.map(|d| d.as_secs() as i32);
+        let total_tokens_used = ctx.total_tokens_used.min(i64::MAX as u64) as i64;
+        let max_tokens = ctx.max_tokens.min(i64::MAX as u64) as i64;
+        let transitions = serde_json::to_value(&ctx.transitions)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
-                id, conversation_id, title, description, category, status, source,
+                id, conversation_id, title, description, category, status, source, user_id, principal_id, actor_id,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                actual_cost, repair_attempts, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                repair_attempts, created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                user_id = EXCLUDED.user_id,
+                principal_id = EXCLUDED.principal_id,
+                actor_id = EXCLUDED.actor_id,
                 estimated_cost = EXCLUDED.estimated_cost,
                 estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
+                total_tokens_used = EXCLUDED.total_tokens_used,
+                max_tokens = EXCLUDED.max_tokens,
+                metadata = EXCLUDED.metadata,
+                transitions = EXCLUDED.transitions,
                 repair_attempts = EXCLUDED.repair_attempts,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at
@@ -224,12 +506,19 @@ impl Store {
                 &ctx.category,
                 &status,
                 &"direct", // source
+                &ctx.user_id,
+                &ctx.principal_id,
+                &ctx.actor_id,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
                 &ctx.estimated_cost,
                 &estimated_time_secs,
                 &ctx.actual_cost,
+                &total_tokens_used,
+                &max_tokens,
+                &ctx.metadata,
+                &transitions,
                 &(ctx.repair_attempts as i32),
                 &ctx.created_at,
                 &ctx.started_at,
@@ -248,9 +537,10 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, conversation_id, title, description, category, status, user_id,
+                SELECT id, conversation_id, title, description, category, status, user_id, principal_id, actor_id,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                       actual_cost, repair_attempts, created_at, started_at, completed_at
+                       actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                       repair_attempts, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = $1
                 "#,
                 &[&id],
@@ -262,11 +552,17 @@ impl Store {
                 let status_str: String = row.get("status");
                 let state = parse_job_state(&status_str);
                 let estimated_time_secs: Option<i32> = row.get("estimated_time_secs");
+                let transitions_json: serde_json::Value = row.get("transitions");
+                let transitions = serde_json::from_value::<Vec<StateTransition>>(transitions_json)
+                    .unwrap_or_default();
+                let metadata: serde_json::Value = row.get("metadata");
 
                 Ok(Some(JobContext {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
+                    principal_id: row.get::<_, String>("principal_id"),
+                    actor_id: row.get("actor_id"),
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
@@ -280,14 +576,14 @@ impl Store {
                     actual_cost: row
                         .get::<_, Option<Decimal>>("actual_cost")
                         .unwrap_or_default(),
+                    total_tokens_used: row.get::<_, i64>("total_tokens_used").max(0) as u64,
+                    max_tokens: row.get::<_, i64>("max_tokens").max(0) as u64,
                     repair_attempts: row.get::<_, i32>("repair_attempts") as u32,
                     created_at: row.get("created_at"),
                     started_at: row.get("started_at"),
                     completed_at: row.get("completed_at"),
-                    transitions: Vec::new(), // Not loaded from DB for now
-                    metadata: serde_json::Value::Null,
-                    total_tokens_used: 0,
-                    max_tokens: 0,
+                    transitions,
+                    metadata,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }
@@ -514,6 +810,7 @@ pub struct SandboxJobRecord {
     pub task: String,
     pub status: String,
     pub user_id: String,
+    pub actor_id: String,
     pub project_dir: String,
     pub success: Option<bool>,
     pub failure_reason: Option<String>,
@@ -544,13 +841,14 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
-                id, title, description, status, source, user_id, project_dir,
+                id, title, description, status, source, user_id, actor_id, project_dir,
                 success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
+                actor_id = EXCLUDED.actor_id,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at
             "#,
@@ -560,6 +858,7 @@ impl Store {
                 &job.credential_grants_json,
                 &job.status,
                 &job.user_id,
+                &job.actor_id,
                 &job.project_dir,
                 &job.success,
                 &job.failure_reason,
@@ -581,7 +880,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
@@ -594,6 +893,7 @@ impl Store {
             task: r.get("title"),
             status: r.get("status"),
             user_id: r.get("user_id"),
+            actor_id: r.get("actor_id"),
             project_dir: r
                 .get::<_, Option<String>>("project_dir")
                 .unwrap_or_default(),
@@ -612,7 +912,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
@@ -628,6 +928,7 @@ impl Store {
                 task: r.get("title"),
                 status: r.get("status"),
                 user_id: r.get("user_id"),
+                actor_id: r.get("actor_id"),
                 project_dir: r
                     .get::<_, Option<String>>("project_dir")
                     .unwrap_or_default(),
@@ -650,7 +951,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, actor_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
@@ -666,6 +967,7 @@ impl Store {
                 task: r.get("title"),
                 status: r.get("status"),
                 user_id: r.get("user_id"),
+                actor_id: r.get("actor_id"),
                 project_dir: r
                     .get::<_, Option<String>>("project_dir")
                     .unwrap_or_default(),
@@ -933,17 +1235,17 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO routines (
-                id, name, description, user_id, enabled,
+                id, name, description, user_id, actor_id, enabled,
                 trigger_type, trigger_config, action_type, action_config,
                 cooldown_secs, max_concurrent, dedup_window_secs,
                 notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
                 state, next_fire_at, created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, $8, $9,
-                $10, $11, $12,
-                $13, $14, $15, $16, $17,
-                $18, $19, $20, $21
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10,
+                $11, $12, $13,
+                $14, $15, $16, $17, $18,
+                $19, $20, $21, $22
             )
             "#,
             &[
@@ -951,6 +1253,7 @@ impl Store {
                 &routine.name,
                 &routine.description,
                 &routine.user_id,
+                &routine.actor_id,
                 &routine.enabled,
                 &trigger_type,
                 &trigger_config,
@@ -1057,13 +1360,13 @@ impl Store {
         conn.execute(
             r#"
             UPDATE routines SET
-                name = $2, description = $3, enabled = $4,
-                trigger_type = $5, trigger_config = $6,
-                action_type = $7, action_config = $8,
-                cooldown_secs = $9, max_concurrent = $10, dedup_window_secs = $11,
-                notify_channel = $12, notify_user = $13,
-                notify_on_success = $14, notify_on_failure = $15, notify_on_attention = $16,
-                state = $17, next_fire_at = $18,
+                name = $2, description = $3, actor_id = $4, enabled = $5,
+                trigger_type = $6, trigger_config = $7,
+                action_type = $8, action_config = $9,
+                cooldown_secs = $10, max_concurrent = $11, dedup_window_secs = $12,
+                notify_channel = $13, notify_user = $14,
+                notify_on_success = $15, notify_on_failure = $16, notify_on_attention = $17,
+                state = $18, next_fire_at = $19,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -1071,6 +1374,7 @@ impl Store {
                 &routine.id,
                 &routine.name,
                 &routine.description,
+                &routine.actor_id,
                 &routine.enabled,
                 &trigger_type,
                 &trigger_config,
@@ -1289,6 +1593,11 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
         name: row.get("name"),
         description: row.get("description"),
         user_id: row.get("user_id"),
+        actor_id: row
+            .try_get::<_, Option<String>>("actor_id")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| row.get("user_id")),
         enabled: row.get("enabled"),
         trigger,
         action,
@@ -1342,6 +1651,11 @@ fn row_to_routine_run(row: &tokio_postgres::Row) -> Result<RoutineRun, DatabaseE
 #[derive(Debug, Clone)]
 pub struct ConversationSummary {
     pub id: Uuid,
+    pub user_id: String,
+    pub actor_id: Option<String>,
+    pub conversation_scope_id: Option<Uuid>,
+    pub conversation_kind: ConversationKind,
+    pub channel: String,
     /// First user message, truncated to 100 chars.
     pub title: Option<String>,
     pub message_count: i64,
@@ -1349,6 +1663,8 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    pub handoff: Option<ConversationHandoffMetadata>,
+    pub stable_external_conversation_key: Option<String>,
 }
 
 /// A single message in a conversation.
@@ -1357,7 +1673,207 @@ pub struct ConversationMessage {
     pub id: Uuid,
     pub role: String,
     pub content: String,
+    pub actor_id: Option<String>,
+    pub actor_display_name: Option<String>,
+    pub raw_sender_id: Option<String>,
+    pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
+}
+
+/// Lightweight linked-DM recall payload used by the prompt assembler.
+#[derive(Debug, Clone)]
+pub struct LinkedConversationRecall {
+    pub principal_id: String,
+    pub actor_id: String,
+    pub include_group_history: bool,
+    pub conversations: Vec<ConversationSummary>,
+}
+
+impl LinkedConversationRecall {
+    pub fn new(
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        include_group_history: bool,
+        conversations: Vec<ConversationSummary>,
+    ) -> Self {
+        Self {
+            principal_id: principal_id.into(),
+            actor_id: actor_id.into(),
+            include_group_history,
+            conversations,
+        }
+    }
+
+    /// Render a compact handoff block that summarizes only the ongoing work.
+    pub fn compact_block(&self) -> Option<String> {
+        if self.conversations.is_empty() {
+            return None;
+        }
+
+        let mut lines = vec![format!(
+            "Linked recall for actor {} (principal {}):",
+            self.actor_id, self.principal_id
+        )];
+
+        for convo in &self.conversations {
+            let kind = convo.conversation_kind.as_str();
+            let handoff = convo
+                .handoff
+                .as_ref()
+                .and_then(|h| h.handoff_summary.as_deref())
+                .unwrap_or_default();
+            let goal = convo
+                .handoff
+                .as_ref()
+                .and_then(|h| h.last_user_goal.as_deref())
+                .unwrap_or_default();
+            let state = convo
+                .handoff
+                .as_ref()
+                .and_then(|h| h.task_state.as_deref())
+                .unwrap_or_default();
+
+            let mut parts = vec![format!(
+                "{} / {} / {} messages",
+                convo.channel, kind, convo.message_count
+            )];
+            if let Some(title) = convo.title.as_deref() {
+                parts.push(format!("title={title}"));
+            }
+            if !goal.is_empty() {
+                parts.push(format!("goal={goal}"));
+            }
+            if !state.is_empty() {
+                parts.push(format!("state={state}"));
+            }
+            if !handoff.is_empty() {
+                parts.push(format!("handoff={handoff}"));
+            }
+            lines.push(format!("- {}", parts.join(" | ")));
+        }
+
+        Some(lines.join("\n"))
+    }
+}
+
+fn conversation_stable_key(channel: &str, thread_id: Option<&str>, fallback: Uuid) -> String {
+    match thread_id {
+        Some(thread_id) if !thread_id.is_empty() => format!("{channel}:{thread_id}"),
+        _ => format!("{channel}:{fallback}"),
+    }
+}
+
+fn conversation_handoff_from_metadata(
+    metadata: &serde_json::Value,
+) -> Option<ConversationHandoffMetadata> {
+    let value = metadata.get("handoff").cloned().or_else(|| {
+        let direct = serde_json::json!({
+            "last_actor_id": metadata.get("last_actor_id"),
+            "task_state": metadata.get("task_state"),
+            "last_user_goal": metadata.get("last_user_goal"),
+            "handoff_summary": metadata.get("handoff_summary"),
+        });
+        if direct
+            .as_object()
+            .map(|m| m.values().any(|v| !v.is_null()))
+            .unwrap_or(false)
+        {
+            Some(direct)
+        } else {
+            None
+        }
+    })?;
+
+    serde_json::from_value(value)
+        .ok()
+        .filter(|handoff: &ConversationHandoffMetadata| !handoff.is_empty())
+}
+
+#[allow(dead_code)] // Prepared for conversation handoff persistence path
+fn conversation_metadata_with_handoff(
+    metadata: &serde_json::Value,
+    handoff: &ConversationHandoffMetadata,
+) -> serde_json::Value {
+    let mut merged = metadata.clone();
+    if merged.is_null() || !merged.is_object() {
+        merged = serde_json::json!({});
+    }
+
+    let mut handoff_value = match serde_json::to_value(handoff) {
+        Ok(value) => value,
+        Err(_) => serde_json::json!({}),
+    };
+    if handoff_value.is_null() {
+        handoff_value = serde_json::json!({});
+    }
+
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert("handoff".to_string(), handoff_value);
+    }
+    merged
+}
+
+fn conversation_summary_from_row(row: &tokio_postgres::Row) -> ConversationSummary {
+    let metadata: serde_json::Value = row.get("metadata");
+    let thread_type = metadata
+        .get("thread_type")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let handoff = conversation_handoff_from_metadata(&metadata);
+    let conversation_kind = ConversationKind::from_db(
+        row.try_get::<_, Option<String>>("conversation_kind")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    let actor_id = row.try_get::<_, Option<String>>("actor_id").ok().flatten();
+    let conversation_scope_id = row
+        .try_get::<_, Option<Uuid>>("conversation_scope_id")
+        .ok()
+        .flatten();
+    let stable_external_conversation_key = row
+        .try_get::<_, Option<String>>("stable_external_conversation_key")
+        .ok()
+        .flatten();
+
+    ConversationSummary {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        actor_id,
+        conversation_scope_id,
+        conversation_kind,
+        channel: row.get("channel"),
+        title: row.get("title"),
+        message_count: row.get("message_count"),
+        started_at: row.get("started_at"),
+        last_activity: row.get("last_activity"),
+        thread_type,
+        handoff,
+        stable_external_conversation_key,
+    }
+}
+
+fn conversation_message_from_row(row: &tokio_postgres::Row) -> ConversationMessage {
+    ConversationMessage {
+        id: row.get("id"),
+        role: row.get("role"),
+        content: row.get("content"),
+        actor_id: row.try_get::<_, Option<String>>("actor_id").ok().flatten(),
+        actor_display_name: row
+            .try_get::<_, Option<String>>("actor_display_name")
+            .ok()
+            .flatten(),
+        raw_sender_id: row
+            .try_get::<_, Option<String>>("raw_sender_id")
+            .ok()
+            .flatten(),
+        metadata: row
+            .try_get::<_, Option<serde_json::Value>>("metadata")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| serde_json::json!({})),
+        created_at: row.get("created_at"),
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -1398,9 +1914,15 @@ impl Store {
                 r#"
                 SELECT
                     c.id,
+                    c.user_id,
+                    c.actor_id,
+                    c.conversation_scope_id,
+                    c.conversation_kind,
+                    c.channel,
                     c.started_at,
                     c.last_activity,
                     c.metadata,
+                    c.stable_external_conversation_key,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
@@ -1417,24 +1939,50 @@ impl Store {
             )
             .await?;
 
-        Ok(rows
+        Ok(rows.iter().map(conversation_summary_from_row).collect())
+    }
+
+    /// Infer the principal that owns the majority of history for a channel.
+    ///
+    /// When the placeholder `"default"` principal and a real principal both
+    /// exist, this prefers the non-default principal so upgraded gateway chat
+    /// UIs reconnect to the historical owner automatically.
+    pub async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT c.user_id
+                FROM conversations c
+                WHERE c.channel = $1
+                  AND c.user_id IS NOT NULL
+                  AND btrim(c.user_id) <> ''
+                GROUP BY c.user_id
+                ORDER BY COUNT(*) DESC, MAX(c.last_activity) DESC, c.user_id ASC
+                LIMIT 2
+                "#,
+                &[&channel],
+            )
+            .await?;
+
+        let candidates: Vec<String> = rows
             .iter()
-            .map(|r| {
-                let metadata: serde_json::Value = r.get("metadata");
-                let thread_type = metadata
-                    .get("thread_type")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                ConversationSummary {
-                    id: r.get("id"),
-                    title: r.get("title"),
-                    message_count: r.get("message_count"),
-                    started_at: r.get("started_at"),
-                    last_activity: r.get("last_activity"),
-                    thread_type,
-                }
-            })
-            .collect())
+            .filter_map(|row| row.try_get::<_, String>("user_id").ok())
+            .filter(|user_id| !user_id.trim().is_empty())
+            .collect();
+
+        let Some(primary) = candidates.first() else {
+            return Ok(None);
+        };
+
+        if primary == "default" && candidates.len() > 1 {
+            return Ok(candidates.get(1).cloned());
+        }
+
+        Ok(Some(primary.clone()))
     }
 
     /// Get or create the singleton "assistant" conversation for a user+channel.
@@ -1469,10 +2017,20 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (
+                id, channel, user_id, actor_id, conversation_scope_id, conversation_kind,
+                stable_external_conversation_key, metadata
+            ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[
+                &id,
+                &channel,
+                &user_id,
+                &id,
+                &ConversationKind::Direct.as_str(),
+                &conversation_stable_key(channel, Some("assistant"), id),
+                &metadata,
+            ],
         )
         .await?;
 
@@ -1488,10 +2046,24 @@ impl Store {
     ) -> Result<Uuid, DatabaseError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
+        let stable_external_conversation_key = conversation_stable_key(channel, None, id);
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, metadata],
+            r#"
+            INSERT INTO conversations (
+                id, channel, user_id, actor_id, conversation_scope_id, conversation_kind,
+                stable_external_conversation_key, metadata
+            ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &channel,
+                &user_id,
+                &id,
+                &ConversationKind::Direct.as_str(),
+                &stable_external_conversation_key,
+                &metadata,
+            ],
         )
         .await?;
 
@@ -1530,7 +2102,8 @@ impl Store {
         let rows = if let Some(before_ts) = before {
             conn.query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id,
+                       metadata, created_at
                 FROM conversation_messages
                 WHERE conversation_id = $1 AND created_at < $2
                 ORDER BY created_at DESC
@@ -1542,7 +2115,8 @@ impl Store {
         } else {
             conn.query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id,
+                       metadata, created_at
                 FROM conversation_messages
                 WHERE conversation_id = $1
                 ORDER BY created_at DESC
@@ -1560,12 +2134,7 @@ impl Store {
         let mut messages: Vec<ConversationMessage> = rows
             .iter()
             .take(take_count)
-            .map(|r| ConversationMessage {
-                id: r.get("id"),
-                role: r.get("role"),
-                content: r.get("content"),
-                created_at: r.get("created_at"),
-            })
+            .map(conversation_message_from_row)
             .collect();
         messages.reverse();
 
@@ -1580,12 +2149,20 @@ impl Store {
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
-        let patch = serde_json::json!({ key: value });
-        conn.execute(
-            "UPDATE conversations SET metadata = metadata || $2 WHERE id = $1",
-            &[&id, &patch],
-        )
-        .await?;
+        if key == "handoff" {
+            conn.execute(
+                "UPDATE conversations SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{handoff}', $2::jsonb, true) WHERE id = $1",
+                &[&id, &value],
+            )
+            .await?;
+        } else {
+            let patch = serde_json::json!({ key: value });
+            conn.execute(
+                "UPDATE conversations SET metadata = metadata || $2 WHERE id = $1",
+                &[&id, &patch],
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -1610,7 +2187,8 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id,
+                       metadata, created_at
                 FROM conversation_messages
                 WHERE conversation_id = $1
                 ORDER BY created_at ASC
@@ -1619,15 +2197,7 @@ impl Store {
             )
             .await?;
 
-        Ok(rows
-            .iter()
-            .map(|r| ConversationMessage {
-                id: r.get("id"),
-                role: r.get("role"),
-                content: r.get("content"),
-                created_at: r.get("created_at"),
-            })
-            .collect())
+        Ok(rows.iter().map(conversation_message_from_row).collect())
     }
 }
 

@@ -253,9 +253,9 @@ pub enum Submission {
     /// Quit the agent. Bypasses thread-state checks.
     Quit,
 
-    /// Restart the agent. Orderly shutdown followed by OS service restart.
-    /// The service manager (launchd/systemd) will automatically restart the
-    /// process, picking up any binary updates applied before the restart.
+    /// Restart the agent. Performs an orderly shutdown, then either lets the
+    /// OS service manager relaunch the process or self-relaunches the current
+    /// foreground invocation.
     Restart,
 
     /// System command (help, model, version, tools, ping, debug).

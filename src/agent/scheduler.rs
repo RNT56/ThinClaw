@@ -132,9 +132,22 @@ impl Scheduler {
         description: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<Uuid, JobError> {
+        self.dispatch_job_for_identity(user_id, user_id, title, description, metadata)
+            .await
+    }
+
+    /// Create, persist, and schedule a job with explicit principal/actor ownership.
+    pub async fn dispatch_job_for_identity(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        title: &str,
+        description: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Uuid, JobError> {
         let job_id = self
             .context_manager
-            .create_job_for_user(user_id, title, description)
+            .create_job_for_identity(principal_id, actor_id, title, description)
             .await?;
 
         // Apply metadata if provided

@@ -19,6 +19,7 @@ use super::embeddings::EmbeddingProvider;
 use super::repository::Repository;
 use super::search::{SearchConfig, SearchResult};
 use crate::error::WorkspaceError;
+use crate::identity::{ConversationKind, LinkedConversationRecall, ResolvedIdentity};
 
 /// Maximum characters per workspace file injected into the system prompt.
 /// Matches openclaw's `bootstrapMaxChars` default (~20k chars ≈ 5k tokens).
@@ -95,6 +96,151 @@ fn extract_essential_instructions(agents_content: &str) -> String {
     }
 }
 
+fn extract_markdown_fields(content: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("- **") && t.contains(":**") {
+            let after_colon = t.split_once(":**").map(|x| x.1).unwrap_or("").trim();
+            if !after_colon.is_empty() && !after_colon.starts_with("_(") && after_colon != "_" {
+                fields.push(t.to_string());
+            }
+        }
+    }
+    fields
+}
+
+fn summarize_profile_json(content: &str) -> Option<String> {
+    match serde_json::from_str::<crate::profile::PsychographicProfile>(content) {
+        Ok(profile) if profile.is_populated() => {
+            let confidence = profile.confidence;
+            if confidence >= 0.6 {
+                Some(cap_chars(&profile.to_user_md(), FILE_MAX_CHARS))
+            } else if confidence >= 0.3 {
+                let mut basics = Vec::new();
+                if !profile.preferred_name.is_empty() {
+                    basics.push(format!("**Name**: {}", profile.preferred_name));
+                }
+                basics.push(format!(
+                    "**Communication**: {} tone, {} detail, {} formality",
+                    profile.communication.tone,
+                    profile.communication.detail_level,
+                    profile.communication.formality,
+                ));
+                if profile.cohort.cohort != crate::profile::UserCohort::Other {
+                    basics.push(format!(
+                        "**User type**: {} ({}% confidence)",
+                        profile.cohort.cohort, profile.cohort.confidence
+                    ));
+                }
+                Some(format!(
+                    "## User Profile (preliminary)\n\n{}",
+                    basics.join("\n")
+                ))
+            } else {
+                None
+            }
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!("Failed to parse profile.json for system prompt: {}", e);
+            None
+        }
+    }
+}
+
+#[allow(dead_code)] // Retained for shared/global memory summarisation
+fn summarize_memory_content(content: &str) -> String {
+    let entry_count = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .count();
+
+    if entry_count == 0 {
+        String::new()
+    } else {
+        format!("MEMORY.md: {} entries (long-term notes)", entry_count)
+    }
+}
+
+fn summarize_actor_memory_content(content: &str) -> String {
+    let entry_count = content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .count();
+
+    if entry_count == 0 {
+        String::new()
+    } else {
+        format!("MEMORY.md: {} entries (actor-private notes)", entry_count)
+    }
+}
+
+fn linked_recall_is_empty(recall: &LinkedConversationRecall) -> bool {
+    recall.source_channel.is_empty()
+        && recall.source_conversation_key.is_empty()
+        && recall
+            .handoff_summary
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        && recall.summary.as_deref().unwrap_or("").trim().is_empty()
+        && recall
+            .last_user_goal
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+}
+
+fn format_linked_recall(recall: &LinkedConversationRecall) -> String {
+    let mut lines = vec!["## Linked Conversation Recall".to_string()];
+    if !recall.actor_id.is_empty() {
+        lines.push(format!("- Actor: {}", recall.actor_id));
+    }
+    if !recall.source_channel.is_empty() {
+        lines.push(format!("- Source channel: {}", recall.source_channel));
+    }
+    if !recall.source_conversation_key.is_empty() {
+        lines.push(format!(
+            "- Source conversation: {}",
+            recall.source_conversation_key
+        ));
+    }
+    if !recall
+        .handoff_summary
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        lines.push(format!(
+            "- Handoff: {}",
+            recall.handoff_summary.as_deref().unwrap_or("").trim()
+        ));
+    }
+    if !recall.summary.as_deref().unwrap_or("").trim().is_empty() {
+        lines.push(format!(
+            "- Summary: {}",
+            recall.summary.as_deref().unwrap_or("").trim()
+        ));
+    }
+    if !recall
+        .last_user_goal
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        lines.push(format!(
+            "- Last goal: {}",
+            recall.last_user_goal.as_deref().unwrap_or("").trim()
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Default template seeded into HEARTBEAT.md on first access.
 ///
 /// Includes a minimal default health check so the agent has baseline
@@ -118,6 +264,7 @@ const HEARTBEAT_SEED: &str = "\
 /// Each workspace is scoped to a user (and optionally an agent).
 /// Documents are persisted to the database and indexed for search.
 /// Supports both PostgreSQL (via Repository) and libSQL (via Database trait).
+#[derive(Clone)]
 pub struct Workspace {
     /// User identifier (from channel).
     user_id: String,
@@ -173,6 +320,57 @@ impl Workspace {
     /// Get the agent ID.
     pub fn agent_id(&self) -> Option<Uuid> {
         self.agent_id
+    }
+
+    /// Clone this workspace's backend/embeddings while changing the scope.
+    pub fn scoped_clone(&self, user_id: impl Into<String>, agent_id: Option<Uuid>) -> Self {
+        Self {
+            user_id: user_id.into(),
+            agent_id,
+            storage: self.storage.clone(),
+            embeddings: self.embeddings.clone(),
+        }
+    }
+
+    /// Resolve the path to an actor-private file.
+    pub fn actor_path(actor_id: &str, file: &str) -> String {
+        format!(
+            "{}/{}",
+            paths::actor_root(actor_id),
+            file.trim_start_matches('/')
+        )
+    }
+
+    /// Get the actor-private USER.md path.
+    pub fn actor_user_path(actor_id: &str) -> String {
+        paths::actor_user(actor_id)
+    }
+
+    /// Get the actor-private MEMORY.md path.
+    pub fn actor_memory_path(actor_id: &str) -> String {
+        paths::actor_memory(actor_id)
+    }
+
+    /// Get the actor-private profile path.
+    pub fn actor_profile_path(actor_id: &str) -> String {
+        paths::actor_profile(actor_id)
+    }
+
+    /// Build a system prompt with explicit identity metadata.
+    pub async fn system_prompt_for_identity(
+        &self,
+        identity: Option<&ResolvedIdentity>,
+    ) -> Result<String, WorkspaceError> {
+        let Some(identity) = identity else {
+            return self.system_prompt_for_context(false).await;
+        };
+
+        self.system_prompt_for_context_details(
+            matches!(identity.conversation_kind, ConversationKind::Group),
+            Some(identity.actor_id.as_str()),
+            None,
+        )
+        .await
     }
 
     // ==================== File Operations ====================
@@ -418,6 +616,17 @@ impl Workspace {
         &self,
         is_group_chat: bool,
     ) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context_details(is_group_chat, None, None)
+            .await
+    }
+
+    /// Build the system prompt with optional actor-private overlay and linked recall.
+    pub async fn system_prompt_for_context_details(
+        &self,
+        is_group_chat: bool,
+        actor_id: Option<&str>,
+        linked_recall: Option<&LinkedConversationRecall>,
+    ) -> Result<String, WorkspaceError> {
         // ── Bootstrap mode: blank-slate first run ────────────────────────
         // BOOTSTRAP.md gives the ritual instructions. We also inject SOUL.md
         // and AGENTS.md so the LLM internalizes the agent's seed values and
@@ -451,6 +660,20 @@ impl Workspace {
                 }
             }
 
+            if let Some(actor_id) = actor_id
+                && let Some(actor_overlay) = self.actor_overlay_section(actor_id).await?
+            {
+                bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str(&actor_overlay);
+            }
+
+            if let Some(recall) = linked_recall
+                && !linked_recall_is_empty(recall)
+            {
+                bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str(&format_linked_recall(recall));
+            }
+
             return Ok(bootstrap_prompt);
         }
 
@@ -461,6 +684,13 @@ impl Workspace {
         let identity = self.compact_identity().await?;
         if !identity.is_empty() {
             parts.push(format!("## Identity\n\n{}", identity));
+        }
+
+        if !is_group_chat
+            && let Some(actor_id) = actor_id
+            && let Some(actor_overlay) = self.actor_overlay_section(actor_id).await?
+        {
+            parts.push(actor_overlay);
         }
 
         // 2. Essential operational instructions (distilled from AGENTS.md)
@@ -528,9 +758,16 @@ impl Workspace {
             }
         }
 
+        if !is_group_chat
+            && let Some(recall) = linked_recall
+            && !linked_recall_is_empty(recall)
+        {
+            parts.push(format_linked_recall(recall));
+        }
+
         // 3. Context manifest (what's available, not the content itself)
         if !is_group_chat {
-            let manifest = self.context_manifest().await?;
+            let manifest = self.context_manifest_for_context(actor_id).await?;
             if !manifest.is_empty() {
                 parts.push(format!("## Context\n\n{}", manifest));
             }
@@ -651,6 +888,14 @@ impl Workspace {
     /// Tells the agent what context exists without injecting full content.
     /// The agent uses `memory_read` to access files on demand.
     pub async fn context_manifest(&self) -> Result<String, WorkspaceError> {
+        self.context_manifest_for_context(None).await
+    }
+
+    /// Build a context manifest with optional actor-private files.
+    pub async fn context_manifest_for_context(
+        &self,
+        actor_id: Option<&str>,
+    ) -> Result<String, WorkspaceError> {
         let mut items = Vec::new();
 
         // MEMORY.md
@@ -710,6 +955,45 @@ impl Workspace {
             }
         }
 
+        if let Some(actor_id) = actor_id {
+            if let Ok(doc) = self.read(&paths::actor_memory(actor_id)).await
+                && !doc.content.is_empty()
+            {
+                let entry_count = doc
+                    .content
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+                    .count();
+                if entry_count > 0 {
+                    items.push(format!(
+                        "actors/{}/MEMORY.md: {} entries (private notes)",
+                        actor_id, entry_count
+                    ));
+                }
+            }
+
+            if let Ok(doc) = self.read(&paths::actor_user(actor_id)).await
+                && !doc.content.is_empty()
+            {
+                let fields = extract_markdown_fields(&doc.content);
+                if !fields.is_empty() {
+                    items.push(format!(
+                        "actors/{}/USER.md: actor profile available",
+                        actor_id
+                    ));
+                }
+            }
+
+            if let Ok(doc) = self.read(&paths::actor_profile(actor_id)).await
+                && !doc.content.is_empty()
+            {
+                items.push(format!(
+                    "actors/{}/context/profile.json: actor profile available",
+                    actor_id
+                ));
+            }
+        }
+
         if items.is_empty() {
             Ok(String::new())
         } else {
@@ -721,6 +1005,50 @@ impl Workspace {
                     .collect::<Vec<_>>()
                     .join("\n")
             ))
+        }
+    }
+
+    /// Build a compact actor-private overlay for direct conversations.
+    pub async fn actor_overlay_section(
+        &self,
+        actor_id: &str,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let mut sections = Vec::new();
+
+        if let Ok(doc) = self.read(&paths::actor_user(actor_id)).await
+            && !doc.content.is_empty()
+        {
+            let fields = extract_markdown_fields(&doc.content);
+            if !fields.is_empty() {
+                sections.push(format!("## Actor USER.md\n\n{}", fields.join("\n")));
+            }
+        }
+
+        if let Ok(doc) = self.read(&paths::actor_memory(actor_id)).await
+            && !doc.content.is_empty()
+        {
+            let summary = summarize_actor_memory_content(&doc.content);
+            if !summary.is_empty() {
+                sections.push(format!("## Actor MEMORY.md\n\n{}", summary));
+            }
+            let capped = cap_chars(&doc.content, FILE_MAX_CHARS);
+            sections.push(format!("## Actor MEMORY.md (recent context)\n\n{}", capped));
+        }
+
+        if let Ok(doc) = self.read(&paths::actor_profile(actor_id)).await
+            && !doc.content.is_empty()
+            && let Some(summary) = summarize_profile_json(&doc.content)
+        {
+            sections.push(format!("## Actor Profile\n\n{}", summary));
+        }
+
+        if sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(format!(
+                "## Actor Overlay\n\n{}",
+                sections.join("\n\n---\n\n")
+            )))
         }
     }
 
@@ -811,10 +1139,7 @@ impl Workspace {
         Ok(())
     }
 
-
     // ==================== Seeding ====================
-
-
 
     // ── Timezone <-> USER.md sync ────────────────────────────────────────
 

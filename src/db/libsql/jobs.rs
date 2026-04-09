@@ -9,7 +9,7 @@ use super::{
     LibSqlBackend, fmt_opt_ts, fmt_ts, get_decimal, get_i64, get_json, get_opt_decimal,
     get_opt_text, get_opt_ts, get_text, get_ts, opt_text, opt_text_owned, parse_job_state,
 };
-use crate::context::{ActionRecord, JobContext, JobState};
+use crate::context::{ActionRecord, JobContext, JobState, StateTransition};
 use crate::db::JobStore;
 use crate::error::DatabaseError;
 use crate::history::LlmCallRecord;
@@ -22,23 +22,35 @@ impl JobStore for LibSqlBackend {
         let conn = self.connect().await?;
         let status = ctx.state.to_string();
         let estimated_time_secs = ctx.estimated_duration.map(|d| d.as_secs() as i64);
+        let total_tokens_used = ctx.total_tokens_used.min(i64::MAX as u64) as i64;
+        let max_tokens = ctx.max_tokens.min(i64::MAX as u64) as i64;
+        let transitions = serde_json::to_string(&ctx.transitions)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         conn
             .execute(
                 r#"
                 INSERT INTO agent_jobs (
-                    id, conversation_id, title, description, category, status, source,
+                    id, conversation_id, title, description, category, status, source, user_id, principal_id, actor_id,
                     budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                    actual_cost, repair_attempts, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                    repair_attempts, created_at, started_at, completed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                 ON CONFLICT (id) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
                     category = excluded.category,
                     status = excluded.status,
+                    user_id = excluded.user_id,
+                    principal_id = excluded.principal_id,
+                    actor_id = excluded.actor_id,
                     estimated_cost = excluded.estimated_cost,
                     estimated_time_secs = excluded.estimated_time_secs,
                     actual_cost = excluded.actual_cost,
+                    total_tokens_used = excluded.total_tokens_used,
+                    max_tokens = excluded.max_tokens,
+                    metadata = excluded.metadata,
+                    transitions = excluded.transitions,
                     repair_attempts = excluded.repair_attempts,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at
@@ -51,12 +63,19 @@ impl JobStore for LibSqlBackend {
                     opt_text(ctx.category.as_deref()),
                     status,
                     "direct",
+                    ctx.user_id.as_str(),
+                    ctx.principal_id.as_str(),
+                    opt_text(ctx.actor_id.as_deref()),
                     opt_text_owned(ctx.budget.map(|d| d.to_string())),
                     opt_text(ctx.budget_token.as_deref()),
                     opt_text_owned(ctx.bid_amount.map(|d| d.to_string())),
                     opt_text_owned(ctx.estimated_cost.map(|d| d.to_string())),
                     estimated_time_secs,
                     ctx.actual_cost.to_string(),
+                    total_tokens_used,
+                    max_tokens,
+                    ctx.metadata.to_string(),
+                    transitions,
                     ctx.repair_attempts as i64,
                     fmt_ts(&ctx.created_at),
                     fmt_opt_ts(&ctx.started_at),
@@ -73,9 +92,10 @@ impl JobStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, conversation_id, title, description, category, status, user_id,
+                SELECT id, conversation_id, title, description, category, status, user_id, principal_id, actor_id,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                       actual_cost, repair_attempts, created_at, started_at, completed_at
+                       actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                       repair_attempts, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -91,31 +111,36 @@ impl JobStore for LibSqlBackend {
             Some(row) => {
                 let status_str = get_text(&row, 5);
                 let state = parse_job_state(&status_str);
-                let estimated_time_secs: Option<i64> = row.get::<i64>(11).ok();
+                let estimated_time_secs: Option<i64> = row.get::<i64>(13).ok();
+                let transitions =
+                    serde_json::from_value::<Vec<StateTransition>>(get_json(&row, 18))
+                        .unwrap_or_default();
 
                 Ok(Some(JobContext {
                     job_id: get_text(&row, 0).parse().unwrap_or_default(),
                     state,
                     user_id: get_text(&row, 6),
+                    principal_id: get_text(&row, 7),
+                    actor_id: get_opt_text(&row, 8),
                     conversation_id: get_opt_text(&row, 1).and_then(|s| s.parse().ok()),
                     title: get_text(&row, 2),
                     description: get_text(&row, 3),
                     category: get_opt_text(&row, 4),
-                    budget: get_opt_decimal(&row, 7),
-                    budget_token: get_opt_text(&row, 8),
-                    bid_amount: get_opt_decimal(&row, 9),
-                    estimated_cost: get_opt_decimal(&row, 10),
+                    budget: get_opt_decimal(&row, 9),
+                    budget_token: get_opt_text(&row, 10),
+                    bid_amount: get_opt_decimal(&row, 11),
+                    estimated_cost: get_opt_decimal(&row, 12),
                     estimated_duration: estimated_time_secs
                         .map(|s| std::time::Duration::from_secs(s as u64)),
-                    actual_cost: get_decimal(&row, 12),
-                    total_tokens_used: 0,
-                    max_tokens: 0,
-                    repair_attempts: get_i64(&row, 13) as u32,
-                    created_at: get_ts(&row, 14),
-                    started_at: get_opt_ts(&row, 15),
-                    completed_at: get_opt_ts(&row, 16),
-                    transitions: Vec::new(),
-                    metadata: serde_json::Value::Null,
+                    actual_cost: get_decimal(&row, 14),
+                    total_tokens_used: get_i64(&row, 15).max(0) as u64,
+                    max_tokens: get_i64(&row, 16).max(0) as u64,
+                    repair_attempts: get_i64(&row, 19) as u32,
+                    created_at: get_ts(&row, 20),
+                    started_at: get_opt_ts(&row, 21),
+                    completed_at: get_opt_ts(&row, 22),
+                    transitions,
+                    metadata: get_json(&row, 17),
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }

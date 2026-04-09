@@ -10,12 +10,14 @@ use super::{LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_text, get_ts};
 /// Column list for agent_workspaces table (matches positional access).
 const AGENT_WS_COLUMNS: &str = "\
     id, agent_id, display_name, system_prompt, model, \
-    bound_channels, trigger_keywords, is_default, \
-    created_at, updated_at";
+    bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+    is_default, created_at, updated_at";
 
 fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
     let bound_channels_json = get_text(row, 5);
     let trigger_keywords_json = get_text(row, 6);
+    let allowed_tools_json = get_opt_text(row, 7);
+    let allowed_skills_json = get_opt_text(row, 8);
 
     AgentWorkspaceRecord {
         id: get_text(row, 0).parse().unwrap_or_default(),
@@ -25,9 +27,15 @@ fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
         model: get_opt_text(row, 4),
         bound_channels: serde_json::from_str(&bound_channels_json).unwrap_or_default(),
         trigger_keywords: serde_json::from_str(&trigger_keywords_json).unwrap_or_default(),
-        is_default: get_i64(row, 7) != 0,
-        created_at: get_ts(row, 8),
-        updated_at: get_ts(row, 9),
+        allowed_tools: allowed_tools_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
+        allowed_skills: allowed_skills_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok()),
+        is_default: get_i64(row, 9) != 0,
+        created_at: get_ts(row, 10),
+        updated_at: get_ts(row, 11),
     }
 }
 
@@ -39,11 +47,19 @@ impl AgentRegistryStore for LibSqlBackend {
             serde_json::to_string(&ws.bound_channels).unwrap_or_else(|_| "[]".into());
         let trigger_keywords =
             serde_json::to_string(&ws.trigger_keywords).unwrap_or_else(|_| "[]".into());
+        let allowed_tools = ws
+            .allowed_tools
+            .as_ref()
+            .and_then(|tools| serde_json::to_string(tools).ok());
+        let allowed_skills = ws
+            .allowed_skills
+            .as_ref()
+            .and_then(|skills| serde_json::to_string(skills).ok());
 
         conn.execute(
             &format!(
                 "INSERT INTO agent_workspaces ({AGENT_WS_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
             ),
             libsql::params![
                 ws.id.to_string(),
@@ -59,6 +75,12 @@ impl AgentRegistryStore for LibSqlBackend {
                     .unwrap_or(libsql::Value::Null),
                 bound_channels,
                 trigger_keywords,
+                allowed_tools
+                    .map(libsql::Value::Text)
+                    .unwrap_or(libsql::Value::Null),
+                allowed_skills
+                    .map(libsql::Value::Text)
+                    .unwrap_or(libsql::Value::Null),
                 ws.is_default as i64,
                 fmt_ts(&ws.created_at),
                 fmt_ts(&ws.updated_at),
@@ -128,14 +150,22 @@ impl AgentRegistryStore for LibSqlBackend {
             serde_json::to_string(&ws.bound_channels).unwrap_or_else(|_| "[]".into());
         let trigger_keywords =
             serde_json::to_string(&ws.trigger_keywords).unwrap_or_else(|_| "[]".into());
+        let allowed_tools = ws
+            .allowed_tools
+            .as_ref()
+            .and_then(|tools| serde_json::to_string(tools).ok());
+        let allowed_skills = ws
+            .allowed_skills
+            .as_ref()
+            .and_then(|skills| serde_json::to_string(skills).ok());
 
         let affected = conn
             .execute(
                 "UPDATE agent_workspaces SET \
                  display_name = ?1, system_prompt = ?2, model = ?3, \
-                 bound_channels = ?4, trigger_keywords = ?5, is_default = ?6, \
-                 updated_at = ?7 \
-                 WHERE agent_id = ?8",
+                 bound_channels = ?4, trigger_keywords = ?5, allowed_tools = ?6, \
+                 allowed_skills = ?7, is_default = ?8, updated_at = ?9 \
+                 WHERE agent_id = ?10",
                 libsql::params![
                     ws.display_name.clone(),
                     ws.system_prompt
@@ -148,6 +178,12 @@ impl AgentRegistryStore for LibSqlBackend {
                         .unwrap_or(libsql::Value::Null),
                     bound_channels,
                     trigger_keywords,
+                    allowed_tools
+                        .map(libsql::Value::Text)
+                        .unwrap_or(libsql::Value::Null),
+                    allowed_skills
+                        .map(libsql::Value::Text)
+                        .unwrap_or(libsql::Value::Null),
                     ws.is_default as i64,
                     fmt_ts(&ws.updated_at),
                     ws.agent_id.clone(),
@@ -192,6 +228,8 @@ mod tests {
             model: None,
             bound_channels: vec![],
             trigger_keywords: vec![],
+            allowed_tools: None,
+            allowed_skills: None,
             is_default: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),

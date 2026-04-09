@@ -14,6 +14,7 @@ pub use analytics::{JobStats, ToolStats};
 #[cfg(feature = "postgres")]
 pub use store::Store;
 pub use store::{
-    ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
+    ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationScope,
+    ConversationSummary, JobEventRecord, LinkedConversationRecall, LlmCallRecord, SandboxJobRecord,
     SandboxJobSummary, SettingRow,
 };

@@ -48,7 +48,7 @@ async fn send_message(
         format!("http://{}:{}", host, port)
     });
 
-    let url = format!("{}/api/chat", base_url);
+    let url = format!("{}/api/chat/send", base_url);
 
     // Check for auth token
     let auth_token = std::env::var("GATEWAY_AUTH_TOKEN").ok();
@@ -58,7 +58,7 @@ async fn send_message(
         .build()?;
 
     let body = serde_json::json!({
-        "message": text,
+        "content": text,
         "user_id": user_id,
     });
 

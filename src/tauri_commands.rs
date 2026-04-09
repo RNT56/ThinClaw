@@ -205,17 +205,25 @@ pub async fn routine_audit_list(
     user_id: &str,
     limit: Option<i64>,
 ) -> Result<Vec<RoutineRun>, String> {
-    // Look up the routine by name to get its UUID.
-    let routine = store
-        .get_routine_by_name(user_id, routine_name)
+    let routines = store
+        .list_routines(user_id)
         .await
-        .map_err(|e| format!("DB error looking up routine '{}': {}", routine_name, e))?
-        .ok_or_else(|| {
-            format!(
-                "Routine '{}' not found for user '{}'",
-                routine_name, user_id
-            )
-        })?;
+        .map_err(|e| format!("DB error listing routines for '{}': {}", user_id, e))?;
+    let mut matches = routines
+        .into_iter()
+        .filter(|routine| routine.name == routine_name);
+    let routine = matches.next().ok_or_else(|| {
+        format!(
+            "Routine '{}' not found for user '{}'",
+            routine_name, user_id
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "Routine '{}' is ambiguous across actors for user '{}'; use routine_audit_list_for_actor",
+            routine_name, user_id
+        ));
+    }
 
     let runs = store
         .list_routine_runs(routine.id, limit.unwrap_or(20))
@@ -223,6 +231,30 @@ pub async fn routine_audit_list(
         .map_err(|e| format!("DB error listing runs: {}", e))?;
 
     Ok(runs)
+}
+
+pub async fn routine_audit_list_for_actor(
+    store: &dyn crate::db::Database,
+    routine_name: &str,
+    user_id: &str,
+    actor_id: &str,
+    limit: Option<i64>,
+) -> Result<Vec<RoutineRun>, String> {
+    let routine = store
+        .get_routine_by_name_for_actor(user_id, actor_id, routine_name)
+        .await
+        .map_err(|e| format!("DB error looking up routine '{}': {}", routine_name, e))?
+        .ok_or_else(|| {
+            format!(
+                "Routine '{}' not found for actor '{}' / user '{}'",
+                routine_name, actor_id, user_id
+            )
+        })?;
+
+    store
+        .list_routine_runs(routine.id, limit.unwrap_or(20))
+        .await
+        .map_err(|e| format!("DB error listing runs: {}", e))
 }
 
 // ── 6. openclaw_cache_stats ───────────────────────────────────────────
@@ -738,6 +770,8 @@ pub struct RoutineCreateParams {
     pub name: String,
     pub description: String,
     pub user_id: String,
+    #[serde(default)]
+    pub actor_id: Option<String>,
     pub trigger: Trigger,
     pub action: RoutineAction,
     #[serde(default)]
@@ -761,7 +795,8 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
         id: uuid::Uuid::new_v4(),
         name: params.name,
         description: params.description,
-        user_id: params.user_id,
+        user_id: params.user_id.clone(),
+        actor_id: params.actor_id.unwrap_or(params.user_id),
         enabled: true,
         trigger: params.trigger,
         action: params.action,

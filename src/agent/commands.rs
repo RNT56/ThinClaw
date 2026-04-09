@@ -8,13 +8,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::agent::session::Session;
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
+use crate::agent::{mutate_thread_runtime, session::Session};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
-use crate::tools::builtin::llm_tools::ModelOverride;
+use crate::tools::builtin::llm_tools::{ModelOverride, model_override_scope_key_from_metadata};
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -33,6 +33,7 @@ impl Agent {
         &self,
         intent: MessageIntent,
         message: &IncomingMessage,
+        thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         // Send thinking status for non-trivial operations
         if let MessageIntent::CreateJob { .. } = &intent {
@@ -52,7 +53,7 @@ impl Agent {
                 description,
                 category,
             } => {
-                self.handle_create_job(&message.user_id, title, description, category)
+                self.handle_create_job(message, title, description, category)
                     .await?
             }
             MessageIntent::CheckJobStatus { job_id } => {
@@ -68,7 +69,10 @@ impl Agent {
                 self.handle_help_job(&message.user_id, &job_id).await?
             }
             MessageIntent::Command { command, args } => {
-                match self.handle_command(&command, &args).await? {
+                match self
+                    .handle_command(message, thread_id, &command, &args)
+                    .await?
+                {
                     Some(s) => s,
                     None => return Ok(SubmissionResult::Ok { message: None }), // Shutdown signal
                 }
@@ -80,14 +84,21 @@ impl Agent {
 
     async fn handle_create_job(
         &self,
-        user_id: &str,
+        message: &IncomingMessage,
         title: String,
         description: String,
         category: Option<String>,
     ) -> Result<String, Error> {
+        let identity = message.resolved_identity();
         let job_id = self
             .scheduler
-            .dispatch_job(user_id, &title, &description, None)
+            .dispatch_job_for_identity(
+                &identity.principal_id,
+                &identity.actor_id,
+                &title,
+                &description,
+                None,
+            )
             .await?;
 
         // Set the dedicated category field (not stored in metadata)
@@ -365,6 +376,8 @@ impl Agent {
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
         command: &str,
         args: &[String],
     ) -> Result<SubmissionResult, Error> {
@@ -386,7 +399,7 @@ impl Agent {
                 "  /redo             Redo undone turn\n",
                 "  /compact          Compress context window\n",
                 "  /clear            Clear current thread\n",
-                "  /interrupt        Stop current operation\n",
+                "  /interrupt        Stop current operation (takes effect between tool iterations)\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
                 "  /resume <id>      Resume from checkpoint\n",
@@ -400,7 +413,7 @@ impl Agent {
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
                 "\n",
-                "  /restart          Restart agent (for updates)\n",
+                "  /restart          Restart agent (requires launchd/systemd to relaunch)\n",
                 "  /quit             Exit",
             ))),
 
@@ -474,10 +487,22 @@ impl Agent {
                     Ok(SubmissionResult::response(out))
                 } else {
                     let requested = &args[0];
+                    let identity = message.resolved_identity();
+                    let scope_key = model_override_scope_key_from_metadata(
+                        &message.metadata,
+                        Some(identity.principal_id.as_str()),
+                        Some(identity.actor_id.as_str()),
+                    );
 
                     if requested.eq_ignore_ascii_case("reset") {
                         if let Some(ref override_lock) = self.deps.model_override {
-                            *override_lock.write().await = None;
+                            override_lock.clear(&scope_key).await;
+                            if let Some(store) = self.store() {
+                                let _ = mutate_thread_runtime(store, thread_id, |runtime| {
+                                    runtime.model_override = None;
+                                })
+                                .await;
+                            }
                             return Ok(SubmissionResult::response(
                                 "Switched back to the default routed model.".to_string(),
                             ));
@@ -511,10 +536,17 @@ impl Agent {
                     }
 
                     if let Some(ref override_lock) = self.deps.model_override {
-                        *override_lock.write().await = Some(ModelOverride {
+                        let override_value = ModelOverride {
                             model_spec: requested.to_string(),
                             reason: Some("manual /model command".to_string()),
-                        });
+                        };
+                        override_lock.set(scope_key, override_value.clone()).await;
+                        if let Some(store) = self.store() {
+                            let _ = mutate_thread_runtime(store, thread_id, |runtime| {
+                                runtime.model_override = Some(override_value.clone());
+                            })
+                            .await;
+                        }
                         Ok(SubmissionResult::response(format!(
                             "Switched model for this conversation to: {}",
                             requested
@@ -726,12 +758,17 @@ impl Agent {
     /// process_user_input -> router -> handle_job_or_command -> here).
     pub(super) async fn handle_command(
         &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
         command: &str,
         args: &[String],
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
-        match self.handle_system_command(command, args).await? {
+        match self
+            .handle_system_command(message, thread_id, command, args)
+            .await?
+        {
             SubmissionResult::Response { content } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),

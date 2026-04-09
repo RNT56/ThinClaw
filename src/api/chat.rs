@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::submission::Submission;
 use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 use super::error::{ApiError, ApiResult};
 
@@ -30,6 +31,18 @@ pub struct SendMessageResult {
     pub message_id: Uuid,
     /// Always `"accepted"` — the actual response arrives via channel events.
     pub status: String,
+}
+
+fn tauri_identity(session_key: &str) -> ResolvedIdentity {
+    let stable_external_conversation_key = format!("tauri:direct:{session_key}");
+    ResolvedIdentity {
+        principal_id: "local_user".to_string(),
+        actor_id: "local_user".to_string(),
+        conversation_scope_id: scope_id_from_key(&stable_external_conversation_key),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: "local_user".to_string(),
+        stable_external_conversation_key,
+    }
 }
 
 /// Send a message to the agent on behalf of a user.
@@ -76,7 +89,10 @@ pub async fn send_message_full(
 
     if !deliver {
         // Context injection — persist without triggering an LLM turn.
-        let msg = IncomingMessage::new("tauri", "local_user", content).with_thread(session_key);
+        let msg = IncomingMessage::new("tauri", "local_user", content)
+            .with_thread(session_key)
+            .with_metadata(serde_json::json!({"thread_id": session_key}))
+            .with_identity(tauri_identity(session_key));
         agent.inject_context(&msg).await?;
         return Ok(SendMessageResult {
             message_id: msg.id,
@@ -88,6 +104,7 @@ pub async fn send_message_full(
     let mut msg = IncomingMessage::new("tauri", "local_user", content);
     msg = msg.with_thread(session_key);
     msg = msg.with_metadata(serde_json::json!({"thread_id": session_key}));
+    msg = msg.with_identity(tauri_identity(session_key));
 
     let msg_id = msg.id;
 
@@ -237,7 +254,10 @@ pub async fn resolve_approval(
     };
     let content = serde_json::to_string(&approval)?;
 
-    let msg = IncomingMessage::new("tauri", "local_user", content).with_thread(session_key);
+    let msg = IncomingMessage::new("tauri", "local_user", content)
+        .with_thread(session_key)
+        .with_metadata(serde_json::json!({"thread_id": session_key}))
+        .with_identity(tauri_identity(session_key));
 
     let msg_id = msg.id;
 

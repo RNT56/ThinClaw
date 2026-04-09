@@ -16,13 +16,17 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    AgentRegistryStore, AgentWorkspaceRecord, ConversationStore, Database, JobStore, RoutineStore,
-    SandboxStore, SettingsStore, ToolFailureStore, WorkspaceStore,
+    AgentRegistryStore, AgentWorkspaceRecord, ConversationStore, Database, IdentityRegistryStore,
+    JobStore, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
     ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
     SandboxJobSummary, SettingRow, Store,
+};
+use crate::identity::{
+    ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, EndpointApprovalStatus,
+    NewActorEndpointRecord, NewActorRecord,
 };
 use crate::workspace::{
     MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
@@ -104,6 +108,29 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn add_conversation_message_with_attribution(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        actor_id: Option<&str>,
+        actor_display_name: Option<&str>,
+        raw_sender_id: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .add_conversation_message_with_attribution(
+                conversation_id,
+                role,
+                content,
+                actor_id,
+                actor_display_name,
+                raw_sender_id,
+                metadata,
+            )
+            .await
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -127,6 +154,13 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store.infer_primary_user_id_for_channel(channel).await
+    }
+
     async fn get_or_create_assistant_conversation(
         &self,
         user_id: &str,
@@ -145,6 +179,52 @@ impl ConversationStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.store
             .create_conversation_with_metadata(channel, user_id, metadata)
+            .await
+    }
+
+    async fn update_conversation_identity(
+        &self,
+        id: Uuid,
+        actor_id: Option<&str>,
+        conversation_scope_id: Option<Uuid>,
+        conversation_kind: crate::history::ConversationKind,
+        stable_external_conversation_key: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_conversation_identity(
+                id,
+                actor_id,
+                conversation_scope_id,
+                conversation_kind,
+                stable_external_conversation_key,
+            )
+            .await
+    }
+
+    async fn set_conversation_handoff_metadata(
+        &self,
+        id: Uuid,
+        handoff: &crate::history::ConversationHandoffMetadata,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .set_conversation_handoff_metadata(id, handoff)
+            .await
+    }
+
+    async fn list_actor_conversations_for_recall(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        include_group_history: bool,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.store
+            .list_actor_conversations_for_recall(
+                principal_id,
+                actor_id,
+                include_group_history,
+                limit,
+            )
             .await
     }
 
@@ -191,6 +271,17 @@ impl ConversationStore for PgBackend {
     ) -> Result<bool, DatabaseError> {
         self.store
             .conversation_belongs_to_user(conversation_id, user_id)
+            .await
+    }
+
+    async fn conversation_belongs_to_actor(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .conversation_belongs_to_actor(conversation_id, principal_id, actor_id)
             .await
     }
 
@@ -686,6 +777,489 @@ impl WorkspaceStore for PgBackend {
     }
 }
 
+// ==================== IdentityRegistryStore ====================
+
+const PG_ACTOR_COLUMNS: &str = "\
+    actor_id, principal_id, display_name, status, \
+    preferred_delivery_channel, preferred_delivery_external_user_id, \
+    last_active_direct_channel, last_active_direct_external_user_id, \
+    created_at, updated_at";
+
+const PG_ACTOR_ENDPOINT_COLUMNS: &str = "\
+    channel, external_user_id, actor_id, endpoint_metadata, approval_status, \
+    created_at, updated_at";
+
+fn pg_endpoint_ref(
+    channel: Option<String>,
+    external_user_id: Option<String>,
+) -> Option<ActorEndpointRef> {
+    match (channel, external_user_id) {
+        (Some(channel), Some(external_user_id)) => {
+            Some(ActorEndpointRef::new(channel, external_user_id))
+        }
+        _ => None,
+    }
+}
+
+fn pg_row_to_actor(row: &tokio_postgres::Row) -> Result<ActorRecord, DatabaseError> {
+    let status = row
+        .get::<_, String>(3)
+        .parse::<ActorStatus>()
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(ActorRecord {
+        actor_id: row.get::<_, Uuid>(0),
+        principal_id: row.get::<_, String>(1),
+        display_name: row.get::<_, String>(2),
+        status,
+        preferred_delivery_endpoint: pg_endpoint_ref(
+            row.get::<_, Option<String>>(4),
+            row.get::<_, Option<String>>(5),
+        ),
+        last_active_direct_endpoint: pg_endpoint_ref(
+            row.get::<_, Option<String>>(6),
+            row.get::<_, Option<String>>(7),
+        ),
+        created_at: row.get::<_, DateTime<Utc>>(8),
+        updated_at: row.get::<_, DateTime<Utc>>(9),
+    })
+}
+
+fn pg_row_to_actor_endpoint(
+    row: &tokio_postgres::Row,
+) -> Result<ActorEndpointRecord, DatabaseError> {
+    let approval_status = row
+        .get::<_, String>(4)
+        .parse::<EndpointApprovalStatus>()
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(ActorEndpointRecord {
+        endpoint: ActorEndpointRef::new(row.get::<_, String>(0), row.get::<_, String>(1)),
+        actor_id: row.get::<_, Uuid>(2),
+        metadata: row.get::<_, serde_json::Value>(3),
+        approval_status,
+        created_at: row.get::<_, DateTime<Utc>>(5),
+        updated_at: row.get::<_, DateTime<Utc>>(6),
+    })
+}
+
+#[async_trait]
+impl IdentityRegistryStore for PgBackend {
+    async fn create_actor(&self, actor: &NewActorRecord) -> Result<ActorRecord, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let row = client
+            .query_one(
+                &format!(
+                    "INSERT INTO actors (principal_id, display_name, status, preferred_delivery_channel, preferred_delivery_external_user_id, last_active_direct_channel, last_active_direct_external_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {PG_ACTOR_COLUMNS}"
+                ),
+                &[
+                    &actor.principal_id,
+                    &actor.display_name,
+                    &actor.status.as_str(),
+                    &actor
+                        .preferred_delivery_endpoint
+                        .as_ref()
+                        .map(|e| e.channel.as_str()),
+                    &actor
+                        .preferred_delivery_endpoint
+                        .as_ref()
+                        .map(|e| e.external_user_id.as_str()),
+                    &actor
+                        .last_active_direct_endpoint
+                        .as_ref()
+                        .map(|e| e.channel.as_str()),
+                    &actor
+                        .last_active_direct_endpoint
+                        .as_ref()
+                        .map(|e| e.external_user_id.as_str()),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to create actor: {e}")))?;
+
+        pg_row_to_actor(&row)
+    }
+
+    async fn get_actor(&self, actor_id: Uuid) -> Result<Option<ActorRecord>, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let row = client
+            .query_opt(
+                &format!("SELECT {PG_ACTOR_COLUMNS} FROM actors WHERE actor_id = $1"),
+                &[&actor_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to get actor: {e}")))?;
+
+        row.map(|row| pg_row_to_actor(&row)).transpose()
+    }
+
+    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {PG_ACTOR_COLUMNS} FROM actors WHERE principal_id = $1 ORDER BY created_at ASC"
+                ),
+                &[&principal_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to list actors: {e}")))?;
+
+        rows.iter()
+            .map(pg_row_to_actor)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn update_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                r#"
+                UPDATE actors SET
+                    principal_id = $2,
+                    display_name = $3,
+                    status = $4,
+                    preferred_delivery_channel = $5,
+                    preferred_delivery_external_user_id = $6,
+                    last_active_direct_channel = $7,
+                    last_active_direct_external_user_id = $8,
+                    updated_at = $9
+                WHERE actor_id = $1
+                "#,
+                &[
+                    &actor.actor_id,
+                    &actor.principal_id,
+                    &actor.display_name,
+                    &actor.status.as_str(),
+                    &actor
+                        .preferred_delivery_endpoint
+                        .as_ref()
+                        .map(|e| e.channel.as_str()),
+                    &actor
+                        .preferred_delivery_endpoint
+                        .as_ref()
+                        .map(|e| e.external_user_id.as_str()),
+                    &actor
+                        .last_active_direct_endpoint
+                        .as_ref()
+                        .map(|e| e.channel.as_str()),
+                    &actor
+                        .last_active_direct_endpoint
+                        .as_ref()
+                        .map(|e| e.external_user_id.as_str()),
+                    &actor.updated_at,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to update actor: {e}")))?;
+
+        if affected == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "actor".to_string(),
+                id: actor.actor_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn delete_actor(&self, actor_id: Uuid) -> Result<bool, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute("DELETE FROM actors WHERE actor_id = $1", &[&actor_id])
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to delete actor: {e}")))?;
+        Ok(affected > 0)
+    }
+
+    async fn rename_actor(&self, actor_id: Uuid, display_name: &str) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                "UPDATE actors SET display_name = $2, updated_at = NOW() WHERE actor_id = $1",
+                &[&actor_id, &display_name],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to rename actor: {e}")))?;
+        if affected == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "actor".to_string(),
+                id: actor_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn set_actor_status(
+        &self,
+        actor_id: Uuid,
+        status: ActorStatus,
+    ) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                "UPDATE actors SET status = $2, updated_at = NOW() WHERE actor_id = $1",
+                &[&actor_id, &status.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to update actor status: {e}")))?;
+        if affected == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "actor".to_string(),
+                id: actor_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn set_actor_preferred_delivery_endpoint(
+        &self,
+        actor_id: Uuid,
+        endpoint: Option<&ActorEndpointRef>,
+    ) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                r#"
+                UPDATE actors SET
+                    preferred_delivery_channel = $2,
+                    preferred_delivery_external_user_id = $3,
+                    updated_at = NOW()
+                WHERE actor_id = $1
+                "#,
+                &[
+                    &actor_id,
+                    &endpoint.as_ref().map(|e| e.channel.as_str()),
+                    &endpoint.as_ref().map(|e| e.external_user_id.as_str()),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to set preferred endpoint: {e}")))?;
+        if affected == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "actor".to_string(),
+                id: actor_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn set_actor_last_active_direct_endpoint(
+        &self,
+        actor_id: Uuid,
+        endpoint: Option<&ActorEndpointRef>,
+    ) -> Result<(), DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                r#"
+                UPDATE actors SET
+                    last_active_direct_channel = $2,
+                    last_active_direct_external_user_id = $3,
+                    updated_at = NOW()
+                WHERE actor_id = $1
+                "#,
+                &[
+                    &actor_id,
+                    &endpoint.as_ref().map(|e| e.channel.as_str()),
+                    &endpoint.as_ref().map(|e| e.external_user_id.as_str()),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::Query(format!("Failed to set last active endpoint: {e}"))
+            })?;
+        if affected == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "actor".to_string(),
+                id: actor_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn upsert_actor_endpoint(
+        &self,
+        record: &NewActorEndpointRecord,
+    ) -> Result<ActorEndpointRecord, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let row = client
+            .query_one(
+                &format!(
+                    "INSERT INTO actor_endpoints (channel, external_user_id, actor_id, endpoint_metadata, approval_status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel, external_user_id) DO UPDATE SET actor_id = EXCLUDED.actor_id, endpoint_metadata = EXCLUDED.endpoint_metadata, approval_status = EXCLUDED.approval_status, updated_at = NOW() RETURNING {PG_ACTOR_ENDPOINT_COLUMNS}"
+                ),
+                &[
+                    &record.endpoint.channel,
+                    &record.endpoint.external_user_id,
+                    &record.actor_id,
+                    &record.metadata,
+                    &record.approval_status.as_str(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to upsert actor endpoint: {e}")))?;
+
+        pg_row_to_actor_endpoint(&row)
+    }
+
+    async fn get_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<Option<ActorEndpointRecord>, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {PG_ACTOR_ENDPOINT_COLUMNS} FROM actor_endpoints WHERE channel = $1 AND external_user_id = $2"
+                ),
+                &[&channel, &external_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to get actor endpoint: {e}")))?;
+
+        row.map(|row| pg_row_to_actor_endpoint(&row)).transpose()
+    }
+
+    async fn list_actor_endpoints(
+        &self,
+        actor_id: Uuid,
+    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {PG_ACTOR_ENDPOINT_COLUMNS} FROM actor_endpoints WHERE actor_id = $1 ORDER BY channel, external_user_id"
+                ),
+                &[&actor_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to list actor endpoints: {e}")))?;
+
+        rows.iter()
+            .map(pg_row_to_actor_endpoint)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    async fn delete_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let affected = client
+            .execute(
+                "DELETE FROM actor_endpoints WHERE channel = $1 AND external_user_id = $2",
+                &[&channel, &external_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to delete actor endpoint: {e}")))?;
+        Ok(affected > 0)
+    }
+
+    async fn resolve_actor_for_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<Option<ActorRecord>, DatabaseError> {
+        let client = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get PG connection: {e}")))?;
+
+        let row = client
+            .query_opt(
+                &format!(
+                    "SELECT {PG_ACTOR_COLUMNS} FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id WHERE e.channel = $1 AND e.external_user_id = $2"
+                ),
+                &[&channel, &external_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(format!("Failed to resolve actor: {e}")))?;
+
+        row.map(|row| pg_row_to_actor(&row)).transpose()
+    }
+}
+
 // ==================== AgentRegistryStore ====================
 
 #[async_trait]
@@ -712,6 +1286,8 @@ impl AgentRegistryStore for PgBackend {
                         model TEXT,
                         bound_channels JSONB NOT NULL DEFAULT '[]',
                         trigger_keywords JSONB NOT NULL DEFAULT '[]',
+                        allowed_tools JSONB,
+                        allowed_skills JSONB,
                         is_default BOOLEAN NOT NULL DEFAULT FALSE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -729,13 +1305,22 @@ impl AgentRegistryStore for PgBackend {
             serde_json::to_value(&ws.bound_channels).unwrap_or(serde_json::Value::Array(vec![]));
         let trigger_keywords =
             serde_json::to_value(&ws.trigger_keywords).unwrap_or(serde_json::Value::Array(vec![]));
+        let allowed_tools = ws
+            .allowed_tools
+            .as_ref()
+            .map(|tools| serde_json::to_value(tools).unwrap_or(serde_json::Value::Null));
+        let allowed_skills = ws
+            .allowed_skills
+            .as_ref()
+            .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
 
         client
             .execute(
                 "INSERT INTO agent_workspaces \
                  (id, agent_id, display_name, system_prompt, model, \
-                  bound_channels, trigger_keywords, is_default, created_at, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                  bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                  is_default, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &ws.id,
                     &ws.agent_id,
@@ -744,6 +1329,8 @@ impl AgentRegistryStore for PgBackend {
                     &ws.model,
                     &bound_channels,
                     &trigger_keywords,
+                    &allowed_tools,
+                    &allowed_skills,
                     &ws.is_default,
                     &ws.created_at,
                     &ws.updated_at,
@@ -769,7 +1356,8 @@ impl AgentRegistryStore for PgBackend {
         let row = client
             .query_opt(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, is_default, created_at, updated_at \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 is_default, created_at, updated_at \
                  FROM agent_workspaces WHERE agent_id = $1",
                 &[&agent_id],
             )
@@ -790,7 +1378,8 @@ impl AgentRegistryStore for PgBackend {
         let rows = client
             .query(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, is_default, created_at, updated_at \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 is_default, created_at, updated_at \
                  FROM agent_workspaces ORDER BY created_at ASC",
                 &[],
             )
@@ -831,20 +1420,30 @@ impl AgentRegistryStore for PgBackend {
             serde_json::to_value(&ws.bound_channels).unwrap_or(serde_json::Value::Array(vec![]));
         let trigger_keywords =
             serde_json::to_value(&ws.trigger_keywords).unwrap_or(serde_json::Value::Array(vec![]));
+        let allowed_tools = ws
+            .allowed_tools
+            .as_ref()
+            .map(|tools| serde_json::to_value(tools).unwrap_or(serde_json::Value::Null));
+        let allowed_skills = ws
+            .allowed_skills
+            .as_ref()
+            .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
 
         let affected = client
             .execute(
                 "UPDATE agent_workspaces SET \
                  display_name = $1, system_prompt = $2, model = $3, \
-                 bound_channels = $4, trigger_keywords = $5, is_default = $6, \
-                 updated_at = NOW() \
-                 WHERE agent_id = $7",
+                 bound_channels = $4, trigger_keywords = $5, allowed_tools = $6, \
+                 allowed_skills = $7, is_default = $8, updated_at = NOW() \
+                 WHERE agent_id = $9",
                 &[
                     &ws.display_name,
                     &ws.system_prompt,
                     &ws.model,
                     &bound_channels,
                     &trigger_keywords,
+                    &allowed_tools,
+                    &allowed_skills,
                     &ws.is_default,
                     &ws.agent_id,
                 ],
@@ -867,6 +1466,8 @@ impl AgentRegistryStore for PgBackend {
 fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord {
     let bound_channels: serde_json::Value = row.get("bound_channels");
     let trigger_keywords: serde_json::Value = row.get("trigger_keywords");
+    let allowed_tools: Option<serde_json::Value> = row.get("allowed_tools");
+    let allowed_skills: Option<serde_json::Value> = row.get("allowed_skills");
 
     AgentWorkspaceRecord {
         id: row.get("id"),
@@ -876,6 +1477,8 @@ fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord 
         model: row.get("model"),
         bound_channels: serde_json::from_value(bound_channels).unwrap_or_default(),
         trigger_keywords: serde_json::from_value(trigger_keywords).unwrap_or_default(),
+        allowed_tools: allowed_tools.and_then(|value| serde_json::from_value(value).ok()),
+        allowed_skills: allowed_skills.and_then(|value| serde_json::from_value(value).ok()),
         is_default: row.get("is_default"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),

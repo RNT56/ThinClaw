@@ -32,9 +32,7 @@ correct approach when the agent has its own GitHub account.
    - Repository permissions: Issues (R/W), Pull requests (R/W), Contents (Read), Actions (R/W)
 
 4. **Store the token**
-   ```bash
-   thinclaw secret set github_token ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
+   Save the PAT using your current ThinClaw secret-entry flow for `github_token` or via env-based secret management if your deployment relies on environment variables.
 
 5. **Verify**
    ```
@@ -43,8 +41,7 @@ correct approach when the agent has its own GitHub account.
 
 ### Headless / Remote Setup
 
-If running on a headless server, the PAT setup is even simpler than OAuth —
-no browser required. Just SSH in and run `thinclaw secret set github_token <pat>`.
+If running on a headless server, PAT setup is still manual-token based. Use the same `github_token` secret flow you use for the rest of your deployment.
 
 ## Available Actions (12)
 

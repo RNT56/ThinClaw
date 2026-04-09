@@ -928,10 +928,17 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
-        if (turn.response) {
-          addMessage('assistant', turn.response);
+      if (!data.turns || data.turns.length === 0) {
+        const emptyMessage = currentThreadId === assistantThreadId
+          ? 'This assistant thread is empty. Select a conversation on the left or start a new one.'
+          : 'No messages in this thread yet.';
+        showChatEmptyState(emptyMessage);
+      } else {
+        for (const turn of data.turns) {
+          addMessage('user', turn.user_input);
+          if (turn.response) {
+            addMessage('assistant', turn.response);
+          }
         }
       }
     } else {
@@ -979,6 +986,14 @@ function removeScrollSpinner() {
   if (spinner) spinner.remove();
 }
 
+function showChatEmptyState(message) {
+  const container = document.getElementById('chat-messages');
+  const empty = document.createElement('div');
+  empty.className = 'empty-state chat-empty-state';
+  empty.textContent = message;
+  container.appendChild(empty);
+}
+
 // --- Threads ---
 
 function loadThreads() {
@@ -1024,9 +1039,30 @@ function loadThreads() {
       list.appendChild(item);
     }
 
-    // Default to assistant thread on first load if no thread selected
-    if (!currentThreadId && assistantThreadId) {
-      switchToAssistant();
+    // Default to the most useful thread on first load.
+    if (!currentThreadId) {
+      const assistantTurns = data.assistant_thread ? (data.assistant_thread.turn_count || 0) : 0;
+      const firstThreadWithTurns = threads.find((thread) => (thread.turn_count || 0) > 0);
+
+      if (assistantThreadId && assistantTurns > 0) {
+        switchToAssistant();
+        return;
+      }
+
+      if (firstThreadWithTurns) {
+        switchThread(firstThreadWithTurns.id);
+        return;
+      }
+
+      if (assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
+
+      if (threads.length > 0) {
+        switchThread(threads[0].id);
+        return;
+      }
     }
 
     // Enable chat input once a thread is available

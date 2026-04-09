@@ -47,6 +47,7 @@ impl Checkpoint {
 /// Each undo/redo operation pops from one stack and pushes the current state
 /// onto the other, so `undo_count() + redo_count()` stays constant across
 /// undo/redo cycles (only `checkpoint()` and `clear()` change the total).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoManager {
     /// Stack of past checkpoints (for undo).
     undo_stack: VecDeque<Checkpoint>,

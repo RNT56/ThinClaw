@@ -34,8 +34,12 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
 use crate::history::{
-    ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow,
+    ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
+    JobEventRecord, LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
+};
+use crate::identity::{
+    ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
+    NewActorRecord,
 };
 use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
@@ -111,6 +115,16 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    async fn add_conversation_message_with_attribution(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        actor_id: Option<&str>,
+        actor_display_name: Option<&str>,
+        raw_sender_id: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<Uuid, DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -124,6 +138,10 @@ pub trait ConversationStore: Send + Sync {
         channel: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError>;
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, DatabaseError>;
     async fn get_or_create_assistant_conversation(
         &self,
         user_id: &str,
@@ -135,6 +153,26 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError>;
+    async fn update_conversation_identity(
+        &self,
+        id: Uuid,
+        actor_id: Option<&str>,
+        conversation_scope_id: Option<Uuid>,
+        conversation_kind: ConversationKind,
+        stable_external_conversation_key: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+    async fn set_conversation_handoff_metadata(
+        &self,
+        id: Uuid,
+        handoff: &ConversationHandoffMetadata,
+    ) -> Result<(), DatabaseError>;
+    async fn list_actor_conversations_for_recall(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        include_group_history: bool,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError>;
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
@@ -160,6 +198,12 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+    async fn conversation_belongs_to_actor(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, DatabaseError>;
 
     /// Delete a conversation and all its messages (cascading).
     ///
@@ -173,6 +217,77 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<u64, DatabaseError>;
+}
+
+#[async_trait]
+pub trait IdentityStore: Send + Sync {
+    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError> {
+        let _ = principal_id;
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
+    }
+    async fn get_actor(&self, actor_id: &str) -> Result<Option<ActorRecord>, DatabaseError> {
+        let _ = actor_id;
+        Ok(None)
+    }
+    async fn upsert_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError> {
+        let _ = actor;
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
+    }
+    async fn rename_actor(&self, actor_id: &str, display_name: &str) -> Result<(), DatabaseError> {
+        let _ = (actor_id, display_name);
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
+    }
+    async fn set_actor_preferred_endpoint(
+        &self,
+        actor_id: &str,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let _ = (actor_id, channel, external_user_id);
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
+    }
+    async fn link_actor_endpoint(
+        &self,
+        actor_id: &str,
+        channel: &str,
+        external_user_id: &str,
+        metadata: &serde_json::Value,
+        approval_status: &str,
+    ) -> Result<(), DatabaseError> {
+        let _ = (
+            actor_id,
+            channel,
+            external_user_id,
+            metadata,
+            approval_status,
+        );
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
+    }
+    async fn unlink_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let _ = (channel, external_user_id);
+        Ok(false)
+    }
+    async fn list_actor_endpoints(
+        &self,
+        actor_id: &str,
+    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError> {
+        let _ = actor_id;
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
@@ -228,15 +343,57 @@ pub trait SandboxStore: Send + Sync {
         &self,
         user_id: &str,
     ) -> Result<Vec<SandboxJobRecord>, DatabaseError>;
+    async fn list_sandbox_jobs_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let jobs = self.list_sandbox_jobs_for_user(user_id).await?;
+        Ok(jobs
+            .into_iter()
+            .filter(|job| job.actor_id == actor_id)
+            .collect())
+    }
     async fn sandbox_job_summary_for_user(
         &self,
         user_id: &str,
     ) -> Result<SandboxJobSummary, DatabaseError>;
+    async fn sandbox_job_summary_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        let jobs = self.list_sandbox_jobs_for_actor(user_id, actor_id).await?;
+        let mut summary = SandboxJobSummary::default();
+        for job in jobs {
+            summary.total += 1;
+            match job.status.as_str() {
+                "creating" => summary.creating += 1,
+                "running" => summary.running += 1,
+                "completed" => summary.completed += 1,
+                "failed" => summary.failed += 1,
+                "interrupted" => summary.interrupted += 1,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
     async fn sandbox_job_belongs_to_user(
         &self,
         job_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+    async fn sandbox_job_belongs_to_actor(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+        actor_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let Some(job) = self.get_sandbox_job(job_id).await? else {
+            return Ok(false);
+        };
+        Ok(job.user_id == user_id && job.actor_id == actor_id)
+    }
     async fn update_sandbox_job_mode(&self, id: Uuid, mode: &str) -> Result<(), DatabaseError>;
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError>;
     async fn save_job_event(
@@ -262,6 +419,26 @@ pub trait RoutineStore: Send + Sync {
         name: &str,
     ) -> Result<Option<Routine>, DatabaseError>;
     async fn list_routines(&self, user_id: &str) -> Result<Vec<Routine>, DatabaseError>;
+    async fn get_routine_by_name_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+        name: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        let routine = self.get_routine_by_name(user_id, name).await?;
+        Ok(routine.filter(|r| r.owner_actor_id() == actor_id))
+    }
+    async fn list_routines_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+    ) -> Result<Vec<Routine>, DatabaseError> {
+        let routines = self.list_routines(user_id).await?;
+        Ok(routines
+            .into_iter()
+            .filter(|routine| routine.owner_actor_id() == actor_id)
+            .collect())
+    }
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError>;
     async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError>;
     async fn update_routine(&self, routine: &Routine) -> Result<(), DatabaseError>;
@@ -308,6 +485,152 @@ pub trait RoutineStore: Send + Sync {
 
     /// Delete ALL routine run records across all routines.
     async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError>;
+}
+
+#[async_trait]
+pub trait IdentityRegistryStore: Send + Sync {
+    async fn create_actor(&self, actor: &NewActorRecord) -> Result<ActorRecord, DatabaseError>;
+    async fn get_actor(&self, actor_id: Uuid) -> Result<Option<ActorRecord>, DatabaseError>;
+    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError>;
+    async fn update_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError>;
+    async fn delete_actor(&self, actor_id: Uuid) -> Result<bool, DatabaseError>;
+    async fn rename_actor(&self, actor_id: Uuid, display_name: &str) -> Result<(), DatabaseError>;
+    async fn set_actor_status(
+        &self,
+        actor_id: Uuid,
+        status: ActorStatus,
+    ) -> Result<(), DatabaseError>;
+    async fn set_actor_preferred_delivery_endpoint(
+        &self,
+        actor_id: Uuid,
+        endpoint: Option<&ActorEndpointRef>,
+    ) -> Result<(), DatabaseError>;
+    async fn set_actor_last_active_direct_endpoint(
+        &self,
+        actor_id: Uuid,
+        endpoint: Option<&ActorEndpointRef>,
+    ) -> Result<(), DatabaseError>;
+    async fn upsert_actor_endpoint(
+        &self,
+        record: &NewActorEndpointRecord,
+    ) -> Result<ActorEndpointRecord, DatabaseError>;
+    async fn get_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<Option<ActorEndpointRecord>, DatabaseError>;
+    async fn list_actor_endpoints(
+        &self,
+        actor_id: Uuid,
+    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError>;
+    async fn delete_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<bool, DatabaseError>;
+    async fn resolve_actor_for_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<Option<ActorRecord>, DatabaseError>;
+}
+
+#[async_trait]
+impl<T> IdentityStore for T
+where
+    T: IdentityRegistryStore + Send + Sync,
+{
+    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError> {
+        IdentityRegistryStore::list_actors(self, principal_id).await
+    }
+
+    async fn get_actor(&self, actor_id: &str) -> Result<Option<ActorRecord>, DatabaseError> {
+        let actor_id = Uuid::parse_str(actor_id)
+            .map_err(|e| DatabaseError::Serialization(format!("invalid actor_id: {e}")))?;
+        IdentityRegistryStore::get_actor(self, actor_id).await
+    }
+
+    async fn upsert_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError> {
+        if IdentityRegistryStore::get_actor(self, actor.actor_id)
+            .await?
+            .is_some()
+        {
+            return IdentityRegistryStore::update_actor(self, actor).await;
+        }
+
+        let new_actor = NewActorRecord {
+            principal_id: actor.principal_id.clone(),
+            display_name: actor.display_name.clone(),
+            status: actor.status,
+            preferred_delivery_endpoint: actor.preferred_delivery_endpoint.clone(),
+            last_active_direct_endpoint: actor.last_active_direct_endpoint.clone(),
+        };
+        let _ = IdentityRegistryStore::create_actor(self, &new_actor).await?;
+        Ok(())
+    }
+
+    async fn rename_actor(&self, actor_id: &str, display_name: &str) -> Result<(), DatabaseError> {
+        let actor_id = Uuid::parse_str(actor_id)
+            .map_err(|e| DatabaseError::Serialization(format!("invalid actor_id: {e}")))?;
+        IdentityRegistryStore::rename_actor(self, actor_id, display_name).await
+    }
+
+    async fn set_actor_preferred_endpoint(
+        &self,
+        actor_id: &str,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let actor_id = Uuid::parse_str(actor_id)
+            .map_err(|e| DatabaseError::Serialization(format!("invalid actor_id: {e}")))?;
+        let endpoint = ActorEndpointRef::new(channel, external_user_id);
+        IdentityRegistryStore::set_actor_preferred_delivery_endpoint(
+            self,
+            actor_id,
+            Some(&endpoint),
+        )
+        .await
+    }
+
+    async fn link_actor_endpoint(
+        &self,
+        actor_id: &str,
+        channel: &str,
+        external_user_id: &str,
+        metadata: &serde_json::Value,
+        approval_status: &str,
+    ) -> Result<(), DatabaseError> {
+        let actor_id = Uuid::parse_str(actor_id)
+            .map_err(|e| DatabaseError::Serialization(format!("invalid actor_id: {e}")))?;
+        let approval_status = approval_status
+            .parse()
+            .map_err(|e: String| DatabaseError::Serialization(e))?;
+        let record = NewActorEndpointRecord {
+            endpoint: ActorEndpointRef::new(channel, external_user_id),
+            actor_id,
+            metadata: metadata.clone(),
+            approval_status,
+        };
+        IdentityRegistryStore::upsert_actor_endpoint(self, &record).await?;
+        Ok(())
+    }
+
+    async fn unlink_actor_endpoint(
+        &self,
+        channel: &str,
+        external_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        IdentityRegistryStore::delete_actor_endpoint(self, channel, external_user_id).await
+    }
+
+    async fn list_actor_endpoints(
+        &self,
+        actor_id: &str,
+    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError> {
+        let actor_id = Uuid::parse_str(actor_id)
+            .map_err(|e| DatabaseError::Serialization(format!("invalid actor_id: {e}")))?;
+        IdentityRegistryStore::list_actor_endpoints(self, actor_id).await
+    }
 }
 
 #[async_trait]
@@ -467,6 +790,12 @@ pub struct AgentWorkspaceRecord {
     pub bound_channels: Vec<String>,
     /// Keywords/mentions that trigger routing to this agent.
     pub trigger_keywords: Vec<String>,
+    /// Optional per-agent tool allowlist.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Optional per-agent skill allowlist.
+    #[serde(default)]
+    pub allowed_skills: Option<Vec<String>>,
     /// Whether this is the default agent (receives unrouted messages).
     pub is_default: bool,
     /// When the record was created.
@@ -503,9 +832,11 @@ pub trait AgentRegistryStore: Send + Sync {
 #[async_trait]
 pub trait Database:
     ConversationStore
+    + IdentityStore
     + JobStore
     + SandboxStore
     + RoutineStore
+    + IdentityRegistryStore
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore

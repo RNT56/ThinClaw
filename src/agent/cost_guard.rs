@@ -118,6 +118,39 @@ impl CostGuard {
         }
     }
 
+    /// Restore counters from persisted cost history after a restart.
+    pub async fn hydrate(
+        &self,
+        daily_spend_usd: Decimal,
+        actions_last_hour: u64,
+        model_usage: HashMap<String, ModelTokens>,
+    ) {
+        {
+            let mut daily = self.daily_cost.lock().await;
+            daily.total = daily_spend_usd;
+            daily.reset_date = chrono::Utc::now().date_naive();
+        }
+
+        let budget_exceeded = self
+            .config
+            .max_cost_per_day_cents
+            .is_some_and(|limit| to_cents(daily_spend_usd) >= limit);
+        self.budget_exceeded
+            .store(budget_exceeded, Ordering::Relaxed);
+
+        {
+            let mut window = self.action_window.lock().await;
+            window.clear();
+            let now = Instant::now();
+            window.extend((0..actions_last_hour).map(|_| now));
+        }
+
+        {
+            let mut tokens = self.model_tokens.lock().await;
+            *tokens = model_usage;
+        }
+    }
+
     /// Check whether the next action is allowed under the configured limits.
     ///
     /// Call this BEFORE making an LLM call. Does NOT record the action yet,
@@ -454,5 +487,48 @@ mod tests {
 
         // Costs should differ since models have different pricing
         assert_ne!(gpt.cost, claude.cost);
+    }
+
+    #[tokio::test]
+    async fn test_hydrate_restores_budget_rate_and_model_usage() {
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: Some(100),
+            max_actions_per_hour: Some(2),
+        });
+
+        let mut usage = HashMap::new();
+        usage.insert(
+            "gpt-4o".to_string(),
+            ModelTokens {
+                input_tokens: 123,
+                output_tokens: 45,
+                cost: dec!(1.10),
+            },
+        );
+
+        guard.hydrate(dec!(1.10), 2, usage).await;
+
+        assert_eq!(guard.daily_spend().await, dec!(1.10));
+        assert_eq!(guard.actions_this_hour().await, 2);
+        assert_eq!(
+            guard
+                .model_usage()
+                .await
+                .get("gpt-4o")
+                .unwrap()
+                .input_tokens,
+            123
+        );
+
+        match guard.check_allowed().await.unwrap_err() {
+            CostLimitExceeded::DailyBudget {
+                spent_cents,
+                limit_cents,
+            } => {
+                assert_eq!(spent_cents, 110);
+                assert_eq!(limit_cents, 100);
+            }
+            other => panic!("Expected DailyBudget after hydrate, got {:?}", other),
+        }
     }
 }

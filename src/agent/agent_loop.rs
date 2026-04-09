@@ -8,6 +8,7 @@
 //! - `thread_ops` - Thread/session operations (user input, undo, approval, persistence)
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 
@@ -102,6 +103,8 @@ pub struct AgentDeps {
     /// When set, the dispatcher creates a new provider from the catalog and
     /// uses it instead of the default routing. Resets per conversation.
     pub model_override: Option<crate::tools::builtin::SharedModelOverride>,
+    /// Restart flag shared with `main` so `/restart` can relaunch foreground runs too.
+    pub restart_requested: Arc<AtomicBool>,
 }
 
 /// The main agent that coordinates all components.
@@ -282,14 +285,30 @@ impl Agent {
     pub(super) async fn select_active_skills(
         &self,
         message_content: &str,
+        allowed_skills: Option<&[String]>,
     ) -> Vec<crate::skills::LoadedSkill> {
         if let Some(registry) = self.skill_registry() {
             let guard = registry.read().await;
-            let available = guard.skills();
+            let allowed_names = allowed_skills.map(|skills| {
+                skills
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::HashSet<_>>()
+            });
+            let filtered: Vec<crate::skills::LoadedSkill> = guard
+                .skills()
+                .iter()
+                .filter(|skill| {
+                    allowed_names.as_ref().is_none_or(|allowed| {
+                        allowed.contains(skill.manifest.name.as_str())
+                    })
+                })
+                .cloned()
+                .collect();
             let skills_cfg = &self.deps.skills_config;
             let selected = crate::skills::prefilter_skills(
                 message_content,
-                available,
+                &filtered,
                 skills_cfg.max_active_skills,
                 skills_cfg.max_context_tokens,
             );
@@ -318,12 +337,26 @@ impl Agent {
     /// regardless of whether they matched the current message. Used by the dispatcher
     /// to build the always-visible skill directory in the system prompt so the agent
     /// always knows what skills are installed even when none keyword-matched.
-    pub(super) async fn collect_all_skills(&self) -> Vec<(String, String)> {
+    pub(super) async fn collect_all_skills(
+        &self,
+        allowed_skills: Option<&[String]>,
+    ) -> Vec<(String, String)> {
         if let Some(registry) = self.skill_registry() {
             let guard = registry.read().await;
+            let allowed_names = allowed_skills.map(|skills| {
+                skills
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::HashSet<_>>()
+            });
             guard
                 .skills()
                 .iter()
+                .filter(|skill| {
+                    allowed_names.as_ref().is_none_or(|allowed| {
+                        allowed.contains(skill.manifest.name.as_str())
+                    })
+                })
                 .map(|s| (s.manifest.name.clone(), s.manifest.description.clone()))
                 .collect()
         } else {
@@ -1250,13 +1283,10 @@ impl Agent {
         }
 
         // Resolve session and thread
+        let identity = message.resolved_identity();
         let (session, thread_id) = self
             .session_manager
-            .resolve_thread(
-                &message.user_id,
-                &message.channel,
-                message.thread_id.as_deref(),
-            )
+            .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
             .await;
 
         // Multi-agent routing: determine which agent workspace should handle this message.
@@ -1273,9 +1303,18 @@ impl Agent {
                 "Routed message to agent workspace"
             );
             // Claim thread ownership if not already owned
-            self.agent_router
+            let claimed = self
+                .agent_router
                 .claim_thread(thread_id, &decision.agent_id)
                 .await;
+            if claimed {
+                let _ = self
+                    .session_manager
+                    .set_thread_owner(thread_id, &decision.agent_id)
+                    .await;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
+            }
         }
 
         // Auth mode interception: if the thread is awaiting a token, route
@@ -1297,9 +1336,19 @@ impl Agent {
                 }
                 _ => {
                     // Any control submission (interrupt, undo, etc.) cancels auth mode
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.pending_auth = None;
+                    let thread_snapshot = {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                            Some(thread.clone())
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(thread_snapshot) = thread_snapshot {
+                        let _ = thread_snapshot;
+                        self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                            .await;
                     }
                     // Fall through to normal handling
                 }
@@ -1320,11 +1369,12 @@ impl Agent {
                     .await
             }
             Submission::SystemCommand { command, args } => {
-                self.handle_system_command(&command, &args).await
+                self.handle_system_command(message, thread_id, &command, &args)
+                    .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
-            Submission::Interrupt => self.process_interrupt(session, thread_id).await,
+            Submission::Interrupt => self.process_interrupt(message, session, thread_id).await,
             Submission::Compact => self.process_compact(session, thread_id).await,
             Submission::Clear => self.process_clear(session, thread_id).await,
             Submission::NewThread => self.process_new_thread(message).await,
@@ -1334,12 +1384,14 @@ impl Agent {
             Submission::Quit => return Ok(None),
             Submission::Restart => {
                 // Notify the user that the agent is restarting, then trigger
-                // orderly shutdown. The OS service manager (launchd KeepAlive /
-                // systemd Restart=always) will automatically relaunch the process.
+                // orderly shutdown. `main` decides whether to hand off to a
+                // service manager restart or relaunch the foreground process.
+                self.deps
+                    .restart_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let target_channel = self.config.notify_channel.as_deref().unwrap_or("web");
-                let restart_msg = OutgoingResponse::text(
-                    "🔄 Restarting ThinClaw agent… The service manager will relaunch me shortly.",
-                );
+                let restart_msg =
+                    OutgoingResponse::text("Restarting ThinClaw agent… I’ll relaunch shortly.");
                 // Best-effort: send to preferred channel + web
                 let _ = self
                     .channels
@@ -1450,15 +1502,12 @@ impl Agent {
     /// and any case where the caller wants `deliver=false` semantics.
     /// The message is persisted to the DB but no LLM call is made.
     pub async fn inject_context(&self, message: &IncomingMessage) -> Result<(), Error> {
+        let identity = message.resolved_identity();
         let (_, thread_id) = self
             .session_manager
-            .resolve_thread(
-                &message.user_id,
-                &message.channel,
-                message.thread_id.as_deref(),
-            )
+            .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
             .await;
-        self.persist_user_message(thread_id, &message.user_id, &message.content)
+        self.persist_user_message(thread_id, message, &message.content)
             .await;
         Ok(())
     }
@@ -1469,11 +1518,25 @@ impl Agent {
     /// because it skips hook chains, submission parsing, and hydration.
     /// Directly locks the session and sets the thread's cancellation flag.
     pub async fn cancel_turn(&self, session_key: &str) -> Result<(), Error> {
+        let identity = crate::identity::ResolvedIdentity {
+            principal_id: "local_user".to_string(),
+            actor_id: "local_user".to_string(),
+            conversation_scope_id: crate::identity::scope_id_from_key(&format!(
+                "tauri:direct:{session_key}"
+            )),
+            conversation_kind: crate::identity::ConversationKind::Direct,
+            raw_sender_id: "local_user".to_string(),
+            stable_external_conversation_key: format!("tauri:direct:{session_key}"),
+        };
         let (session, thread_id) = self
             .session_manager
-            .resolve_thread("local_user", "tauri", Some(session_key))
+            .resolve_thread_for_identity(&identity, "tauri", Some(session_key))
             .await;
-        self.process_interrupt(session, thread_id).await?;
+        let message = crate::channels::IncomingMessage::new("tauri", "local_user", "/interrupt")
+            .with_thread(session_key)
+            .with_metadata(serde_json::json!({"thread_id": session_key}))
+            .with_identity(identity);
+        self.process_interrupt(&message, session, thread_id).await?;
         Ok(())
     }
 }
@@ -1566,6 +1629,7 @@ async fn upsert_heartbeat_routine(
                 name: "__heartbeat__".to_string(),
                 description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
                 user_id: "default".to_string(),
+                actor_id: "default".to_string(),
                 enabled: true,
                 trigger: Trigger::Cron { schedule: schedule.clone() },
                 action,

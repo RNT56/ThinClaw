@@ -15,8 +15,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::context::JobContext;
+use crate::identity::ConversationKind;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
 
@@ -36,6 +38,111 @@ const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[];
 /// instead of accreting duplicate identity blocks.
 const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] =
     &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryScope {
+    Shared,
+    Actor,
+}
+
+fn split_scoped_target(target: &str) -> (Option<MemoryScope>, String) {
+    let trimmed = target.trim();
+    for (prefix, scope) in [
+        ("shared:", MemoryScope::Shared),
+        ("root:", MemoryScope::Shared),
+        ("household:", MemoryScope::Shared),
+        ("actor:", MemoryScope::Actor),
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return (Some(scope), rest.trim().trim_start_matches('/').to_string());
+        }
+    }
+    (None, trimmed.to_string())
+}
+
+fn actor_scoped_path(actor_id: &str, path: &str) -> String {
+    if path.is_empty() {
+        paths::actor_root(actor_id)
+    } else if path.eq_ignore_ascii_case("memory") || path.eq_ignore_ascii_case(paths::MEMORY) {
+        paths::actor_memory(actor_id)
+    } else if path.eq_ignore_ascii_case(paths::USER) {
+        paths::actor_user(actor_id)
+    } else if path.eq_ignore_ascii_case("profile") || path.eq_ignore_ascii_case(paths::PROFILE) {
+        paths::actor_profile(actor_id)
+    } else if path.starts_with("actors/") {
+        path.to_string()
+    } else {
+        format!("{}/{}", paths::actor_root(actor_id), path)
+    }
+}
+
+fn shared_root_path(path: &str) -> String {
+    if path.eq_ignore_ascii_case("memory") {
+        paths::MEMORY.to_string()
+    } else if path.eq_ignore_ascii_case("heartbeat") {
+        paths::HEARTBEAT.to_string()
+    } else if path.eq_ignore_ascii_case("profile") || path.eq_ignore_ascii_case(paths::PROFILE) {
+        paths::PROFILE.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn job_conversation_kind(metadata: &serde_json::Value) -> ConversationKind {
+    let kind = metadata
+        .get("conversation_kind")
+        .and_then(|v| v.as_str())
+        .or_else(|| metadata.get("chat_type").and_then(|v| v.as_str()))
+        .unwrap_or("direct")
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "group" | "channel" | "supergroup" => ConversationKind::Group,
+        _ => ConversationKind::Direct,
+    }
+}
+
+fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
+    let (explicit_scope, bare_target) = split_scoped_target(target);
+    let actor_id = ctx
+        .metadata
+        .get("actor_id")
+        .or_else(|| ctx.metadata.get("actor"))
+        .and_then(|v| v.as_str());
+    let direct_actor =
+        job_conversation_kind(&ctx.metadata) == ConversationKind::Direct && actor_id.is_some();
+
+    match explicit_scope {
+        Some(MemoryScope::Shared) => (shared_root_path(&bare_target), false),
+        Some(MemoryScope::Actor) => {
+            let actor_id = actor_id.unwrap_or("unknown");
+            (actor_scoped_path(actor_id, &bare_target), true)
+        }
+        None if direct_actor
+            && (bare_target.eq_ignore_ascii_case("memory")
+                || bare_target.eq_ignore_ascii_case(paths::MEMORY)
+                || bare_target.eq_ignore_ascii_case(paths::USER)
+                || bare_target.eq_ignore_ascii_case(paths::PROFILE)) =>
+        {
+            let actor_id = actor_id.expect("checked is_some above");
+            (actor_scoped_path(actor_id, &bare_target), true)
+        }
+        None if direct_actor && bare_target.starts_with("actors/") => {
+            let actor_id = actor_id.expect("checked is_some above");
+            (actor_scoped_path(actor_id, &bare_target), true)
+        }
+        None => (shared_root_path(&bare_target), false),
+    }
+}
+
+fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
+    let agent_workspace_id = ctx
+        .metadata
+        .get("agent_workspace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .or_else(|| base.agent_id());
+    base.scoped_clone(ctx.user_id.clone(), agent_workspace_id)
+}
 
 /// Tool for searching workspace memory.
 ///
@@ -98,9 +205,10 @@ impl Tool for MemorySearchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let query = require_str(&params, "query")?;
 
@@ -130,8 +238,7 @@ impl Tool for MemorySearchTool {
             config = config.with_temporal_decay(30.0);
         }
 
-        let results = self
-            .workspace
+        let results = workspace
             .search_with_config(query, config)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
@@ -140,6 +247,7 @@ impl Tool for MemorySearchTool {
             "query": query,
             "results": results.iter().map(|r| {
                 serde_json::json!({
+                    "path": r.path.clone(),
                     "content": r.content,
                     "score": r.score,
                     "document_id": r.document_id.to_string(),
@@ -184,7 +292,8 @@ impl Tool for MemoryWriteTool {
          Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
          'heartbeat' (HEARTBEAT.md checklist), 'IDENTITY.md' / 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
          (freely rewritable — use append: false to fully restructure after bootstrap), \
-         or a custom path. \
+         or a custom path. In direct DMs, memory/user/profile writes default to the actor overlay; \
+         prefix with 'shared:' to force the household root. \
          ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
          and clear prose. Never dump raw unformatted text into identity files."
     }
@@ -199,7 +308,7 @@ impl Tool for MemoryWriteTool {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, or a path like 'projects/alpha/notes.md'",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'shared:...' to force the household root, or a path like 'projects/alpha/notes.md'",
                     "default": "daily_log"
                 },
                 "append": {
@@ -215,9 +324,10 @@ impl Tool for MemoryWriteTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let content = require_str(&params, "content")?;
 
@@ -237,8 +347,15 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        let (path, _is_actor_scoped) = resolve_memory_write_path(ctx, target);
+        let normalized_path = path.trim_start_matches('/');
+        let file_name = normalized_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(normalized_path);
+
         // IDENTITY.md is append-only to protect the agent's established name/creature.
-        if APPEND_ONLY_IDENTITY_FILES.contains(&target) {
+        if APPEND_ONLY_IDENTITY_FILES.contains(&file_name) {
             if !append {
                 return Err(ToolError::NotAuthorized(format!(
                     "'{}' is append-only. Add an '## Update' section with your changes \
@@ -247,13 +364,13 @@ impl Tool for MemoryWriteTool {
                     target,
                 )));
             }
-            self.workspace
-                .append(target, content)
+            workspace
+                .append(&path, content)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
             let output = serde_json::json!({
                 "status": "appended",
-                "path": target,
+                "path": path,
                 "append": true,
                 "content_length": content.len(),
                 "note": "Identity file updated (append-only)",
@@ -263,21 +380,24 @@ impl Tool for MemoryWriteTool {
 
         // SOUL.md / AGENTS.md / USER.md — freely rewritable.
         // With append: false the agent can fully restructure the file.
-        if FREELY_REWRITABLE_IDENTITY_FILES.contains(&target) {
+        if FREELY_REWRITABLE_IDENTITY_FILES
+            .iter()
+            .any(|p| file_name.eq_ignore_ascii_case(p))
+        {
             if append {
-                self.workspace
-                    .append(target, content)
+                workspace
+                    .append(&path, content)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
             } else {
-                self.workspace
-                    .write(target, content)
+                workspace
+                    .write(&path, content)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
             }
             let output = serde_json::json!({
                 "status": if append { "appended" } else { "rewritten" },
-                "path": target,
+                "path": path,
                 "append": append,
                 "content_length": content.len(),
                 "note": if append {
@@ -289,106 +409,76 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        let path = match target {
-            "memory" => {
-                if append {
-                    self.workspace
-                        .append_memory(content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(paths::MEMORY, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                }
-                paths::MEMORY.to_string()
-            }
-            "daily_log" => {
-                self.workspace
-                    .append_daily_log(content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
-            }
-            "heartbeat" => {
-                if append {
-                    self.workspace
-                        .append(paths::HEARTBEAT, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(paths::HEARTBEAT, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                }
-                paths::HEARTBEAT.to_string()
-            }
-            path => {
-                // Path-form check for append-only files (IDENTITY.md).
-                let normalized = path.trim_start_matches('/');
-                if APPEND_ONLY_IDENTITY_FILES
-                    .iter()
-                    .any(|p| normalized.eq_ignore_ascii_case(p))
-                {
-                    if !append {
-                        return Err(ToolError::NotAuthorized(format!(
-                            "'{}' is append-only. Use append: true to add sections.",
-                            path
-                        )));
-                    }
-                    self.workspace
-                        .append(path, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                    let output = serde_json::json!({
-                        "status": "appended",
-                        "path": path,
-                        "append": true,
-                        "content_length": content.len(),
-                        "note": "Identity file updated (append-only)",
-                    });
-                    return Ok(ToolOutput::success(output, start.elapsed()));
-                }
-
-                // Path-form check for freely rewritable personality files.
-                if FREELY_REWRITABLE_IDENTITY_FILES
-                    .iter()
-                    .any(|p| normalized.eq_ignore_ascii_case(p))
-                {
-                    if append {
-                        self.workspace.append(path, content).await.map_err(|e| {
+        let path =
+            match target.trim() {
+                t if t.eq_ignore_ascii_case("memory") => {
+                    if path.eq_ignore_ascii_case(paths::MEMORY) {
+                        if append {
+                            workspace.append_memory(content).await.map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                            })?;
+                        } else {
+                            workspace.write(paths::MEMORY, content).await.map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                            })?;
+                        }
+                    } else if append {
+                        let doc = workspace.read(&path).await.ok();
+                        let new_content = match doc {
+                            Some(doc) if !doc.content.is_empty() => {
+                                format!("{}\n\n{}", doc.content, content)
+                            }
+                            _ => content.to_string(),
+                        };
+                        workspace.write(&path, &new_content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     } else {
-                        self.workspace.write(path, content).await.map_err(|e| {
+                        workspace.write(&path, content).await.map_err(|e| {
                             ToolError::ExecutionFailed(format!("Write failed: {}", e))
                         })?;
                     }
-                    let output = serde_json::json!({
-                        "status": if append { "appended" } else { "rewritten" },
-                        "path": path,
-                        "append": append,
-                        "content_length": content.len(),
-                    });
-                    return Ok(ToolOutput::success(output, start.elapsed()));
+                    path
                 }
-
-                if append {
-                    self.workspace
-                        .append(path, content)
+                t if t.eq_ignore_ascii_case("daily_log") => {
+                    workspace
+                        .append_daily_log(content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(path, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
                 }
-                path.to_string()
-            }
-        };
+                t if t.eq_ignore_ascii_case("heartbeat") => {
+                    if append {
+                        workspace.append(&path, content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
+                    } else {
+                        workspace.write(&path, content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
+                    }
+                    path
+                }
+                _ => {
+                    if append {
+                        let doc = workspace.read(&path).await.ok();
+                        let new_content = match doc {
+                            Some(doc) if !doc.content.is_empty() => {
+                                format!("{}\n\n{}", doc.content, content)
+                            }
+                            _ => content.to_string(),
+                        };
+                        workspace.write(&path, &new_content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
+                    } else {
+                        workspace.write(&path, content).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                        })?;
+                    }
+                    path
+                }
+            };
 
         let output = serde_json::json!({
             "status": "written",
@@ -466,15 +556,16 @@ impl Tool for MemoryReadTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = require_str(&params, "path")?;
 
         // Graceful degradation: missing file → empty content, not an error.
         // Matches openclaw memory_get: { text: "", path } on ENOENT.
-        let doc = match self.workspace.read(path).await {
+        let doc = match workspace.read(path).await {
             Ok(doc) => doc,
             Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
                 let output = serde_json::json!({
@@ -551,6 +642,7 @@ impl MemoryTreeTool {
     /// Returns a compact format where directories end with `/` and may have children.
     async fn build_tree(
         &self,
+        workspace: &Workspace,
         path: &str,
         current_depth: usize,
         max_depth: usize,
@@ -559,8 +651,7 @@ impl MemoryTreeTool {
             return Ok(Vec::new());
         }
 
-        let entries = self
-            .workspace
+        let entries = workspace
             .list(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Tree failed: {}", e)))?;
@@ -576,7 +667,8 @@ impl MemoryTreeTool {
 
             if entry.is_directory && current_depth < max_depth {
                 let children =
-                    Box::pin(self.build_tree(&entry.path, current_depth + 1, max_depth)).await?;
+                    Box::pin(self.build_tree(workspace, &entry.path, current_depth + 1, max_depth))
+                        .await?;
                 if children.is_empty() {
                     result.push(serde_json::Value::String(display_path));
                 } else {
@@ -626,9 +718,10 @@ impl Tool for MemoryTreeTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -638,7 +731,7 @@ impl Tool for MemoryTreeTool {
             .unwrap_or(1)
             .clamp(1, 10) as usize;
 
-        let tree = self.build_tree(path, 1, depth).await?;
+        let tree = self.build_tree(&workspace, path, 1, depth).await?;
 
         // Compact output: just the tree array
         Ok(ToolOutput::success(
@@ -711,9 +804,10 @@ impl Tool for MemoryDeleteTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = require_str(&params, "path")?;
 
@@ -732,7 +826,7 @@ impl Tool for MemoryDeleteTool {
             )));
         }
 
-        self.workspace
+        workspace
             .delete(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
@@ -832,5 +926,31 @@ mod tests {
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["depth"].is_object());
         assert_eq!(schema["properties"]["depth"]["default"], 1);
+    }
+
+    #[test]
+    fn test_memory_write_routes_direct_actor_memory_to_overlay() {
+        let mut ctx = JobContext::with_user("default", "chat", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct",
+            "actor_id": "actor-123",
+        });
+
+        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "memory");
+        assert!(is_actor_scoped);
+        assert_eq!(path, "actors/actor-123/MEMORY.md");
+    }
+
+    #[test]
+    fn test_memory_write_shared_prefix_forces_root() {
+        let mut ctx = JobContext::with_user("default", "chat", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct",
+            "actor_id": "actor-123",
+        });
+
+        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
+        assert!(!is_actor_scoped);
+        assert_eq!(path, "MEMORY.md");
     }
 }

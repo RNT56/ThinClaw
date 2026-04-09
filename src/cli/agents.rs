@@ -84,11 +84,14 @@ pub async fn run_agents_command(cmd: AgentCommand, router: &AgentRouter) {
             default,
         } => {
             let ws = AgentWorkspace {
+                workspace_id: None,
                 agent_id: id.clone(),
                 display_name: display_name.unwrap_or_else(|| id.clone()),
                 system_prompt,
                 bound_channels: channels,
                 trigger_keywords: keywords,
+                allowed_tools: None,
+                allowed_skills: None,
                 is_default: default,
                 model,
             };
@@ -247,11 +250,14 @@ mod tests {
     async fn test_remove_agent() {
         let router = AgentRouter::new();
         let ws = AgentWorkspace {
+            workspace_id: None,
             agent_id: "temp".to_string(),
             display_name: "Temp".to_string(),
             system_prompt: None,
             bound_channels: vec![],
             trigger_keywords: vec![],
+            allowed_tools: None,
+            allowed_skills: None,
             is_default: false,
             model: None,
         };

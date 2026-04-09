@@ -9,6 +9,7 @@ use futures::Stream;
 use uuid::Uuid;
 
 use crate::error::ChannelError;
+use crate::identity::ResolvedIdentity;
 use crate::media::MediaContent;
 
 /// A message received from an external channel.
@@ -30,6 +31,8 @@ pub struct IncomingMessage {
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
     pub metadata: serde_json::Value,
+    /// Optional resolved identity attached by ingress normalization.
+    pub identity: Option<ResolvedIdentity>,
     /// Media attachments (images, PDFs, audio files, etc.).
     pub attachments: Vec<MediaContent>,
 }
@@ -50,6 +53,7 @@ impl IncomingMessage {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
+            identity: None,
             attachments: Vec::new(),
         }
     }
@@ -64,6 +68,17 @@ impl IncomingMessage {
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    /// Attach a resolved identity.
+    pub fn with_identity(mut self, identity: ResolvedIdentity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Resolve the message identity, deriving stable defaults when needed.
+    pub fn resolved_identity(&self) -> ResolvedIdentity {
+        ResolvedIdentity::from_message(self)
     }
 
     /// Set user name.

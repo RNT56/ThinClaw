@@ -559,12 +559,12 @@ impl SkillRegistry {
         let target_dir = match target_trust {
             SkillTrust::Trusted => self.user_dir.clone(),
             SkillTrust::Installed => {
-                self.installed_dir.clone().ok_or_else(|| {
-                    SkillRegistryError::WriteError {
+                self.installed_dir
+                    .clone()
+                    .ok_or_else(|| SkillRegistryError::WriteError {
                         path: name.to_string(),
                         reason: "no installed_dir configured, cannot demote skill".into(),
-                    }
-                })?
+                    })?
             }
         };
 
@@ -582,12 +582,12 @@ impl SkillRegistry {
         let src_file = current_path.join("SKILL.md");
         let dst_file = new_skill_dir.join("SKILL.md");
 
-        tokio::fs::copy(&src_file, &dst_file)
-            .await
-            .map_err(|e| SkillRegistryError::WriteError {
+        tokio::fs::copy(&src_file, &dst_file).await.map_err(|e| {
+            SkillRegistryError::WriteError {
                 path: dst_file.display().to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         // Remove old files (best-effort — new files are already in place)
         let _ = tokio::fs::remove_file(&src_file).await;
@@ -643,8 +643,7 @@ impl SkillRegistry {
         };
 
         // Re-load and validate from disk (full pipeline: read, parse, hash, compile)
-        let (new_name, new_skill) =
-            load_and_validate_skill(&skill_md_path, trust, source).await?;
+        let (new_name, new_skill) = load_and_validate_skill(&skill_md_path, trust, source).await?;
 
         // Replace the in-memory entry atomically
         self.skills[idx] = new_skill;

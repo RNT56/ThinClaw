@@ -50,6 +50,7 @@ async fn start_test_server() -> (
         job_manager: None,
         prompt_queue: None,
         user_id: "test-user".to_string(),
+        actor_id: "test-actor".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -147,6 +148,43 @@ async fn test_ws_message_reaches_agent() {
     assert_eq!(incoming.thread_id.as_deref(), Some("t42"));
     assert_eq!(incoming.channel, "gateway");
     assert_eq!(incoming.user_id, "test-user");
+    let identity = incoming.resolved_identity();
+    assert_eq!(identity.principal_id, "test-user");
+    assert_eq!(identity.actor_id, "test-actor");
+    assert_eq!(
+        identity.stable_external_conversation_key,
+        "gateway://direct/test-user/actor/test-actor/thread/t42"
+    );
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_ws_approval_preserves_actor_bound_identity() {
+    let (addr, _state, mut agent_rx) = start_test_server().await;
+    let mut ws = connect_ws(addr).await;
+
+    let request_id = uuid::Uuid::new_v4();
+    let msg = serde_json::json!({
+        "type": "approval",
+        "request_id": request_id,
+        "action": "approve",
+        "thread_id": "t-approval",
+    });
+    ws.send(Message::Text(msg.to_string().into())).await.unwrap();
+
+    let incoming = timeout(TIMEOUT, agent_rx.recv())
+        .await
+        .expect("Timed out waiting for approval message")
+        .expect("Agent channel closed");
+
+    let identity = incoming.resolved_identity();
+    assert_eq!(identity.principal_id, "test-user");
+    assert_eq!(identity.actor_id, "test-actor");
+    assert_eq!(
+        identity.stable_external_conversation_key,
+        "gateway://direct/test-user/actor/test-actor/thread/t-approval"
+    );
 
     ws.close(None).await.unwrap();
 }

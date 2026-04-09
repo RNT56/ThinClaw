@@ -35,6 +35,50 @@ pub mod paths {
     pub const TOOLS: &str = "TOOLS.md";
     /// Psychographic profile (JSON, auto-generated during onboarding, evolved weekly).
     pub const PROFILE: &str = "context/profile.json";
+    /// Actor directory root for private overlays.
+    pub const ACTORS_DIR: &str = "actors";
+
+    /// Build the actor directory path.
+    pub fn actor_root(actor_id: &str) -> String {
+        format!("{}/{}", ACTORS_DIR, sanitize_component(actor_id))
+    }
+
+    /// Actor-private USER.md path.
+    pub fn actor_user(actor_id: &str) -> String {
+        format!("{}/USER.md", actor_root(actor_id))
+    }
+
+    /// Actor-private MEMORY.md path.
+    pub fn actor_memory(actor_id: &str) -> String {
+        format!("{}/MEMORY.md", actor_root(actor_id))
+    }
+
+    /// Actor-private profile path.
+    pub fn actor_profile(actor_id: &str) -> String {
+        format!("{}/context/profile.json", actor_root(actor_id))
+    }
+
+    fn sanitize_component(component: &str) -> String {
+        let trimmed = component.trim();
+        if trimmed.is_empty() {
+            return "unknown".to_string();
+        }
+
+        let safe = trimmed
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                _ => c,
+            })
+            .collect::<String>()
+            .replace("..", "_");
+
+        if safe.is_empty() {
+            "unknown".to_string()
+        } else {
+            safe
+        }
+    }
 }
 
 /// A memory document stored in the database.

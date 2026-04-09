@@ -1,17 +1,18 @@
 # Web Gateway Channel
 
-> Built-in web UI with REST API, SSE streaming, WebSocket, and OpenAI-compatible endpoint.
+> Built-in control plane with web UI, API, SSE streaming, WebSocket, and OpenAI-compatible access.
 
 ## Overview
 
-The Gateway is a full-featured web interface for the agent. It serves a built-in
-web UI and exposes a comprehensive REST API for programmatic access. Enabled by default.
+The Gateway is ThinClaw's operator control plane. It serves a built-in web UI
+and exposes a programmatic API for chat, memory, jobs, routines, extensions,
+settings, and OpenAI-compatible access. Availability depends on the build
+profile and gateway-enabled configuration.
 
 ## Configuration
 
 ```bash
-# Enabled by default. To disable:
-GATEWAY_ENABLED=false
+# Enable or disable the gateway with your deployment configuration
 
 # Host and port (defaults: 127.0.0.1:3000)
 GATEWAY_HOST=127.0.0.1
@@ -37,33 +38,20 @@ GATEWAY_USER_ID=default
 - Settings management
 - Dark mode, responsive design
 
-### REST API Endpoints
+### API Surface
 
-| Category | Endpoint | Method | Description |
-|----------|----------|--------|-------------|
-| **Chat** | `/api/chat/send` | POST | Send a message |
-| | `/api/chat/events` | GET | SSE event stream |
-| | `/api/chat/ws` | GET | WebSocket upgrade |
-| | `/api/chat/history` | GET | Paginated chat history |
-| | `/api/chat/threads` | GET | List threads |
-| | `/api/chat/thread/new` | POST | Create new thread |
-| | `/api/chat/approval` | POST | Approve/deny tool execution |
-| **Memory** | `/api/memory/tree` | GET | Workspace file tree |
-| | `/api/memory/read` | GET | Read a file |
-| | `/api/memory/write` | POST | Write a file |
-| | `/api/memory/search` | POST | Search files |
-| **Jobs** | `/api/jobs` | GET | List sandbox jobs |
-| | `/api/jobs/{id}` | GET | Job details |
-| | `/api/jobs/{id}/cancel` | POST | Cancel a job |
-| **Extensions** | `/api/extensions` | GET | List extensions |
-| | `/api/extensions/install` | POST | Install extension |
-| **Routines** | `/api/routines` | GET | List routines |
-| | `/api/routines/{id}/trigger` | POST | Trigger a routine |
-| **Settings** | `/api/settings` | GET | List settings |
-| | `/api/settings/{key}` | PUT | Update a setting |
-| **Health** | `/api/health` | GET | Health check (no auth) |
-| **OpenAI** | `/v1/chat/completions` | POST | OpenAI-compatible proxy |
-| | `/v1/models` | GET | List available models |
+The gateway API groups include:
+
+- chat and streaming
+- memory and workspace access
+- jobs and approvals
+- extensions and installation
+- routines and triggers
+- settings and health
+- OpenAI-compatible chat/model endpoints
+
+The exact route table is maintained in the deployment and server docs so this
+page can stay focused on the control-plane model.
 
 ### Authentication
 
@@ -72,11 +60,11 @@ All protected endpoints require a Bearer token:
 Authorization: Bearer <token>
 ```
 
-The token is displayed in the boot screen URL: `http://127.0.0.1:3000/?token=<token>`
+The token is displayed in the boot screen URL when the gateway is running.
 
 ### SSE Events
 
-The `/api/chat/events` endpoint streams:
+Streaming events include:
 - `message_chunk` — Streaming text chunks
 - `message_complete` — Full response ready
 - `tool_call_start` / `tool_call_result` — Tool execution progress
@@ -86,8 +74,8 @@ The `/api/chat/events` endpoint streams:
 
 ### WebSocket
 
-`/api/chat/ws` provides bidirectional communication with the same event types as SSE.
-Origin validation is enforced (localhost only).
+The WebSocket channel provides bidirectional communication with the same event
+types as SSE. Origin validation is enforced for local-first deployments.
 
 ### Rate Limiting
 
@@ -107,7 +95,6 @@ To access the Gateway from outside the machine:
 ```bash
 # Bind to all interfaces
 GATEWAY_HOST=0.0.0.0 thinclaw
-
-# Or use a tunnel
-thinclaw --tunnel cloudflare
 ```
+
+For wider access, use the deployment guide's tunnel and remote-access options.

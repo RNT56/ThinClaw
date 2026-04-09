@@ -178,6 +178,44 @@ impl SignalChannel {
             .map(String::from)
     }
 
+    fn stable_sender_id(envelope: &Envelope, sender: &str) -> String {
+        envelope
+            .source_uuid
+            .as_deref()
+            .unwrap_or(sender)
+            .to_string()
+    }
+
+    fn conversation_kind(is_group: bool) -> &'static str {
+        if is_group { "group" } else { "direct" }
+    }
+
+    fn conversation_scope_id(
+        is_group: bool,
+        sender: &str,
+        stable_sender_id: &str,
+        group_id: Option<&str>,
+    ) -> String {
+        if is_group {
+            format!("signal:group:{}", group_id.unwrap_or(sender))
+        } else {
+            format!("signal:direct:{stable_sender_id}")
+        }
+    }
+
+    fn external_conversation_key(
+        is_group: bool,
+        sender: &str,
+        stable_sender_id: &str,
+        group_id: Option<&str>,
+    ) -> String {
+        if is_group {
+            format!("signal://group/{}", group_id.unwrap_or(sender))
+        } else {
+            format!("signal://direct/{stable_sender_id}")
+        }
+    }
+
     /// Normalize an allowlist entry to the bare identifier.
     ///
     /// Strips the `uuid:` prefix if present, so `uuid:<id>` and `<id>` both
@@ -226,11 +264,24 @@ impl SignalChannel {
     /// Handle pairing request for unapproved sender.
     /// Returns Ok(true) if message should be allowed (was already paired),
     /// Ok(false) if message was blocked but pairing request was processed.
-    fn handle_pairing_request(&self, sender: &str, source_name: Option<&str>) -> Result<bool, ()> {
+    fn handle_pairing_request(
+        &self,
+        sender: &str,
+        source_name: Option<&str>,
+        stable_sender_id: &str,
+        conversation_kind: &str,
+        conversation_scope_id: &str,
+        external_conversation_key: &str,
+    ) -> Result<bool, ()> {
         let store = PairingStore::new();
         let meta = serde_json::json!({
             "sender": sender,
             "name": source_name,
+            "raw_sender_id": sender,
+            "stable_sender_id": stable_sender_id,
+            "conversation_kind": conversation_kind,
+            "conversation_scope_id": conversation_scope_id,
+            "external_conversation_key": external_conversation_key,
         });
 
         match store.upsert_request("signal", sender, Some(meta)) {
@@ -242,7 +293,8 @@ impl SignalChannel {
                 );
                 if result.created {
                     let message = format!(
-                        "To pair with this bot, run: `thinclaw pairing approve signal {}`",
+                        "To pair with this bot, run: `thinclaw pairing approve signal {}`. \
+                         For a new family member, you can add `--name \"Alex\"` to create and link an actor.",
                         result.code
                     );
                     let http_url = self.config.http_url.clone();
@@ -647,12 +699,17 @@ impl SignalChannel {
             "Signal: received message"
         );
 
-        // Check if this is a group message
-        let is_group = data_msg
+        let group_id = data_msg
             .group_info
             .as_ref()
-            .and_then(|g| g.group_id.as_deref())
-            .is_some();
+            .and_then(|g| g.group_id.as_deref());
+        let is_group = group_id.is_some();
+        let stable_sender_id = Self::stable_sender_id(envelope, &sender);
+        let conversation_kind = Self::conversation_kind(is_group);
+        let conversation_scope_id =
+            Self::conversation_scope_id(is_group, &sender, &stable_sender_id, group_id);
+        let external_conversation_key =
+            Self::external_conversation_key(is_group, &sender, &stable_sender_id, group_id);
 
         // Apply group policy first (before DM policy for group messages)
         if is_group {
@@ -663,10 +720,7 @@ impl SignalChannel {
                 }
                 "open" => {
                     // For "open" policy, check group allowlist but not sender allowlist
-                    if let Some(group_id) = data_msg
-                        .group_info
-                        .as_ref()
-                        .and_then(|g| g.group_id.as_deref())
+                    if let Some(group_id) = group_id
                         && !self.is_group_allowed(group_id)
                     {
                         tracing::debug!(
@@ -678,11 +732,7 @@ impl SignalChannel {
                 }
                 "allowlist" => {
                     // Default to allowlist - check group AND sender
-                    if let Some(group_id) = data_msg
-                        .group_info
-                        .as_ref()
-                        .and_then(|g| g.group_id.as_deref())
-                    {
+                    if let Some(group_id) = group_id {
                         if !self.is_group_allowed(group_id) {
                             tracing::debug!(
                                 group_id = %group_id,
@@ -711,7 +761,14 @@ impl SignalChannel {
                     // Pairing policy: check allow_from + pairing store
                     if !self.is_sender_allowed_with_pairing(&sender) => {
                         // Handle pairing request - this will create a request and send reply if new
-                        match self.handle_pairing_request(&sender, envelope.source_name.as_deref())
+                        match self.handle_pairing_request(
+                            &sender,
+                            envelope.source_name.as_deref(),
+                            &stable_sender_id,
+                            conversation_kind,
+                            &conversation_scope_id,
+                            &external_conversation_key,
+                        )
                         {
                             Ok(_) => {
                                 // Pairing request processed (new or existing), drop the message
@@ -753,6 +810,12 @@ impl SignalChannel {
             "signal_sender": &sender,
             "signal_target": &target,
             "signal_timestamp": timestamp,
+            "conversation_kind": conversation_kind,
+            "conversation_scope_id": conversation_scope_id,
+            "external_conversation_key": external_conversation_key,
+            "raw_sender_id": &sender,
+            "stable_sender_id": stable_sender_id,
+            "group_id": group_id,
         });
 
         let mut msg = IncomingMessage::new("signal", &sender, text)

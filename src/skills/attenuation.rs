@@ -36,8 +36,8 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "json",
     "skill_list",
     "skill_search",
-    "skill_read",    // Required for lazy loading — reads in-memory skill content, no I/O
-    "agent_think",   // Internal reasoning scratchpad, no side effects
+    "skill_read",  // Required for lazy loading — reads in-memory skill content, no I/O
+    "agent_think", // Internal reasoning scratchpad, no side effects
 ];
 
 /// Result of tool attenuation, including transparency information.

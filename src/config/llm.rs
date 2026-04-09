@@ -568,7 +568,7 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     /// Clear all openai-compatible-related env vars.
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_uses_selected_model_when_llm_model_unset() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
 
         let settings = Settings {
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_llm_model_env_overrides_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn default_backend_is_openai_compatible() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
 
         let backend = LlmBackend::default();
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn openai_uses_selected_model_when_env_unset() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_provider_env();
 
         let settings = Settings {
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn openai_env_overrides_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_provider_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn anthropic_uses_selected_model_when_env_unset() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_provider_env();
 
         let settings = Settings {
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn anthropic_env_overrides_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_provider_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {

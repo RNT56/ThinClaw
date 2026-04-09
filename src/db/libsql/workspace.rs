@@ -19,6 +19,63 @@ use crate::workspace::{
 
 use chrono::Utc;
 
+const LIBSQL_VECTOR_DIM: usize = 1536;
+
+fn serialize_libsql_embedding(embedding: &[f32]) -> (Option<Vec<u8>>, Vec<u8>, i64) {
+    let canonical = embedding
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect::<Vec<u8>>();
+    let indexed = if embedding.len() == LIBSQL_VECTOR_DIM {
+        Some(canonical.clone())
+    } else {
+        tracing::debug!(
+            configured_dimension = embedding.len(),
+            indexed_dimension = LIBSQL_VECTOR_DIM,
+            "Storing non-1536 embedding in canonical libSQL payload and skipping vector index column"
+        );
+        None
+    };
+
+    (indexed, canonical, embedding.len() as i64)
+}
+
+fn deserialize_libsql_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return None;
+    }
+
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Option<f32> {
+    if query.len() != candidate.len() || query.is_empty() {
+        return None;
+    }
+
+    let mut dot = 0.0f32;
+    let mut query_norm = 0.0f32;
+    let mut candidate_norm = 0.0f32;
+
+    for (q, c) in query.iter().zip(candidate.iter()) {
+        dot += q * c;
+        query_norm += q * q;
+        candidate_norm += c * c;
+    }
+
+    let denom = query_norm.sqrt() * candidate_norm.sqrt();
+    if denom <= f32::EPSILON {
+        return None;
+    }
+
+    Some(dot / denom)
+}
+
 #[async_trait]
 impl WorkspaceStore for LibSqlBackend {
     async fn get_document_by_path(
@@ -395,22 +452,27 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: e.to_string(),
             })?;
         let id = Uuid::new_v4();
-        let embedding_blob = embedding.map(|e| {
-            let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
-            bytes
-        });
+        let (indexed_embedding, canonical_embedding, embedding_dim) = embedding
+            .map(serialize_libsql_embedding)
+            .map_or((None, None, None), |(indexed, canonical, dim)| {
+                (indexed, Some(canonical), Some(dim))
+            });
 
         conn.execute(
             r#"
-                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT INTO memory_chunks (
+                    id, document_id, chunk_index, content, embedding, embedding_blob, embedding_dim
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
             params![
                 id.to_string(),
                 document_id.to_string(),
                 chunk_index as i64,
                 content,
-                embedding_blob.map(libsql::Value::Blob),
+                indexed_embedding.map(libsql::Value::Blob),
+                canonical_embedding.map(libsql::Value::Blob),
+                embedding_dim,
             ],
         )
         .await
@@ -463,21 +525,27 @@ impl WorkspaceStore for LibSqlBackend {
         // Insert new chunks
         for (index, content, embedding) in chunks {
             let chunk_id = Uuid::new_v4();
-            let embedding_blob = embedding.as_ref().map(|e| {
-                let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
-                bytes
-            });
+            let (indexed_embedding, canonical_embedding, embedding_dim) = embedding
+                .as_ref()
+                .map(|e| serialize_libsql_embedding(e))
+                .map_or((None, None, None), |(indexed, canonical, dim)| {
+                    (indexed, Some(canonical), Some(dim))
+                });
 
             let ins_result = conn
                 .execute(
-                    r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-                       VALUES (?1, ?2, ?3, ?4, ?5)"#,
+                    r#"INSERT INTO memory_chunks (
+                           id, document_id, chunk_index, content, embedding, embedding_blob, embedding_dim
+                       )
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
                     params![
                         chunk_id.to_string(),
                         document_id.to_string(),
                         *index as i64,
                         content.as_str(),
-                        embedding_blob.map(libsql::Value::Blob),
+                        indexed_embedding.map(libsql::Value::Blob),
+                        canonical_embedding.map(libsql::Value::Blob),
+                        embedding_dim,
                     ],
                 )
                 .await;
@@ -500,7 +568,6 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(())
     }
 
-
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -512,11 +579,23 @@ impl WorkspaceStore for LibSqlBackend {
             .map_err(|e| WorkspaceError::EmbeddingFailed {
                 reason: e.to_string(),
             })?;
-        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let (indexed_embedding, canonical_embedding, embedding_dim) =
+            serialize_libsql_embedding(embedding);
 
         conn.execute(
-            "UPDATE memory_chunks SET embedding = ?2 WHERE id = ?1",
-            params![chunk_id.to_string(), libsql::Value::Blob(bytes)],
+            r#"
+                UPDATE memory_chunks
+                SET embedding = ?2,
+                    embedding_blob = ?3,
+                    embedding_dim = ?4
+                WHERE id = ?1
+            "#,
+            params![
+                chunk_id.to_string(),
+                indexed_embedding.map(libsql::Value::Blob),
+                libsql::Value::Blob(canonical_embedding),
+                embedding_dim,
+            ],
         )
         .await
         .map_err(|e| WorkspaceError::EmbeddingFailed {
@@ -545,7 +624,7 @@ impl WorkspaceStore for LibSqlBackend {
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = ?1 AND d.agent_id IS ?2
-                  AND c.embedding IS NULL
+                  AND c.embedding_blob IS NULL
                 LIMIT ?3
                 "#,
                 params![user_id, agent_id_str.as_deref(), limit as i64],
@@ -619,7 +698,7 @@ impl WorkspaceStore for LibSqlBackend {
                 let mut rows = conn
                     .query(
                         r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, d.path, c.content, c.created_at
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -646,9 +725,10 @@ impl WorkspaceStore for LibSqlBackend {
                     results.push(RankedResult {
                         chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                         document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                        content: get_text(&row, 2),
+                        path: get_text(&row, 2),
+                        content: get_text(&row, 3),
                         rank: results.len() as u32 + 1,
-                        created_at: None,
+                        created_at: get_opt_ts(&row, 4),
                         embedding: None,
                     });
                 }
@@ -659,48 +739,112 @@ impl WorkspaceStore for LibSqlBackend {
         };
 
         let vector_results = if let (true, Some(emb)) = (config.use_vector, embedding) {
-            let vector_json = format!(
-                "[{}]",
-                emb.iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+            if emb.len() == LIBSQL_VECTOR_DIM {
+                let vector_json = format!(
+                    "[{}]",
+                    emb.iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
 
-            let mut rows = conn
-                .query(
-                    r#"
-                    SELECT c.id, c.document_id, c.content
+                let mut rows = conn
+                    .query(
+                        r#"
+                    SELECT c.id, c.document_id, d.path, c.content, c.created_at, c.embedding
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
                     WHERE d.user_id = ?3 AND d.agent_id IS ?4
                     "#,
-                    params![vector_json, pre_limit, user_id, agent_id_str.as_deref()],
-                )
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector query failed: {}", e),
-                })?;
+                        params![vector_json, pre_limit, user_id, agent_id_str.as_deref()],
+                    )
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("Vector query failed: {}", e),
+                    })?;
 
-            let mut results = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector row fetch failed: {}", e),
-                })?
-            {
-                results.push(RankedResult {
-                    chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
-                    document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                    content: get_text(&row, 2),
-                    rank: results.len() as u32 + 1,
-                    created_at: None,
-                    embedding: None,
-                });
+                let mut results = Vec::new();
+                while let Some(row) =
+                    rows.next()
+                        .await
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!("Vector row fetch failed: {}", e),
+                        })?
+                {
+                    results.push(RankedResult {
+                        chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                        document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                        path: get_text(&row, 2),
+                        content: get_text(&row, 3),
+                        rank: results.len() as u32 + 1,
+                        created_at: get_opt_ts(&row, 4),
+                        embedding: row
+                            .get::<Vec<u8>>(5)
+                            .ok()
+                            .and_then(|bytes| deserialize_libsql_embedding(&bytes)),
+                    });
+                }
+                results
+            } else {
+                let query_dim = emb.len() as i64;
+                let mut rows = conn
+                    .query(
+                        r#"
+                    SELECT c.id, c.document_id, d.path, c.content, c.created_at, c.embedding_blob
+                    FROM memory_chunks c
+                    JOIN memory_documents d ON d.id = c.document_id
+                    WHERE d.user_id = ?1 AND d.agent_id IS ?2
+                      AND c.embedding_blob IS NOT NULL
+                      AND c.embedding_dim = ?3
+                    LIMIT ?4
+                    "#,
+                        params![user_id, agent_id_str.as_deref(), query_dim, pre_limit],
+                    )
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("Vector candidate query failed: {}", e),
+                    })?;
+
+                let mut scored = Vec::new();
+                while let Some(row) =
+                    rows.next()
+                        .await
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!("Vector row fetch failed: {}", e),
+                        })?
+                {
+                    let candidate_embedding = row
+                        .get::<Vec<u8>>(5)
+                        .ok()
+                        .and_then(|bytes| deserialize_libsql_embedding(&bytes));
+                    if let Some(candidate_embedding) = candidate_embedding
+                        && let Some(score) = cosine_similarity(emb, &candidate_embedding)
+                    {
+                        scored.push((
+                            score,
+                            RankedResult {
+                                chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                                document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                                path: get_text(&row, 2),
+                                content: get_text(&row, 3),
+                                rank: 0,
+                                created_at: get_opt_ts(&row, 4),
+                                embedding: Some(candidate_embedding),
+                            },
+                        ));
+                    }
+                }
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, (_, mut result))| {
+                        result.rank = (idx + 1) as u32;
+                        result
+                    })
+                    .collect()
             }
-            results
         } else {
             Vec::new()
         };
@@ -711,11 +855,17 @@ impl WorkspaceStore for LibSqlBackend {
             );
         }
 
-        // Collect timestamps from raw results before fusion
+        // Collect timestamps and embeddings from raw results before fusion.
         let mut doc_timestamps = HashMap::new();
+        let mut chunk_embeddings = HashMap::new();
         for r in fts_results.iter().chain(vector_results.iter()) {
             if let Some(ts) = r.created_at {
                 doc_timestamps.entry(r.document_id).or_insert(ts);
+            }
+            if let Some(ref embedding) = r.embedding {
+                chunk_embeddings
+                    .entry(r.chunk_id)
+                    .or_insert_with(|| embedding.clone());
             }
         }
 
@@ -729,15 +879,8 @@ impl WorkspaceStore for LibSqlBackend {
         }
 
         // Apply MMR diversity re-ranking if configured.
-        // Note: libsql vector search doesn't return embeddings, so MMR is a no-op
-        // unless embeddings are separately provided. Log a warning.
-        if config.enable_mmr {
-            tracing::debug!(
-                "MMR re-ranking requested but libsql vector search does not return embeddings; \
-                 MMR will have no effect on diversity"
-            );
-            let empty_embeddings = HashMap::new();
-            results = mmr_rerank(results, &empty_embeddings, config.mmr_lambda, config.limit);
+        if config.enable_mmr && !chunk_embeddings.is_empty() {
+            results = mmr_rerank(results, &chunk_embeddings, config.mmr_lambda, config.limit);
         }
 
         Ok(results)

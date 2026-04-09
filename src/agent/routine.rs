@@ -35,6 +35,8 @@ pub struct Routine {
     pub name: String,
     pub description: String,
     pub user_id: String,
+    #[serde(default)]
+    pub actor_id: String,
     pub enabled: bool,
     pub trigger: Trigger,
     pub action: RoutineAction,
@@ -50,6 +52,17 @@ pub struct Routine {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Routine {
+    /// Resolve the owning actor for this routine.
+    pub fn owner_actor_id(&self) -> &str {
+        if self.actor_id.is_empty() {
+            &self.user_id
+        } else {
+            &self.actor_id
+        }
+    }
 }
 
 /// When a routine should fire.
@@ -205,6 +218,12 @@ pub enum RoutineAction {
         /// Max reasoning iterations (default: 10).
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
+        /// Optional tool allowlist for this routine's worker/subagent.
+        #[serde(default)]
+        allowed_tools: Option<Vec<String>>,
+        /// Optional skill allowlist for this routine's worker/subagent.
+        #[serde(default)]
+        allowed_skills: Option<Vec<String>>,
     },
     /// Periodic heartbeat: reads HEARTBEAT.md and runs a full agent turn.
     ///
@@ -317,10 +336,18 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
+                let allowed_tools = config
+                    .get("allowed_tools")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let allowed_skills = config
+                    .get("allowed_skills")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
+                    allowed_tools,
+                    allowed_skills,
                 })
             }
             "heartbeat" => {
@@ -384,10 +411,14 @@ impl RoutineAction {
                 title,
                 description,
                 max_iterations,
+                allowed_tools,
+                allowed_skills,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
+                "allowed_tools": allowed_tools,
+                "allowed_skills": allowed_skills,
             }),
             RoutineAction::Heartbeat {
                 light_context,
@@ -598,12 +629,17 @@ mod tests {
             title: "Deploy review".to_string(),
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
+            allowed_tools: Some(vec!["shell".to_string()]),
+            allowed_skills: Some(vec!["github".to_string()]),
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, .. }
-            if title == "Deploy review" && max_iterations == 5)
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, allowed_tools, allowed_skills, .. }
+            if title == "Deploy review"
+                && max_iterations == 5
+                && allowed_tools == Some(vec!["shell".to_string()])
+                && allowed_skills == Some(vec!["github".to_string()]))
         );
     }
 

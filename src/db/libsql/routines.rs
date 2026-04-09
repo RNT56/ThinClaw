@@ -28,17 +28,17 @@ impl RoutineStore for LibSqlBackend {
         conn.execute(
                 r#"
                 INSERT INTO routines (
-                    id, name, description, user_id, enabled,
+                    id, name, description, user_id, actor_id, enabled,
                     trigger_type, trigger_config, action_type, action_config,
                     cooldown_secs, max_concurrent, dedup_window_secs,
                     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
                     state, next_fire_at, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17,
-                    ?18, ?19, ?20, ?21
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22
                 )
                 "#,
                 params![
@@ -46,6 +46,7 @@ impl RoutineStore for LibSqlBackend {
                     routine.name.as_str(),
                     routine.description.as_str(),
                     routine.user_id.as_str(),
+                    routine.actor_id.as_str(),
                     routine.enabled as i64,
                     trigger_type,
                     trigger_config.to_string(),
@@ -204,20 +205,21 @@ impl RoutineStore for LibSqlBackend {
         conn.execute(
             r#"
                 UPDATE routines SET
-                    name = ?2, description = ?3, enabled = ?4,
-                    trigger_type = ?5, trigger_config = ?6,
-                    action_type = ?7, action_config = ?8,
-                    cooldown_secs = ?9, max_concurrent = ?10, dedup_window_secs = ?11,
-                    notify_channel = ?12, notify_user = ?13,
-                    notify_on_success = ?14, notify_on_failure = ?15, notify_on_attention = ?16,
-                    state = ?17, next_fire_at = ?18,
-                    updated_at = ?19
+                    name = ?2, description = ?3, actor_id = ?4, enabled = ?5,
+                    trigger_type = ?6, trigger_config = ?7,
+                    action_type = ?8, action_config = ?9,
+                    cooldown_secs = ?10, max_concurrent = ?11, dedup_window_secs = ?12,
+                    notify_channel = ?13, notify_user = ?14,
+                    notify_on_success = ?15, notify_on_failure = ?16, notify_on_attention = ?17,
+                    state = ?18, next_fire_at = ?19,
+                    updated_at = ?20
                 WHERE id = ?1
                 "#,
             params![
                 routine.id.to_string(),
                 routine.name.as_str(),
                 routine.description.as_str(),
+                routine.actor_id.as_str(),
                 routine.enabled as i64,
                 trigger_type,
                 trigger_config.to_string(),

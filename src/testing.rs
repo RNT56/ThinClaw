@@ -309,6 +309,7 @@ impl TestHarnessBuilder {
             llm_runtime: None,
             routing_policy: None,
             model_override: None,
+            restart_requested: Arc::new(AtomicBool::new(false)),
         };
 
         TestHarness {

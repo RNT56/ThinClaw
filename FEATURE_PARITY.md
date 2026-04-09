@@ -23,7 +23,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
 | WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
 | Single-user system | ✅ | ✅ | |
-| Multi-agent routing | ✅ | ✅ | `AgentRouter` with workspace isolation, priority-based routing, thread ownership |
+| Multi-agent routing | ✅ | ✅ | `AgentRouter` with workspace isolation, priority-based routing, thread ownership, and per-agent tool/skill allowlists |
 | Session-based messaging | ✅ | ✅ | Per-sender sessions |
 | Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 but can be configured |
 
@@ -39,6 +39,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
+| Household multi-actor identity | ❌ | 🚧 | Actor registry + `ResolvedIdentity` + conversation-scope session keys are landed, with `thinclaw identity ...` management and pairing-based actor linking; WebSocket/Tauri send, approval, cancel, and thread binding now preserve actor/thread scope consistently, while gateway actor auth still defaults to the principal actor in v1 |
 | Configuration hot-reload | ✅ | ✅ | `ConfigWatcher` with mtime polling, debounce, broadcast subscribers |
 | Network modes (loopback/LAN/remote) | ✅ | ✅ | Full loopback/LAN/remote with security validation ([`src/config/network_modes.rs`](src/config/network_modes.rs)) |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
@@ -126,6 +127,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ✅ | `ToolPolicyManager` with AllowAll/AllowList/DenyList + hierarchical evaluation ([`src/tools/policy.rs`](src/tools/policy.rs)) |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
+| Linked DM continuity across channels | ❌ | 🚧 | DM scope metadata, actor-linked recall, and handoff storage added; explicit group recall and full UX restrictions still need completion |
 | Per-channel media limits | ✅ | ✅ | `MediaLimits` with per-channel env var overrides + `filter_attachments()` ([`src/media/limits.rs`](src/media/limits.rs)) |
 | Typing indicators | ✅ | ✅ | `Channel::send_typing()` trait method with platform-agnostic interface; TUI + Telegram + extensible to Discord/Signal |
 | Per-channel ackReaction config | ✅ | ✅ | Per-channel emoji overrides via env vars ([`src/channels/ack_reaction.rs`](src/channels/ack_reaction.rs)) |
@@ -199,9 +201,9 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Autonomous approval mode | ❌ | ✅ | `auto_approve_tools` with NEVER_AUTO_APPROVE_PATTERNS safety preserved; wizard step 12 ([`src/agent/dispatcher.rs`](src/agent/dispatcher.rs), [`src/setup/wizard.rs`](src/setup/wizard.rs)) |
-| Self-update & restart | ❌ | ✅ | `thinclaw update install` + `/restart` command for orderly shutdown; OS service manager auto-relaunches with new binary ([`src/cli/update.rs`](src/cli/update.rs), [`src/agent/submission.rs`](src/agent/submission.rs)) |
+| Self-update & restart | ❌ | ✅ | `thinclaw update install` + `/restart` command for orderly shutdown; service-managed installs auto-relaunch and foreground `thinclaw` runs now self-relaunch too ([`src/cli/update.rs`](src/cli/update.rs), [`src/agent/submission.rs`](src/agent/submission.rs), [`src/main.rs`](src/main.rs)) |
 | Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
-| Subagent system | ✅ | ✅ | Full `SubagentExecutor` ([`src/agent/subagent_executor.rs`](src/agent/subagent_executor.rs)): in-process agentic loops with isolated context, filtered tools, configurable timeouts, cancellation via watch channels |
+| Subagent system | ✅ | ✅ | Full `SubagentExecutor` ([`src/agent/subagent_executor.rs`](src/agent/subagent_executor.rs)): in-process agentic loops with isolated context, filtered tools/skills, configurable timeouts, cancellation via watch channels, and durable async-subagent resume metadata |
 | `spawn_subagent` tool | ✅ | ✅ | Declarative tool → dispatcher interception → `SubagentExecutor::spawn()`. Sync (wait=true) and async (wait=false) modes ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | `list_subagents` tool | ✅ | ✅ | Query active/recent sub-agents with ID, status, task, timing info ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | `cancel_subagent` tool | ✅ | ✅ | Cancel running sub-agents by UUID; watch channel + task abort ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
@@ -260,7 +262,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for the missing API key without clobbering the primary backend, and persists canonical provider settings ([`src/setup/wizard/llm.rs`](src/setup/wizard/llm.rs)) |
 | Claude Code runtime model config | ❌ | ✅ | WebUI Settings: change model/max-turns without restart, hot-reloaded into `ContainerJobManager` ([`src/orchestrator/job_manager.rs`](src/orchestrator/job_manager.rs)) |
 | Provider Vault (WebUI key mgmt) | ❌ | ✅ | Providers tab: list providers, add/remove encrypted credentials for catalog providers plus custom OpenAI-compatible endpoints and native Bedrock API keys, auto-enable them for routing, and hot-reload the live LLM runtime ([`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
-| Agent-initiated model switching | ❌ | ✅ | `llm_select` + `llm_list_models` tools: agent can switch LLM mid-conversation via `SharedModelOverride`; runtime probe blocks dead model switches, dispatcher auto-resets failed overrides to the previous working model, and model discovery exposes current primary/cheap config [`src/tools/builtin/llm_tools.rs`](src/tools/builtin/llm_tools.rs) |
+| Agent-initiated model switching | ❌ | ✅ | `llm_select` + `llm_list_models` tools: agent can switch LLM mid-conversation via conversation-scoped runtime overrides; runtime probe blocks dead model switches, dispatcher auto-resets failed overrides to the previous working model, and model discovery exposes current primary/cheap config [`src/tools/builtin/llm_tools.rs`](src/tools/builtin/llm_tools.rs) |
 | Wizard fallback providers step | ❌ | ✅ | `step_fallback_providers` adds secondary providers and models into canonical provider routing settings without mutating the chosen primary backend ([`src/setup/wizard/llm.rs`](src/setup/wizard/llm.rs)) |
 | RoutingPolicy in runtime | ❌ | ✅ | Policy rules are resolved by the live LLM runtime manager and applied to request-time routing, explicit fallback chains, cost-aware target selection, OpenAI-compatible calls, and hot-reloaded provider settings ([`src/llm/runtime_manager.rs`](src/llm/runtime_manager.rs), [`src/llm/routing_policy.rs`](src/llm/routing_policy.rs)) |
 
@@ -469,6 +471,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Cron finished-run webhook | ✅ | ✅ | P3 | `FinishedRunPayload` + `notify_finished_run()` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
 | Timezone support | ✅ | ✅ | - | Via cron expressions |
 | One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
+| Actor-private routines/jobs | ❌ | 🚧 | `actor_id` persistence, actor-scoped cron/tool lookups, in-channel job listing, pairing-linked delivery, and default gateway actor filtering are landed; explicit multi-actor WebUI auth is still pending |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor` wired into background tasks |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
 | `beforeOutbound` hook | ✅ | ✅ | P2 | |

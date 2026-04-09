@@ -313,6 +313,19 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             .ok()
             .and_then(|ctx| ctx.metadata.get("heartbeat").and_then(|v| v.as_bool()))
             .unwrap_or(false);
+        let capability_metadata = self
+            .context_manager()
+            .get_context(self.job_id)
+            .await
+            .ok()
+            .map(|ctx| ctx.metadata)
+            .unwrap_or(serde_json::Value::Null);
+        let allowed_tools =
+            crate::tools::ToolRegistry::metadata_string_list(&capability_metadata, "allowed_tools");
+        let allowed_skills = crate::tools::ToolRegistry::metadata_string_list(
+            &capability_metadata,
+            "allowed_skills",
+        );
 
         let mut iteration = 0;
 
@@ -320,7 +333,13 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         // Filter to only tools usable in autonomous context: exclude tools
         // requiring explicit approval (Always) and tools that need dispatcher
         // interception (spawn_subagent).
-        reason_ctx.available_tools = self.tools().tool_definitions_for_autonomous().await;
+        reason_ctx.available_tools = self
+            .tools()
+            .tool_definitions_for_autonomous_capabilities(
+                allowed_tools.as_deref(),
+                allowed_skills.as_deref(),
+            )
+            .await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -485,7 +504,13 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             }
 
             // Refresh tool definitions so newly built tools become visible
-            reason_ctx.available_tools = self.tools().tool_definitions_for_autonomous().await;
+            reason_ctx.available_tools = self
+                .tools()
+                .tool_definitions_for_autonomous_capabilities(
+                    allowed_tools.as_deref(),
+                    allowed_skills.as_deref(),
+                )
+                .await;
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -742,6 +767,14 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
+        if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name)
+        {
+            return Err(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: "Tool is not permitted in this agent context".to_string(),
+            }
+            .into());
+        }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
         if let Some(config) = tool.rate_limit_config()

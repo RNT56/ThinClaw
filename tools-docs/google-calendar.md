@@ -7,10 +7,10 @@
 Uses **Google OAuth 2.0** (shared credentials with all Google tools).
 
 ```bash
-thinclaw auth google
+thinclaw tool auth gmail
 ```
 
-Or if not already authenticated: `thinclaw auth gmail` also works (same token).
+Authenticate once with any Google tool that uses the shared token. `thinclaw tool auth gmail` is the current documented path.
 
 ### Secret Name
 

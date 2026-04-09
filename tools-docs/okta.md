@@ -13,13 +13,11 @@ Okta uses **OAuth 2.0** via the ThinClaw OAuth flow.
    - Your Okta domain (e.g. `dev-12345.okta.com`)
 
 2. **Configure Okta domain**
-   ```bash
-   thinclaw secret set okta_domain dev-12345.okta.com
-   ```
+   Store your Okta domain in the workspace at `okta/domain` (for example `dev-12345.okta.com`).
 
 3. **Run the OAuth flow**
    ```bash
-   thinclaw auth okta
+   thinclaw tool auth okta
    ```
    This opens a browser for Okta consent. Sign in and authorize the integration.
 
