@@ -1165,9 +1165,71 @@ impl Agent {
                                 )
                                 .await;
 
-                            let result = self
-                                .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                                .await;
+                            // ── consult_advisor interception ───────────────────
+                            // When the executor calls consult_advisor, route the
+                            // question to the advisor (primary LLM) instead of
+                            // executing the sentinel tool.
+                            let result = if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                                let question = tc.arguments
+                                    .get("question")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("(no question provided)");
+                                let context_summary = tc.arguments
+                                    .get("context_summary")
+                                    .and_then(|v| v.as_str());
+
+                                // Read advisor config from runtime status
+                                let rt_status = self.deps.llm_runtime.as_ref()
+                                    .map(|rt| rt.status());
+                                let advisor_config = crate::llm::route_planner::AdvisorConfig {
+                                    advisor_target: "primary".to_string(),
+                                    max_advisor_calls: rt_status.as_ref()
+                                        .map(|s| s.advisor_max_calls)
+                                        .unwrap_or(3),
+                                    advisor_system_prompt: rt_status.as_ref()
+                                        .and_then(|s| s.advisor_escalation_prompt.clone())
+                                        .unwrap_or_default(),
+                                };
+
+                                // Use the primary LLM as the advisor
+                                let advisor_provider = self.llm().as_ref();
+                                match crate::tools::builtin::advisor::execute_advisor_consultation(
+                                    advisor_provider,
+                                    &advisor_config,
+                                    question,
+                                    context_summary,
+                                    &context_messages,
+                                ).await {
+                                    Ok(guidance) => {
+                                        tracing::info!(
+                                            question_len = question.len(),
+                                            guidance_len = guidance.len(),
+                                            "Advisor consultation completed"
+                                        );
+                                        Ok(serde_json::json!({
+                                            "status": "ok",
+                                            "advisor_guidance": guidance,
+                                        }).to_string())
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Advisor consultation failed"
+                                        );
+                                        Ok(serde_json::json!({
+                                            "status": "error",
+                                            "message": format!(
+                                                "Advisor consultation failed: {}. \
+                                                 Continue without advisor guidance.",
+                                                e
+                                            ),
+                                        }).to_string())
+                                    }
+                                }
+                            } else {
+                                self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                                    .await
+                            };
 
                             let _ = self
                                 .channels
@@ -2729,6 +2791,8 @@ mod tests {
             tool_phase_primary_thinking_enabled: true,
             primary_provider: Some("openai_compatible".to_string()),
             fallback_chain: Vec::new(),
+            advisor_max_calls: 3,
+            advisor_escalation_prompt: None,
         }
     }
 

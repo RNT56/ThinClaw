@@ -18,13 +18,13 @@ use crate::llm::provider_factory::{
     build_provider_chain, create_llm_provider, create_provider_for_catalog_entry,
 };
 use crate::llm::routing_policy::{
-    RouteCandidate, RoutingContext, RoutingDecision, RoutingPolicy, RoutingRule,
+    RouteCandidate, RoutingContext, RoutingPolicy, RoutingRule,
 };
 use crate::llm::route_planner::{
     RequiredCapabilities, RoutePlanner, RoutePlannerInput,
+    log_routing_decision,
     validate_providers_settings as validate_planner_settings,
 };
-use crate::llm::smart_routing::{SmartRoutingConfig, TaskComplexity, classify_message};
 use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
 use crate::secrets::SecretsStore;
 use crate::settings::{ProviderModelSlots, ProvidersSettings, RoutingMode, Settings};
@@ -41,6 +41,10 @@ pub struct RuntimeStatus {
     pub tool_phase_primary_thinking_enabled: bool,
     pub primary_provider: Option<String>,
     pub fallback_chain: Vec<String>,
+    /// AdvisorExecutor: max advisor calls per turn.
+    pub advisor_max_calls: u32,
+    /// AdvisorExecutor: custom advisor escalation prompt.
+    pub advisor_escalation_prompt: Option<String>,
 }
 
 #[derive(Clone)]
@@ -126,7 +130,7 @@ impl RuntimeLlmProvider {
             return self.manager.provider_for_model_spec(model, &snapshot);
         }
 
-        // ── Shadow mode: run route planner in parallel for diff logging ──
+        // ── RoutePlanner-driven routing (Phase 6b cutover) ──
         if snapshot.providers.smart_routing_enabled {
             if let Some(ctx) = routing_context {
                 let planner_input = RoutePlannerInput {
@@ -142,79 +146,39 @@ impl RuntimeLlmProvider {
                 };
 
                 if let Ok(guard) = self.manager.route_planner.read() {
-                    let planner_decision = guard.plan(
+                    let decision = guard.plan(
                         &planner_input,
                         self.manager.routing_policy.read().ok().as_deref(),
                     );
-                    let live_target = self.live_routing_target(&snapshot, ctx);
-                    if planner_decision.target != live_target {
-                        tracing::info!(
-                            live = %live_target,
-                            planner = %planner_decision.target,
-                            reason = %planner_decision.reason,
-                            mode = %snapshot.providers.routing_mode.as_str(),
-                            "[route_planner shadow] Decision differs from live path"
-                        );
-                    }
+
+                    // Emit structured routing telemetry (Phase 7)
+                    log_routing_decision(&decision, snapshot.providers.routing_mode.as_str());
+
+                    // Resolve the planner target to a provider
+                    let primary_providers = if decision.fallbacks.is_empty() {
+                        vec![decision.target.clone()]
+                    } else {
+                        let mut targets = vec![decision.target.clone()];
+                        for fb in &decision.fallbacks {
+                            if !targets.contains(fb) {
+                                targets.push(fb.clone());
+                            }
+                        }
+                        targets
+                    };
+
+                    return self
+                        .manager
+                        .provider_chain_for_targets(&primary_providers, &snapshot);
                 }
             }
         }
 
-        // ── Live path (unchanged existing logic) ──
-        if matches!(self.role, RuntimeProviderRole::Primary)
-            && snapshot.providers.smart_routing_enabled
-            && snapshot.providers.routing_mode == RoutingMode::Policy
-            && !snapshot.providers.policy_rules.is_empty()
-            && let Some(ctx) = routing_context
-        {
-            let decision = self.manager.route_decision_for_policy(ctx, &snapshot);
-            return self
-                .manager
-                .provider_for_routing_decision(&decision, &snapshot);
-        }
-
+        // Fallback: no routing context available or planner lock failed
         Ok(match self.role {
             RuntimeProviderRole::Primary => snapshot.llm,
             RuntimeProviderRole::Cheap => snapshot.cheap_llm.unwrap_or(snapshot.llm),
         })
-    }
-
-    /// Determine the target the live (pre-planner) routing logic would pick.
-    /// Used only by shadow mode for diff logging.
-    fn live_routing_target(
-        &self,
-        snapshot: &LlmRuntimeSnapshot,
-        ctx: &RoutingContext,
-    ) -> String {
-        match snapshot.providers.routing_mode {
-            RoutingMode::PrimaryOnly => "primary".to_string(),
-            RoutingMode::CheapSplit => {
-                // CheapSplit in live mode goes through SmartRoutingProvider
-                // which wraps primary; tools/streaming → primary is built-in
-                if ctx.has_tools || ctx.requires_streaming {
-                    "primary".to_string()
-                } else {
-                    "cheap".to_string() // simplified — actual classification in SmartRouting
-                }
-            }
-            RoutingMode::AdvisorExecutor => {
-                // New mode — no existing live path, treat as cheap
-                if snapshot.cheap_llm.is_some() {
-                    "cheap".to_string()
-                } else {
-                    "primary".to_string()
-                }
-            }
-            RoutingMode::Policy => {
-                let candidates = self.manager.available_route_candidates(snapshot);
-                self.manager
-                    .routing_policy
-                    .read()
-                    .ok()
-                    .map(|policy| policy.select_decision(ctx, &candidates).target)
-                    .unwrap_or_else(|| "primary".to_string())
-            }
-        }
     }
 
     fn resolved_completion_request(mut request: CompletionRequest) -> CompletionRequest {
@@ -480,6 +444,8 @@ impl LlmRuntimeManager {
                 .tool_phase_primary_thinking_enabled,
             primary_provider: snapshot.providers.primary.clone(),
             fallback_chain: snapshot.providers.fallback_chain.clone(),
+            advisor_max_calls: snapshot.providers.advisor_max_calls,
+            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
         }
     }
 
@@ -650,20 +616,6 @@ impl LlmRuntimeManager {
         }
     }
 
-    fn provider_for_routing_decision(
-        &self,
-        decision: &RoutingDecision,
-        snapshot: &LlmRuntimeSnapshot,
-    ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-        let mut targets = vec![decision.target.clone()];
-        for fallback in &decision.fallbacks {
-            if !targets.contains(fallback) {
-                targets.push(fallback.clone());
-            }
-        }
-        self.provider_chain_for_targets(&targets, snapshot)
-    }
-
     fn provider_chain_for_targets(
         &self,
         targets: &[String],
@@ -785,79 +737,37 @@ impl LlmRuntimeManager {
         if !snapshot.providers.smart_routing_enabled {
             return ("primary".to_string(), "Routing disabled".to_string());
         }
-        match snapshot.providers.routing_mode {
-            RoutingMode::PrimaryOnly => ("primary".to_string(), "Primary-only mode".to_string()),
-            RoutingMode::CheapSplit => simulate_cheap_split_route(&snapshot, &ctx, prompt),
-            RoutingMode::AdvisorExecutor => {
-                if snapshot.cheap_llm.is_some() {
-                    ("cheap".to_string(), "AdvisorExecutor: executor handles request, may consult advisor".to_string())
-                } else {
-                    ("primary".to_string(), "AdvisorExecutor: no executor model, using primary".to_string())
-                }
-            }
-            RoutingMode::Policy => {
-                let candidates = self.available_route_candidates(&snapshot);
-                let (decision, reason) = self
-                    .routing_policy
-                    .read()
-                    .ok()
-                    .map(|policy| {
-                        let decision = policy.select_decision(&ctx, &candidates);
-                        let reason = decision
-                            .matched_rule_index
-                            .and_then(|index| {
-                                policy
-                                    .rules()
-                                    .get(index)
-                                    .and_then(|rule| {
-                                        policy.matches_rule_for_summary(rule, &ctx, &candidates)
-                                    })
-                                    .map(|_| {
-                                        crate::llm::routing_policy::RoutingRuleSummary::from_policy(
-                                            &policy,
-                                        )
-                                        .get(index)
-                                        .map(|summary| summary.description.clone())
-                                        .unwrap_or_else(|| "Matched policy rule".to_string())
-                                    })
-                            })
-                            .unwrap_or_else(|| "Default policy target".to_string());
-                        (decision, reason)
-                    })
-                    .unwrap_or((
-                        RoutingDecision {
-                            target: "primary".to_string(),
-                            fallbacks: Vec::new(),
-                            matched_rule_index: None,
-                        },
-                        "Default policy target".to_string(),
-                    ));
 
-                let reason = if decision.fallbacks.is_empty() {
-                    reason
-                } else {
-                    format!("{}. Fallbacks: {}", reason, decision.fallbacks.join(" -> "))
-                };
-                (decision.target, reason)
-            }
+        let planner_input = RoutePlannerInput {
+            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
+            routing_mode: snapshot.providers.routing_mode,
+            routing_context: ctx.clone(),
+            model_override: None,
+            provider_health: std::collections::HashMap::new(),
+            candidates: self.available_route_candidates(&snapshot),
+            turn_cost_usd: 0.0,
+            budget_utilization: None,
+            last_user_message: prompt.map(|s| s.to_string()),
+        };
+
+        if let Ok(guard) = self.route_planner.read() {
+            let decision = guard.plan(
+                &planner_input,
+                self.routing_policy.read().ok().as_deref(),
+            );
+            let reason = if decision.fallbacks.is_empty() {
+                decision.reason
+            } else {
+                format!(
+                    "{}. Fallbacks: {}",
+                    decision.reason,
+                    decision.fallbacks.join(" -> ")
+                )
+            };
+            (decision.target, reason)
+        } else {
+            ("primary".to_string(), "Planner lock unavailable".to_string())
         }
-    }
-
-    fn route_decision_for_policy(
-        &self,
-        ctx: &RoutingContext,
-        snapshot: &LlmRuntimeSnapshot,
-    ) -> RoutingDecision {
-        let candidates = self.available_route_candidates(snapshot);
-        self.routing_policy
-            .read()
-            .ok()
-            .map(|policy| policy.select_decision(ctx, &candidates))
-            .unwrap_or(RoutingDecision {
-                target: "primary".to_string(),
-                fallbacks: Vec::new(),
-                matched_rule_index: None,
-            })
     }
 
     fn available_route_candidates(&self, snapshot: &LlmRuntimeSnapshot) -> Vec<RouteCandidate> {
@@ -954,53 +864,6 @@ fn create_provider_for_runtime_slug(
 
     apply_model_override(&mut llm_config, model);
     create_llm_provider(&llm_config)
-}
-
-fn simulate_cheap_split_route(
-    snapshot: &LlmRuntimeSnapshot,
-    ctx: &RoutingContext,
-    prompt: Option<&str>,
-) -> (String, String) {
-    if ctx.has_tools {
-        return (
-            "primary".to_string(),
-            "Cheap split mode always routes tool-use requests to the primary model".to_string(),
-        );
-    }
-
-    let simulated_prompt = prompt
-        .map(str::to_string)
-        .unwrap_or_else(|| "x".repeat((ctx.estimated_input_tokens as usize).saturating_mul(4)));
-    let complexity = classify_message(&simulated_prompt, &SmartRoutingConfig::default());
-    let cheap_target = snapshot
-        .providers
-        .cheap_model
-        .clone()
-        .unwrap_or_else(|| "primary".to_string());
-
-    match complexity {
-        TaskComplexity::Simple => (
-            cheap_target,
-            "Cheap split mode classified this request as simple".to_string(),
-        ),
-        TaskComplexity::Moderate => {
-            let target = if snapshot.providers.smart_routing_cascade {
-                cheap_target
-            } else {
-                cheap_target
-            };
-            let reason = if snapshot.providers.smart_routing_cascade {
-                "Cheap split mode classified this request as moderate, so it starts on the cheap model and may cascade to primary if the answer looks uncertain".to_string()
-            } else {
-                "Cheap split mode classified this request as moderate, so it stays on the cheap model".to_string()
-            };
-            (target, reason)
-        }
-        TaskComplexity::Complex => (
-            "primary".to_string(),
-            "Cheap split mode classified this request as complex".to_string(),
-        ),
-    }
 }
 
 fn apply_model_override(config: &mut crate::config::LlmConfig, model: &str) {

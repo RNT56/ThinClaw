@@ -351,6 +351,9 @@ output or call tools — the executor handles all execution.";
 
 /// Unified route planner that handles all routing modes.
 pub struct RoutePlanner {
+    /// Scorer infrastructure — ready for scored routing with live health/cost signals.
+    /// Currently used in tests and will be promoted when scored mode replaces keyword classification.
+    #[allow(dead_code)]
     scorer: RouteScorer,
     cheap_split_config: SmartRoutingConfig,
     cascade_enabled: bool,
@@ -636,6 +639,186 @@ pub fn validate_providers_settings(
     }
 
     warnings
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Telemetry normalization (Phase 7)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Canonical telemetry key format: `"{logical_role}|{provider_slug}|{model_id}"`.
+///
+/// Used by all routing decision telemetry to ensure consistent log indexing
+/// across modes and providers.
+pub fn canonical_telemetry_key(logical_role: &str, provider_slug: &str, model_id: &str) -> String {
+    format!("{}|{}|{}", logical_role, provider_slug, model_id)
+}
+
+/// Enrich a `RouteDecision` telemetry key with resolved provider/model info.
+///
+/// Call this after the planner resolves a target to a concrete provider,
+/// so the telemetry key reflects the actual provider and model used.
+pub fn enrich_telemetry_key(
+    decision: &mut RouteDecision,
+    provider_slug: &str,
+    model_id: &str,
+) {
+    // Extract logical role from the current key (the part before the first '|')
+    let logical_role = decision
+        .telemetry_key
+        .split('|')
+        .next()
+        .unwrap_or(&decision.target);
+    decision.telemetry_key = canonical_telemetry_key(logical_role, provider_slug, model_id);
+}
+
+/// Log a structured routing decision event for observability.
+///
+/// This emits a `tracing::info!` event with all decision fields in a
+/// standardized format suitable for structured log aggregation.
+pub fn log_routing_decision(decision: &RouteDecision, mode: &str) {
+    tracing::info!(
+        target = %decision.target,
+        telemetry_key = %decision.telemetry_key,
+        reason = %decision.reason,
+        routing_mode = %mode,
+        cascade = ?decision.cascade,
+        advisor_active = decision.advisor.is_some(),
+        tool_phase_synthesis = decision.tool_phase_synthesis,
+        matched_rule = ?decision.matched_rule_index,
+        fallback_count = decision.fallbacks.len(),
+        quality_score = decision.score.as_ref().map(|s| s.quality),
+        cost_score = decision.score.as_ref().map(|s| s.cost),
+        composite_score = decision.score.as_ref().map(|s| s.composite),
+        "[route_planner] Routing decision"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Health signal integration (Phase 8)
+// ──────────────────────────────────────────────────────────────────────
+
+/// Circuit breaker–aware health probe.
+///
+/// Reports provider health based on circuit breaker state:
+/// - `Closed` (healthy) → 1.0
+/// - `HalfOpen` (recovering) → 0.5
+/// - `Open` (failing) → 0.0
+///
+/// When no circuit breaker data is available, returns a configurable default
+/// (typically 0.8 to slightly penalize unknown providers vs known-healthy ones).
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerHealthProbe {
+    target: String,
+    state: CircuitBreakerState,
+}
+
+/// Simplified circuit breaker state for routing decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitBreakerState {
+    /// Provider is healthy — all requests succeed.
+    Closed,
+    /// Provider is recovering — limited requests sent.
+    HalfOpen,
+    /// Provider is failing — requests blocked.
+    Open,
+    /// No circuit breaker data available.
+    Unknown,
+}
+
+impl CircuitBreakerHealthProbe {
+    pub fn new(target: impl Into<String>, state: CircuitBreakerState) -> Self {
+        Self {
+            target: target.into(),
+            state,
+        }
+    }
+}
+
+impl HealthProbe for CircuitBreakerHealthProbe {
+    fn health_score(&self) -> f64 {
+        match self.state {
+            CircuitBreakerState::Closed => 1.0,
+            CircuitBreakerState::HalfOpen => 0.5,
+            CircuitBreakerState::Open => 0.0,
+            CircuitBreakerState::Unknown => 0.8,
+        }
+    }
+
+    fn probe_target(&self) -> &str {
+        &self.target
+    }
+}
+
+/// Build a health map from a collection of health probes.
+///
+/// Returns `target → health_score` suitable for `RoutePlannerInput::provider_health`.
+pub fn build_health_map(probes: &[Box<dyn HealthProbe>]) -> HashMap<String, f64> {
+    probes
+        .iter()
+        .map(|probe| (probe.probe_target().to_string(), probe.health_score()))
+        .collect()
+}
+
+/// Latency-weighted health probe.
+///
+/// Combines circuit breaker state with latency data for a richer health signal.
+/// High latency (>5s P50) degrades the health score even when the circuit is closed.
+#[derive(Debug, Clone)]
+pub struct LatencyWeightedHealthProbe {
+    target: String,
+    cb_state: CircuitBreakerState,
+    latency_p50_ms: Option<f64>,
+}
+
+impl LatencyWeightedHealthProbe {
+    pub fn new(
+        target: impl Into<String>,
+        cb_state: CircuitBreakerState,
+        latency_p50_ms: Option<f64>,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            cb_state,
+            latency_p50_ms,
+        }
+    }
+}
+
+impl HealthProbe for LatencyWeightedHealthProbe {
+    fn health_score(&self) -> f64 {
+        let base = match self.cb_state {
+            CircuitBreakerState::Closed => 1.0,
+            CircuitBreakerState::HalfOpen => 0.5,
+            CircuitBreakerState::Open => 0.0,
+            CircuitBreakerState::Unknown => 0.8,
+        };
+
+        // Apply latency penalty when circuit is not open
+        if base > 0.0 {
+            if let Some(p50) = self.latency_p50_ms {
+                // Degrade health for high latency:
+                // 0-2000ms → no penalty
+                // 2000-5000ms → gradual penalty (up to -0.3)
+                // >5000ms → max penalty (-0.3)
+                let penalty = if p50 > 5000.0 {
+                    0.3
+                } else if p50 > 2000.0 {
+                    0.3 * (p50 - 2000.0) / 3000.0
+                } else {
+                    0.0
+                };
+                (base - penalty).max(0.1)
+            } else {
+                base
+            }
+        } else {
+            base
+        }
+    }
+
+    fn probe_target(&self) -> &str {
+        &self.target
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -975,5 +1158,87 @@ mod tests {
         // Alias
         let back: RoutingMode = serde_json::from_str("\"advisor\"").unwrap();
         assert_eq!(back, RoutingMode::AdvisorExecutor);
+    }
+
+    // -- Telemetry normalization (Phase 7) --
+
+    #[test]
+    fn canonical_telemetry_key_format() {
+        let key = canonical_telemetry_key("primary", "anthropic", "claude-sonnet-4-20250514");
+        assert_eq!(key, "primary|anthropic|claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn enrich_telemetry_key_preserves_role() {
+        let mut decision = RouteDecision::primary("test");
+        enrich_telemetry_key(&mut decision, "openai", "gpt-4o");
+        assert_eq!(decision.telemetry_key, "primary|openai|gpt-4o");
+    }
+
+    #[test]
+    fn enrich_telemetry_key_for_cheap_target() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::CheapSplit;
+        input.last_user_message = Some("hello".to_string());
+        let mut d = p.plan(&input, None);
+        // Should be "cheap||" initially
+        assert!(d.telemetry_key.starts_with("cheap"));
+        enrich_telemetry_key(&mut d, "anthropic", "claude-3-haiku");
+        assert_eq!(d.telemetry_key, "cheap|anthropic|claude-3-haiku");
+    }
+
+    // -- Health signal integration (Phase 8) --
+
+    #[test]
+    fn circuit_breaker_health_scores() {
+        let closed = CircuitBreakerHealthProbe::new("test", CircuitBreakerState::Closed);
+        assert_eq!(closed.health_score(), 1.0);
+
+        let half_open = CircuitBreakerHealthProbe::new("test", CircuitBreakerState::HalfOpen);
+        assert_eq!(half_open.health_score(), 0.5);
+
+        let open = CircuitBreakerHealthProbe::new("test", CircuitBreakerState::Open);
+        assert_eq!(open.health_score(), 0.0);
+
+        let unknown = CircuitBreakerHealthProbe::new("test", CircuitBreakerState::Unknown);
+        assert_eq!(unknown.health_score(), 0.8);
+    }
+
+    #[test]
+    fn latency_weighted_health_no_latency() {
+        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, None);
+        assert_eq!(probe.health_score(), 1.0);
+    }
+
+    #[test]
+    fn latency_weighted_health_low_latency() {
+        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(500.0));
+        assert_eq!(probe.health_score(), 1.0); // No penalty below 2000ms
+    }
+
+    #[test]
+    fn latency_weighted_health_high_latency() {
+        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(5500.0));
+        let score = probe.health_score();
+        assert!(score < 0.8, "High latency should penalize score: {}", score);
+        assert!(score >= 0.1, "Score should never drop below 0.1: {}", score);
+    }
+
+    #[test]
+    fn latency_weighted_health_open_circuit_ignores_latency() {
+        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Open, Some(100.0));
+        assert_eq!(probe.health_score(), 0.0); // Open circuit = 0 regardless
+    }
+
+    #[test]
+    fn build_health_map_from_probes() {
+        let probes: Vec<Box<dyn HealthProbe>> = vec![
+            Box::new(CircuitBreakerHealthProbe::new("primary", CircuitBreakerState::Closed)),
+            Box::new(CircuitBreakerHealthProbe::new("cheap", CircuitBreakerState::HalfOpen)),
+        ];
+        let map = build_health_map(&probes);
+        assert_eq!(map.get("primary"), Some(&1.0));
+        assert_eq!(map.get("cheap"), Some(&0.5));
     }
 }
