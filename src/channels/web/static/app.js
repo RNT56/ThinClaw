@@ -4436,7 +4436,7 @@ function renderProvidersWorkspace(providers, config) {
   const mergedProviders = mergeProviderEntries(providers, config.providers || []);
 
   let html = '<section class="ui-panel ui-panel-stack providers-workspace-shell">';
-  html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models first, then enable routing only if you want cheap-split or policy-based behavior across multiple providers.</p></div><div class="ui-panel-actions"><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
+  html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models, then choose a routing strategy to distribute work across providers.</p></div><div class="ui-panel-actions"><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
   if (config.last_reload_error) {
     html += '<div class="ui-inline-alert ui-inline-alert--error">' + escapeHtml(config.last_reload_error) + '</div>';
   } else if (config.runtime_revision) {
@@ -4702,32 +4702,81 @@ function renderRoutingSection(config, providers) {
   const primarySummary = summarizeRoleTargets(providers, 'primary');
   const cheapSummary = summarizeRoleTargets(providers, 'cheap');
 
+  // SVG icons for mode tiles
+  const icons = {
+    primary_only: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>',
+    cheap_split: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg>',
+    advisor_executor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838.838-2.872a2 2 0 0 1 .506-.855z"/><circle cx="7" cy="7" r="2" fill="currentColor" opacity="0.3"/></svg>',
+    policy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4"/></svg>',
+  };
+
+  const modes = [
+    { value: 'primary_only', name: 'Primary only', desc: 'All requests use your primary model' },
+    { value: 'cheap_split', name: 'Cheap split', desc: 'Route simple work to the cheap model' },
+    { value: 'advisor_executor', name: 'Advisor + Executor', desc: 'Fast model executes, consults advisor when needed' },
+    { value: 'policy', name: 'Policy rules', desc: 'Custom rules control routing decisions' },
+  ];
+
   let html = '<div class="routing-section-block ui-panel-stack">';
   html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Routing Strategy</h4><p class="ui-panel-desc">Choose how requests are distributed across your enabled providers.</p></div></div>';
   html += '<div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel--focusable routing-card routing-strategy-card">';
 
-  // --- Row 1: always visible — enable toggle + mode selector ---
-  html += '<div class="routing-mode-pills">';
-  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-enabled"' + (config.routing_enabled ? ' checked' : '') + '> <span>Enable routing</span></label>';
-  html += '<select id="routing-mode" class="routing-select routing-mode-select">';
-  html += '<option value="primary_only"' + (mode === 'primary_only' ? ' selected' : '') + '>Primary only</option>';
-  html += '<option value="cheap_split"' + (mode === 'cheap_split' ? ' selected' : '') + '>Cheap split</option>';
-  html += '<option value="policy"' + (mode === 'policy' ? ' selected' : '') + '>Policy rules</option>';
+  // --- Enable toggle + hidden select ---
+  html += '<div class="routing-mode-header">';
+  html += renderToggleSwitch('routing-enabled', 'Enable routing', config.routing_enabled);
+  html += '<select id="routing-mode" class="routing-mode-select-hidden">';
+  for (const m of modes) {
+    html += '<option value="' + m.value + '"' + (mode === m.value ? ' selected' : '') + '>' + escapeHtml(m.name) + '</option>';
+  }
   html += '</select>';
   html += '</div>';
+
+  // --- Mode tiles ---
+  html += '<div class="routing-mode-tiles">';
+  for (const m of modes) {
+    html += '<div class="routing-mode-tile' + (mode === m.value ? ' active' : '') + '" data-mode-value="' + m.value + '">';
+    html += '<div class="routing-mode-tile-head">';
+    html += '<div class="routing-mode-tile-icon">' + icons[m.value] + '</div>';
+    html += '<span class="routing-mode-tile-name">' + escapeHtml(m.name) + '</span>';
+    html += '</div>';
+    html += '<div class="routing-mode-tile-desc">' + escapeHtml(m.desc) + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+
   html += '<div id="routing-mode-note" class="routing-inline-note"></div>';
 
-  // --- cheap_split + policy: show pool summaries and cascade toggle ---
+  // --- Advanced options: cheap_split, advisor, policy all share pool editors ---
   html += '<div id="routing-advanced-options" class="' + (mode === 'primary_only' ? 'is-hidden' : '') + '">';
-  html += '<label class="routing-inline-toggle" style="margin-top:14px"><input type="checkbox" id="routing-cascade"' + (config.cascade_enabled ? ' checked' : '') + '> <span>Cascade moderate cheap answers up to the primary pool</span></label>';
-  html += '<label id="routing-tool-phase-toggle-row" class="routing-inline-toggle" style="margin-top:14px"><input type="checkbox" id="routing-tool-phase-synthesis"' + (config.tool_phase_synthesis_enabled ? ' checked' : '') + '> <span>Separate tool planning from final answer</span></label>';
-  html += '<div id="routing-tool-phase-note" class="routing-inline-note">Run hidden tool-capable planning first. The cheap model is used only when the planner explicitly replies with NO_TOOLS_NEEDED; if the primary model already produces the final answer, that answer is used directly. Applies only in Cheap split mode and is ignored when llm_select is active.</div>';
-  html += '<label id="routing-tool-phase-thinking-row" class="routing-inline-toggle" style="margin-top:10px"><input type="checkbox" id="routing-tool-phase-primary-thinking"' + (config.tool_phase_primary_thinking_enabled !== false ? ' checked' : '') + '> <span>Allow primary planning thinking</span></label>';
-  html += '<div id="routing-tool-phase-thinking-note" class="routing-inline-note">Keeps model-side reasoning enabled on the primary planning pass. Disable this to save more expensive-model tokens, but tool planning may get weaker.</div>';
+
+  // Options group with toggles
+  html += '<div class="routing-options-group">';
+  html += renderToggleOption('routing-cascade', 'Cascade moderate answers', 'Let cheap answers that look uncertain escalate to the primary pool for a better response', config.cascade_enabled);
+  html += renderToggleOption('routing-tool-phase-synthesis', 'Separate tool planning', 'Run a hidden tool-capable planning pass first — the cheap model is used only when the planner replies NO_TOOLS_NEEDED', config.tool_phase_synthesis_enabled, 'routing-tool-phase-toggle-row');
+  html += renderToggleOption('routing-tool-phase-primary-thinking', 'Primary planning thinking', 'Keeps model-side reasoning enabled on the primary planning pass — disable to save tokens at the cost of weaker tool planning', config.tool_phase_primary_thinking_enabled !== false, 'routing-tool-phase-thinking-row');
+  html += '</div>';
+
+  // --- Advisor settings panel (only for advisor_executor mode) ---
+  html += '<div id="routing-advisor-settings" class="advisor-settings-panel' + (mode !== 'advisor_executor' ? ' is-hidden' : '') + '">';
+  html += '<div class="advisor-settings-title">Advisor Configuration</div>';
+  html += '<div class="advisor-settings-grid">';
+  html += '<div>';
+  html += '<label class="advisor-field-label">Max advisor calls per turn</label>';
+  html += '<input id="routing-advisor-max-calls" class="advisor-input" type="number" min="1" max="10" value="' + (config.advisor_max_calls || 3) + '" placeholder="3">';
+  html += '</div>';
+  html += '<div style="grid-column: 1 / -1">';
+  html += '<label class="advisor-field-label">Escalation prompt (optional)</label>';
+  html += '<textarea id="routing-advisor-prompt" class="advisor-input advisor-textarea" placeholder="Custom guidance for the advisor model when the executor escalates...">' + escapeHtml(config.advisor_escalation_prompt || '') + '</textarea>';
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  // --- Pool editors ---
   html += '<div class="routing-summary-stack" style="margin-top:14px">';
   html += renderRolePoolEditor('primary', providers, primarySummary);
   html += renderRolePoolEditor('cheap', providers, cheapSummary);
   html += '</div>';
+
   // --- policy only: fallback chain ---
   html += '<div id="routing-policy-extras" class="' + (mode !== 'policy' ? 'is-hidden' : '') + '">';
   html += '<label class="routing-field-label">Fallback chain</label>';
@@ -4756,9 +4805,9 @@ function renderRoutingSection(config, providers) {
   html += '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--focusable routing-card simulation-card" style="margin-top:12px">';
   html += '<textarea id="routing-sim-prompt" class="routing-textarea" placeholder="Describe a representative request"></textarea>';
   html += '<div class="routing-sim-options">';
-  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-vision"> <span>Contains image input</span></label>';
-  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-tools"> <span>Uses tools</span></label>';
-  html += '<label class="routing-inline-toggle"><input type="checkbox" id="routing-sim-stream"> <span>Requires streaming</span></label>';
+  html += renderToggleSwitch('routing-sim-vision', 'Contains image input', false, true);
+  html += renderToggleSwitch('routing-sim-tools', 'Uses tools', false, true);
+  html += renderToggleSwitch('routing-sim-stream', 'Requires streaming', false, true);
   html += '</div>';
   html += '<div class="routing-sim-actions"><button id="routing-simulate" class="btn-vault-save inline">Simulate</button><div id="routing-sim-result" class="routing-sim-result">' + escapeHtml(config.last_reload_error || 'Ready.') + '</div></div>';
   html += '</div>';
@@ -4766,6 +4815,30 @@ function renderRoutingSection(config, providers) {
   html += '</div>'; // end #routing-policy-section
 
   html += '</div>'; // end .routing-section-block
+  return html;
+}
+
+/** Render a toggle switch (checkbox hidden behind a styled track). */
+function renderToggleSwitch(id, labelText, checked, compact) {
+  return '<label class="routing-inline-toggle' + (compact ? ' compact' : '') + '">'
+    + '<input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '>'
+    + '<span class="toggle-track"></span>'
+    + '<span class="toggle-label">' + escapeHtml(labelText) + '</span>'
+    + '</label>';
+}
+
+/** Render a toggle option row with label + description text. */
+function renderToggleOption(id, label, desc, checked, wrapperId) {
+  let html = '<div class="routing-option-row"' + (wrapperId ? ' id="' + wrapperId + '"' : '') + '>';
+  html += '<label class="routing-inline-toggle" style="margin-top:2px">';
+  html += '<input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '>';
+  html += '<span class="toggle-track"></span>';
+  html += '</label>';
+  html += '<div class="routing-option-content">';
+  html += '<span class="routing-option-label">' + escapeHtml(label) + '</span>';
+  html += '<span class="routing-option-desc">' + escapeHtml(desc) + '</span>';
+  html += '</div>';
+  html += '</div>';
   return html;
 }
 
@@ -4784,6 +4857,19 @@ function attachProvidersEvents() {
     }
     if (event.target.closest('#providers-routing-save')) {
       saveProvidersRoutingConfig();
+      return;
+    }
+    // Mode tile click — update hidden select + presentation
+    const modeTile = event.target.closest('.routing-mode-tile');
+    if (modeTile && modeTile.dataset.modeValue) {
+      const select = document.getElementById('routing-mode');
+      if (select) {
+        select.value = modeTile.dataset.modeValue;
+        // Update active class on tiles
+        document.querySelectorAll('.routing-mode-tile').forEach(t => t.classList.remove('active'));
+        modeTile.classList.add('active');
+        updateRoutingModePresentation();
+      }
       return;
     }
     if (event.target.closest('#routing-simulate')) {
@@ -5223,6 +5309,8 @@ function collectProvidersRoutingConfig() {
     ),
     policy_rules: policyRules,
     providers,
+    advisor_max_calls: Number(document.getElementById('routing-advisor-max-calls')?.value || '3'),
+    advisor_escalation_prompt: document.getElementById('routing-advisor-prompt')?.value?.trim() || null,
   };
 }
 
@@ -5240,29 +5328,29 @@ function updateRoutingModePresentation() {
   const advancedOptions = document.getElementById('routing-advanced-options');
   const policyExtras = document.getElementById('routing-policy-extras');
   const policySection = document.getElementById('routing-policy-section');
+  const advisorSettings = document.getElementById('routing-advisor-settings');
   const toolPhaseToggleRow = document.getElementById('routing-tool-phase-toggle-row');
   const toolPhaseToggle = document.getElementById('routing-tool-phase-synthesis');
-  const toolPhaseNote = document.getElementById('routing-tool-phase-note');
   const toolPhaseThinkingRow = document.getElementById('routing-tool-phase-thinking-row');
   const toolPhaseThinkingToggle = document.getElementById('routing-tool-phase-primary-thinking');
-  const toolPhaseThinkingNote = document.getElementById('routing-tool-phase-thinking-note');
   const simulator = document.querySelector('.routing-simulator-details');
   const toolPhaseThinkingVisible = mode === 'cheap_split' && !!toolPhaseToggle?.checked;
   if (advancedOptions) advancedOptions.classList.toggle('is-hidden', mode === 'primary_only');
   if (policyExtras) policyExtras.classList.toggle('is-hidden', mode !== 'policy');
   if (policySection) policySection.classList.toggle('is-hidden', mode !== 'policy');
-  if (toolPhaseToggleRow) toolPhaseToggleRow.classList.toggle('is-hidden', mode === 'primary_only');
+  if (advisorSettings) advisorSettings.classList.toggle('is-hidden', mode !== 'advisor_executor');
+  if (toolPhaseToggleRow) toolPhaseToggleRow.classList.toggle('is-hidden', mode !== 'cheap_split');
   if (toolPhaseToggle) toolPhaseToggle.disabled = mode !== 'cheap_split';
-  if (toolPhaseNote) toolPhaseNote.classList.toggle('is-hidden', mode === 'primary_only');
   if (toolPhaseThinkingRow) toolPhaseThinkingRow.classList.toggle('is-hidden', !toolPhaseThinkingVisible);
   if (toolPhaseThinkingToggle) toolPhaseThinkingToggle.disabled = !toolPhaseThinkingVisible;
-  if (toolPhaseThinkingNote) toolPhaseThinkingNote.classList.toggle('is-hidden', !toolPhaseThinkingVisible);
   if (simulator && mode !== 'policy') simulator.open = false;
   if (note) {
     if (mode === 'primary_only') {
-      note.textContent = 'All requests stay on the selected primary provider. Advanced routing options stay hidden until you switch to Cheap split or Policy rules.';
+      note.textContent = 'All requests stay on the selected primary provider. Select a different mode to unlock multi-provider routing.';
     } else if (mode === 'cheap_split') {
       note.textContent = 'Simple work uses the cheap slot pool, while complex or tool-heavy work stays on the primary slot pool.';
+    } else if (mode === 'advisor_executor') {
+      note.textContent = 'The executor (cheap model) handles all requests and can call the advisor (primary model) via the consult_advisor tool when it needs strategic guidance.';
     } else {
       note.textContent = 'Ordered policy rules below decide which alias, provider slot, or specific model handles each request.';
     }

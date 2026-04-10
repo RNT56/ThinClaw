@@ -3197,6 +3197,8 @@ struct ProvidersConfigResponse {
     providers: Vec<ProviderConfigEntry>,
     runtime_revision: Option<u64>,
     last_reload_error: Option<String>,
+    advisor_max_calls: u32,
+    advisor_escalation_prompt: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3222,6 +3224,14 @@ struct ProvidersConfigWriteRequest {
     fallback_chain: Vec<String>,
     policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
     providers: Vec<ProviderConfigEntry>,
+    #[serde(default = "default_advisor_max_calls_api")]
+    advisor_max_calls: u32,
+    #[serde(default)]
+    advisor_escalation_prompt: Option<String>,
+}
+
+fn default_advisor_max_calls_api() -> u32 {
+    3
 }
 
 #[derive(serde::Serialize)]
@@ -3396,6 +3406,8 @@ async fn providers_config_handler(
         providers,
         runtime_revision: runtime_status.as_ref().map(|status| status.revision),
         last_reload_error: runtime_status.and_then(|status| status.last_error),
+        advisor_max_calls: providers_settings.advisor_max_calls,
+        advisor_escalation_prompt: providers_settings.advisor_escalation_prompt.clone(),
     }))
 }
 
@@ -4471,6 +4483,13 @@ async fn providers_config_set_handler(
     settings.providers.cheap_pool_order = body.cheap_pool_order.clone();
     settings.providers.fallback_chain = body.fallback_chain.clone();
     settings.providers.policy_rules = body.policy_rules.clone();
+    settings.providers.advisor_max_calls = body.advisor_max_calls;
+    settings.providers.advisor_escalation_prompt = body
+        .advisor_escalation_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     settings.providers.enabled = body
         .providers
         .iter()

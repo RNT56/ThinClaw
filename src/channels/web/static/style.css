@@ -4102,14 +4102,269 @@ mark {
 .routing-inline-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: 13px;
   color: var(--text);
+  cursor: pointer;
+  user-select: none;
 }
 
 .routing-inline-toggle.compact {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Hide native checkbox, style custom track+thumb */
+.routing-inline-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.toggle-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: background 0.25s, border-color 0.25s, box-shadow 0.25s;
+  cursor: pointer;
+}
+
+.toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.5);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.25s;
+}
+
+.routing-inline-toggle input:checked + .toggle-track {
+  background: rgba(52, 211, 153, 0.25);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.routing-inline-toggle input:checked + .toggle-track::after {
+  transform: translateX(16px);
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.4);
+}
+
+.routing-inline-toggle input:disabled + .toggle-track {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.toggle-label {
+  line-height: 1.4;
+}
+
+/* ── Routing mode tile selector ── */
+
+.routing-mode-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.routing-mode-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.routing-mode-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, transform 0.15s;
+  user-select: none;
+}
+
+.routing-mode-tile:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  transform: translateY(-1px);
+}
+
+.routing-mode-tile.active {
+  border-color: rgba(52, 211, 153, 0.4);
+  background:
+    radial-gradient(circle at top right, rgba(52, 211, 153, 0.08), transparent 50%),
+    rgba(255, 255, 255, 0.035);
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.15), 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.routing-mode-tile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.routing-mode-tile-icon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  transition: color 0.2s, background 0.2s;
+}
+
+.routing-mode-tile.active .routing-mode-tile-icon {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+}
+
+.routing-mode-tile-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.routing-mode-tile-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.routing-mode-tile-desc {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.routing-mode-tile.active .routing-mode-tile-name {
+  color: #e2e8f0;
+}
+
+/* Hidden select (keeps form value for JS save) */
+.routing-mode-select-hidden {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ── Routing options group ── */
+
+.routing-options-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.routing-option-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.routing-option-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.routing-option-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.routing-option-desc {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* ── Advisor settings panel ── */
+
+.advisor-settings-panel {
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  background:
+    radial-gradient(circle at top left, rgba(139, 92, 246, 0.06), transparent 50%),
+    rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.advisor-settings-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #c4b5fd;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.advisor-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.advisor-field-label {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.advisor-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text);
+  padding: 9px 12px;
+  font-size: 13px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.advisor-input:focus {
+  outline: none;
+  border-color: rgba(139, 92, 246, 0.4);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+.advisor-input::placeholder {
+  color: rgba(161, 161, 170, 0.6);
+}
+
+.advisor-textarea {
+  min-height: 72px;
+  resize: vertical;
+  font-family: inherit;
 }
 
 .routing-mode-pills {
