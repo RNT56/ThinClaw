@@ -50,7 +50,10 @@ pub use reasoning::{
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
-pub use runtime_manager::{LlmRuntimeManager, RuntimeStatus, normalize_providers_settings};
+pub use runtime_manager::{
+    LlmRuntimeManager, RouteSimulationResult, RouteSimulationScore, RuntimeStatus,
+    derive_runtime_defaults, normalize_providers_settings, validate_providers_settings,
+};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use usage_tracking::UsageTrackingProvider;
 

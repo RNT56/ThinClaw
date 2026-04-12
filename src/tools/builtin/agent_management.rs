@@ -353,16 +353,16 @@ impl Tool for UpdateAgentTool {
         } else {
             None
         };
-        let allowed_skills: Option<Option<Vec<String>>> =
-            if params.get("allowed_skills").is_some() {
-                Some(
-                    params
-                        .get("allowed_skills")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                )
-            } else {
-                None
-            };
+        let allowed_skills: Option<Option<Vec<String>>> = if params.get("allowed_skills").is_some()
+        {
+            Some(
+                params
+                    .get("allowed_skills")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            )
+        } else {
+            None
+        };
         let is_default = params.get("is_default").and_then(|v| v.as_bool());
 
         match self
@@ -598,12 +598,12 @@ impl Tool for MessageAgentTool {
         let mut context_parts = vec![system_prompt];
 
         // Load target agent's workspace memory into context
-        if let Some(ref ws) = target_workspace {
-            if let Ok(memory) = ws.read("MEMORY.md").await {
-                let content = memory.content.trim();
-                if !content.is_empty() {
-                    context_parts.push(format!("\n--- Your Memory (MEMORY.md) ---\n{}", content));
-                }
+        if let Some(ref ws) = target_workspace
+            && let Ok(memory) = ws.read("MEMORY.md").await
+        {
+            let content = memory.content.trim();
+            if !content.is_empty() {
+                context_parts.push(format!("\n--- Your Memory (MEMORY.md) ---\n{}", content));
             }
         }
 

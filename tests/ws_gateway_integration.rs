@@ -171,7 +171,9 @@ async fn test_ws_approval_preserves_actor_bound_identity() {
         "action": "approve",
         "thread_id": "t-approval",
     });
-    ws.send(Message::Text(msg.to_string().into())).await.unwrap();
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
 
     let incoming = timeout(TIMEOUT, agent_rx.recv())
         .await

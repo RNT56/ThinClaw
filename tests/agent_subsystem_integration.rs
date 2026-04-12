@@ -236,8 +236,8 @@ mod context_compactor {
     fn make_thread(n_turns: u32) -> Thread {
         let mut t = Thread::new(Uuid::new_v4());
         for i in 0..n_turns {
-            t.start_turn(&format!("Question #{}", i + 1));
-            t.complete_turn(&format!("Answer #{}", i + 1));
+            t.start_turn(format!("Question #{}", i + 1));
+            t.complete_turn(format!("Answer #{}", i + 1));
         }
         t
     }

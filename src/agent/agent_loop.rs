@@ -299,9 +299,9 @@ impl Agent {
                 .skills()
                 .iter()
                 .filter(|skill| {
-                    allowed_names.as_ref().is_none_or(|allowed| {
-                        allowed.contains(skill.manifest.name.as_str())
-                    })
+                    allowed_names
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(skill.manifest.name.as_str()))
                 })
                 .cloned()
                 .collect();
@@ -353,9 +353,9 @@ impl Agent {
                 .skills()
                 .iter()
                 .filter(|skill| {
-                    allowed_names.as_ref().is_none_or(|allowed| {
-                        allowed.contains(skill.manifest.name.as_str())
-                    })
+                    allowed_names
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(skill.manifest.name.as_str()))
                 })
                 .map(|s| (s.manifest.name.clone(), s.manifest.description.clone()))
                 .collect()

@@ -12,15 +12,11 @@ use serde::{Deserialize, Serialize};
 /// Whether a conversation is direct or group-scoped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ConversationKind {
+    #[default]
     Direct,
     Group,
-}
-
-impl Default for ConversationKind {
-    fn default() -> Self {
-        Self::Direct
-    }
 }
 
 impl ConversationKind {
@@ -216,10 +212,17 @@ impl ResolvedIdentity {
         }
 
         let raw_sender_id = message.user_id.clone();
-        let principal_id = raw_sender_id.clone();
+        let principal_id = message
+            .metadata
+            .get("principal_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|candidate| !candidate.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| raw_sender_id.clone());
         let conversation_kind = conversation_kind_from_message(message);
         let stable_external_conversation_key =
-            stable_conversation_key(message, conversation_kind, &raw_sender_id);
+            stable_conversation_key(message, conversation_kind, &principal_id, &raw_sender_id);
         let conversation_scope_id = scope_id_from_key(&stable_external_conversation_key);
 
         Self {
@@ -279,6 +282,7 @@ fn conversation_kind_from_message(message: &IncomingMessage) -> ConversationKind
 fn stable_conversation_key(
     message: &IncomingMessage,
     conversation_kind: ConversationKind,
+    principal_id: &str,
     raw_sender_id: &str,
 ) -> String {
     if let Some(identity) = &message.identity {
@@ -288,6 +292,14 @@ fn stable_conversation_key(
     if let Some(explicit) = message
         .metadata
         .get("conversation_key")
+        .and_then(|v| v.as_str())
+    {
+        return explicit.to_string();
+    }
+
+    if let Some(explicit) = message
+        .metadata
+        .get("external_conversation_key")
         .and_then(|v| v.as_str())
     {
         return explicit.to_string();
@@ -337,8 +349,74 @@ fn stable_conversation_key(
         ConversationKind::Group => thread_hint
             .map(|hint| format!("{}:group:{}", message.channel, hint))
             .unwrap_or_else(|| format!("{}:group:{}", message.channel, raw_sender_id)),
-        ConversationKind::Direct => thread_hint
-            .map(|hint| format!("{}:direct:{}", message.channel, hint))
-            .unwrap_or_else(|| format!("{}:direct:{}", message.channel, raw_sender_id)),
+        // Default direct conversations are principal-scoped so they can flow
+        // across channels/devices without splitting into per-channel sessions.
+        ConversationKind::Direct => format!("principal:{principal_id}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_defaults_to_principal_scoped_key() {
+        let msg = IncomingMessage::new("telegram", "user-123", "hello");
+        let identity = ResolvedIdentity::from_message(&msg);
+        assert_eq!(
+            identity.stable_external_conversation_key,
+            "principal:user-123"
+        );
+    }
+
+    #[test]
+    fn external_conversation_key_metadata_is_honored() {
+        let msg =
+            IncomingMessage::new("signal", "user-abc", "hello").with_metadata(serde_json::json!({
+                "external_conversation_key": "signal://direct/user-abc/device/phone-1"
+            }));
+        let identity = ResolvedIdentity::from_message(&msg);
+        assert_eq!(
+            identity.stable_external_conversation_key,
+            "signal://direct/user-abc/device/phone-1"
+        );
+    }
+
+    #[test]
+    fn principal_id_metadata_unifies_direct_scopes() {
+        let msg_one = IncomingMessage::new("telegram", "device-a", "hello").with_metadata(
+            serde_json::json!({
+                "principal_id": "household-123"
+            }),
+        );
+        let msg_two =
+            IncomingMessage::new("discord", "device-b", "hello").with_metadata(serde_json::json!({
+                "principal_id": "household-123"
+            }));
+
+        let one = ResolvedIdentity::from_message(&msg_one);
+        let two = ResolvedIdentity::from_message(&msg_two);
+
+        assert_eq!(
+            one.stable_external_conversation_key,
+            "principal:household-123"
+        );
+        assert_eq!(
+            two.stable_external_conversation_key,
+            "principal:household-123"
+        );
+        assert_eq!(one.conversation_scope_id, two.conversation_scope_id);
+    }
+
+    #[test]
+    fn group_keys_remain_channel_scoped() {
+        let msg = IncomingMessage::new("signal", "user-1", "hello")
+            .with_thread("group-42")
+            .with_metadata(serde_json::json!({"conversation_kind":"group"}));
+        let identity = ResolvedIdentity::from_message(&msg);
+        assert_eq!(
+            identity.stable_external_conversation_key,
+            "signal:group:group-42"
+        );
     }
 }

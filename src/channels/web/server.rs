@@ -676,7 +676,7 @@ fn gateway_identity(
     ResolvedIdentity {
         principal_id: principal_id.to_string(),
         actor_id: actor_id.to_string(),
-        conversation_scope_id: scope_id_from_key(&stable_external_conversation_key),
+        conversation_scope_id: scope_id_from_key(&format!("principal:{principal_id}")),
         conversation_kind: ConversationKind::Direct,
         raw_sender_id: actor_id.to_string(),
         stable_external_conversation_key,
@@ -720,7 +720,7 @@ async fn get_or_create_gateway_assistant_conversation(
         .update_conversation_identity(
             id,
             Some(actor_id),
-            Some(scope_id_from_key(&stable_external_conversation_key)),
+            Some(scope_id_from_key(&format!("principal:{user_id}"))),
             HistoryConversationKind::Direct,
             Some(&stable_external_conversation_key),
         )
@@ -1312,7 +1312,7 @@ async fn chat_new_thread_handler(
                 .update_conversation_identity(
                     thread_id,
                     Some(&actor_id),
-                    Some(scope_id_from_key(&stable_external_conversation_key)),
+                    Some(scope_id_from_key(&format!("principal:{user_id}"))),
                     HistoryConversationKind::Direct,
                     Some(&stable_external_conversation_key),
                 )
@@ -3199,6 +3199,11 @@ struct ProvidersConfigResponse {
     last_reload_error: Option<String>,
     advisor_max_calls: u32,
     advisor_escalation_prompt: Option<String>,
+    #[serde(default)]
+    diagnostics: Vec<String>,
+    derived_defaults: crate::settings::ProvidersSettings,
+    persisted: crate::settings::ProvidersSettings,
+    effective: crate::settings::ProvidersSettings,
 }
 
 #[derive(serde::Deserialize)]
@@ -3228,6 +3233,8 @@ struct ProvidersConfigWriteRequest {
     advisor_max_calls: u32,
     #[serde(default)]
     advisor_escalation_prompt: Option<String>,
+    #[serde(default)]
+    auto_fix: bool,
 }
 
 fn default_advisor_max_calls_api() -> u32 {
@@ -3273,6 +3280,28 @@ struct RouteSimulateRequest {
 struct RouteSimulateResponse {
     target: String,
     reason: String,
+    #[serde(default)]
+    fallback_chain: Vec<String>,
+    #[serde(default)]
+    candidate_list: Vec<String>,
+    #[serde(default)]
+    rejections: Vec<String>,
+    #[serde(default)]
+    score_breakdown: Vec<RouteSimulateScore>,
+    #[serde(default)]
+    diagnostics: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct RouteSimulateScore {
+    target: String,
+    telemetry_key: Option<String>,
+    quality: f64,
+    cost: f64,
+    latency: f64,
+    health: f64,
+    policy_bias: f64,
+    composite: f64,
 }
 
 async fn providers_list_handler(
@@ -3378,11 +3407,13 @@ async fn providers_config_handler(
     })?;
     let settings = crate::settings::Settings::from_db_map(&map);
     let providers_settings = crate::llm::normalize_providers_settings(&settings);
+    let diagnostics = crate::llm::validate_providers_settings(&settings.providers);
+    let derived_defaults = crate::llm::derive_runtime_defaults(&settings);
+    let persisted = settings.providers.clone();
     let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
     let secrets = state.secrets_store.as_ref();
     let providers =
-        build_routing_provider_entries(&state.user_id, &settings, &providers_settings, secrets)
-            .await;
+        build_routing_provider_entries(&state.user_id, &settings, &persisted, secrets).await;
 
     Ok(Json(ProvidersConfigResponse {
         routing_enabled: providers_settings.smart_routing_enabled,
@@ -3408,6 +3439,10 @@ async fn providers_config_handler(
         last_reload_error: runtime_status.and_then(|status| status.last_error),
         advisor_max_calls: providers_settings.advisor_max_calls,
         advisor_escalation_prompt: providers_settings.advisor_escalation_prompt.clone(),
+        diagnostics,
+        derived_defaults,
+        persisted,
+        effective: providers_settings.clone(),
     }))
 }
 
@@ -4590,6 +4625,19 @@ async fn providers_config_set_handler(
                 });
     }
 
+    let diagnostics = crate::llm::validate_providers_settings(&settings.providers);
+    for diagnostic in &diagnostics {
+        tracing::warn!(
+            "Provider config diagnostic while saving (auto_fix={}): {}",
+            body.auto_fix,
+            diagnostic
+        );
+    }
+
+    if body.auto_fix {
+        settings.providers = crate::llm::derive_runtime_defaults(&settings);
+    }
+
     sync_legacy_llm_settings(&mut settings);
     let next_settings_map = settings.to_db_map();
     let stale_provider_keys = stale_provider_namespace_keys(&map, &next_settings_map);
@@ -4765,8 +4813,29 @@ async fn providers_route_simulate_handler(
         requires_streaming: body.requires_streaming,
         budget_usd: None,
     };
-    let (target, reason) = runtime.simulate_route_for_prompt(ctx, Some(body.prompt.as_str()));
-    Ok(Json(RouteSimulateResponse { target, reason }))
+    let result = runtime.simulate_route_details(ctx, Some(body.prompt.as_str()));
+    Ok(Json(RouteSimulateResponse {
+        target: result.target,
+        reason: result.reason,
+        fallback_chain: result.fallback_chain,
+        candidate_list: result.candidate_list,
+        rejections: result.rejections,
+        score_breakdown: result
+            .score_breakdown
+            .into_iter()
+            .map(|score| RouteSimulateScore {
+                target: score.target,
+                telemetry_key: score.telemetry_key,
+                quality: score.quality,
+                cost: score.cost,
+                latency: score.latency,
+                health: score.health,
+                policy_bias: score.policy_bias,
+                composite: score.composite,
+            })
+            .collect(),
+        diagnostics: result.diagnostics,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -5065,8 +5134,27 @@ async fn auto_disable_provider(db: &dyn crate::db::Database, user_id: &str, slug
 async fn reload_llm_runtime(state: &GatewayState) -> Result<(), String> {
     if let Some(ref runtime) = state.llm_runtime {
         runtime.reload().await.map_err(|e| e.to_string())?;
+        reconcile_advisor_tool_registration(state).await;
     }
     Ok(())
+}
+
+async fn reconcile_advisor_tool_registration(state: &GatewayState) {
+    let Some(ref registry) = state.tool_registry else {
+        return;
+    };
+    let Some(ref runtime) = state.llm_runtime else {
+        return;
+    };
+
+    let status = runtime.status();
+    if status.routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
+        registry.register_advisor_tool(status.routing_mode);
+    } else {
+        let _ = registry
+            .unregister(crate::tools::builtin::advisor::ADVISOR_TOOL_NAME)
+            .await;
+    }
 }
 
 fn sync_legacy_llm_settings(settings: &mut crate::settings::Settings) {
@@ -5227,6 +5315,13 @@ async fn settings_set_handler(
         _ => None,
     };
 
+    // Telegram subagent session mode changes require the channel transport to
+    // refresh so the WASM/channel side can re-read config-derived behavior.
+    let telegram_session_mode_restart = matches!(
+        key.as_str(),
+        "telegram_subagent_session_mode" | "channels.telegram_subagent_session_mode"
+    );
+
     store
         .set_setting(&state.user_id, &key, &body.value)
         .await
@@ -5248,6 +5343,17 @@ async fn settings_set_handler(
     {
         tokio::spawn(async move {
             cm.set_channel_stream_mode(channel_name, mode).await;
+        });
+    }
+
+    if let (Some(cm), true) = (state.channel_manager.clone(), telegram_session_mode_restart) {
+        tokio::spawn(async move {
+            if let Err(error) = cm.restart_channel("telegram").await {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to hot-restart Telegram channel after subagent session mode update"
+                );
+            }
         });
     }
 

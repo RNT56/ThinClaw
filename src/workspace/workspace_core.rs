@@ -641,23 +641,24 @@ impl Workspace {
             let mut bootstrap_prompt = doc.content;
 
             // Append SOUL.md so the agent absorbs the seed personality
-            if let Ok(soul) = self.read(paths::SOUL).await {
-                if !soul.content.is_empty() {
-                    bootstrap_prompt.push_str("\n\n---\n\n");
-                    bootstrap_prompt.push_str("## Your Starting Soul (read this carefully — these are your seed values)\n\n");
-                    bootstrap_prompt.push_str(&soul.content);
-                    bootstrap_prompt.push_str("\n\n_Absorb these values. They're your starting point. When you rewrite SOUL.md, build on them — don't ignore them._");
-                }
+            if let Ok(soul) = self.read(paths::SOUL).await
+                && !soul.content.is_empty()
+            {
+                bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str(
+                    "## Your Starting Soul (read this carefully — these are your seed values)\n\n",
+                );
+                bootstrap_prompt.push_str(&soul.content);
+                bootstrap_prompt.push_str("\n\n_Absorb these values. They're your starting point. When you rewrite SOUL.md, build on them — don't ignore them._");
             }
 
             // Append AGENTS.md so the agent knows its workspace conventions
-            if let Ok(agents) = self.read(paths::AGENTS).await {
-                if !agents.content.is_empty() {
-                    bootstrap_prompt.push_str("\n\n---\n\n");
-                    bootstrap_prompt
-                        .push_str("## Your Workspace Guide (operational reference)\n\n");
-                    bootstrap_prompt.push_str(&agents.content);
-                }
+            if let Ok(agents) = self.read(paths::AGENTS).await
+                && !agents.content.is_empty()
+            {
+                bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str("## Your Workspace Guide (operational reference)\n\n");
+                bootstrap_prompt.push_str(&agents.content);
             }
 
             if let Some(actor_id) = actor_id

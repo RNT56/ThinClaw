@@ -15,11 +15,119 @@ let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+const SUBAGENT_EVENTS_CAP = 120;
+const SUBAGENT_SESSION_STORAGE_KEY = 'thinclaw_subagent_sessions_v1';
+const SUBAGENT_SESSION_STORAGE_LIMIT = 96;
 
 // --- Tool Activity State ---
 let _activeGroup = null;
 let _activeToolCards = {};
 let _activityThinking = null;
+
+// --- Temporal Subagent State ---
+let threadsCache = { assistantThread: null, threads: [] };
+const threadMetaById = new Map();
+const subagentSessions = new Map();
+let selectedSubsessionKey = null;
+let subsessionPanelDismissed = false;
+
+function readStoredSubagentSessions() {
+  try {
+    const raw = sessionStorage.getItem(SUBAGENT_SESSION_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writeStoredSubagentSessions(entries) {
+  try {
+    if (!entries || entries.length === 0) {
+      sessionStorage.removeItem(SUBAGENT_SESSION_STORAGE_KEY);
+      return;
+    }
+    sessionStorage.setItem(SUBAGENT_SESSION_STORAGE_KEY, JSON.stringify(entries));
+  } catch (_) {
+    // Best-effort cache only.
+  }
+}
+
+function normalizeStoredSubagentSession(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const threadId = firstDefined(entry.threadId, entry.thread_id);
+  const agentId = firstDefined(entry.agentId, entry.agent_id);
+  if (!threadId || !agentId) return null;
+  const key = makeSubsessionKey(threadId, agentId);
+  return {
+    key: key,
+    threadId: String(threadId),
+    agentId: String(agentId),
+    name: firstDefined(entry.name, null),
+    task: firstDefined(entry.task, null),
+    category: firstDefined(entry.category, null),
+    status: normalizeSubagentStatus(entry, entry.type),
+    response: firstDefined(entry.response, null),
+    summary: firstDefined(entry.summary, null),
+    iterations: firstDefined(entry.iterations, null),
+    durationMs: firstDefined(entry.durationMs, entry.duration_ms, null),
+    startedAt: toIsoTimestamp(firstDefined(entry.startedAt, entry.started_at, entry.updatedAt, entry.updated_at, Date.now())),
+    updatedAt: toIsoTimestamp(firstDefined(entry.updatedAt, entry.updated_at, Date.now())),
+    completedAt: firstDefined(entry.completedAt, entry.completed_at) ? toIsoTimestamp(firstDefined(entry.completedAt, entry.completed_at)) : null,
+    events: Array.isArray(entry.events)
+      ? entry.events.slice(-SUBAGENT_EVENTS_CAP).map((event) => ({
+          id: String(firstDefined(event.id, Math.random().toString(36).slice(2))),
+          type: String(firstDefined(event.type, 'subagent_progress')),
+          status: normalizeSubagentStatus(event, event.type),
+          category: String(firstDefined(event.category, '')),
+          timestamp: toIsoTimestamp(firstDefined(event.timestamp, Date.now())),
+          title: String(firstDefined(event.title, 'Activity')),
+          body: String(firstDefined(event.body, '')),
+        }))
+      : [],
+    lastProgressMessage: firstDefined(entry.lastProgressMessage, null),
+    collapsed: entry.collapsed !== false,
+  };
+}
+
+function hydrateSubagentSessionsFromStorage() {
+  const entries = readStoredSubagentSessions();
+  if (!entries.length) return;
+  entries.forEach((entry) => {
+    const normalized = normalizeStoredSubagentSession(entry);
+    if (!normalized) return;
+    subagentSessions.set(normalized.key, normalized);
+  });
+}
+
+function persistSubagentSessionsToStorage() {
+  const ordered = Array.from(subagentSessions.values())
+    .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+    .slice(0, SUBAGENT_SESSION_STORAGE_LIMIT)
+    .map((session) => ({
+      key: session.key,
+      threadId: session.threadId,
+      agentId: session.agentId,
+      name: session.name,
+      task: session.task,
+      category: session.category,
+      status: session.status,
+      response: session.response,
+      summary: session.summary,
+      iterations: session.iterations,
+      durationMs: session.durationMs,
+      startedAt: session.startedAt,
+      updatedAt: session.updatedAt,
+      completedAt: session.completedAt,
+      lastProgressMessage: session.lastProgressMessage,
+      collapsed: session.collapsed !== false,
+      events: (session.events || []).slice(-SUBAGENT_EVENTS_CAP),
+    }));
+  writeStoredSubagentSessions(ordered);
+}
+
+hydrateSubagentSessionsFromStorage();
 
 // --- Auth ---
 
@@ -133,6 +241,8 @@ function connectSSE() {
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
       loadHistory();
+      loadThreads();
+      refreshSubsessionUi();
     }
     sseHasConnectedBefore = true;
   };
@@ -184,8 +294,24 @@ function connectSSE() {
     appendToLastAssistant(data.content);
   });
 
+  eventSource.addEventListener('subagent_spawned', (e) => {
+    const data = JSON.parse(e.data);
+    handleSubagentSpawned(data);
+  });
+
+  eventSource.addEventListener('subagent_progress', (e) => {
+    const data = JSON.parse(e.data);
+    handleSubagentProgress(data);
+  });
+
+  eventSource.addEventListener('subagent_completed', (e) => {
+    const data = JSON.parse(e.data);
+    handleSubagentCompleted(data);
+  });
+
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
+    if (consumeLegacySubagentStatus(data)) return;
     if (!isCurrentThread(data.thread_id)) return;
     setStatus(data.message);
     // "Done" and "Awaiting approval" are terminal signals from the agent:
@@ -281,6 +407,518 @@ function isCurrentThread(threadId) {
   if (!threadId) return true;
   if (!currentThreadId) return true;
   return threadId === currentThreadId;
+}
+
+// --- Temporal Subagent Subsessions ---
+
+function makeSubsessionKey(threadId, agentId) {
+  return String(threadId || 'unknown-thread') + '::' + String(agentId || 'unknown-agent');
+}
+
+function firstDefined() {
+  for (let i = 0; i < arguments.length; i += 1) {
+    const value = arguments[i];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return null;
+}
+
+function toIsoTimestamp() {
+  const value = firstDefined.apply(null, arguments);
+  if (!value) return new Date().toISOString();
+  if (typeof value === 'number') return new Date(value).toISOString();
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  return new Date().toISOString();
+}
+
+function formatTimeShort(isoString) {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDurationMs(durationMs) {
+  const numeric = Number(durationMs);
+  if (!Number.isFinite(numeric) || numeric < 0) return '-';
+  if (numeric < 1000) return Math.round(numeric) + ' ms';
+  if (numeric < 60000) return (Math.round(numeric / 100) / 10) + ' s';
+  const minutes = Math.floor(numeric / 60000);
+  const seconds = Math.round((numeric % 60000) / 1000);
+  return minutes + 'm ' + seconds + 's';
+}
+
+function getSubagentTransparencyLevel() {
+  const value = settingsCache['agent.subagent_transparency_level']?.value;
+  return value === 'detailed' ? 'detailed' : 'balanced';
+}
+
+function normalizeSubagentStatus(payload, fallbackType) {
+  const rawStatus = String(firstDefined(
+    payload.status,
+    payload.outcome,
+    payload.state,
+    fallbackType === 'subagent_completed' ? 'completed' : 'running'
+  ) || '').toLowerCase();
+  if (rawStatus === 'error' || rawStatus === 'failed' || payload.success === false) return 'failed';
+  if (rawStatus === 'completed' || rawStatus === 'complete' || rawStatus === 'done' || rawStatus === 'success') return 'completed';
+  return 'running';
+}
+
+function getSubsessionDisplayName(session) {
+  return session.name || session.task || ('Subagent ' + String(session.agentId || '').slice(0, 8));
+}
+
+function getSubsessionStatusLabel(status) {
+  if (status === 'failed') return 'Failed';
+  if (status === 'completed') return 'Complete';
+  return 'Running';
+}
+
+function buildSubagentEventRecord(eventType, payload) {
+  const status = normalizeSubagentStatus(payload, eventType);
+  const timestamp = toIsoTimestamp(
+    payload.timestamp,
+    payload.completed_at,
+    payload.started_at,
+    payload.updated_at,
+    payload.created_at
+  );
+  let title = 'Activity';
+  let body = '';
+  if (eventType === 'subagent_spawned') {
+    title = 'Delegated';
+    body = firstDefined(payload.task, payload.message, payload.summary, payload.detail) || 'Main agent delegated a bounded task.';
+  } else if (eventType === 'subagent_completed') {
+    title = status === 'failed' ? 'Finished with issues' : 'Completed';
+    body = firstDefined(payload.summary, payload.response, payload.message, payload.detail) || (status === 'failed'
+      ? 'The subagent ended without a successful completion payload.'
+      : 'The subagent returned control to the main agent.');
+  } else {
+    title = firstDefined(payload.title, payload.category, 'Progress');
+    body = firstDefined(payload.message, payload.detail, payload.summary, payload.response, payload.task) || 'Work in progress.';
+  }
+  return {
+    id: String(firstDefined(payload.event_id, timestamp, Math.random().toString(36).slice(2))),
+    type: eventType,
+    status: status,
+    category: String(firstDefined(payload.category, payload.kind, '') || ''),
+    timestamp: timestamp,
+    title: String(title),
+    body: String(body || ''),
+  };
+}
+
+function ensureSubsession(threadId, agentId, seed) {
+  if (!threadId || !agentId) return null;
+  const key = makeSubsessionKey(threadId, agentId);
+  let session = subagentSessions.get(key);
+  if (!session) {
+    session = {
+      key: key,
+      threadId: threadId,
+      agentId: agentId,
+      name: null,
+      task: null,
+      category: null,
+      status: 'running',
+      response: null,
+      summary: null,
+      iterations: null,
+      durationMs: null,
+      startedAt: null,
+      updatedAt: null,
+      completedAt: null,
+      events: [],
+      lastProgressMessage: null,
+      collapsed: false,
+    };
+    subagentSessions.set(key, session);
+  }
+
+  const timestamp = toIsoTimestamp(
+    seed?.timestamp,
+    seed?.updated_at,
+    seed?.completed_at,
+    seed?.started_at,
+    Date.now()
+  );
+
+  session.name = firstDefined(seed?.name, session.name);
+  session.task = firstDefined(seed?.task, session.task);
+  session.category = firstDefined(seed?.category, session.category);
+  session.response = firstDefined(seed?.response, session.response);
+  session.summary = firstDefined(seed?.summary, seed?.message, session.summary);
+  session.iterations = firstDefined(seed?.iterations, session.iterations);
+  session.durationMs = firstDefined(seed?.duration_ms, seed?.durationMs, session.durationMs);
+  session.status = normalizeSubagentStatus(seed || {}, seed?.type);
+  session.updatedAt = timestamp;
+  session.startedAt = session.startedAt || toIsoTimestamp(seed?.started_at, timestamp);
+  if (session.status !== 'running') {
+    session.completedAt = toIsoTimestamp(seed?.completed_at, timestamp);
+  }
+
+  return session;
+}
+
+function recordSubsessionEvent(session, eventType, payload) {
+  if (!session) return;
+  const record = buildSubagentEventRecord(eventType, payload);
+  session.events.push(record);
+  while (session.events.length > SUBAGENT_EVENTS_CAP) session.events.shift();
+  session.updatedAt = record.timestamp;
+  if (record.body && eventType === 'subagent_progress') {
+    session.lastProgressMessage = record.body;
+  }
+  if (eventType === 'subagent_completed') {
+    session.summary = firstDefined(payload.summary, payload.message, payload.response, session.summary);
+    session.response = firstDefined(payload.response, session.response);
+    session.status = record.status;
+    session.completedAt = record.timestamp;
+    session.collapsed = true;
+  } else if (eventType === 'subagent_spawned') {
+    session.collapsed = false;
+  } else if (eventType === 'subagent_progress') {
+    session.status = 'running';
+    session.collapsed = false;
+  }
+}
+
+function getThreadSubsessions(threadId) {
+  const sessions = [];
+  subagentSessions.forEach((session) => {
+    if (session.threadId === threadId) sessions.push(session);
+  });
+  sessions.sort((a, b) => {
+    if (a.status === 'running' && b.status !== 'running') return -1;
+    if (a.status !== 'running' && b.status === 'running') return 1;
+    return new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+  });
+  return sessions;
+}
+
+function findNewestRunningSubsession(threadId) {
+  return getThreadSubsessions(threadId).find((session) => session.status === 'running') || null;
+}
+
+function syncSelectedSubsessionForCurrentThread() {
+  if (!selectedSubsessionKey) {
+    if (subsessionPanelDismissed) return;
+    const running = currentThreadId ? findNewestRunningSubsession(currentThreadId) : null;
+    if (running) selectedSubsessionKey = running.key;
+    return;
+  }
+
+  const session = subagentSessions.get(selectedSubsessionKey);
+  if (!session || session.threadId !== currentThreadId) {
+    if (subsessionPanelDismissed) {
+      selectedSubsessionKey = null;
+      return;
+    }
+    const running = currentThreadId ? findNewestRunningSubsession(currentThreadId) : null;
+    selectedSubsessionKey = running ? running.key : null;
+  }
+}
+
+function openSubsession(threadId, agentId) {
+  subsessionPanelDismissed = false;
+  selectedSubsessionKey = makeSubsessionKey(threadId, agentId);
+  renderThreadSidebar();
+  renderSubsessionPanel();
+}
+
+function closeSubsessionPanel() {
+  subsessionPanelDismissed = true;
+  selectedSubsessionKey = null;
+  renderThreadSidebar();
+  renderSubsessionPanel();
+}
+
+function getThreadLabel(threadId) {
+  if (threadId === assistantThreadId) return 'Assistant';
+  const thread = threadMetaById.get(threadId);
+  if (!thread) return String(threadId || '');
+  return thread.title || String(thread.id || '').slice(0, 8);
+}
+
+function rebuildThreadMetaIndex() {
+  threadMetaById.clear();
+  if (threadsCache.assistantThread) {
+    threadMetaById.set(threadsCache.assistantThread.id, threadsCache.assistantThread);
+  }
+  (threadsCache.threads || []).forEach((thread) => {
+    threadMetaById.set(thread.id, thread);
+  });
+}
+
+function renderSubsessionTree(container, threadId) {
+  if (!container) return;
+  container.innerHTML = '';
+  if (!threadId || threadId !== currentThreadId) return;
+  const sessions = getThreadSubsessions(threadId);
+  for (const session of sessions) {
+    container.appendChild(createSubsessionRow(session));
+  }
+}
+
+function createSubsessionRow(session) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  const isCollapsed = session.status !== 'running' && session.collapsed !== false;
+  row.className = 'subsession-row ' + session.status + (isCollapsed ? ' collapsed' : '') + (selectedSubsessionKey === session.key ? ' active' : '');
+  row.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSubsession(session.threadId, session.agentId);
+  });
+
+  const task = session.task || 'Delegated task';
+  const summary = firstDefined(
+    session.status === 'running' ? session.lastProgressMessage : null,
+    session.summary,
+    session.response,
+    'Open transcript'
+  );
+
+  row.innerHTML =
+    '<div class="subsession-row-header">' +
+      '<span class="subsession-row-title">' + escapeHtml(getSubsessionDisplayName(session)) + '</span>' +
+      '<span class="subsession-chip ' + escapeHtml(session.status) + '">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span>' +
+    '</div>' +
+    '<div class="subsession-row-body">' +
+      (isCollapsed ? '' : '<div class="subsession-row-task">' + escapeHtml(task) + '</div>') +
+      '<div class="subsession-row-summary">' + escapeHtml(summary) + '</div>' +
+    '</div>' +
+    '<div class="subsession-row-footer">' +
+      '<span class="subsession-row-summary">' + escapeHtml(session.category || 'subagent') + '</span>' +
+      '<span class="subsession-row-time">' + escapeHtml(formatTimeShort(session.updatedAt)) + '</span>' +
+    '</div>';
+  return row;
+}
+
+function renderThreadSidebar() {
+  const assistantEl = document.getElementById('assistant-thread');
+  const assistantMetaEl = document.getElementById('assistant-meta');
+  if (threadsCache.assistantThread) {
+    assistantThreadId = threadsCache.assistantThread.id;
+    const isActive = currentThreadId === assistantThreadId;
+    assistantEl.className = 'assistant-item' + (isActive ? ' active' : '');
+    const count = threadsCache.assistantThread.turn_count || 0;
+    assistantMetaEl.textContent = count > 0 ? count + ' turns' : '';
+  } else if (assistantEl && assistantMetaEl) {
+    assistantEl.className = 'assistant-item';
+    assistantMetaEl.textContent = '';
+  }
+
+  renderSubsessionTree(document.getElementById('assistant-subsessions'), assistantThreadId);
+
+  const list = document.getElementById('thread-list');
+  list.innerHTML = '';
+  const threads = threadsCache.threads || [];
+  for (const thread of threads) {
+    const node = document.createElement('div');
+    node.className = 'thread-node';
+
+    const item = document.createElement('div');
+    item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
+
+    const label = document.createElement('span');
+    label.className = 'thread-label';
+    label.textContent = thread.title || thread.id.substring(0, 8);
+    label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
+    item.appendChild(label);
+
+    const meta = document.createElement('span');
+    meta.className = 'thread-meta';
+    meta.textContent = (thread.turn_count || 0) + ' turns';
+    item.appendChild(meta);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'thread-delete-btn';
+    delBtn.innerHTML = '&times;';
+    delBtn.title = 'Delete thread';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteThread(thread.id, thread.title || thread.id.substring(0, 8));
+    });
+    item.appendChild(delBtn);
+    item.addEventListener('click', () => switchThread(thread.id));
+
+    node.appendChild(item);
+
+    if (thread.id === currentThreadId) {
+      const tree = document.createElement('div');
+      tree.className = 'subsession-tree';
+      renderSubsessionTree(tree, thread.id);
+      node.appendChild(tree);
+    }
+
+    list.appendChild(node);
+  }
+}
+
+function getVisibleSubsessionEvents(session) {
+  if (!session) return [];
+  if (getSubagentTransparencyLevel() === 'detailed') return session.events;
+
+  const reduced = [];
+  const progressEvents = session.events.filter((event) => event.type === 'subagent_progress' && event.body);
+  const lastProgress = progressEvents.length > 0 ? progressEvents[progressEvents.length - 1] : null;
+  const seenBodies = new Set();
+
+  session.events.forEach((event) => {
+    if (event.type !== 'subagent_progress') {
+      reduced.push(event);
+      return;
+    }
+    if (!event.body) return;
+    const normalizedBody = event.body.trim().toLowerCase();
+    if (seenBodies.has(normalizedBody) && event !== lastProgress) return;
+    if (reduced.filter((entry) => entry.type === 'subagent_progress').length >= 6 && event !== lastProgress) return;
+    seenBodies.add(normalizedBody);
+    reduced.push(event);
+  });
+
+  return reduced;
+}
+
+function renderSubsessionPanelEmpty(title, description) {
+  const panel = document.getElementById('subsession-panel');
+  if (!panel) return;
+  panel.classList.remove('hidden');
+  panel.innerHTML =
+    '<div class="subsession-panel-empty">' +
+      '<div class="subsession-panel-kicker">Temporal Subsession</div>' +
+      '<h3>' + escapeHtml(title) + '</h3>' +
+      '<p>' + escapeHtml(description) + '</p>' +
+    '</div>';
+}
+
+function renderSubsessionPanel() {
+  const panel = document.getElementById('subsession-panel');
+  if (!panel) return;
+
+  const currentSessions = currentThreadId ? getThreadSubsessions(currentThreadId) : [];
+  if (currentSessions.length === 0 || (subsessionPanelDismissed && !selectedSubsessionKey)) {
+    panel.classList.add('hidden');
+    panel.innerHTML =
+      '<div class="subsession-panel-empty">' +
+        '<div class="subsession-panel-kicker">Temporal Subsession</div>' +
+        '<h3>Agent transcript</h3>' +
+        '<p>Select a running or completed subagent session to inspect what it worked on without interrupting the main thread.</p>' +
+      '</div>';
+    return;
+  }
+
+  const session = selectedSubsessionKey ? subagentSessions.get(selectedSubsessionKey) : null;
+  if (!session || session.threadId !== currentThreadId) {
+    renderSubsessionPanelEmpty('Subsession ready', 'Choose a child session from the sidebar to inspect its timeline, progress, and final handoff.');
+    return;
+  }
+
+  const timeline = getVisibleSubsessionEvents(session).map((event) => {
+    return (
+      '<div class="subsession-timeline-item ' + escapeHtml(event.status) + ' ' + escapeHtml(event.type.replace('subagent_', '')) + '">' +
+        '<span class="subsession-timeline-dot"></span>' +
+        '<div class="subsession-timeline-head">' +
+          '<span class="subsession-timeline-title">' + escapeHtml(event.title) + '</span>' +
+          '<span class="subsession-timeline-time">' + escapeHtml(formatTimeShort(event.timestamp)) + '</span>' +
+        '</div>' +
+        '<div class="subsession-timeline-body">' + escapeHtml(event.body || '').replace(/\n/g, '<br>') + '</div>' +
+      '</div>'
+    );
+  }).join('');
+  const iterationsValue = firstDefined(session.iterations, '-');
+
+  panel.classList.remove('hidden');
+  panel.innerHTML =
+    '<div class="subsession-panel-shell">' +
+      '<div class="subsession-panel-header">' +
+        '<div>' +
+          '<div class="subsession-panel-kicker">' + escapeHtml(getSubsessionStatusLabel(session.status)) + ' subagent session</div>' +
+          '<h3>' + escapeHtml(getSubsessionDisplayName(session)) + '</h3>' +
+          '<p class="subsession-panel-meta">' + escapeHtml(getThreadLabel(session.threadId)) + ' \u00b7 ' + escapeHtml(session.category || 'subagent') + '</p>' +
+        '</div>' +
+        '<button type="button" class="subsession-close-btn" aria-label="Close subsession panel" onclick="closeSubsessionPanel()">&times;</button>' +
+      '</div>' +
+      '<div class="subsession-panel-body">' +
+        '<div class="subsession-summary-card">' +
+          '<div class="subsession-panel-kicker">Mission</div>' +
+          '<div class="subsession-summary-grid">' +
+            '<div class="subsession-summary-item"><span class="subsession-summary-label">Task</span><span class="subsession-summary-value">' + escapeHtml(session.task || 'Delegated task') + '</span></div>' +
+            '<div class="subsession-summary-item"><span class="subsession-summary-label">Status</span><span class="subsession-summary-value">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span></div>' +
+            '<div class="subsession-summary-item"><span class="subsession-summary-label">Iterations</span><span class="subsession-summary-value">' + escapeHtml(String(iterationsValue === null ? '-' : iterationsValue)) + '</span></div>' +
+            '<div class="subsession-summary-item"><span class="subsession-summary-label">Duration</span><span class="subsession-summary-value">' + escapeHtml(formatDurationMs(session.durationMs)) + '</span></div>' +
+          '</div>' +
+          (session.response
+            ? '<div class="subsession-response"><span class="subsession-response-label">Final handoff</span>' + renderMarkdown(session.response) + '</div>'
+            : '') +
+        '</div>' +
+        '<div class="subsession-timeline-card">' +
+          '<h4 class="subsession-section-title">Timeline</h4>' +
+          '<div class="subsession-timeline">' + timeline + '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+function refreshSubsessionUi() {
+  syncSelectedSubsessionForCurrentThread();
+  renderThreadSidebar();
+  renderSubsessionPanel();
+  persistSubagentSessionsToStorage();
+}
+
+function handleSubagentLifecycleEvent(eventType, payload) {
+  const threadId = firstDefined(payload.thread_id, payload.threadId);
+  const agentId = firstDefined(payload.agent_id, payload.agentId);
+  if (!threadId || !agentId) return;
+  const seed = Object.assign({}, payload, { type: eventType });
+  const session = ensureSubsession(threadId, agentId, seed);
+  if (!session) return;
+  recordSubsessionEvent(session, eventType, payload);
+  session.name = firstDefined(payload.name, session.name);
+  session.task = firstDefined(payload.task, session.task);
+  session.category = firstDefined(payload.category, session.category);
+  session.iterations = firstDefined(payload.iterations, session.iterations);
+  session.durationMs = firstDefined(payload.duration_ms, session.durationMs);
+  if (eventType === 'subagent_spawned' && threadId === currentThreadId) {
+    subsessionPanelDismissed = false;
+    selectedSubsessionKey = session.key;
+  } else if (eventType === 'subagent_completed' && selectedSubsessionKey === session.key && threadId === currentThreadId) {
+    selectedSubsessionKey = null;
+    subsessionPanelDismissed = true;
+  }
+  refreshSubsessionUi();
+}
+
+function handleSubagentSpawned(payload) {
+  handleSubagentLifecycleEvent('subagent_spawned', payload || {});
+}
+
+function handleSubagentProgress(payload) {
+  handleSubagentLifecycleEvent('subagent_progress', payload || {});
+}
+
+function handleSubagentCompleted(payload) {
+  handleSubagentLifecycleEvent('subagent_completed', payload || {});
+}
+
+function consumeLegacySubagentStatus(data) {
+  if (!data || typeof data.message !== 'string') return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(data.message);
+  } catch (_) {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object') return false;
+  const type = firstDefined(parsed.type, parsed.event, parsed.kind);
+  if (!type || ['subagent_spawned', 'subagent_progress', 'subagent_completed'].indexOf(type) === -1) return false;
+  parsed.thread_id = parsed.thread_id || data.thread_id;
+  if (type === 'subagent_spawned') handleSubagentSpawned(parsed);
+  if (type === 'subagent_progress') handleSubagentProgress(parsed);
+  if (type === 'subagent_completed') handleSubagentCompleted(parsed);
+  return true;
 }
 
 // --- Chat ---
@@ -998,51 +1636,23 @@ function showChatEmptyState(message) {
 
 function loadThreads() {
   apiFetch('/api/chat/threads').then((data) => {
-    // Pinned assistant thread
-    if (data.assistant_thread) {
-      assistantThreadId = data.assistant_thread.id;
-      const el = document.getElementById('assistant-thread');
-      const isActive = currentThreadId === assistantThreadId;
-      el.className = 'assistant-item' + (isActive ? ' active' : '');
-      const meta = document.getElementById('assistant-meta');
-      const count = data.assistant_thread.turn_count || 0;
-      meta.textContent = count > 0 ? count + ' turns' : '';
+    threadsCache.assistantThread = data.assistant_thread || null;
+    assistantThreadId = threadsCache.assistantThread ? threadsCache.assistantThread.id : null;
+    threadsCache.threads = data.threads || [];
+    rebuildThreadMetaIndex();
+
+    if (currentThreadId && !threadMetaById.has(currentThreadId)) {
+      currentThreadId = null;
     }
 
-    // Regular threads
-    const list = document.getElementById('thread-list');
-    list.innerHTML = '';
-    const threads = data.threads || [];
-    for (const thread of threads) {
-      const item = document.createElement('div');
-      item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
-      const label = document.createElement('span');
-      label.className = 'thread-label';
-      label.textContent = thread.title || thread.id.substring(0, 8);
-      label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
-      item.appendChild(label);
-      const meta = document.createElement('span');
-      meta.className = 'thread-meta';
-      meta.textContent = (thread.turn_count || 0) + ' turns';
-      item.appendChild(meta);
-      // Delete button
-      const delBtn = document.createElement('button');
-      delBtn.className = 'thread-delete-btn';
-      delBtn.innerHTML = '&times;';
-      delBtn.title = 'Delete thread';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteThread(thread.id, thread.title || thread.id.substring(0, 8));
-      });
-      item.appendChild(delBtn);
-      item.addEventListener('click', () => switchThread(thread.id));
-      list.appendChild(item);
-    }
+    syncSelectedSubsessionForCurrentThread();
+    renderThreadSidebar();
+    renderSubsessionPanel();
 
     // Default to the most useful thread on first load.
     if (!currentThreadId) {
-      const assistantTurns = data.assistant_thread ? (data.assistant_thread.turn_count || 0) : 0;
-      const firstThreadWithTurns = threads.find((thread) => (thread.turn_count || 0) > 0);
+      const assistantTurns = threadsCache.assistantThread ? (threadsCache.assistantThread.turn_count || 0) : 0;
+      const firstThreadWithTurns = threadsCache.threads.find((thread) => (thread.turn_count || 0) > 0);
 
       if (assistantThreadId && assistantTurns > 0) {
         switchToAssistant();
@@ -1059,8 +1669,8 @@ function loadThreads() {
         return;
       }
 
-      if (threads.length > 0) {
-        switchThread(threads[0].id);
+      if (threadsCache.threads.length > 0) {
+        switchThread(threadsCache.threads[0].id);
         return;
       }
     }
@@ -1076,8 +1686,12 @@ function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
+  subsessionPanelDismissed = false;
   hasMore = false;
   oldestTimestamp = null;
+  syncSelectedSubsessionForCurrentThread();
+  renderThreadSidebar();
+  renderSubsessionPanel();
   loadHistory();
   loadThreads();
 }
@@ -1085,8 +1699,12 @@ function switchToAssistant() {
 function switchThread(threadId) {
   finalizeActivityGroup();
   currentThreadId = threadId;
+  subsessionPanelDismissed = false;
   hasMore = false;
   oldestTimestamp = null;
+  syncSelectedSubsessionForCurrentThread();
+  renderThreadSidebar();
+  renderSubsessionPanel();
   loadHistory();
   loadThreads();
 }
@@ -1094,8 +1712,12 @@ function switchThread(threadId) {
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
+    subsessionPanelDismissed = false;
     document.getElementById('chat-messages').innerHTML = '';
     setStatus('');
+    syncSelectedSubsessionForCurrentThread();
+    renderThreadSidebar();
+    renderSubsessionPanel();
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -1106,10 +1728,19 @@ function deleteThread(threadId, threadName) {
   if (!confirm('Delete thread "' + threadName + '"? This cannot be undone.')) return;
   apiFetch('/api/chat/thread/' + encodeURIComponent(threadId), { method: 'DELETE' }).then(() => {
     showToast('Thread deleted', 'success');
+    Array.from(subagentSessions.keys()).forEach((key) => {
+      if (key.indexOf(String(threadId) + '::') === 0) subagentSessions.delete(key);
+    });
+    if (selectedSubsessionKey && selectedSubsessionKey.indexOf(String(threadId) + '::') === 0) {
+      selectedSubsessionKey = null;
+    }
     // If the deleted thread was active, switch to assistant
     if (currentThreadId === threadId) {
       switchToAssistant();
     } else {
+      renderThreadSidebar();
+      renderSubsessionPanel();
+      persistSubagentSessionsToStorage();
       loadThreads();
     }
   }).catch((err) => {
@@ -4265,6 +4896,7 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
       { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
       { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (use with caution)' },
+      { key: 'agent.subagent_transparency_level', label: 'Subagent transparency', type: 'select', options: [{value: 'balanced', label: 'Balanced'}, {value: 'detailed', label: 'Detailed'}], desc: 'How much subagent progress detail to surface in temporal transcript views' },
     ]
   },
   'LLM Backend': {
@@ -4281,6 +4913,7 @@ const SETTINGS_SCHEMA = {
     fields: [
       { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
       { key: 'channels.telegram_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
+      { key: 'channels.telegram_subagent_session_mode', label: 'Subagent session mode', type: 'select', options: [{value: 'temp_topic', label: 'Temporary topic'}, {value: 'reply_chain', label: 'Reply chain fallback'}, {value: 'compact_off', label: 'Compact off'}], desc: 'How Telegram should surface temporary subagent sessions when available' },
     ]
   },
   'Channels — Signal': {
@@ -4404,6 +5037,29 @@ function waitForProviderRoutingSaves() {
   return providerRoutingSaveInFlight.catch(() => null).then(() => waitForProviderRoutingSaves());
 }
 
+function applyPersistedProvidersConfig(configData) {
+  if (!configData || !configData.persisted) return configData;
+  const persisted = configData.persisted;
+  return {
+    ...configData,
+    routing_enabled: persisted.smart_routing_enabled,
+    routing_mode: persisted.routing_mode,
+    cascade_enabled: persisted.smart_routing_cascade,
+    tool_phase_synthesis_enabled: persisted.tool_phase_synthesis_enabled,
+    tool_phase_primary_thinking_enabled: persisted.tool_phase_primary_thinking_enabled,
+    primary_provider: persisted.primary,
+    primary_model: persisted.primary_model,
+    preferred_cheap_provider: persisted.preferred_cheap_provider,
+    cheap_model: persisted.cheap_model,
+    primary_pool_order: Array.isArray(persisted.primary_pool_order) ? persisted.primary_pool_order : [],
+    cheap_pool_order: Array.isArray(persisted.cheap_pool_order) ? persisted.cheap_pool_order : [],
+    fallback_chain: Array.isArray(persisted.fallback_chain) ? persisted.fallback_chain : [],
+    policy_rules: Array.isArray(persisted.policy_rules) ? persisted.policy_rules : [],
+    advisor_max_calls: persisted.advisor_max_calls || configData.advisor_max_calls || 3,
+    advisor_escalation_prompt: persisted.advisor_escalation_prompt || null,
+  };
+}
+
 function loadProviders() {
   const container = document.getElementById('providers-content');
   container.innerHTML = '<div class="settings-loading">Loading providers...</div>';
@@ -4412,10 +5068,10 @@ function loadProviders() {
       apiFetch('/api/providers'),
       apiFetch('/api/providers/config'),
     ]).then(([providersData, configData]) => {
-      providerRoutingConfig = configData;
+      providerRoutingConfig = applyPersistedProvidersConfig(configData);
       providerModelsCache.clear();
       providerModelsInflight.clear();
-      renderProvidersWorkspace(providersData.providers || [], configData);
+      renderProvidersWorkspace(providersData.providers || [], providerRoutingConfig);
     }).catch((err) => {
       container.innerHTML = '<div class="empty-state">Failed to load providers: ' + escapeHtml(err.message) + '</div>';
     });

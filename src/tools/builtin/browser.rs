@@ -232,10 +232,10 @@ impl BrowserTool {
             if instance.browser.pages().await.is_err() {
                 tracing::warn!("Chrome process appears dead, re-launching");
                 // If it was a Docker instance, try to stop the dead container.
-                if instance.is_docker {
-                    if let Some(ref dc) = self.docker_config {
-                        let _ = dc.stop_container();
-                    }
+                if instance.is_docker
+                    && let Some(ref dc) = self.docker_config
+                {
+                    let _ = dc.stop_container();
                 }
                 *guard = None;
             } else {
@@ -249,10 +249,8 @@ impl BrowserTool {
             .unwrap_or(false);
 
         // Try local Chrome first (unless Docker is forced).
-        if !force_docker {
-            if let Some(chrome_path) = Self::find_chrome() {
-                return self.launch_local_chrome(&mut guard, chrome_path).await;
-            }
+        if !force_docker && let Some(chrome_path) = Self::find_chrome() {
+            return self.launch_local_chrome(&mut guard, chrome_path).await;
         }
 
         // Fall back to Docker Chromium.
@@ -830,10 +828,8 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             drop(instance);
 
             // Stop the Docker container if applicable.
-            if was_docker {
-                if let Some(ref dc) = self.docker_config {
-                    let _ = dc.stop_container();
-                }
+            if was_docker && let Some(ref dc) = self.docker_config {
+                let _ = dc.stop_container();
             }
 
             tracing::info!(

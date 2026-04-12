@@ -157,8 +157,8 @@ impl LlamaConfig {
     pub fn estimated_memory_bytes(&self) -> u64 {
         // Base: model file size is a reasonable proxy
         // Context: ~2 bytes per token per layer (rough)
-        let context_mem = (self.context_length as u64) * 128 * 1024; // ~128KB per 1K context
-        context_mem
+        // ~128KB per 1K context
+        (self.context_length as u64) * 128 * 1024
     }
 }
 

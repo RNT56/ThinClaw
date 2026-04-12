@@ -48,6 +48,152 @@ use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::SseEvent;
 
+fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -> SseEvent {
+    match status {
+        StatusUpdate::Thinking(msg) => SseEvent::Thinking {
+            message: msg,
+            thread_id,
+        },
+        StatusUpdate::ToolStarted { name, .. } => SseEvent::ToolStarted { name, thread_id },
+        StatusUpdate::ToolCompleted { name, success, .. } => SseEvent::ToolCompleted {
+            name,
+            success,
+            thread_id,
+        },
+        StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
+            name,
+            preview,
+            thread_id,
+        },
+        StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content, thread_id },
+        StatusUpdate::Status(msg) => SseEvent::Status {
+            message: msg,
+            thread_id,
+        },
+        StatusUpdate::JobStarted {
+            job_id,
+            title,
+            browse_url,
+        } => SseEvent::JobStarted {
+            job_id,
+            title,
+            browse_url,
+        },
+        StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        } => SseEvent::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters: serde_json::to_string_pretty(&parameters)
+                .unwrap_or_else(|_| parameters.to_string()),
+            thread_id,
+        },
+        StatusUpdate::AuthRequired {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+        } => SseEvent::AuthRequired {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+        },
+        StatusUpdate::AuthCompleted {
+            extension_name,
+            success,
+            message,
+        } => SseEvent::AuthCompleted {
+            extension_name,
+            success,
+            message,
+        },
+        StatusUpdate::Error { message, code } => SseEvent::Status {
+            message: format!(
+                "[error{}] {}",
+                code.as_ref().map(|c| format!(": {c}")).unwrap_or_default(),
+                message
+            ),
+            thread_id,
+        },
+        StatusUpdate::CanvasAction(action) => {
+            let payload = serde_json::to_string(&action).unwrap_or_default();
+            SseEvent::Status {
+                message: format!("[canvas] {}", payload),
+                thread_id,
+            }
+        }
+        StatusUpdate::AgentMessage {
+            content,
+            message_type,
+        } => {
+            let prefix = match message_type.as_str() {
+                "warning" => "⚠️ ",
+                "question" => "❓ ",
+                _ => "",
+            };
+            SseEvent::Response {
+                content: format!("{}{}", prefix, content),
+                thread_id: thread_id.unwrap_or_default(),
+            }
+        }
+        StatusUpdate::LifecycleStart { run_id } => SseEvent::Status {
+            message: format!("{{\"lifecycle\":\"start\",\"runId\":\"{}\"}}", run_id),
+            thread_id,
+        },
+        StatusUpdate::LifecycleEnd { run_id, phase } => SseEvent::Status {
+            message: format!(
+                "{{\"lifecycle\":\"end\",\"runId\":\"{}\",\"phase\":\"{}\"}}",
+                run_id, phase
+            ),
+            thread_id,
+        },
+        StatusUpdate::SubagentSpawned {
+            agent_id,
+            name,
+            task,
+        } => SseEvent::SubagentSpawned {
+            agent_id,
+            name,
+            task,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            thread_id,
+        },
+        StatusUpdate::SubagentProgress {
+            agent_id,
+            message,
+            category,
+        } => SseEvent::SubagentProgress {
+            agent_id,
+            message,
+            category,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            thread_id,
+        },
+        StatusUpdate::SubagentCompleted {
+            agent_id,
+            name,
+            success,
+            response,
+            duration_ms,
+            iterations,
+        } => SseEvent::SubagentCompleted {
+            agent_id,
+            name,
+            success,
+            response,
+            duration_ms,
+            iterations,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            thread_id,
+        },
+    }
+}
+
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
     config: GatewayConfig,
@@ -359,148 +505,7 @@ impl Channel for GatewayChannel {
             .get("thread_id")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let event = match status {
-            StatusUpdate::Thinking(msg) => SseEvent::Thinking {
-                message: msg,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::ToolStarted { name, .. } => SseEvent::ToolStarted {
-                name,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::ToolCompleted { name, success, .. } => SseEvent::ToolCompleted {
-                name,
-                success,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
-                name,
-                preview,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
-                content,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::Status(msg) => SseEvent::Status {
-                message: msg,
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::JobStarted {
-                job_id,
-                title,
-                browse_url,
-            } => SseEvent::JobStarted {
-                job_id,
-                title,
-                browse_url,
-            },
-            StatusUpdate::ApprovalNeeded {
-                request_id,
-                tool_name,
-                description,
-                parameters,
-            } => SseEvent::ApprovalNeeded {
-                request_id,
-                tool_name,
-                description,
-                parameters: serde_json::to_string_pretty(&parameters)
-                    .unwrap_or_else(|_| parameters.to_string()),
-                thread_id,
-            },
-            StatusUpdate::AuthRequired {
-                extension_name,
-                instructions,
-                auth_url,
-                setup_url,
-            } => SseEvent::AuthRequired {
-                extension_name,
-                instructions,
-                auth_url,
-                setup_url,
-            },
-            StatusUpdate::AuthCompleted {
-                extension_name,
-                success,
-                message,
-            } => SseEvent::AuthCompleted {
-                extension_name,
-                success,
-                message,
-            },
-            StatusUpdate::Error { message, code } => SseEvent::Status {
-                message: format!(
-                    "[error{}] {}",
-                    code.as_ref().map(|c| format!(": {c}")).unwrap_or_default(),
-                    message
-                ),
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::CanvasAction(action) => {
-                // Serialize the canvas action and send as a status event so
-                // SSE clients can render panels/notifications in real-time.
-                let payload = serde_json::to_string(&action).unwrap_or_default();
-                SseEvent::Status {
-                    message: format!("[canvas] {}", payload),
-                    thread_id: thread_id.clone(),
-                }
-            }
-            StatusUpdate::AgentMessage {
-                content,
-                message_type,
-            } => {
-                // Agent progress messages are sent as Response events so they
-                // appear as persistent chat messages, not transient status.
-                let prefix = match message_type.as_str() {
-                    "warning" => "⚠️ ",
-                    "question" => "❓ ",
-                    _ => "",
-                };
-                SseEvent::Response {
-                    content: format!("{}{}", prefix, content),
-                    thread_id: thread_id.unwrap_or_default(),
-                }
-            }
-            StatusUpdate::LifecycleStart { run_id } => SseEvent::Status {
-                message: format!("{{\"lifecycle\":\"start\",\"runId\":\"{}\"}}", run_id),
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::LifecycleEnd { run_id, phase } => SseEvent::Status {
-                message: format!(
-                    "{{\"lifecycle\":\"end\",\"runId\":\"{}\",\"phase\":\"{}\"}}",
-                    run_id, phase
-                ),
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::SubagentSpawned { name, task, .. } => SseEvent::Status {
-                message: format!(
-                    "{{\"subagent\":\"spawned\",\"name\":\"{}\",\"task\":\"{}\"}}",
-                    name, task
-                ),
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::SubagentProgress {
-                message, category, ..
-            } => SseEvent::Status {
-                message: format!(
-                    "{{\"subagent\":\"progress\",\"category\":\"{}\",\"message\":\"{}\"}}",
-                    category, message
-                ),
-                thread_id: thread_id.clone(),
-            },
-            StatusUpdate::SubagentCompleted {
-                name,
-                success,
-                duration_ms,
-                ..
-            } => SseEvent::Status {
-                message: format!(
-                    "{{\"subagent\":\"completed\",\"name\":\"{}\",\"success\":{},\"duration_ms\":{}}}",
-                    name, success, duration_ms
-                ),
-                thread_id: thread_id.clone(),
-            },
-        };
+        let event = status_update_to_sse_event(status, thread_id);
 
         self.state.sse.broadcast(event);
         Ok(())
@@ -534,5 +539,79 @@ impl Channel for GatewayChannel {
         }
         *self.state.msg_tx.write().await = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_update_to_sse_event;
+    use crate::channels::StatusUpdate;
+    use crate::channels::web::types::SseEvent;
+
+    #[test]
+    fn subagent_spawned_maps_to_typed_sse_event() {
+        let event = status_update_to_sse_event(
+            StatusUpdate::SubagentSpawned {
+                agent_id: "agent-1".to_string(),
+                name: "researcher".to_string(),
+                task: "Check docs".to_string(),
+            },
+            Some("thread-1".to_string()),
+        );
+
+        match event {
+            SseEvent::SubagentSpawned {
+                agent_id,
+                name,
+                task,
+                timestamp,
+                thread_id,
+            } => {
+                assert_eq!(agent_id, "agent-1");
+                assert_eq!(name, "researcher");
+                assert_eq!(task, "Check docs");
+                assert!(!timestamp.is_empty());
+                assert_eq!(thread_id.as_deref(), Some("thread-1"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_completed_maps_to_typed_sse_event() {
+        let event = status_update_to_sse_event(
+            StatusUpdate::SubagentCompleted {
+                agent_id: "agent-2".to_string(),
+                name: "summarizer".to_string(),
+                success: true,
+                response: "Done".to_string(),
+                duration_ms: 2400,
+                iterations: 4,
+            },
+            None,
+        );
+
+        match event {
+            SseEvent::SubagentCompleted {
+                agent_id,
+                name,
+                success,
+                response,
+                duration_ms,
+                iterations,
+                timestamp,
+                thread_id,
+            } => {
+                assert_eq!(agent_id, "agent-2");
+                assert_eq!(name, "summarizer");
+                assert!(success);
+                assert_eq!(response, "Done");
+                assert_eq!(duration_ms, 2400);
+                assert_eq!(iterations, 4);
+                assert!(!timestamp.is_empty());
+                assert!(thread_id.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

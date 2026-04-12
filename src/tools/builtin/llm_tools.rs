@@ -488,10 +488,10 @@ impl Tool for LlmListModelsTool {
 
         for (slug, display_name, default_model, context_size, streaming, has_key) in &entries {
             // Apply filter if provided
-            if let Some(filter) = filter_provider {
-                if slug != filter {
-                    continue;
-                }
+            if let Some(filter) = filter_provider
+                && slug != filter
+            {
+                continue;
             }
 
             let active = is_active_provider(slug);
@@ -586,8 +586,10 @@ mod tests {
             .await;
 
         let tool = LlmSelectTool::new(shared.clone());
-        let mut ctx = JobContext::default();
-        ctx.metadata = serde_json::json!({"thread_id": "test-thread"});
+        let ctx = JobContext {
+            metadata: serde_json::json!({"thread_id": "test-thread"}),
+            ..JobContext::default()
+        };
 
         let result = tool
             .execute(serde_json::json!({"model": "reset"}), &ctx)
@@ -602,8 +604,10 @@ mod tests {
     async fn test_llm_select_is_scoped_to_current_thread() {
         let shared = new_shared_model_override();
         let tool = LlmSelectTool::new(shared.clone());
-        let mut ctx = JobContext::default();
-        ctx.metadata = serde_json::json!({"thread_id": "thread-a"});
+        let ctx = JobContext {
+            metadata: serde_json::json!({"thread_id": "thread-a"}),
+            ..JobContext::default()
+        };
 
         tool.execute(serde_json::json!({"model": "ollama/test-model"}), &ctx)
             .await

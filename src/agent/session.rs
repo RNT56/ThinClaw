@@ -112,9 +112,30 @@ impl Session {
         self.auto_approved_tools.contains(tool_name)
     }
 
+    /// Check if a tool has been auto-approved for the given channel.
+    ///
+    /// Legacy global approvals (`tool_name`) remain valid for backward
+    /// compatibility. New approvals are stored in channel-scoped form.
+    pub fn is_tool_auto_approved_for_channel(&self, channel: &str, tool_name: &str) -> bool {
+        self.is_tool_auto_approved(tool_name)
+            || self
+                .auto_approved_tools
+                .contains(&Self::channel_tool_approval_key(channel, tool_name))
+    }
+
     /// Add a tool to the auto-approved set.
     pub fn auto_approve_tool(&mut self, tool_name: impl Into<String>) {
         self.auto_approved_tools.insert(tool_name.into());
+    }
+
+    /// Add a channel-scoped tool approval.
+    pub fn auto_approve_tool_for_channel(&mut self, channel: &str, tool_name: &str) {
+        self.auto_approved_tools
+            .insert(Self::channel_tool_approval_key(channel, tool_name));
+    }
+
+    fn channel_tool_approval_key(channel: &str, tool_name: &str) -> String {
+        format!("channel:{channel}:tool:{tool_name}")
     }
 
     /// Create a new thread in this session.
@@ -168,9 +189,10 @@ impl Session {
 }
 
 /// State of a thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThreadState {
     /// Thread is idle, waiting for input.
+    #[default]
     Idle,
     /// Thread is processing a turn.
     Processing,
@@ -180,12 +202,6 @@ pub enum ThreadState {
     Completed,
     /// Thread was interrupted.
     Interrupted,
-}
-
-impl Default for ThreadState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Pending auth token request.
@@ -814,16 +830,23 @@ mod tests {
         );
 
         let json = serde_json::to_value(&runtime).expect("serialize runtime");
-        let restored: ThreadRuntimeState = serde_json::from_value(json).expect("deserialize runtime");
+        let restored: ThreadRuntimeState =
+            serde_json::from_value(json).expect("deserialize runtime");
 
         assert_eq!(restored.state, ThreadState::AwaitingApproval);
         assert_eq!(
-            restored.pending_auth.as_ref().map(|auth| auth.extension_name.as_str()),
+            restored
+                .pending_auth
+                .as_ref()
+                .map(|auth| auth.extension_name.as_str()),
             Some("github")
         );
         assert_eq!(restored.owner_agent_id.as_deref(), Some("agent-ops"));
         assert_eq!(
-            restored.model_override.as_ref().map(|m| m.model_spec.as_str()),
+            restored
+                .model_override
+                .as_ref()
+                .map(|m| m.model_spec.as_str()),
             Some("openai/gpt-4.1")
         );
         assert_eq!(
@@ -835,8 +858,7 @@ mod tests {
             restored.active_subagents[0]
                 .request
                 .allowed_skills
-                .as_ref()
-                .map(|skills| skills.as_slice()),
+                .as_deref(),
             Some(&["github".to_string()][..])
         );
     }
@@ -857,7 +879,10 @@ mod tests {
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);
-        assert_eq!(thread.last_turn().map(|turn| turn.state), Some(TurnState::Interrupted));
+        assert_eq!(
+            thread.last_turn().map(|turn| turn.state),
+            Some(TurnState::Interrupted)
+        );
     }
 
     #[test]
@@ -1129,6 +1154,24 @@ mod tests {
         // Idempotent
         session.auto_approve_tool("shell");
         assert_eq!(session.auto_approved_tools.len(), 1);
+    }
+
+    #[test]
+    fn test_channel_scoped_auto_approval() {
+        let mut session = Session::new("user-chan");
+
+        session.auto_approve_tool_for_channel("gateway", "shell");
+        assert!(session.is_tool_auto_approved_for_channel("gateway", "shell"));
+        assert!(!session.is_tool_auto_approved_for_channel("telegram", "shell"));
+    }
+
+    #[test]
+    fn test_legacy_global_auto_approval_still_applies() {
+        let mut session = Session::new("user-legacy");
+
+        session.auto_approve_tool("http");
+        assert!(session.is_tool_auto_approved_for_channel("gateway", "http"));
+        assert!(session.is_tool_auto_approved_for_channel("telegram", "http"));
     }
 
     #[test]

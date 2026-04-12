@@ -133,6 +133,15 @@ pub fn clear_bridge_vars() {
     }
 }
 
+/// Clear all injected secret-overlay vars (test support).
+#[cfg(test)]
+pub(crate) fn clear_injected_vars_for_tests() {
+    match INJECTED_VARS.write() {
+        Ok(mut guard) => guard.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+}
+
 /// IC-007: Check whether a key exists in the bridge overlay.
 ///
 /// Used by the bridge to replicate the `is_err()` guard logic:

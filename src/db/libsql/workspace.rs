@@ -41,7 +41,7 @@ fn serialize_libsql_embedding(embedding: &[f32]) -> (Option<Vec<u8>>, Vec<u8>, i
 }
 
 fn deserialize_libsql_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return None;
     }
 

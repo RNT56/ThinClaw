@@ -893,10 +893,7 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        let providers_settings = self
-            .providers_settings
-            .clone()
-            .unwrap_or_else(crate::settings::ProvidersSettings::default);
+        let providers_settings = self.providers_settings.clone().unwrap_or_default();
         let llm_runtime = LlmRuntimeManager::new(
             self.config.clone(),
             providers_settings,

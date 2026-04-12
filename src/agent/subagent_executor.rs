@@ -52,6 +52,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of concurrent sub-agents.
 const DEFAULT_MAX_CONCURRENT: usize = 5;
 
+const SUBAGENT_PROGRESS_PREVIEW_MAX: usize = 80;
+
 /// Configuration for the sub-agent system.
 #[derive(Debug, Clone)]
 pub struct SubagentConfig {
@@ -74,6 +76,99 @@ impl Default for SubagentConfig {
             max_tool_iterations: SUBAGENT_MAX_ITERATIONS,
         }
     }
+}
+
+fn truncate_progress_preview(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        return value.to_string();
+    }
+
+    let truncated: String = value.chars().take(max_len.saturating_sub(3)).collect();
+    format!("{truncated}...")
+}
+
+fn extract_subagent_message(arguments: &serde_json::Value) -> Option<String> {
+    ["message", "content"]
+        .into_iter()
+        .find_map(|key| arguments.get(key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn with_subagent_thread_metadata(
+    metadata: &serde_json::Value,
+    parent_thread_id: &str,
+) -> serde_json::Value {
+    let mut merged = if metadata.is_object() {
+        metadata.clone()
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(object) = merged.as_object_mut() {
+        object.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(parent_thread_id.to_string()),
+        );
+    }
+
+    merged
+}
+
+fn normalize_subagent_progress_category(message_type: &str) -> &'static str {
+    match message_type {
+        "progress" => "milestone",
+        "interim_result" => "finding",
+        "question" => "question",
+        "warning" => "warning",
+        "tool" => "activity",
+        _ => "update",
+    }
+}
+
+fn first_argument_preview(arguments: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| arguments.get(*key))
+        .and_then(|value| match value {
+            serde_json::Value::String(s) => Some(truncate_progress_preview(
+                s.trim(),
+                SUBAGENT_PROGRESS_PREVIEW_MAX,
+            )),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn subagent_tool_activity_message(tool_name: &str, arguments: &serde_json::Value) -> String {
+    let tool_label = tool_name.replace('_', " ");
+
+    if let Some(path) = first_argument_preview(arguments, &["path", "target", "file"]) {
+        return format!("Running {tool_label} on {path}");
+    }
+
+    if let Some(query) = first_argument_preview(arguments, &["query", "q", "pattern", "task"]) {
+        return format!("Running {tool_label} for {query}");
+    }
+
+    if let Some(url) = first_argument_preview(arguments, &["url"]) {
+        return format!("Running {tool_label} on {url}");
+    }
+
+    if let Some(command) = first_argument_preview(arguments, &["command", "cmd"]) {
+        return format!("Running {tool_label}: {command}");
+    }
+
+    format!("Running {tool_label}")
+}
+
+fn subagent_tool_warning_message(tool_name: &str, detail: &str) -> String {
+    format!(
+        "{tool_name} needs attention: {}",
+        truncate_progress_preview(detail.trim(), SUBAGENT_PROGRESS_PREVIEW_MAX)
+    )
 }
 
 /// A completed sub-agent result ready for injection into the main agent loop.
@@ -307,7 +402,9 @@ impl SubagentExecutor {
                  You have been delegated a specific task by the main agent.\n\n\
                  Complete the task thoroughly and concisely. \
                  Return a clear, actionable summary when done.\n\n\
-                 You can use `emit_user_message` to share progress with the user.",
+                 Use `emit_user_message` only for meaningful checkpoints, interim findings, \
+                 blockers, or clarifying questions that help the user stay oriented. \
+                 Do not narrate every routine tool call unless detailed progress is explicitly requested.",
                 request.name
             )
         });
@@ -328,7 +425,6 @@ impl SubagentExecutor {
         let tools = self.tools.clone();
         let channels = self.channels.clone();
         let ch_name = channel_name.to_string();
-        let ch_meta = channel_metadata.clone();
         let allowed = request.allowed_tools.clone();
         let allowed_skills = request.allowed_skills.clone();
         let result_tx = self.result_tx.clone();
@@ -348,6 +444,7 @@ impl SubagentExecutor {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| "agent:main".to_string());
+        let ch_meta = with_subagent_thread_metadata(channel_metadata, &parent_thread_id);
 
         let agent_name = name.clone();
         let agent_task = task.clone();
@@ -758,10 +855,16 @@ async fn run_subagent_loop(
             );
         }
         if let Some(allowed_tools) = allowed_tools {
-            metadata.insert("allowed_tools".to_string(), serde_json::json!(allowed_tools));
+            metadata.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(allowed_tools),
+            );
         }
         if let Some(allowed_skills) = allowed_skills {
-            metadata.insert("allowed_skills".to_string(), serde_json::json!(allowed_skills));
+            metadata.insert(
+                "allowed_skills".to_string(),
+                serde_json::json!(allowed_skills),
+            );
         }
     }
 
@@ -837,11 +940,8 @@ async fn run_subagent_loop(
                 for tc in tool_calls {
                     // Handle emit_user_message specially — forward as SubagentProgress
                     if tc.name == "emit_user_message" {
-                        let content_val = tc
-                            .arguments
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("[no content]");
+                        let message = extract_subagent_message(&tc.arguments)
+                            .unwrap_or_else(|| "[no message]".to_string());
                         let msg_type = tc
                             .arguments
                             .get("message_type")
@@ -853,8 +953,9 @@ async fn run_subagent_loop(
                                 channel_name,
                                 StatusUpdate::SubagentProgress {
                                     agent_id: agent_id.to_string(),
-                                    message: content_val.to_string(),
-                                    category: msg_type.to_string(),
+                                    message,
+                                    category: normalize_subagent_progress_category(msg_type)
+                                        .to_string(),
                                 },
                                 channel_metadata,
                             )
@@ -865,6 +966,8 @@ async fn run_subagent_loop(
                             &tc.name,
                             serde_json::json!({
                                 "status": "message_sent",
+                                "message": extract_subagent_message(&tc.arguments)
+                                    .unwrap_or_else(|| "[no message]".to_string()),
                                 "message_type": msg_type,
                             })
                             .to_string(),
@@ -897,8 +1000,8 @@ async fn run_subagent_loop(
                             channel_name,
                             StatusUpdate::SubagentProgress {
                                 agent_id: agent_id.to_string(),
-                                message: format!("Using tool: {}", tc.name),
-                                category: "tool".to_string(),
+                                message: subagent_tool_activity_message(&tc.name, &tc.arguments),
+                                category: "activity".to_string(),
                             },
                             channel_metadata,
                         )
@@ -908,10 +1011,23 @@ async fn run_subagent_loop(
                         &job_ctx.metadata,
                         &tc.name,
                     ) {
+                        let warning =
+                            format!("Tool '{}' is not allowed for this delegated task", tc.name);
+                        let _ = channels
+                            .send_status(
+                                channel_name,
+                                StatusUpdate::SubagentProgress {
+                                    agent_id: agent_id.to_string(),
+                                    message: subagent_tool_warning_message(&tc.name, &warning),
+                                    category: "warning".to_string(),
+                                },
+                                channel_metadata,
+                            )
+                            .await;
                         context_messages.push(ChatMessage::tool_result(
                             &tc.id,
                             &tc.name,
-                            format!("Error: tool '{}' not allowed for this sub-agent", tc.name),
+                            format!("Error: {}", warning),
                         ));
                         continue;
                     }
@@ -920,10 +1036,22 @@ async fn run_subagent_loop(
                     let tool = match tools.get(&tc.name).await {
                         Some(t) => t,
                         None => {
+                            let warning = format!("Tool '{}' is unavailable", tc.name);
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(&tc.name, &warning),
+                                        category: "warning".to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
                             context_messages.push(ChatMessage::tool_result(
                                 &tc.id,
                                 &tc.name,
-                                format!("Error: tool '{}' not found", tc.name),
+                                format!("Error: {}", warning),
                             ));
                             continue;
                         }
@@ -946,8 +1074,39 @@ async fn run_subagent_loop(
                             let sanitized = safety.sanitize_tool_output(&tc.name, &raw);
                             sanitized.content
                         }
-                        Ok(Err(e)) => format!("Error: {}", e),
-                        Err(_) => format!("Error: tool '{}' timed out", tc.name),
+                        Ok(Err(e)) => {
+                            let error = format!("{}", e);
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(&tc.name, &error),
+                                        category: "warning".to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
+                            format!("Error: {}", error)
+                        }
+                        Err(_) => {
+                            let timeout_message = format!("Tool '{}' timed out", tc.name);
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(
+                                            &tc.name,
+                                            &timeout_message,
+                                        ),
+                                        category: "warning".to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
+                            format!("Error: {}", timeout_message)
+                        }
                     };
 
                     context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_str));
@@ -1061,6 +1220,77 @@ mod tests {
         assert!(request.allowed_tools.is_none());
         assert!(request.timeout_secs.is_none());
         assert!(!request.wait);
+    }
+
+    #[test]
+    fn extract_subagent_message_prefers_message_and_falls_back_to_content() {
+        let from_message = serde_json::json!({
+            "message": "Checking the docs",
+            "content": "older field"
+        });
+        let from_content = serde_json::json!({
+            "content": "Legacy progress payload"
+        });
+
+        assert_eq!(
+            extract_subagent_message(&from_message).as_deref(),
+            Some("Checking the docs")
+        );
+        assert_eq!(
+            extract_subagent_message(&from_content).as_deref(),
+            Some("Legacy progress payload")
+        );
+    }
+
+    #[test]
+    fn with_subagent_thread_metadata_inserts_thread_id_for_non_object_metadata() {
+        let metadata = serde_json::json!("legacy");
+        let merged = with_subagent_thread_metadata(&metadata, "thread-123");
+
+        assert_eq!(merged["thread_id"], serde_json::json!("thread-123"));
+    }
+
+    #[test]
+    fn with_subagent_thread_metadata_overrides_existing_thread_id() {
+        let metadata = serde_json::json!({
+            "thread_id": "stale-thread",
+            "channel": "web"
+        });
+        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh");
+
+        assert_eq!(merged["thread_id"], serde_json::json!("thread-fresh"));
+        assert_eq!(merged["channel"], serde_json::json!("web"));
+    }
+
+    #[test]
+    fn normalize_subagent_progress_category_maps_known_message_types() {
+        assert_eq!(
+            normalize_subagent_progress_category("progress"),
+            "milestone"
+        );
+        assert_eq!(
+            normalize_subagent_progress_category("interim_result"),
+            "finding"
+        );
+        assert_eq!(normalize_subagent_progress_category("question"), "question");
+        assert_eq!(normalize_subagent_progress_category("warning"), "warning");
+        assert_eq!(normalize_subagent_progress_category("tool"), "activity");
+        assert_eq!(normalize_subagent_progress_category("other"), "update");
+    }
+
+    #[test]
+    fn subagent_tool_activity_message_uses_argument_hints() {
+        let path_message = subagent_tool_activity_message(
+            "read_file",
+            &serde_json::json!({ "path": "/tmp/demo.txt" }),
+        );
+        let query_message = subagent_tool_activity_message(
+            "web_search",
+            &serde_json::json!({ "query": "Rust async channels" }),
+        );
+
+        assert_eq!(path_message, "Running read file on /tmp/demo.txt");
+        assert_eq!(query_message, "Running web search for Rust async channels");
     }
 
     #[tokio::test]

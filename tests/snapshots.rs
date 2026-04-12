@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_media_type_display() {
         use thinclaw::media::MediaType;
-        let types = vec![
+        let types = [
             MediaType::Image,
             MediaType::Pdf,
             MediaType::Audio,

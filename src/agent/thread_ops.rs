@@ -362,9 +362,18 @@ impl Agent {
             sess.last_active_at = chrono::Utc::now();
         }
 
+        let register_scope_id = match identity.conversation_kind {
+            crate::identity::ConversationKind::Direct => {
+                crate::agent::session_manager::SessionManager::scope_id_for_user_id(
+                    &identity.principal_id,
+                )
+            }
+            crate::identity::ConversationKind::Group => identity.conversation_scope_id,
+        };
         self.session_manager
             .register_thread_for_scope(
-                identity.conversation_scope_id,
+                register_scope_id,
+                identity.conversation_kind,
                 &message.channel,
                 thread_uuid,
                 Arc::clone(&session),
@@ -609,14 +618,13 @@ impl Agent {
 
         // Attach multimodal media to the last user message for LLM processing.
         // The rig adapter converts these to provider-native base64 content blocks.
-        if !multimodal_attachments.is_empty() {
-            if let Some(last_user) = turn_messages
+        if !multimodal_attachments.is_empty()
+            && let Some(last_user) = turn_messages
                 .iter_mut()
                 .rev()
                 .find(|m| m.role == crate::llm::Role::User)
-            {
-                last_user.attachments = multimodal_attachments;
-            }
+        {
+            last_user.attachments = multimodal_attachments;
         }
 
         // Persist user message to DB immediately so it survives crashes
@@ -1086,7 +1094,7 @@ impl Agent {
             // If always, add to auto-approved set
             if always {
                 let mut sess = session.lock().await;
-                sess.auto_approve_tool(&pending.tool_name);
+                sess.auto_approve_tool_for_channel(&message.channel, &pending.tool_name);
                 tracing::info!(
                     "Auto-approved tool '{}' for session {}",
                     pending.tool_name,
@@ -1145,8 +1153,7 @@ impl Agent {
                 );
                 if let Some(owner) = self.agent_router.get_thread_owner(thread_id).await {
                     metadata.insert("agent_id".to_string(), serde_json::json!(owner.clone()));
-                    if let Some(agent) = self.agent_router.get_agent(&owner).await
-                    {
+                    if let Some(agent) = self.agent_router.get_agent(&owner).await {
                         if let Some(workspace_id) = agent.workspace_id {
                             metadata.insert(
                                 "agent_workspace_id".to_string(),
@@ -1318,7 +1325,7 @@ impl Agent {
                         ApprovalRequirement::Never => false,
                         ApprovalRequirement::UnlessAutoApproved => {
                             let sess = session.lock().await;
-                            !sess.is_tool_auto_approved(&tc.name)
+                            !sess.is_tool_auto_approved_for_channel(&message.channel, &tc.name)
                         }
                         ApprovalRequirement::Always => true,
                     };
@@ -1721,7 +1728,7 @@ impl Agent {
         };
         if let Some(thread_snapshot) = thread_snapshot {
             let _ = thread_snapshot;
-            self.persist_thread_runtime_snapshot(message, &session, thread_id)
+            self.persist_thread_runtime_snapshot(message, session, thread_id)
                 .await;
         }
         let _ = self

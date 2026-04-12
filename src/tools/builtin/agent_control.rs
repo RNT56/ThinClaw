@@ -108,8 +108,9 @@ impl Tool for EmitUserMessageTool {
 
     fn description(&self) -> &str {
         "Send a visible progress message to the user WITHOUT ending your work. \
-         Use this to keep the user informed during long tasks: share interim results, \
-         status updates, or ask for clarification while continuing to work. \
+         Use this for meaningful checkpoints while you continue working: share major milestones, \
+         interim results, blockers, or ask for clarification without stopping the loop. \
+         Avoid narrating every routine tool call or micro-step unless the user explicitly wants detailed progress. \
          After calling this, you will continue executing — your loop does NOT stop. \
          Only use a regular text response when you are DONE with your work."
     }
@@ -121,15 +122,15 @@ impl Tool for EmitUserMessageTool {
                 "message": {
                     "type": "string",
                     "description": "The message to show to the user. Use markdown formatting. \
-                                    Keep it concise — this is a progress update, not a final answer."
+                                    Keep it concise and milestone-oriented — this is a checkpoint, not a final answer."
                 },
                 "message_type": {
                     "type": "string",
                     "enum": ["progress", "interim_result", "question", "warning"],
                     "description": "Type of message: 'progress' for status updates, \
-                                    'interim_result' for partial results the user should see, \
+                                    'interim_result' for partial findings the user should see, \
                                     'question' for asking the user something while continuing, \
-                                    'warning' for issues that need attention.",
+                                    'warning' for blockers or issues that need attention.",
                     "default": "progress"
                 }
             },
@@ -282,5 +283,16 @@ mod tests {
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["message"].is_object());
         assert!(schema["properties"]["message_type"].is_object());
+    }
+
+    #[test]
+    fn test_emit_user_message_description_mentions_checkpoint_usage() {
+        let tool = EmitUserMessageTool;
+
+        assert!(tool.description().contains("meaningful checkpoints"));
+        assert!(
+            tool.description()
+                .contains("Avoid narrating every routine tool call")
+        );
     }
 }

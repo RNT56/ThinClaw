@@ -42,14 +42,55 @@ pub fn print_boot_screen(info: &BootInfo) {
     let reset = "\x1b[0m";
 
     let border = format!("  {dim}{}{reset}", "\u{2576}".repeat(58));
+    let mission = if info.db_connected {
+        "Cockpit online. ThinClaw is ready for the next request."
+    } else {
+        "Cockpit online, with storage still warming up."
+    };
+    let readiness = if info.sandbox_enabled {
+        "Sandboxing is available for work that needs a safer boundary."
+    } else {
+        "Sandboxing is currently disabled."
+    };
+    let mut readiness_notes = Vec::new();
+    readiness_notes.push(if info.db_connected {
+        format!("{cyan}database connected{reset}")
+    } else {
+        format!("{yellow}database not connected{reset}")
+    });
+    readiness_notes.push(match info.docker_status {
+        crate::sandbox::detect::DockerStatus::Available => {
+            format!("{cyan}sandbox host ready{reset}")
+        }
+        crate::sandbox::detect::DockerStatus::NotInstalled => {
+            format!("{yellow}sandbox host missing docker{reset}")
+        }
+        crate::sandbox::detect::DockerStatus::NotRunning => {
+            format!("{yellow}sandbox host needs docker started{reset}")
+        }
+        crate::sandbox::detect::DockerStatus::Disabled => "sandbox disabled".to_string(),
+    });
+    if info.heartbeat_enabled {
+        readiness_notes.push(format!(
+            "{cyan}heartbeat every {}m{reset}",
+            info.heartbeat_interval_secs / 60
+        ));
+    }
+    if info.embeddings_enabled {
+        readiness_notes.push(match info.embeddings_provider.as_deref() {
+            Some(provider) => format!("{cyan}embeddings via {provider}{reset}"),
+            None => format!("{cyan}embeddings enabled{reset}"),
+        });
+    }
 
     println!();
     println!("{border}");
     println!();
     println!("  {bold}{}{reset} v{}", info.agent_name, info.version);
+    println!("  {dim}mission{reset}    {cyan}{mission}{reset}");
     println!();
 
-    // Model line
+    println!("  {bold}Runtime{reset}");
     let model_display = if let Some(ref cheap) = info.cheap_model {
         format!(
             "{cyan}{}{reset}  {dim}cheap{reset} {cyan}{}{reset}",
@@ -59,28 +100,44 @@ pub fn print_boot_screen(info: &BootInfo) {
         format!("{cyan}{}{reset}", info.llm_model)
     };
     println!(
-        "  {dim}model{reset}     {model_display}  {dim}via {}{reset}",
+        "    {dim}model{reset}     {model_display}  {dim}via {}{reset}",
         info.llm_backend
     );
 
-    // Database line
     let db_status = if info.db_connected {
         "connected"
     } else {
         "none"
     };
     println!(
-        "  {dim}database{reset}  {cyan}{}{reset} {dim}({db_status}){reset}",
+        "    {dim}database{reset}  {cyan}{}{reset} {dim}({db_status}){reset}",
         info.db_backend
     );
-
-    // Tools line
     println!(
-        "  {dim}tools{reset}     {cyan}{}{reset} {dim}registered{reset}",
+        "    {dim}tools{reset}     {cyan}{}{reset} {dim}registered{reset}",
         info.tool_count
     );
+    if info.routines_enabled || info.skills_enabled || info.claude_code_enabled {
+        let mut feature_tags = Vec::new();
+        if info.claude_code_enabled {
+            feature_tags.push("claude-code");
+        }
+        if info.routines_enabled {
+            feature_tags.push("routines");
+        }
+        if info.skills_enabled {
+            feature_tags.push("skills");
+        }
+        println!(
+            "    {dim}features{reset}  {cyan}{}{reset}",
+            feature_tags.join("  ")
+        );
+    }
 
-    // Features line
+    println!();
+    println!("  {bold}Readiness{reset}");
+    println!("    {dim}status{reset}    {cyan}{readiness}{reset}");
+
     let mut features = Vec::new();
     if info.embeddings_enabled {
         if let Some(ref provider) = info.embeddings_provider {
@@ -107,50 +164,52 @@ pub fn print_boot_screen(info: &BootInfo) {
             // Don't show sandbox when disabled
         }
     }
-    if info.claude_code_enabled {
-        features.push("claude-code".to_string());
-    }
-    if info.routines_enabled {
-        features.push("routines".to_string());
-    }
-    if info.skills_enabled {
-        features.push("skills".to_string());
-    }
     if !features.is_empty() {
         println!(
-            "  {dim}features{reset}  {cyan}{}{reset}",
+            "    {dim}capabilities{reset}  {cyan}{}{reset}",
             features.join("  ")
         );
     }
-
-    // Channels line
     if !info.channels.is_empty() {
         println!(
-            "  {dim}channels{reset}  {cyan}{}{reset}",
+            "    {dim}channels{reset}  {cyan}{}{reset}",
             info.channels.join("  ")
         );
     }
-
-    // Gateway URL (highlighted)
-    if let Some(ref url) = info.gateway_url {
-        println!();
-        println!("  {dim}gateway{reset}   {yellow_underline}{url}{reset}");
+    println!("    {dim}note{reset}      {mission}");
+    println!("    {dim}note{reset}      {readiness}");
+    if !readiness_notes.is_empty() {
+        println!(
+            "    {dim}health{reset}     {cyan}{}{reset}",
+            readiness_notes.join("  ")
+        );
     }
 
-    // Tunnel URL
+    println!();
+    println!("  {bold}Access{reset}");
+    if let Some(ref url) = info.gateway_url {
+        println!("    {dim}gateway{reset}   {yellow_underline}{url}{reset}");
+    }
     if let Some(ref url) = info.tunnel_url {
         let provider_tag = info
             .tunnel_provider
             .as_deref()
             .map(|p| format!(" {dim}({p}){reset}"))
             .unwrap_or_default();
-        println!("  {dim}tunnel{reset}    {yellow_underline}{url}{reset}{provider_tag}");
+        println!("    {dim}tunnel{reset}    {yellow_underline}{url}{reset}{provider_tag}");
+    }
+    if info.gateway_url.is_none() && info.tunnel_url.is_none() {
+        println!(
+            "    {dim}direct cue{reset}  Connect a gateway or tunnel when you want remote access."
+        );
     }
 
     println!();
     println!("{border}");
     println!();
-    println!("  /help for commands, /quit to exit");
+    println!(
+        "  {bold}/help{reset} for commands  {dim}•{reset}  {bold}/quit{reset} to exit  {dim}•{reset}  send a message to begin"
+    );
     println!();
 }
 

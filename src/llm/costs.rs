@@ -9,8 +9,10 @@
 //! long-context surcharges.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -18,20 +20,62 @@ use rust_decimal_macros::dec;
 ///
 /// Checked **before** the static `model_cost` match table so that
 /// OpenRouter-sourced prices take precedence over hardcoded values.
-static DYNAMIC_PRICING: OnceLock<RwLock<HashMap<String, (Decimal, Decimal)>>> = OnceLock::new();
+#[derive(Default)]
+struct DynamicPricingOverlay {
+    pricing: HashMap<String, (Decimal, Decimal)>,
+    fetched_at: Option<DateTime<Utc>>,
+}
 
-fn dynamic_pricing() -> &'static RwLock<HashMap<String, (Decimal, Decimal)>> {
-    DYNAMIC_PRICING.get_or_init(|| RwLock::new(HashMap::new()))
+static DYNAMIC_PRICING: OnceLock<RwLock<DynamicPricingOverlay>> = OnceLock::new();
+static DYNAMIC_PRICING_REVISION: AtomicU64 = AtomicU64::new(0);
+
+fn dynamic_pricing() -> &'static RwLock<DynamicPricingOverlay> {
+    DYNAMIC_PRICING.get_or_init(|| RwLock::new(DynamicPricingOverlay::default()))
 }
 
 /// Replace the entire dynamic pricing overlay.
 ///
 /// Called by [`crate::llm::pricing_sync`] after fetching from OpenRouter.
 pub fn set_dynamic_pricing(pricing: HashMap<String, (Decimal, Decimal)>) {
+    set_dynamic_pricing_with_fetched_at(pricing, Some(Utc::now()));
+}
+
+/// Replace the entire dynamic pricing overlay with an explicit freshness timestamp.
+///
+/// Used when restoring cached pricing from persistent storage so stale penalties
+/// can be applied correctly on restart.
+pub fn set_dynamic_pricing_with_fetched_at(
+    pricing: HashMap<String, (Decimal, Decimal)>,
+    fetched_at: Option<DateTime<Utc>>,
+) {
     let lock = dynamic_pricing();
     if let Ok(mut guard) = lock.write() {
-        *guard = pricing;
+        guard.pricing = pricing;
+        guard.fetched_at = fetched_at;
+        DYNAMIC_PRICING_REVISION.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Monotonic revision of the dynamic pricing overlay.
+///
+/// Increments whenever pricing is replaced (fresh sync or cache restore).
+pub fn dynamic_pricing_revision() -> u64 {
+    DYNAMIC_PRICING_REVISION.load(Ordering::Relaxed)
+}
+
+/// Return true when the dynamic pricing snapshot age exceeds `max_age`.
+pub fn dynamic_pricing_is_stale(max_age: std::time::Duration) -> bool {
+    let lock = dynamic_pricing();
+    let Ok(guard) = lock.read() else {
+        return false;
+    };
+    let Some(fetched_at) = guard.fetched_at else {
+        return false;
+    };
+    let Ok(age) = (Utc::now() - fetched_at).to_std() else {
+        return false;
+    };
+    age > max_age
 }
 
 /// Look up a model in the dynamic pricing overlay.
@@ -41,13 +85,62 @@ pub fn set_dynamic_pricing(pricing: HashMap<String, (Decimal, Decimal)>) {
 fn dynamic_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
     let lock = dynamic_pricing();
     let guard = lock.read().ok()?;
+    let pricing = &guard.pricing;
     // Try exact match first (e.g. "openai/gpt-5.4-mini")
-    if let Some(cost) = guard.get(model_id) {
+    if let Some(cost) = pricing.get(model_id) {
         return Some(*cost);
     }
-    // Try with provider prefix prepended to normalized id
-    // OpenRouter uses "provider/model" but our static table uses bare names
+
+    // Try normalized ID directly (OpenRouter occasionally stores unprefixed IDs).
+    let normalized = normalize_model_id(model_id);
+    if let Some(cost) = pricing.get(&normalized) {
+        return Some(*cost);
+    }
+
+    let provider = model_id.split_once('/').map(|(provider, _)| provider);
+    if let Some(provider) = provider {
+        let provider_normalized = format!("{provider}/{normalized}");
+        if let Some(cost) = pricing.get(&provider_normalized) {
+            return Some(*cost);
+        }
+        for alias in provider_aliases(provider) {
+            let key = format!("{alias}/{normalized}");
+            if let Some(cost) = pricing.get(&key) {
+                return Some(*cost);
+            }
+        }
+    } else {
+        // No provider prefix passed; try provider-prefixed aliases from overlay.
+        // Choose the cheapest priced entry when multiple providers expose the same model.
+        let mut matches: Vec<(Decimal, Decimal)> = pricing
+            .iter()
+            .filter(|(key, _)| key.ends_with(&format!("/{normalized}")))
+            .map(|(_, cost)| *cost)
+            .collect();
+        matches.sort_by(|a, b| {
+            (a.0 + a.1)
+                .partial_cmp(&(b.0 + b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(cost) = matches.first().copied() {
+            return Some(cost);
+        }
+    }
+
     None
+}
+
+fn provider_aliases(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "openrouter" => &["openai", "anthropic", "google", "meta", "mistralai"],
+        "openai_compatible" => &["openai", "anthropic", "google"],
+        "bedrock" => &["anthropic", "meta", "amazon", "cohere"],
+        "vertex" => &["google", "anthropic"],
+        "google" | "gemini" => &["google", "gemini"],
+        "anthropic" => &["anthropic"],
+        "openai" => &["openai"],
+        _ => &[],
+    }
 }
 
 fn normalize_model_id(model_id: &str) -> String {
@@ -82,18 +175,14 @@ fn normalize_model_id(model_id: &str) -> String {
     if let Some((base, ymd)) = id.rsplit_once('-')
         && ymd.len() == 2
         && ymd.chars().all(|ch| ch.is_ascii_digit())
+        && let Some((base, month)) = base.rsplit_once('-')
+        && month.len() == 2
+        && month.chars().all(|ch| ch.is_ascii_digit())
+        && let Some((base, year)) = base.rsplit_once('-')
+        && year.len() == 4
+        && year.chars().all(|ch| ch.is_ascii_digit())
     {
-        if let Some((base, month)) = base.rsplit_once('-')
-            && month.len() == 2
-            && month.chars().all(|ch| ch.is_ascii_digit())
-        {
-            if let Some((base, year)) = base.rsplit_once('-')
-                && year.len() == 4
-                && year.chars().all(|ch| ch.is_ascii_digit())
-            {
-                id = base.to_string();
-            }
-        }
+        id = base.to_string();
     }
 
     id
@@ -103,14 +192,28 @@ fn normalize_model_id(model_id: &str) -> String {
 ///
 /// Returns `Some((input_cost, output_cost))` for known models, `None` otherwise.
 pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
+    model_cost_with_source(model_id).map(|(input, output, _source)| (input, output))
+}
+
+/// Source of a resolved model price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostSource {
+    Dynamic,
+    Static,
+}
+
+/// Look up known per-token costs for a model by its identifier.
+///
+/// Returns `Some((input_cost, output_cost, source))` for known models, `None` otherwise.
+pub fn model_cost_with_source(model_id: &str) -> Option<(Decimal, Decimal, CostSource)> {
     // 1. Check dynamic pricing overlay first (OpenRouter-sourced)
-    if let Some(cost) = dynamic_cost(model_id) {
-        return Some(cost);
+    if let Some((input, output)) = dynamic_cost(model_id) {
+        return Some((input, output, CostSource::Dynamic));
     }
 
     // 2. Fall back to static pricing table
     let id = normalize_model_id(model_id);
-    static_model_cost(&id)
+    static_model_cost(&id).map(|(input, output)| (input, output, CostSource::Static))
 }
 
 /// Static pricing table — hardcoded per-model rates.
@@ -214,7 +317,7 @@ fn static_model_cost(id: &str) -> Option<(Decimal, Decimal)> {
         "gemini-1.0-pro" => Some((dec!(0.0000005), dec!(0.0000015))),
 
         // Ollama / local models -- free
-        _ if is_local_model(&id) => Some((Decimal::ZERO, Decimal::ZERO)),
+        _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
         _ => None,
     }
@@ -246,7 +349,18 @@ fn is_local_model(model_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
+
+    fn dynamic_pricing_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("dynamic pricing test guard should lock")
+    }
 
     #[test]
     fn test_known_model_costs() {
@@ -371,5 +485,59 @@ mod tests {
             model_cost("claude-sonnet-4-5@20250929"),
             model_cost("claude-sonnet-4-5-20250929")
         );
+    }
+
+    #[test]
+    fn test_model_cost_with_source_static() {
+        let (_, _, source) = model_cost_with_source("gpt-4o").expect("known static cost");
+        assert_eq!(source, CostSource::Static);
+    }
+
+    #[test]
+    fn test_dynamic_pricing_revision_increments() {
+        let _guard = dynamic_pricing_test_guard();
+        let before = dynamic_pricing_revision();
+        set_dynamic_pricing_with_fetched_at(HashMap::new(), None);
+        let after = dynamic_pricing_revision();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn test_dynamic_pricing_alias_and_normalized_lookup_chain() {
+        let _guard = dynamic_pricing_test_guard();
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "openai/custom-dyn-mini".to_string(),
+            (dec!(0.00000012), dec!(0.00000048)),
+        );
+        set_dynamic_pricing_with_fetched_at(overlay, None);
+
+        let (input, output, source) =
+            model_cost_with_source("openrouter/custom-dyn-mini-2024-07-18")
+                .expect("dynamic alias-normalized lookup should resolve");
+        assert_eq!(source, CostSource::Dynamic);
+        assert_eq!(input, dec!(0.00000012));
+        assert_eq!(output, dec!(0.00000048));
+    }
+
+    #[test]
+    fn test_dynamic_pricing_unprefixed_lookup_picks_cheapest_prefixed_match() {
+        let _guard = dynamic_pricing_test_guard();
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "openai/custom-dyn-model".to_string(),
+            (dec!(0.000002), dec!(0.000008)),
+        );
+        overlay.insert(
+            "anthropic/custom-dyn-model".to_string(),
+            (dec!(0.000001), dec!(0.000004)),
+        );
+        set_dynamic_pricing_with_fetched_at(overlay, None);
+
+        let (input, output, source) =
+            model_cost_with_source("custom-dyn-model").expect("unprefixed lookup should resolve");
+        assert_eq!(source, CostSource::Dynamic);
+        assert_eq!(input, dec!(0.000001));
+        assert_eq!(output, dec!(0.000004));
     }
 }

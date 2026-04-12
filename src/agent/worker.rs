@@ -1394,34 +1394,29 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                     // When a heartbeat evaluation finds issues, persist the
                     // critique so the next heartbeat run can read it and
                     // avoid repeating the same mistake.
-                    if is_heartbeat {
-                        if let Some(ref store) = store {
-                            if !result.success || result.quality_score < 100 {
-                                let critique = serde_json::json!({
-                                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                                    "job_id": job_id.to_string(),
-                                    "quality": result.quality_score,
-                                    "reasoning": result.reasoning,
-                                });
-                                if let Err(e) = store
-                                    .set_setting("system", "heartbeat.last_critique", &critique)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "Failed to persist heartbeat self-critique: {}",
-                                        e
-                                    );
-                                }
-                            } else {
-                                // Clean run — clear any stale critique
-                                let _ = store
-                                    .set_setting(
-                                        "system",
-                                        "heartbeat.last_critique",
-                                        &serde_json::Value::Null,
-                                    )
-                                    .await;
+                    if is_heartbeat && let Some(ref store) = store {
+                        if !result.success || result.quality_score < 100 {
+                            let critique = serde_json::json!({
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "job_id": job_id.to_string(),
+                                "quality": result.quality_score,
+                                "reasoning": result.reasoning,
+                            });
+                            if let Err(e) = store
+                                .set_setting("system", "heartbeat.last_critique", &critique)
+                                .await
+                            {
+                                tracing::warn!("Failed to persist heartbeat self-critique: {}", e);
                             }
+                        } else {
+                            // Clean run — clear any stale critique
+                            let _ = store
+                                .set_setting(
+                                    "system",
+                                    "heartbeat.last_critique",
+                                    &serde_json::Value::Null,
+                                )
+                                .await;
                         }
                     }
                 }

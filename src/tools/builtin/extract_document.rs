@@ -95,7 +95,7 @@ impl Tool for ExtractDocumentTool {
 
         // Extract text
         let mut text = extractors::extract_text(&bytes, &resolved_mime, filename)
-            .map_err(|e| ToolError::ExecutionFailed(e))?;
+            .map_err(ToolError::ExecutionFailed)?;
 
         // Truncate if needed
         if text.len() > MAX_EXTRACTED_TEXT_LEN {

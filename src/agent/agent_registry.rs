@@ -432,9 +432,19 @@ mod tests {
     async fn test_invalid_agent_id() {
         let reg = make_registry();
         assert!(
-            reg.create_agent("UPPER", "Name", None, None, vec![], vec![], false, None, None)
-                .await
-                .is_err()
+            reg.create_agent(
+                "UPPER",
+                "Name",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None
+            )
+            .await
+            .is_err()
         );
         assert!(
             reg.create_agent("a", "Name", None, None, vec![], vec![], false, None, None)
@@ -453,8 +463,8 @@ mod tests {
                 None,
                 None,
             )
-                .await
-                .is_err()
+            .await
+            .is_err()
         );
     }
 
@@ -473,8 +483,8 @@ mod tests {
                 None,
                 None,
             )
-                .await
-                .is_err()
+            .await
+            .is_err()
         );
         assert!(
             reg.create_agent(
@@ -488,17 +498,27 @@ mod tests {
                 None,
                 None,
             )
-                .await
-                .is_err()
+            .await
+            .is_err()
         );
     }
 
     #[tokio::test]
     async fn test_duplicate_rejected() {
         let reg = make_registry();
-        reg.create_agent("bot-a", "Bot A", None, None, vec![], vec![], false, None, None)
-            .await
-            .unwrap();
+        reg.create_agent(
+            "bot-a",
+            "Bot A",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             reg.create_agent(
                 "bot-a",
@@ -511,8 +531,8 @@ mod tests {
                 None,
                 None,
             )
-                .await
-                .is_err()
+            .await
+            .is_err()
         );
     }
 
@@ -530,8 +550,8 @@ mod tests {
             None,
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert!(reg.remove_agent("to-remove", false).await.unwrap());
         assert_eq!(reg.agent_count().await, 0);
     }
@@ -539,9 +559,19 @@ mod tests {
     #[tokio::test]
     async fn test_default_agent_protected() {
         let reg = make_registry();
-        reg.create_agent("main-bot", "Main", None, None, vec![], vec![], true, None, None)
-            .await
-            .unwrap();
+        reg.create_agent(
+            "main-bot",
+            "Main",
+            None,
+            None,
+            vec![],
+            vec![],
+            true,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(reg.remove_agent("main-bot", false).await.is_err());
         assert!(reg.remove_agent("main-bot", true).await.unwrap());
     }
@@ -560,8 +590,8 @@ mod tests {
             None,
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let updated = reg
             .update_agent(
@@ -588,12 +618,32 @@ mod tests {
     #[tokio::test]
     async fn test_list_agents() {
         let reg = make_registry();
-        reg.create_agent("bot-1", "Bot 1", None, None, vec![], vec![], false, None, None)
-            .await
-            .unwrap();
-        reg.create_agent("bot-2", "Bot 2", None, None, vec![], vec![], false, None, None)
-            .await
-            .unwrap();
+        reg.create_agent(
+            "bot-1",
+            "Bot 1",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        reg.create_agent(
+            "bot-2",
+            "Bot 2",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(reg.list_agents().await.len(), 2);
     }
 
@@ -637,7 +687,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.allowed_tools, Some(vec!["shell".to_string()]));
-        assert_eq!(updated.allowed_skills, Some(vec!["openai-docs".to_string()]));
+        assert_eq!(
+            updated.allowed_skills,
+            Some(vec!["openai-docs".to_string()])
+        );
 
         let ws = reg.router.get_agent("bounded").await.unwrap();
         assert_eq!(ws.allowed_tools, Some(vec!["shell".to_string()]));

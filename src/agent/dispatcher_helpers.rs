@@ -359,6 +359,7 @@ mod tests {
                 thinking_enabled: false,
                 thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
+                subagent_transparency_level: "balanced".to_string(),
                 model_thinking_overrides: std::collections::HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
                 workspace_root: None,

@@ -31,6 +31,8 @@ pub struct ChannelsConfig {
     pub telegram_owner_id: Option<i64>,
     /// Telegram stream mode fallback for Wasm Channel.
     pub telegram_stream_mode: Option<String>,
+    /// Telegram subagent session mode fallback for Wasm Channel.
+    pub telegram_subagent_session_mode: String,
     /// Discord stream mode fallback for Wasm Channel.
     pub discord_stream_mode: Option<String>,
 }
@@ -250,6 +252,10 @@ impl ChannelsConfig {
                 .or(settings.channels.telegram_owner_id),
             telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?
                 .or(settings.channels.telegram_stream_mode.clone()),
+            telegram_subagent_session_mode: normalize_telegram_subagent_session_mode(
+                optional_env("TELEGRAM_SUBAGENT_SESSION_MODE")?
+                    .unwrap_or_else(|| settings.channels.telegram_subagent_session_mode.clone()),
+            ),
             discord_stream_mode: optional_env("DISCORD_STREAM_MODE")?
                 .or(settings.channels.discord_stream_mode.clone()),
             telegram: Self::resolve_telegram(settings)?,
@@ -329,12 +335,17 @@ impl ChannelsConfig {
             .or(settings.channels.telegram_stream_mode.clone())
             .map(|s| StreamMode::from_str_value(&s))
             .unwrap_or_default();
+        let subagent_session_mode = normalize_telegram_subagent_session_mode(
+            optional_env("TELEGRAM_SUBAGENT_SESSION_MODE")?
+                .unwrap_or_else(|| settings.channels.telegram_subagent_session_mode.clone()),
+        );
 
         Ok(Some(TelegramConfig {
             bot_token,
             owner_id,
             allow_from,
             stream_mode,
+            subagent_session_mode,
         }))
     }
 }
@@ -358,6 +369,8 @@ pub struct TelegramConfig {
     pub allow_from: Vec<String>,
     /// Stream mode for progressive message rendering.
     pub stream_mode: StreamMode,
+    /// How temporary subagent sessions should be surfaced in Telegram.
+    pub subagent_session_mode: String,
 }
 
 /// Slack channel configuration.
@@ -382,6 +395,21 @@ pub struct DiscordChannelConfig {
     pub allow_from: Vec<String>,
     /// Stream mode for progressive message rendering.
     pub stream_mode: StreamMode,
+}
+
+fn normalize_telegram_subagent_session_mode(value: impl AsRef<str>) -> String {
+    match value.as_ref().trim().to_ascii_lowercase().as_str() {
+        "" | "temp_topic" | "topic" | "forum_topic" => "temp_topic".to_string(),
+        "reply_chain" | "reply" | "thread" => "reply_chain".to_string(),
+        "compact_off" | "compact" | "off" | "disabled" => "compact_off".to_string(),
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Unknown Telegram subagent session mode; falling back to temp_topic"
+            );
+            "temp_topic".to_string()
+        }
+    }
 }
 
 /// iMessage channel configuration (macOS only).
@@ -708,5 +736,29 @@ mod tests {
         assert_eq!(nostr.private_key.expose_secret(), "nsec_test_alias");
 
         clear_nostr_env();
+    }
+
+    #[test]
+    fn normalize_telegram_subagent_session_mode_accepts_aliases() {
+        assert_eq!(
+            normalize_telegram_subagent_session_mode("temp_topic"),
+            "temp_topic"
+        );
+        assert_eq!(
+            normalize_telegram_subagent_session_mode("topic"),
+            "temp_topic"
+        );
+        assert_eq!(
+            normalize_telegram_subagent_session_mode("reply"),
+            "reply_chain"
+        );
+        assert_eq!(
+            normalize_telegram_subagent_session_mode("disabled"),
+            "compact_off"
+        );
+        assert_eq!(
+            normalize_telegram_subagent_session_mode("mystery"),
+            "temp_topic"
+        );
     }
 }

@@ -105,10 +105,10 @@ impl CostTracker {
 
     /// Record a cost entry, compacting oldest if at capacity.
     pub fn record(&mut self, entry: CostEntry) {
-        if self.entries.len() >= self.max_entries {
-            if let Some(evicted) = self.entries.pop_front() {
-                self.compact_entry(&evicted);
-            }
+        if self.entries.len() >= self.max_entries
+            && let Some(evicted) = self.entries.pop_front()
+        {
+            self.compact_entry(&evicted);
         }
         self.entries.push_back(entry);
     }
@@ -401,20 +401,19 @@ impl CostTracker {
     pub fn from_json(&mut self, value: &serde_json::Value) {
         if let Some(obj) = value.as_object() {
             // New format: load compacted first so trim-compaction merges correctly.
-            if let Some(compacted_val) = obj.get("compacted") {
-                if let Ok(compacted) =
+            if let Some(compacted_val) = obj.get("compacted")
+                && let Ok(compacted) =
                     serde_json::from_value::<CompactedStats>(compacted_val.clone())
-                {
-                    self.compacted = compacted;
-                }
+            {
+                self.compacted = compacted;
             }
-            if let Some(entries_val) = obj.get("entries") {
-                if let Ok(entries) = serde_json::from_value::<Vec<CostEntry>>(entries_val.clone()) {
-                    self.entries = VecDeque::from(entries);
-                    while self.entries.len() > self.max_entries {
-                        if let Some(evicted) = self.entries.pop_front() {
-                            self.compact_entry(&evicted);
-                        }
+            if let Some(entries_val) = obj.get("entries")
+                && let Ok(entries) = serde_json::from_value::<Vec<CostEntry>>(entries_val.clone())
+            {
+                self.entries = VecDeque::from(entries);
+                while self.entries.len() > self.max_entries {
+                    if let Some(evicted) = self.entries.pop_front() {
+                        self.compact_entry(&evicted);
                     }
                 }
             }

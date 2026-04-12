@@ -6,12 +6,16 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) fn step_web_ui(&mut self) -> Result<(), SetupError> {
-        print_info("ThinClaw includes a web dashboard (gateway UI) for chat and monitoring.");
-        print_info("You can customize its appearance here.");
+        print_info("ThinClaw includes a web dashboard for chat, monitoring, and operator control.");
+        print_info(
+            "This step tunes the cockpit feel without changing the underlying runtime behavior.",
+        );
         println!();
 
         if !confirm("Customize web UI appearance?", false).map_err(SetupError::Io)? {
-            print_info("Using defaults (system theme, default accent color, branding shown).");
+            print_info(
+                "Keeping the default cockpit presentation: system theme, default accent color, and branding shown.",
+            );
             return Ok(());
         }
 
@@ -33,10 +37,10 @@ impl SetupWizard {
             Some("leave blank for default"),
         )
         .map_err(SetupError::Io)?;
-        if let Some(ref color) = accent {
-            if !color.is_empty() {
-                self.settings.webchat_accent_color = Some(color.clone());
-            }
+        if let Some(ref color) = accent
+            && !color.is_empty()
+        {
+            self.settings.webchat_accent_color = Some(color.clone());
         }
 
         // Branding badge
@@ -50,7 +54,7 @@ impl SetupWizard {
             .as_deref()
             .unwrap_or("default");
         print_success(&format!(
-            "Web UI configured (theme: {}, accent: {}, branding: {})",
+            "Web UI cockpit configured (theme: {}, accent: {}, branding: {})",
             theme,
             accent_display,
             if show_branding { "shown" } else { "hidden" }
@@ -63,7 +67,9 @@ impl SetupWizard {
     ///
     /// Selects the event and metric recording backend.
     pub(super) fn step_observability(&mut self) -> Result<(), SetupError> {
-        print_info("Observability records events and metrics for debugging and monitoring.");
+        print_info(
+            "Observability controls how much operational signal ThinClaw emits for debugging and monitoring.",
+        );
         println!();
 
         let options: &[&str] = &[
@@ -78,9 +84,9 @@ impl SetupWizard {
         self.settings.observability_backend = backend.to_string();
 
         if backend == "log" {
-            print_success("Observability enabled — events will be emitted via tracing.");
+            print_success("Observability enabled. Events will be emitted through tracing.");
         } else {
-            print_info("Observability disabled — zero overhead mode.");
+            print_info("Observability left lean. Additional event logging will stay off for now.");
         }
 
         Ok(())

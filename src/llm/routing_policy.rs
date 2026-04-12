@@ -39,10 +39,43 @@ pub struct RoutingContext {
 }
 
 /// A concrete route candidate that can be considered by policy rules.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCapabilitiesMetadata {
+    /// `Some(false)` means explicitly unsupported.
+    /// `None` means unknown metadata (fail-open at planner level).
+    pub supports_streaming: Option<bool>,
+    /// `Some(false)` means explicitly unsupported.
+    /// `None` means unknown metadata (fail-open at planner level).
+    pub supports_tools: Option<bool>,
+    /// `Some(false)` means explicitly unsupported.
+    /// `None` means unknown metadata (fail-open at planner level).
+    pub supports_vision: Option<bool>,
+    /// `Some(false)` means explicitly unsupported.
+    /// `None` means unknown metadata (fail-open at planner level).
+    pub supports_thinking: Option<bool>,
+    /// Provider/model context window when known.
+    pub max_context_tokens: Option<u32>,
+}
+
+/// A concrete route candidate that can be considered by policy rules.
 #[derive(Debug, Clone)]
 pub struct RouteCandidate {
     pub target: String,
     pub cost_per_m_usd: Option<f64>,
+    /// Provider slug when target resolves to a known provider/model.
+    pub provider_slug: Option<String>,
+    /// Concrete model ID when resolved (without provider prefix).
+    pub model_id: Option<String>,
+    /// Canonical telemetry key: `{logical_role}|{provider_slug}|{model_id}`.
+    pub telemetry_key: Option<String>,
+    /// Optional capability metadata for scorer/capability gating.
+    pub capabilities: ProviderCapabilitiesMetadata,
+    /// Live latency hint (p50 ms) when available.
+    pub latency_p50_ms: Option<f64>,
+    /// Live health signal (0.0-1.0) when available.
+    pub health: Option<f64>,
+    /// True when cost data came from stale dynamic pricing.
+    pub cost_stale: bool,
 }
 
 impl RouteCandidate {
@@ -50,7 +83,49 @@ impl RouteCandidate {
         Self {
             target: target.into(),
             cost_per_m_usd,
+            provider_slug: None,
+            model_id: None,
+            telemetry_key: None,
+            capabilities: ProviderCapabilitiesMetadata::default(),
+            latency_p50_ms: None,
+            health: None,
+            cost_stale: false,
         }
+    }
+
+    pub fn with_identity(
+        mut self,
+        provider_slug: Option<String>,
+        model_id: Option<String>,
+    ) -> Self {
+        self.provider_slug = provider_slug;
+        self.model_id = model_id;
+        self
+    }
+
+    pub fn with_telemetry_key(mut self, telemetry_key: Option<String>) -> Self {
+        self.telemetry_key = telemetry_key;
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: ProviderCapabilitiesMetadata) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    pub fn with_latency_p50_ms(mut self, latency_p50_ms: Option<f64>) -> Self {
+        self.latency_p50_ms = latency_p50_ms;
+        self
+    }
+
+    pub fn with_health(mut self, health: Option<f64>) -> Self {
+        self.health = health;
+        self
+    }
+
+    pub fn with_cost_stale(mut self, cost_stale: bool) -> Self {
+        self.cost_stale = cost_stale;
+        self
     }
 }
 
@@ -119,10 +194,8 @@ impl LatencyTracker {
 
     /// Record a latency sample for a provider.
     pub fn record(&mut self, provider: &str, latency_ms: f64) {
-        let entry = self
-            .providers
-            .entry(provider.to_string())
-            .or_insert((latency_ms, 0));
+        let key = canonical_latency_key(provider);
+        let entry = self.providers.entry(key).or_insert((latency_ms, 0));
         entry.1 += 1;
         if entry.1 == 1 {
             // First sample: use raw value
@@ -143,18 +216,40 @@ impl LatencyTracker {
                     .partial_cmp(&b.1.0)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| latency_key_to_legacy_target(name))
     }
 
     /// Get the EMA latency for a specific provider.
     pub fn get_latency(&self, provider: &str) -> Option<f64> {
-        self.providers.get(provider).map(|(ema, _)| *ema)
+        self.providers
+            .get(provider)
+            .or_else(|| self.providers.get(&canonical_latency_key(provider)))
+            .map(|(ema, _)| *ema)
     }
 
     /// Number of providers with latency data.
     pub fn provider_count(&self) -> usize {
         self.providers.len()
     }
+}
+
+/// Convert legacy latency identifiers into canonical route keys.
+///
+/// Transition behavior:
+/// - Canonical keys (`role|provider|model`) are preserved as-is.
+/// - Legacy model-only/provider-only identifiers are mapped to
+///   `unknown|unknown|<legacy-id>`.
+pub fn canonical_latency_key(key: &str) -> String {
+    if key.contains('|') {
+        return key.to_string();
+    }
+    format!("unknown|unknown|{key}")
+}
+
+fn latency_key_to_legacy_target(key: &str) -> String {
+    key.strip_prefix("unknown|unknown|")
+        .unwrap_or(key)
+        .to_string()
 }
 
 impl RoutingPolicy {
@@ -267,8 +362,7 @@ impl RoutingPolicy {
                 .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(target, _)| RoutingDecision::single(target, matched_rule_index)),
             RoutingRule::LowestLatency => self
-                .latency_tracker
-                .get_fastest()
+                .select_lowest_latency_target(available_targets)
                 .map(|target| RoutingDecision::single(target, matched_rule_index)),
             RoutingRule::RoundRobin { providers } => {
                 if providers.is_empty() {
@@ -382,6 +476,43 @@ impl RoutingPolicy {
     /// Set the default provider.
     pub fn set_default_provider(&mut self, provider: impl Into<String>) {
         self.default_provider = provider.into();
+    }
+
+    fn select_lowest_latency_target(&self, available_targets: &[RouteCandidate]) -> Option<String> {
+        if available_targets.is_empty() {
+            return self.latency_tracker.get_fastest();
+        }
+
+        available_targets
+            .iter()
+            .filter_map(|candidate| {
+                let mut keys = Vec::new();
+                if let Some(key) = candidate.telemetry_key.as_deref() {
+                    keys.push(key.to_string());
+                }
+                keys.push(candidate.target.clone());
+                if let Some(model_id) = candidate.model_id.as_deref() {
+                    keys.push(canonical_latency_key(model_id));
+                }
+                if let (Some(provider), Some(model)) = (
+                    candidate.provider_slug.as_deref(),
+                    candidate.model_id.as_deref(),
+                ) {
+                    keys.push(canonical_latency_key(&format!("{provider}/{model}")));
+                }
+                keys.push(canonical_latency_key(&candidate.target));
+                keys.sort();
+                keys.dedup();
+
+                let latency = keys
+                    .iter()
+                    .filter_map(|key| self.latency_tracker.get_latency(key))
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                latency.map(|ms| (candidate.target.clone(), ms))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(target, _)| target)
     }
 }
 

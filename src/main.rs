@@ -19,7 +19,8 @@ use thinclaw::{
     },
     cli::{
         Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
-        run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
+        run_mcp_command, run_pairing_command, run_reset_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -117,6 +118,12 @@ async fn main() -> anyhow::Result<()> {
             thinclaw::bootstrap::load_thinclaw_env();
             return run_status_command().await;
         }
+        Some(Command::Reset(reset_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            return run_reset_command(reset_cmd.clone()).await;
+        }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
@@ -177,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Onboard {
             skip_auth,
             channels_only,
+            ui,
         }) => {
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
@@ -186,13 +194,14 @@ async fn main() -> anyhow::Result<()> {
                 let config = SetupConfig {
                     skip_auth: *skip_auth,
                     channels_only: *channels_only,
+                    ui_mode: *ui,
                 };
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only);
+                let _ = (skip_auth, channels_only, ui);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());
@@ -1188,6 +1197,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&components.llm),
         components.cheap_llm.as_ref().map(Arc::clone),
     );
+    components
+        .tools
+        .register_advisor_tool(components.llm_runtime.status().routing_mode);
 
     // ── Agent registry (persistent multi-agent management) ──────────────
     //

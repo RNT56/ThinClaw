@@ -52,10 +52,10 @@ impl PdfExtractor {
         // Try pdf-extract crate first when available (handles CMap, fonts, page ordering)
         #[cfg(feature = "document-extraction")]
         {
-            if let Ok(text) = crate::document_extraction::extractors::extract_pdf(data) {
-                if !text.trim().is_empty() {
-                    return Ok(text);
-                }
+            if let Ok(text) = crate::document_extraction::extractors::extract_pdf(data)
+                && !text.trim().is_empty()
+            {
+                return Ok(text);
             }
         }
 

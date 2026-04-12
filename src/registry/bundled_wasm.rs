@@ -30,12 +30,19 @@ pub fn is_available() -> bool {
 // - `kind`: "tool" or "channel"
 // - `wasm_bytes`: the compiled WASM binary
 // - `caps_bytes`: optional capabilities JSON sidecar
+pub type BundledEntry = (
+    &'static str,
+    &'static str,
+    &'static [u8],
+    Option<&'static [u8]>,
+);
+
 #[cfg(feature = "bundled-wasm")]
 include!(concat!(env!("OUT_DIR"), "/bundled_wasm_entries.rs"));
 
 /// Stub constant when feature is disabled — empty array.
 #[cfg(not(feature = "bundled-wasm"))]
-pub const BUNDLED_ENTRIES: &[(&str, &str, &[u8], Option<&[u8]>)] = &[];
+pub const BUNDLED_ENTRIES: &[BundledEntry] = &[];
 
 /// List names of all bundled extensions.
 pub fn bundled_names() -> Vec<&'static str> {

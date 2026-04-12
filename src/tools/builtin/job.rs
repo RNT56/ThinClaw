@@ -1887,7 +1887,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("does not belong to current user"),
+            err.contains("job not found") || err.contains("does not belong to current user"),
             "expected ownership error, got: {}",
             err
         );

@@ -387,11 +387,11 @@ impl Agent {
                 "principal_id".to_string(),
                 serde_json::json!(identity.principal_id.clone()),
             );
-                metadata.insert(
-                    "actor_id".to_string(),
-                    serde_json::json!(identity.actor_id.clone()),
-                );
-                if let Some(agent) = routed_agent.as_ref() {
+            metadata.insert(
+                "actor_id".to_string(),
+                serde_json::json!(identity.actor_id.clone()),
+            );
+            if let Some(agent) = routed_agent.as_ref() {
                 metadata.insert(
                     "agent_id".to_string(),
                     serde_json::json!(agent.agent_id.clone()),
@@ -402,20 +402,20 @@ impl Agent {
                         serde_json::json!(workspace_id.to_string()),
                     );
                 }
-                    if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
-                        metadata.insert(
-                            "allowed_tools".to_string(),
-                            serde_json::json!(allowed_tools),
-                        );
-                    }
-                    if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
-                        metadata.insert(
-                            "allowed_skills".to_string(),
-                            serde_json::json!(allowed_skills),
-                        );
-                    }
+                if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
+                    metadata.insert(
+                        "allowed_tools".to_string(),
+                        serde_json::json!(allowed_tools),
+                    );
+                }
+                if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
+                    metadata.insert(
+                        "allowed_skills".to_string(),
+                        serde_json::json!(allowed_skills),
+                    );
                 }
             }
+        }
         let model_override_scope_key =
             crate::tools::builtin::llm_tools::model_override_scope_key_from_metadata(
                 &job_ctx.metadata,
@@ -454,6 +454,13 @@ impl Agent {
         // properly cleaned up when tool calls interrupt streaming.
         let persistent_draft: Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>> =
             Arc::new(tokio::sync::Mutex::new(None));
+        let advisor_call_budget = Arc::new(crate::tools::builtin::advisor::AdvisorCallBudget::new(
+            self.deps
+                .llm_runtime
+                .as_ref()
+                .map(|runtime| runtime.status().advisor_max_calls)
+                .unwrap_or(3),
+        ));
 
         loop {
             iteration += 1;
@@ -1127,7 +1134,10 @@ impl Agent {
                                     ApprovalRequirement::Never => false,
                                     ApprovalRequirement::UnlessAutoApproved => {
                                         let sess = session.lock().await;
-                                        !sess.is_tool_auto_approved(&tc.name)
+                                        !sess.is_tool_auto_approved_for_channel(
+                                            &message.channel,
+                                            &tc.name,
+                                        )
                                     }
                                     ApprovalRequirement::Always => true,
                                 }
@@ -1165,71 +1175,18 @@ impl Agent {
                                 )
                                 .await;
 
-                            // ── consult_advisor interception ───────────────────
-                            // When the executor calls consult_advisor, route the
-                            // question to the advisor (primary LLM) instead of
-                            // executing the sentinel tool.
-                            let result = if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
-                                let question = tc.arguments
-                                    .get("question")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("(no question provided)");
-                                let context_summary = tc.arguments
-                                    .get("context_summary")
-                                    .and_then(|v| v.as_str());
-
-                                // Read advisor config from runtime status
-                                let rt_status = self.deps.llm_runtime.as_ref()
-                                    .map(|rt| rt.status());
-                                let advisor_config = crate::llm::route_planner::AdvisorConfig {
-                                    advisor_target: "primary".to_string(),
-                                    max_advisor_calls: rt_status.as_ref()
-                                        .map(|s| s.advisor_max_calls)
-                                        .unwrap_or(3),
-                                    advisor_system_prompt: rt_status.as_ref()
-                                        .and_then(|s| s.advisor_escalation_prompt.clone())
-                                        .unwrap_or_default(),
-                                };
-
-                                // Use the primary LLM as the advisor
-                                let advisor_provider = self.llm().as_ref();
-                                match crate::tools::builtin::advisor::execute_advisor_consultation(
-                                    advisor_provider,
-                                    &advisor_config,
-                                    question,
-                                    context_summary,
-                                    &context_messages,
-                                ).await {
-                                    Ok(guidance) => {
-                                        tracing::info!(
-                                            question_len = question.len(),
-                                            guidance_len = guidance.len(),
-                                            "Advisor consultation completed"
-                                        );
-                                        Ok(serde_json::json!({
-                                            "status": "ok",
-                                            "advisor_guidance": guidance,
-                                        }).to_string())
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Advisor consultation failed"
-                                        );
-                                        Ok(serde_json::json!({
-                                            "status": "error",
-                                            "message": format!(
-                                                "Advisor consultation failed: {}. \
-                                                 Continue without advisor guidance.",
-                                                e
-                                            ),
-                                        }).to_string())
-                                    }
-                                }
-                            } else {
-                                self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            let result =
+                                if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                                    self.execute_consult_advisor_call(
+                                        tc,
+                                        &context_messages,
+                                        advisor_call_budget.as_ref(),
+                                    )
                                     .await
-                            };
+                                } else {
+                                    self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                                        .await
+                                };
 
                             let _ = self
                                 .channels
@@ -1254,6 +1211,47 @@ impl Agent {
                         let mut join_set = JoinSet::new();
 
                         for (pf_idx, tc) in &runnable {
+                            if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                                let _ = self
+                                    .channels
+                                    .send_status(
+                                        &message.channel,
+                                        StatusUpdate::ToolStarted {
+                                            name: tc.name.clone(),
+                                            parameters: Some(tc.arguments.clone()),
+                                        },
+                                        &message.metadata,
+                                    )
+                                    .await;
+
+                                let result = self
+                                    .execute_consult_advisor_call(
+                                        tc,
+                                        &context_messages,
+                                        advisor_call_budget.as_ref(),
+                                    )
+                                    .await;
+
+                                let _ = self
+                                    .channels
+                                    .send_status(
+                                        &message.channel,
+                                        StatusUpdate::ToolCompleted {
+                                            name: tc.name.clone(),
+                                            success: result.is_ok(),
+                                            result_preview: result
+                                                .as_ref()
+                                                .ok()
+                                                .map(|s| truncate_preview(s, 500)),
+                                        },
+                                        &message.metadata,
+                                    )
+                                    .await;
+
+                                exec_results[*pf_idx] = Some(result);
+                                continue;
+                            }
+
                             let pf_idx = *pf_idx;
                             let tools = self.tools().clone();
                             let safety = self.safety().clone();
@@ -1522,7 +1520,7 @@ impl Agent {
                                     && parsed.get("action").and_then(|v| v.as_str())
                                         == Some("spawn_subagent")
                                 {
-                                        if let Some(executor) = self.subagent_executor.as_ref() {
+                                    if let Some(executor) = self.subagent_executor.as_ref() {
                                         if let Some(req_val) = parsed.get("request")
                                                         && let Ok(mut request) = serde_json::from_value::<
                                                             crate::agent::subagent_executor::SubagentSpawnRequest,
@@ -2327,7 +2325,8 @@ impl Agent {
         if let Some(ref policy_lock) = self.deps.routing_policy {
             let latency_ms = llm_start.elapsed().as_millis() as f64;
             if let Ok(mut policy) = policy_lock.write() {
-                policy.record_latency(&model_name, latency_ms);
+                let latency_key = crate::llm::routing_policy::canonical_latency_key(&model_name);
+                policy.record_latency(&latency_key, latency_ms);
             }
         }
 
@@ -2390,6 +2389,116 @@ impl Agent {
         })
     }
 
+    async fn execute_consult_advisor_call(
+        &self,
+        tool_call: &crate::llm::ToolCall,
+        context_messages: &[ChatMessage],
+        advisor_call_budget: &crate::tools::builtin::advisor::AdvisorCallBudget,
+    ) -> Result<String, Error> {
+        let question = tool_call
+            .arguments
+            .get("question")
+            .and_then(|value| value.as_str())
+            .unwrap_or("(no question provided)");
+        let context_summary = tool_call
+            .arguments
+            .get("context_summary")
+            .and_then(|value| value.as_str());
+
+        let advisor_config = self
+            .deps
+            .llm_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.advisor_config_for_messages(context_messages))
+            .unwrap_or_else(|| crate::llm::route_planner::AdvisorConfig {
+                advisor_target: "primary".to_string(),
+                max_advisor_calls: 3,
+                advisor_system_prompt: String::new(),
+            });
+
+        if let Err(limit_message) = advisor_call_budget.try_consume() {
+            tracing::warn!(
+                advisor_target = %advisor_config.advisor_target,
+                "Advisor call rejected: call budget exhausted"
+            );
+            return Ok(serde_json::json!({
+                "status": "error",
+                "code": "advisor_call_limit_reached",
+                "message": limit_message,
+            })
+            .to_string());
+        }
+
+        let advisor_provider: Arc<dyn crate::llm::LlmProvider> = self
+            .deps
+            .llm_runtime
+            .as_ref()
+            .and_then(|runtime| {
+                runtime
+                    .provider_handle_for_target(&advisor_config.advisor_target)
+                    .map(|provider| {
+                        if let Some(tracker) = self.deps.cost_tracker.as_ref() {
+                            Arc::new(crate::llm::usage_tracking::UsageTrackingProvider::new(
+                                provider,
+                                Arc::clone(tracker),
+                                Some(Arc::clone(&self.deps.cost_guard)),
+                            ))
+                                as Arc<dyn crate::llm::LlmProvider>
+                        } else {
+                            provider
+                        }
+                    })
+                    .map_err(|err| {
+                        tracing::warn!(
+                            advisor_target = %advisor_config.advisor_target,
+                            error = %err,
+                            "Failed to resolve concrete advisor target; falling back to generic runtime provider"
+                        );
+                        err
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(|| self.llm().clone());
+
+        match crate::tools::builtin::advisor::execute_advisor_consultation(
+            advisor_provider.as_ref(),
+            &advisor_config,
+            question,
+            context_summary,
+            context_messages,
+        )
+        .await
+        {
+            Ok(guidance) => {
+                tracing::info!(
+                    question_len = question.len(),
+                    guidance_len = guidance.len(),
+                    "Advisor consultation completed"
+                );
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "advisor_guidance": guidance,
+                })
+                .to_string())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Advisor consultation failed"
+                );
+                Ok(serde_json::json!({
+                    "status": "error",
+                    "message": format!(
+                        "Advisor consultation failed: {}. \
+                         Continue without advisor guidance.",
+                        e
+                    ),
+                })
+                .to_string())
+            }
+        }
+    }
+
     /// Execute a tool for chat (without full job context).
     pub(super) async fn execute_chat_tool(
         &self,
@@ -2405,7 +2514,6 @@ impl Agent {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::LazyLock;
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2425,7 +2533,7 @@ mod tests {
         Channel, ChannelManager, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse,
         StatusUpdate, StreamMode,
     };
-    use crate::config::{AgentConfig, Config, SafetyConfig, SkillsConfig, inject_bridge_vars};
+    use crate::config::{AgentConfig, Config, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::{ChannelError, LlmError};
     use crate::hooks::HookRegistry;
@@ -2436,8 +2544,6 @@ mod tests {
     use crate::safety::SafetyLayer;
     use crate::settings::{ProviderModelSlots, ProvidersSettings, RoutingMode};
     use crate::tools::{ApprovalRequirement, Tool, ToolOutput, ToolRegistry};
-
-    static CONFIG_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[derive(Debug, Clone)]
     struct CapturedRequest {
@@ -2800,17 +2906,43 @@ mod tests {
         tool_phase_synthesis_enabled: bool,
         tool_phase_primary_thinking_enabled: bool,
     ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
-        let _guard = CONFIG_ENV_LOCK.lock().await;
-        inject_bridge_vars(HashMap::from([
-            ("LLM_BACKEND".to_string(), "openai_compatible".to_string()),
-            (
-                "LLM_BASE_URL".to_string(),
-                "http://localhost:12345/v1".to_string(),
-            ),
-            ("LLM_MODEL".to_string(), "primary-model".to_string()),
-        ]));
-        let config = Config::from_env().await.expect("config should load");
-        crate::config::clear_bridge_vars();
+        make_runtime_manager_with_advisor_limit(
+            tool_phase_synthesis_enabled,
+            tool_phase_primary_thinking_enabled,
+            3,
+        )
+        .await
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    async fn make_runtime_manager_with_advisor_limit(
+        tool_phase_synthesis_enabled: bool,
+        tool_phase_primary_thinking_enabled: bool,
+        advisor_max_calls: u32,
+    ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
+        let config = {
+            let _env_guard = crate::config::helpers::lock_env();
+            // SAFETY: guarded by crate-wide ENV_MUTEX.
+            unsafe {
+                std::env::set_var("LLM_BACKEND", "openai_compatible");
+                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
+                std::env::set_var("LLM_MODEL", "primary-model");
+                // Avoid keychain probes in tests (can block/hang in CI/local).
+                std::env::set_var(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                );
+            }
+            let loaded = Config::from_env().await.expect("config should load");
+            // SAFETY: guarded by crate-wide ENV_MUTEX.
+            unsafe {
+                std::env::remove_var("LLM_BACKEND");
+                std::env::remove_var("LLM_BASE_URL");
+                std::env::remove_var("LLM_MODEL");
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+            loaded
+        };
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
@@ -2821,6 +2953,7 @@ mod tests {
             routing_mode: RoutingMode::CheapSplit,
             tool_phase_synthesis_enabled,
             tool_phase_primary_thinking_enabled,
+            advisor_max_calls,
             ..ProvidersSettings::default()
         };
         providers.provider_models.insert(
@@ -2902,6 +3035,7 @@ mod tests {
                 thinking_enabled,
                 thinking_budget_tokens: 128,
                 auto_approve_tools: false,
+                subagent_transparency_level: "balanced".to_string(),
                 model_thinking_overrides: HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
                 workspace_root: None,
@@ -3480,6 +3614,71 @@ mod tests {
             cheap_disabled[0].thinking,
             ThinkingConfig::Enabled { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn advisor_interception_runs_in_parallel_path_and_enforces_budget() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![
+                ScriptedResponse::tool_calls(
+                    vec![tool_call("consult_advisor"), tool_call("test_tool")],
+                    FinishReason::ToolUse,
+                ),
+                ScriptedResponse::text("Final answer", FinishReason::Stop),
+            ],
+        ));
+        let runtime = make_runtime_manager_with_advisor_limit(false, true, 0).await;
+        let tools = Arc::new(ToolRegistry::new());
+        register_tool(
+            &tools,
+            "test_tool",
+            ApprovalRequirement::Never,
+            "tool output",
+        )
+        .await;
+        let (agent, channel) = make_test_agent(
+            primary.clone(),
+            Some(primary.clone()),
+            tools,
+            Some(runtime),
+            StreamMode::None,
+            true,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "help");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("help")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => assert_eq!(text, "Final answer"),
+            other => panic!(
+                "expected response result, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        let events = channel.events().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Status(StatusUpdate::ToolCompleted { name, success, .. })
+                if name == "consult_advisor" && *success
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RecordedChannelEvent::Status(StatusUpdate::ToolResult { name, preview })
+                if name == "consult_advisor" && preview.contains("advisor_call_limit_reached")
+        )));
     }
 
     #[tokio::test]

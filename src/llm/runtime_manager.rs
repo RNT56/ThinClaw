@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
@@ -17,17 +18,14 @@ use crate::llm::provider::{
 use crate::llm::provider_factory::{
     build_provider_chain, create_llm_provider, create_provider_for_catalog_entry,
 };
-use crate::llm::routing_policy::{
-    RouteCandidate, RoutingContext, RoutingPolicy, RoutingRule,
-};
 use crate::llm::route_planner::{
-    RequiredCapabilities, RoutePlanner, RoutePlannerInput,
-    log_routing_decision,
+    RequiredCapabilities, RoutePlanner, RoutePlannerInput, log_routing_decision,
     validate_providers_settings as validate_planner_settings,
 };
+use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy, RoutingRule};
 use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
 use crate::secrets::SecretsStore;
-use crate::settings::{ProviderModelSlots, ProvidersSettings, RoutingMode, Settings};
+use crate::settings::{ProvidersSettings, RoutingMode, Settings};
 
 #[derive(Clone)]
 pub struct RuntimeStatus {
@@ -45,6 +43,29 @@ pub struct RuntimeStatus {
     pub advisor_max_calls: u32,
     /// AdvisorExecutor: custom advisor escalation prompt.
     pub advisor_escalation_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteSimulationScore {
+    pub target: String,
+    pub telemetry_key: Option<String>,
+    pub quality: f64,
+    pub cost: f64,
+    pub latency: f64,
+    pub health: f64,
+    pub policy_bias: f64,
+    pub composite: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteSimulationResult {
+    pub target: String,
+    pub reason: String,
+    pub fallback_chain: Vec<String>,
+    pub candidate_list: Vec<String>,
+    pub rejections: Vec<String>,
+    pub score_breakdown: Vec<RouteSimulationScore>,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -76,6 +97,11 @@ impl ProviderModelRole {
     }
 }
 
+struct ResolvedRoute {
+    provider: Arc<dyn LlmProvider>,
+    telemetry_key: String,
+}
+
 pub struct RuntimeLlmProvider {
     manager: Arc<LlmRuntimeManager>,
     role: RuntimeProviderRole,
@@ -99,7 +125,7 @@ impl RuntimeLlmProvider {
         messages: &[crate::llm::ChatMessage],
         has_tools: bool,
         requires_streaming: bool,
-    ) -> RoutingContext {
+    ) -> (RoutingContext, Option<String>) {
         let estimated_input_tokens = messages
             .iter()
             .map(|m| (m.estimated_chars() / 4) as u32)
@@ -109,75 +135,131 @@ impl RuntimeLlmProvider {
                 .iter()
                 .any(|a| a.mime_type.starts_with("image/"))
         });
+        let last_user_message = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::llm::Role::User)
+            .map(|m| m.content.trim().to_string())
+            .filter(|msg| !msg.is_empty());
 
-        RoutingContext {
-            estimated_input_tokens,
-            has_vision,
-            has_tools,
-            requires_streaming,
-            budget_usd: None,
-        }
+        (
+            RoutingContext {
+                estimated_input_tokens,
+                has_vision,
+                has_tools,
+                requires_streaming,
+                budget_usd: None,
+            },
+            last_user_message,
+        )
     }
 
     fn provider_for_request(
         &self,
         requested_model: Option<&str>,
         routing_context: Option<&RoutingContext>,
-    ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        last_user_message: Option<String>,
+    ) -> Result<ResolvedRoute, LlmError> {
         let snapshot = self.manager.snapshot();
 
         if let Some(model) = requested_model {
-            return self.manager.provider_for_model_spec(model, &snapshot);
+            let provider = self.manager.provider_for_model_spec(model, &snapshot)?;
+            let telemetry_key = format!("unknown|unknown|{}", model.trim());
+            return Ok(ResolvedRoute {
+                provider,
+                telemetry_key,
+            });
+        }
+
+        if routing_kill_switch_enabled() {
+            let (provider, target) = match self.role {
+                RuntimeProviderRole::Primary => (Arc::clone(&snapshot.llm), "primary"),
+                RuntimeProviderRole::Cheap => (
+                    snapshot
+                        .cheap_llm
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| Arc::clone(&snapshot.llm)),
+                    "cheap",
+                ),
+            };
+            let telemetry_key = self
+                .manager
+                .resolve_telemetry_key_for_target(target, &snapshot)
+                .unwrap_or_else(|| format!("killswitch|runtime|{target}"));
+            return Ok(ResolvedRoute {
+                provider,
+                telemetry_key,
+            });
         }
 
         // ── RoutePlanner-driven routing (Phase 6b cutover) ──
-        if snapshot.providers.smart_routing_enabled {
-            if let Some(ctx) = routing_context {
-                let planner_input = RoutePlannerInput {
-                    required_capabilities: RequiredCapabilities::from_routing_context(ctx),
-                    routing_mode: snapshot.providers.routing_mode,
-                    routing_context: ctx.clone(),
-                    model_override: None,
-                    provider_health: std::collections::HashMap::new(),
-                    candidates: self.manager.available_route_candidates(&snapshot),
-                    turn_cost_usd: 0.0,
-                    budget_utilization: None,
-                    last_user_message: None,
+        if snapshot.providers.smart_routing_enabled
+            && let Some(ctx) = routing_context
+        {
+            let planner_input = RoutePlannerInput {
+                required_capabilities: RequiredCapabilities::from_routing_context(ctx),
+                routing_mode: snapshot.providers.routing_mode,
+                routing_context: ctx.clone(),
+                model_override: None,
+                provider_health: self.manager.route_health_snapshot(),
+                candidates: self.manager.available_route_candidates(&snapshot),
+                turn_cost_usd: 0.0,
+                budget_utilization: None,
+                last_user_message,
+                advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+            };
+
+            if let Ok(guard) = self.manager.route_planner.read() {
+                let mut decision = guard.plan(
+                    &planner_input,
+                    self.manager.routing_policy.read().ok().as_deref(),
+                );
+
+                // Resolve the planner target to a provider
+                let primary_providers = if decision.fallbacks.is_empty() {
+                    vec![decision.target.clone()]
+                } else {
+                    let mut targets = vec![decision.target.clone()];
+                    for fb in &decision.fallbacks {
+                        if !targets.contains(fb) {
+                            targets.push(fb.clone());
+                        }
+                    }
+                    targets
                 };
 
-                if let Ok(guard) = self.manager.route_planner.read() {
-                    let decision = guard.plan(
-                        &planner_input,
-                        self.manager.routing_policy.read().ok().as_deref(),
-                    );
-
-                    // Emit structured routing telemetry (Phase 7)
-                    log_routing_decision(&decision, snapshot.providers.routing_mode.as_str());
-
-                    // Resolve the planner target to a provider
-                    let primary_providers = if decision.fallbacks.is_empty() {
-                        vec![decision.target.clone()]
-                    } else {
-                        let mut targets = vec![decision.target.clone()];
-                        for fb in &decision.fallbacks {
-                            if !targets.contains(fb) {
-                                targets.push(fb.clone());
-                            }
+                let provider = self
+                    .manager
+                    .provider_chain_for_targets(&primary_providers, &snapshot)?;
+                let telemetry_key = self
+                    .manager
+                    .resolve_telemetry_key_for_target(&decision.target, &snapshot)
+                    .or_else(|| {
+                        if decision.telemetry_key.contains('|') {
+                            Some(decision.telemetry_key.clone())
+                        } else {
+                            None
                         }
-                        targets
-                    };
-
-                    return self
-                        .manager
-                        .provider_chain_for_targets(&primary_providers, &snapshot);
-                }
+                    })
+                    .unwrap_or_else(|| format!("unknown|unknown|{}", decision.target));
+                decision.telemetry_key = telemetry_key.clone();
+                log_routing_decision(&decision, snapshot.providers.routing_mode.as_str());
+                return Ok(ResolvedRoute {
+                    provider,
+                    telemetry_key,
+                });
             }
         }
 
         // Fallback: no routing context available or planner lock failed
-        Ok(match self.role {
+        let provider = match self.role {
             RuntimeProviderRole::Primary => snapshot.llm,
             RuntimeProviderRole::Cheap => snapshot.cheap_llm.unwrap_or(snapshot.llm),
+        };
+        Ok(ResolvedRoute {
+            provider,
+            telemetry_key: "unknown|unknown|runtime_fallback".to_string(),
         })
     }
 
@@ -209,44 +291,68 @@ impl LlmProvider for RuntimeLlmProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let ctx = self.routing_context(&request.messages, false, false);
-        let provider = self.provider_for_request(request.model.as_deref(), Some(&ctx))?;
-        provider
+        let (ctx, last_user_message) = self.routing_context(&request.messages, false, false);
+        let route =
+            self.provider_for_request(request.model.as_deref(), Some(&ctx), last_user_message)?;
+        let start = Instant::now();
+        let result = route
+            .provider
             .complete(Self::resolved_completion_request(request))
-            .await
+            .await;
+        self.manager
+            .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
+        result
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let ctx = self.routing_context(&request.messages, true, false);
-        let provider = self.provider_for_request(request.model.as_deref(), Some(&ctx))?;
-        provider
+        let (ctx, last_user_message) = self.routing_context(&request.messages, true, false);
+        let route =
+            self.provider_for_request(request.model.as_deref(), Some(&ctx), last_user_message)?;
+        let start = Instant::now();
+        let result = route
+            .provider
             .complete_with_tools(Self::resolved_tool_completion_request(request))
-            .await
+            .await;
+        self.manager
+            .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
+        result
     }
 
     async fn complete_stream(
         &self,
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
-        let ctx = self.routing_context(&request.messages, false, true);
-        let provider = self.provider_for_request(request.model.as_deref(), Some(&ctx))?;
-        provider
+        let (ctx, last_user_message) = self.routing_context(&request.messages, false, true);
+        let route =
+            self.provider_for_request(request.model.as_deref(), Some(&ctx), last_user_message)?;
+        let start = Instant::now();
+        let result = route
+            .provider
             .complete_stream(Self::resolved_completion_request(request))
-            .await
+            .await;
+        self.manager
+            .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
+        result
     }
 
     async fn complete_stream_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
-        let ctx = self.routing_context(&request.messages, true, true);
-        let provider = self.provider_for_request(request.model.as_deref(), Some(&ctx))?;
-        provider
+        let (ctx, last_user_message) = self.routing_context(&request.messages, true, true);
+        let route =
+            self.provider_for_request(request.model.as_deref(), Some(&ctx), last_user_message)?;
+        let start = Instant::now();
+        let result = route
+            .provider
             .complete_stream_with_tools(Self::resolved_tool_completion_request(request))
-            .await
+            .await;
+        self.manager
+            .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
+        result
     }
 
     fn supports_streaming(&self) -> bool {
@@ -255,8 +361,8 @@ impl LlmProvider for RuntimeLlmProvider {
 
     fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
         let snapshot = self.manager.snapshot();
-        self.provider_for_request(requested_model, None)
-            .map(|provider| provider.supports_streaming())
+        self.provider_for_request(requested_model, None, None)
+            .map(|route| route.provider.supports_streaming())
             .unwrap_or_else(|_| match self.role {
                 RuntimeProviderRole::Primary => snapshot.llm.supports_streaming(),
                 RuntimeProviderRole::Cheap => snapshot
@@ -353,6 +459,16 @@ pub struct LlmRuntimeManager {
     snapshot: RwLock<LlmRuntimeSnapshot>,
     pub routing_policy: Arc<RwLock<RoutingPolicy>>,
     pub route_planner: Arc<RwLock<RoutePlanner>>,
+    /// Prebuilt per-target providers (reused across requests).
+    target_provider_cache: RwLock<HashMap<String, Arc<dyn LlmProvider>>>,
+    /// Prebuilt failover/retry chains keyed by ordered target sequence.
+    chain_provider_cache: RwLock<HashMap<String, Arc<dyn LlmProvider>>>,
+    /// Static candidate metadata + costs, rebuilt on startup/reload.
+    route_candidate_cache: RwLock<Vec<RouteCandidate>>,
+    /// Live route-health EMA keyed by canonical telemetry key.
+    route_health: RwLock<HashMap<String, f64>>,
+    /// Last observed dynamic pricing revision used to hydrate candidate costs.
+    dynamic_pricing_revision_seen: AtomicU64,
     revision: AtomicU64,
     last_error: RwLock<Option<String>>,
 }
@@ -366,7 +482,7 @@ impl LlmRuntimeManager {
         user_id: impl Into<String>,
         toml_path: Option<PathBuf>,
     ) -> Result<Arc<Self>, LlmError> {
-        let providers = normalize_providers_settings_from_parts(
+        let providers = derive_runtime_defaults_from_parts(
             providers,
             legacy_primary_slug_from_config(&config),
             Some(config.llm.primary_model().to_string()),
@@ -384,7 +500,7 @@ impl LlmRuntimeManager {
             tracing::warn!("[route_planner] Config: {}", warning);
         }
 
-        Ok(Arc::new(Self {
+        let manager = Arc::new(Self {
             user_id: user_id.into(),
             db,
             secrets_store,
@@ -397,9 +513,18 @@ impl LlmRuntimeManager {
             }),
             routing_policy,
             route_planner,
+            target_provider_cache: RwLock::new(HashMap::new()),
+            chain_provider_cache: RwLock::new(HashMap::new()),
+            route_candidate_cache: RwLock::new(Vec::new()),
+            route_health: RwLock::new(HashMap::new()),
+            dynamic_pricing_revision_seen: AtomicU64::new(
+                crate::llm::costs::dynamic_pricing_revision(),
+            ),
             revision: AtomicU64::new(1),
             last_error: RwLock::new(None),
-        }))
+        });
+        manager.refresh_route_caches()?;
+        Ok(manager)
     }
 
     pub fn primary_handle(self: &Arc<Self>) -> Arc<dyn LlmProvider> {
@@ -500,6 +625,7 @@ impl LlmRuntimeManager {
                 providers.advisor_max_calls,
             );
         }
+        self.refresh_route_caches()?;
         // Emit planner config validation warnings on reload
         for warning in validate_planner_settings(&providers) {
             tracing::warn!("[route_planner] Config: {}", warning);
@@ -544,6 +670,223 @@ impl LlmRuntimeManager {
         Ok((config, providers))
     }
 
+    fn route_health_snapshot(&self) -> HashMap<String, f64> {
+        self.route_health
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_route_outcome(
+        &self,
+        telemetry_key: &str,
+        latency: std::time::Duration,
+        success: bool,
+    ) {
+        if let Ok(mut health) = self.route_health.try_write() {
+            let current = health.get(telemetry_key).copied().unwrap_or(0.8);
+            let target = if success { 1.0 } else { 0.0 };
+            let alpha = if success { 0.12 } else { 0.35 };
+            let next = (1.0 - alpha) * current + alpha * target;
+            health.insert(telemetry_key.to_string(), next.clamp(0.05, 1.0));
+        }
+
+        if let Ok(mut policy) = self.routing_policy.try_write() {
+            policy.record_latency(telemetry_key, latency.as_millis() as f64);
+        }
+    }
+
+    fn refresh_route_caches(&self) -> Result<(), LlmError> {
+        let snapshot = self.snapshot();
+        let targets = self.gather_route_targets(&snapshot);
+
+        let mut target_cache = HashMap::new();
+        for target in &targets {
+            match self.direct_provider_for_route_target_uncached(target, &snapshot) {
+                Ok(provider) => {
+                    target_cache.insert(target.clone(), provider);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target = %target,
+                        error = %err,
+                        "Skipping uncached route target during cache rebuild"
+                    );
+                }
+            }
+        }
+
+        let mut candidates = Vec::new();
+        for target in &targets {
+            if target_cache.contains_key(target) {
+                candidates.push(self.build_route_candidate(target, &snapshot));
+            } else {
+                tracing::warn!(
+                    target = %target,
+                    "Skipping route candidate for unresolved target"
+                );
+            }
+        }
+
+        if let Ok(mut guard) = self.target_provider_cache.write() {
+            *guard = target_cache;
+        }
+        if let Ok(mut guard) = self.chain_provider_cache.write() {
+            guard.clear();
+        }
+        if let Ok(mut guard) = self.route_candidate_cache.write() {
+            *guard = candidates;
+        }
+        self.dynamic_pricing_revision_seen.store(
+            crate::llm::costs::dynamic_pricing_revision(),
+            Ordering::Relaxed,
+        );
+
+        Ok(())
+    }
+
+    fn gather_route_targets(&self, snapshot: &LlmRuntimeSnapshot) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut targets = Vec::new();
+        let mut push = |target: String| {
+            if seen.insert(target.clone()) {
+                targets.push(target);
+            }
+        };
+
+        push("primary".to_string());
+
+        if !provider_slot_selectors(&snapshot.providers, ProviderModelRole::Cheap).is_empty()
+            || snapshot.providers.cheap_model.is_some()
+            || snapshot.cheap_llm.is_some()
+        {
+            push("cheap".to_string());
+        }
+
+        for target in &snapshot.providers.fallback_chain {
+            push(target.clone());
+        }
+
+        for target in policy_rule_targets(&snapshot.providers.policy_rules) {
+            push(target);
+        }
+
+        for slug in &snapshot.providers.enabled {
+            let primary_selector = provider_slot_selector(slug, ProviderModelRole::Primary);
+            if provider_role_target(&snapshot.providers, slug, ProviderModelRole::Primary).is_some()
+            {
+                push(primary_selector);
+            }
+            let cheap_selector = provider_slot_selector(slug, ProviderModelRole::Cheap);
+            if provider_role_target(&snapshot.providers, slug, ProviderModelRole::Cheap).is_some() {
+                push(cheap_selector);
+            }
+        }
+
+        targets
+    }
+
+    fn build_route_candidate(&self, target: &str, snapshot: &LlmRuntimeSnapshot) -> RouteCandidate {
+        let logical_role = logical_role_for_target(target);
+        let (provider_slug, model_id) = self.resolve_route_identity(target, snapshot);
+        let telemetry_key = Some(format!(
+            "{}|{}|{}",
+            logical_role,
+            provider_slug.as_deref().unwrap_or("unknown"),
+            model_id.as_deref().unwrap_or(target)
+        ));
+
+        let (cost_per_m_usd, cost_stale) = self.route_target_cost_per_m_usd(target, snapshot);
+        let capabilities =
+            capability_metadata_for_route(provider_slug.as_deref(), model_id.as_deref());
+
+        RouteCandidate::new(target.to_string(), cost_per_m_usd)
+            .with_identity(provider_slug, model_id)
+            .with_telemetry_key(telemetry_key)
+            .with_capabilities(capabilities)
+            .with_cost_stale(cost_stale)
+    }
+
+    fn resolve_route_identity(
+        &self,
+        target: &str,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> (Option<String>, Option<String>) {
+        let spec = self.resolve_route_model_spec(target, snapshot);
+        match spec {
+            Some(spec) => {
+                if let Some((provider, model)) = spec.split_once('/') {
+                    (Some(provider.to_string()), Some(model.to_string()))
+                } else {
+                    (None, Some(spec))
+                }
+            }
+            None => (None, None),
+        }
+    }
+
+    fn resolve_route_model_spec(
+        &self,
+        target: &str,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Option<String> {
+        match target {
+            "primary" => provider_slot_selectors(&snapshot.providers, ProviderModelRole::Primary)
+                .into_iter()
+                .next()
+                .and_then(|selector| {
+                    parse_provider_slot_selector(&selector).and_then(|(slug, role)| {
+                        provider_role_target(&snapshot.providers, slug, role)
+                    })
+                })
+                .or_else(|| {
+                    snapshot
+                        .providers
+                        .primary
+                        .as_ref()
+                        .zip(snapshot.providers.primary_model.as_ref())
+                        .map(|(provider, model)| format!("{provider}/{model}"))
+                })
+                .or_else(|| Some(snapshot.llm.active_model_name())),
+            "cheap" => provider_slot_selectors(&snapshot.providers, ProviderModelRole::Cheap)
+                .into_iter()
+                .next()
+                .and_then(|selector| {
+                    parse_provider_slot_selector(&selector).and_then(|(slug, role)| {
+                        provider_role_target(&snapshot.providers, slug, role)
+                    })
+                })
+                .or_else(|| snapshot.providers.cheap_model.clone())
+                .or_else(|| {
+                    snapshot
+                        .cheap_llm
+                        .as_ref()
+                        .map(|llm| llm.active_model_name())
+                })
+                .or_else(|| Some(snapshot.llm.active_model_name())),
+            other if parse_provider_slot_selector(other).is_some() => {
+                let (provider, role) = parse_provider_slot_selector(other)?;
+                provider_role_target(&snapshot.providers, provider, role)
+            }
+            other => Some(other.to_string()),
+        }
+    }
+
+    fn resolve_telemetry_key_for_target(
+        &self,
+        target: &str,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Option<String> {
+        let (provider_slug, model_id) = self.resolve_route_identity(target, snapshot);
+        let model_id = model_id?;
+        Some(format!(
+            "{}|{}|{}",
+            logical_role_for_target(target),
+            provider_slug.as_deref().unwrap_or("unknown"),
+            model_id
+        ))
+    }
+
     fn provider_for_route_target(
         &self,
         target: &str,
@@ -585,6 +928,19 @@ impl LlmRuntimeManager {
         target: &str,
         snapshot: &LlmRuntimeSnapshot,
     ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if let Ok(cache) = self.target_provider_cache.read()
+            && let Some(provider) = cache.get(target)
+        {
+            return Ok(provider.clone());
+        }
+        self.direct_provider_for_route_target_uncached(target, snapshot)
+    }
+
+    fn direct_provider_for_route_target_uncached(
+        &self,
+        target: &str,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Result<Arc<dyn LlmProvider>, LlmError> {
         match target {
             "primary" => {
                 if let Some(target) =
@@ -621,6 +977,20 @@ impl LlmRuntimeManager {
         targets: &[String],
         snapshot: &LlmRuntimeSnapshot,
     ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if targets.len() == 1
+            && let Ok(cache) = self.target_provider_cache.read()
+            && let Some(provider) = cache.get(&targets[0])
+        {
+            return Ok(provider.clone());
+        }
+
+        let chain_key = targets.join("->");
+        if let Ok(cache) = self.chain_provider_cache.read()
+            && let Some(provider) = cache.get(&chain_key)
+        {
+            return Ok(provider.clone());
+        }
+
         let mut providers = Vec::new();
 
         for target in targets {
@@ -644,7 +1014,11 @@ impl LlmRuntimeManager {
         }
 
         if providers.len() == 1 {
-            return Ok(providers.remove(0));
+            let provider = providers.remove(0);
+            if let Ok(mut cache) = self.chain_provider_cache.write() {
+                cache.insert(chain_key, provider.clone());
+            }
+            return Ok(provider);
         }
 
         let rel = &snapshot.config.llm.reliability;
@@ -661,16 +1035,22 @@ impl LlmRuntimeManager {
             })?,
         );
 
-        if rel.max_retries > 0 {
-            Ok(Arc::new(RetryProvider::new(
+        let provider = if rel.max_retries > 0 {
+            Arc::new(RetryProvider::new(
                 provider,
                 RetryConfig {
                     max_retries: rel.max_retries,
                 },
-            )))
+            )) as Arc<dyn LlmProvider>
         } else {
-            Ok(provider)
+            provider
+        };
+
+        if let Ok(mut cache) = self.chain_provider_cache.write() {
+            cache.insert(chain_key, provider.clone());
         }
+
+        Ok(provider)
     }
 
     fn provider_for_provider_slot(
@@ -724,6 +1104,63 @@ impl LlmRuntimeManager {
         create_llm_provider(&llm_config)
     }
 
+    pub fn advisor_config_for_messages(
+        &self,
+        messages: &[crate::llm::ChatMessage],
+    ) -> Option<crate::llm::route_planner::AdvisorConfig> {
+        let snapshot = self.snapshot();
+        let estimated_input_tokens = messages
+            .iter()
+            .map(|m| (m.estimated_chars() / 4) as u32)
+            .sum();
+        let has_vision = messages.iter().any(|m| {
+            m.attachments
+                .iter()
+                .any(|a| a.mime_type.starts_with("image/"))
+        });
+        let last_user_message = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::llm::Role::User)
+            .map(|m| m.content.trim().to_string())
+            .filter(|msg| !msg.is_empty());
+
+        let ctx = RoutingContext {
+            estimated_input_tokens,
+            has_vision,
+            has_tools: true,
+            requires_streaming: false,
+            budget_usd: None,
+        };
+
+        let planner_input = RoutePlannerInput {
+            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
+            routing_mode: snapshot.providers.routing_mode,
+            routing_context: ctx,
+            model_override: None,
+            provider_health: self.route_health_snapshot(),
+            candidates: self.available_route_candidates(&snapshot),
+            turn_cost_usd: 0.0,
+            budget_utilization: None,
+            last_user_message,
+            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+        };
+
+        self.route_planner
+            .read()
+            .ok()
+            .map(|planner| planner.plan(&planner_input, self.routing_policy.read().ok().as_deref()))
+            .and_then(|decision| decision.advisor)
+    }
+
+    pub fn provider_handle_for_target(
+        &self,
+        target: &str,
+    ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        let snapshot = self.snapshot();
+        self.provider_for_route_target(target, &snapshot)
+    }
+
     pub fn simulate_route(&self, ctx: RoutingContext) -> (String, String) {
         self.simulate_route_for_prompt(ctx, None)
     }
@@ -733,9 +1170,26 @@ impl LlmRuntimeManager {
         ctx: RoutingContext,
         prompt: Option<&str>,
     ) -> (String, String) {
+        let simulation = self.simulate_route_details(ctx, prompt);
+        (simulation.target, simulation.reason)
+    }
+
+    pub fn simulate_route_details(
+        &self,
+        ctx: RoutingContext,
+        prompt: Option<&str>,
+    ) -> RouteSimulationResult {
         let snapshot = self.snapshot();
         if !snapshot.providers.smart_routing_enabled {
-            return ("primary".to_string(), "Routing disabled".to_string());
+            return RouteSimulationResult {
+                target: "primary".to_string(),
+                reason: "Routing disabled".to_string(),
+                fallback_chain: Vec::new(),
+                candidate_list: Vec::new(),
+                rejections: Vec::new(),
+                score_breakdown: Vec::new(),
+                diagnostics: Vec::new(),
+            };
         }
 
         let planner_input = RoutePlannerInput {
@@ -743,18 +1197,16 @@ impl LlmRuntimeManager {
             routing_mode: snapshot.providers.routing_mode,
             routing_context: ctx.clone(),
             model_override: None,
-            provider_health: std::collections::HashMap::new(),
+            provider_health: self.route_health_snapshot(),
             candidates: self.available_route_candidates(&snapshot),
             turn_cost_usd: 0.0,
             budget_utilization: None,
-            last_user_message: prompt.map(|s| s.to_string()),
+            last_user_message: prompt.map(ToOwned::to_owned),
+            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
         };
 
         if let Ok(guard) = self.route_planner.read() {
-            let decision = guard.plan(
-                &planner_input,
-                self.routing_policy.read().ok().as_deref(),
-            );
+            let decision = guard.plan(&planner_input, self.routing_policy.read().ok().as_deref());
             let reason = if decision.fallbacks.is_empty() {
                 decision.reason
             } else {
@@ -764,75 +1216,182 @@ impl LlmRuntimeManager {
                     decision.fallbacks.join(" -> ")
                 )
             };
-            (decision.target, reason)
+            RouteSimulationResult {
+                target: decision.target,
+                reason,
+                fallback_chain: decision.fallbacks,
+                candidate_list: decision.candidate_list,
+                rejections: decision
+                    .rejections
+                    .into_iter()
+                    .map(|rejection| format!("{}: {}", rejection.target, rejection.reason))
+                    .collect(),
+                score_breakdown: decision
+                    .score_breakdown
+                    .into_iter()
+                    .map(|score| RouteSimulationScore {
+                        target: score.target,
+                        telemetry_key: score.telemetry_key,
+                        quality: score.breakdown.quality,
+                        cost: score.breakdown.cost,
+                        latency: score.breakdown.latency,
+                        health: score.breakdown.health,
+                        policy_bias: score.breakdown.policy_bias,
+                        composite: score.breakdown.composite,
+                    })
+                    .collect(),
+                diagnostics: decision.diagnostics,
+            }
         } else {
-            ("primary".to_string(), "Planner lock unavailable".to_string())
+            RouteSimulationResult {
+                target: "primary".to_string(),
+                reason: "Planner lock unavailable".to_string(),
+                fallback_chain: Vec::new(),
+                candidate_list: Vec::new(),
+                rejections: Vec::new(),
+                score_breakdown: Vec::new(),
+                diagnostics: Vec::new(),
+            }
         }
     }
 
     fn available_route_candidates(&self, snapshot: &LlmRuntimeSnapshot) -> Vec<RouteCandidate> {
-        let mut seen = BTreeSet::new();
-        let mut candidates = Vec::new();
-        let mut push = |target: String, cost_per_m_usd: Option<f64>| {
-            if seen.insert(target.clone()) {
-                candidates.push(RouteCandidate::new(target, cost_per_m_usd));
-            }
-        };
+        self.refresh_cached_candidate_costs_if_needed(snapshot);
 
-        push(
-            "primary".to_string(),
-            self.route_target_cost_per_m_usd("primary", snapshot),
-        );
+        let mut candidates = self
+            .route_candidate_cache
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
 
-        if !provider_slot_selectors(&snapshot.providers, ProviderModelRole::Cheap).is_empty()
-            || snapshot.providers.cheap_model.is_some()
-            || snapshot.cheap_llm.is_some()
-        {
-            push(
-                "cheap".to_string(),
-                self.route_target_cost_per_m_usd("cheap", snapshot),
-            );
-        }
-
-        for target in &snapshot.providers.fallback_chain {
-            push(
-                target.clone(),
-                self.route_target_cost_per_m_usd(target, snapshot),
-            );
-        }
-
-        for slug in &snapshot.providers.enabled {
-            let primary_selector = provider_slot_selector(slug, ProviderModelRole::Primary);
-            if provider_role_target(&snapshot.providers, slug, ProviderModelRole::Primary).is_some()
-            {
-                push(
-                    primary_selector.clone(),
-                    self.route_target_cost_per_m_usd(&primary_selector, snapshot),
-                );
-            }
-            let cheap_selector = provider_slot_selector(slug, ProviderModelRole::Cheap);
-            if provider_role_target(&snapshot.providers, slug, ProviderModelRole::Cheap).is_some() {
-                push(
-                    cheap_selector.clone(),
-                    self.route_target_cost_per_m_usd(&cheap_selector, snapshot),
-                );
+        let health = self.route_health.read().ok();
+        let routing_policy = self.routing_policy.read().ok();
+        for candidate in &mut candidates {
+            if let Some(ref key) = candidate.telemetry_key {
+                candidate.health = health.as_ref().and_then(|map| map.get(key).copied());
+                candidate.latency_p50_ms = routing_policy
+                    .as_ref()
+                    .and_then(|policy| policy.latency_tracker().get_latency(key));
+            } else {
+                candidate.health = health
+                    .as_ref()
+                    .and_then(|map| map.get(&candidate.target).copied());
+                candidate.latency_p50_ms = routing_policy
+                    .as_ref()
+                    .and_then(|policy| policy.latency_tracker().get_latency(&candidate.target));
             }
         }
+        if candidates.is_empty() {
+            self.gather_route_targets(snapshot)
+                .into_iter()
+                .map(|target| self.build_route_candidate(&target, snapshot))
+                .collect()
+        } else {
+            candidates
+        }
+    }
 
-        candidates
+    fn refresh_cached_candidate_costs_if_needed(&self, snapshot: &LlmRuntimeSnapshot) {
+        let latest_revision = crate::llm::costs::dynamic_pricing_revision();
+        let seen_revision = self.dynamic_pricing_revision_seen.load(Ordering::Relaxed);
+        if latest_revision == seen_revision {
+            return;
+        }
+
+        if let Ok(mut cache) = self.route_candidate_cache.write() {
+            for candidate in cache.iter_mut() {
+                let (cost_per_m_usd, cost_stale) =
+                    self.route_target_cost_per_m_usd(&candidate.target, snapshot);
+                candidate.cost_per_m_usd = cost_per_m_usd;
+                candidate.cost_stale = cost_stale;
+            }
+            self.dynamic_pricing_revision_seen
+                .store(latest_revision, Ordering::Relaxed);
+        }
     }
 
     fn route_target_cost_per_m_usd(
         &self,
         target: &str,
         snapshot: &LlmRuntimeSnapshot,
-    ) -> Option<f64> {
-        let provider = self
-            .direct_provider_for_route_target(target, snapshot)
-            .ok()?;
-        let (input_cost, output_cost) = provider.cost_per_token();
-        ((input_cost + output_cost) * rust_decimal::Decimal::from(1_000_000u64)).to_f64()
+    ) -> (Option<f64>, bool) {
+        let Some(spec) = self.resolve_route_model_spec(target, snapshot) else {
+            return (None, false);
+        };
+        let Some((input_cost, output_cost, source)) =
+            crate::llm::costs::model_cost_with_source(&spec)
+        else {
+            return (None, false);
+        };
+        let cost_stale = matches!(source, crate::llm::costs::CostSource::Dynamic)
+            && crate::llm::costs::dynamic_pricing_is_stale(std::time::Duration::from_secs(
+                48 * 3600,
+            ));
+        (
+            ((input_cost + output_cost) * rust_decimal::Decimal::from(1_000_000u64)).to_f64(),
+            cost_stale,
+        )
     }
+}
+
+fn logical_role_for_target(target: &str) -> &'static str {
+    if target == "cheap" || target.ends_with("@cheap") {
+        "cheap"
+    } else if target == "primary" || target.ends_with("@primary") {
+        "primary"
+    } else {
+        "direct"
+    }
+}
+
+fn capability_metadata_for_route(
+    provider_slug: Option<&str>,
+    model_id: Option<&str>,
+) -> crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+    let mut metadata = crate::llm::routing_policy::ProviderCapabilitiesMetadata::default();
+    if let Some(model_id) = model_id {
+        let compat = crate::config::model_compat::find_model(model_id).or_else(|| {
+            model_id
+                .split_once('/')
+                .and_then(|(_, model)| crate::config::model_compat::find_model(model))
+        });
+        if let Some(compat) = compat {
+            metadata.supports_streaming = Some(compat.supports_streaming);
+            metadata.supports_tools = Some(compat.supports_tools);
+            metadata.supports_vision = Some(compat.supports_vision);
+            metadata.supports_thinking = Some(compat.supports_thinking);
+            metadata.max_context_tokens = Some(compat.context_window);
+        }
+    }
+
+    if let Some(slug) = provider_slug
+        && let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug)
+    {
+        if metadata.supports_streaming.is_none() {
+            metadata.supports_streaming = Some(endpoint.supports_streaming);
+        }
+        if metadata.max_context_tokens.is_none() {
+            metadata.max_context_tokens = Some(endpoint.default_context_size);
+        }
+    }
+
+    // Explicitly-known limitation: Perplexity models currently do not expose
+    // function/tool calling in ThinClaw's routing layer.
+    if provider_slug == Some("perplexity") {
+        metadata.supports_tools = Some(false);
+    }
+
+    metadata
+}
+
+fn routing_kill_switch_enabled() -> bool {
+    std::env::var("THINCLAW_ROUTING_KILL_SWITCH")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 fn create_provider_for_runtime_slug(
@@ -952,15 +1511,52 @@ fn legacy_primary_slug_from_config(config: &Config) -> Option<String> {
     }
 }
 
-pub fn normalize_providers_settings(settings: &Settings) -> ProvidersSettings {
-    normalize_providers_settings_from_parts(
+pub fn validate_providers_settings(raw: &ProvidersSettings) -> Vec<String> {
+    let mut diagnostics = validate_planner_settings(raw);
+
+    if raw.smart_routing_enabled && raw.enabled.is_empty() {
+        diagnostics.push(
+            "smart_routing_enabled is true but no providers are enabled; runtime will fall back to legacy backend".to_string(),
+        );
+    }
+    if raw.routing_mode == RoutingMode::CheapSplit
+        && raw.cheap_model.is_none()
+        && raw.preferred_cheap_provider.is_none()
+    {
+        diagnostics.push(
+            "CheapSplit mode is enabled but cheap model is not explicitly configured; runtime defaults will infer one when possible".to_string(),
+        );
+    }
+    if raw.routing_mode == RoutingMode::Policy {
+        for target in policy_rule_targets(&raw.policy_rules) {
+            if !route_target_resolves_in_settings(raw, &target) {
+                diagnostics.push(format!(
+                    "Policy target '{}' cannot be resolved with current provider configuration",
+                    target
+                ));
+            }
+        }
+    }
+
+    diagnostics.sort();
+    diagnostics.dedup();
+    diagnostics
+}
+
+pub fn derive_runtime_defaults(settings: &Settings) -> ProvidersSettings {
+    derive_runtime_defaults_from_parts(
         settings.providers.clone(),
         legacy_primary_slug(settings),
         settings.selected_model.clone(),
     )
 }
 
-fn normalize_providers_settings_from_parts(
+/// Backward-compatible alias. New code should prefer `derive_runtime_defaults`.
+pub fn normalize_providers_settings(settings: &Settings) -> ProvidersSettings {
+    derive_runtime_defaults(settings)
+}
+
+fn derive_runtime_defaults_from_parts(
     mut providers: ProvidersSettings,
     legacy_primary: Option<String>,
     legacy_model: Option<String>,
@@ -972,10 +1568,7 @@ fn normalize_providers_settings_from_parts(
         providers.primary_model = legacy_model;
     }
     if let Some(primary_slug) = providers.primary.clone() {
-        let slots = providers
-            .provider_models
-            .entry(primary_slug)
-            .or_insert_with(ProviderModelSlots::default);
+        let slots = providers.provider_models.entry(primary_slug).or_default();
         if slots.primary.is_none() {
             slots.primary = providers.primary_model.clone();
         }
@@ -986,7 +1579,7 @@ fn normalize_providers_settings_from_parts(
         let slots = providers
             .provider_models
             .entry(slug.to_string())
-            .or_insert_with(ProviderModelSlots::default);
+            .or_default();
         if slots.cheap.is_none() {
             slots.cheap = Some(model.to_string());
         }
@@ -996,10 +1589,7 @@ fn normalize_providers_settings_from_parts(
     }
     for (slug, allowed) in &providers.allowed_models {
         if let Some(model) = allowed.first() {
-            let slots = providers
-                .provider_models
-                .entry(slug.clone())
-                .or_insert_with(ProviderModelSlots::default);
+            let slots = providers.provider_models.entry(slug.clone()).or_default();
             if slots.primary.is_none() {
                 slots.primary = Some(model.clone());
             }
@@ -1046,10 +1636,7 @@ fn normalize_providers_settings_from_parts(
 
     let enabled_snapshot = providers.enabled.clone();
     for slug in enabled_snapshot {
-        let slots = providers
-            .provider_models
-            .entry(slug.clone())
-            .or_insert_with(ProviderModelSlots::default);
+        let slots = providers.provider_models.entry(slug.clone()).or_default();
 
         if slots.primary.is_none() {
             slots.primary = if providers.primary.as_deref() == Some(slug.as_str()) {
@@ -1171,13 +1758,12 @@ fn suggest_cheap_model(
     primary_model: Option<&str>,
     enabled: &[String],
 ) -> Option<String> {
-    if let Some(primary_slug) = primary {
-        if let Some(candidate_model) = suggest_provider_cheap_model(primary_slug, primary_model)
-            && primary_model != Some(candidate_model.as_str())
-        {
-            let candidate = format!("{primary_slug}/{candidate_model}");
-            return Some(candidate);
-        }
+    if let Some(primary_slug) = primary
+        && let Some(candidate_model) = suggest_provider_cheap_model(primary_slug, primary_model)
+        && primary_model != Some(candidate_model.as_str())
+    {
+        let candidate = format!("{primary_slug}/{candidate_model}");
+        return Some(candidate);
     }
 
     enabled
@@ -1219,7 +1805,7 @@ fn suggest_provider_cheap_model(slug: &str, primary_model: Option<&str>) -> Opti
 fn default_model_for_runtime_slug(slug: &str) -> Option<&'static str> {
     crate::config::provider_catalog::endpoint_for(slug)
         .map(|endpoint| endpoint.default_model)
-        .or_else(|| match slug {
+        .or(match slug {
             "ollama" => Some("llama3"),
             "openai_compatible" => Some("default"),
             "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0"),
@@ -1240,6 +1826,92 @@ fn parse_provider_slot_selector(selector: &str) -> Option<(&str, ProviderModelRo
         return Some((slug, ProviderModelRole::Cheap));
     }
     None
+}
+
+fn policy_rule_targets(rules: &[RoutingRule]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut push_unique = |target: &str| {
+        if !targets.iter().any(|existing| existing == target) {
+            targets.push(target.to_string());
+        }
+    };
+
+    for rule in rules {
+        match rule {
+            RoutingRule::LargeContext { provider, .. }
+            | RoutingRule::VisionContent { provider } => {
+                push_unique(provider);
+            }
+            RoutingRule::RoundRobin { providers } => {
+                for provider in providers {
+                    push_unique(provider);
+                }
+            }
+            RoutingRule::Fallback { primary, fallbacks } => {
+                push_unique(primary);
+                for fallback in fallbacks {
+                    push_unique(fallback);
+                }
+            }
+            RoutingRule::CostOptimized { .. } | RoutingRule::LowestLatency => {}
+        }
+    }
+
+    targets
+}
+
+fn route_target_resolves_in_settings(settings: &ProvidersSettings, target: &str) -> bool {
+    match target {
+        "primary" => settings.primary.is_some() || !settings.enabled.is_empty(),
+        "cheap" => {
+            settings.cheap_model.is_some()
+                || settings.preferred_cheap_provider.is_some()
+                || settings.primary.is_some()
+                || !settings.enabled.is_empty()
+        }
+        other if parse_provider_slot_selector(other).is_some() => {
+            let (slug, role) = parse_provider_slot_selector(other)
+                .expect("slot selector checked above for route_target_resolves_in_settings");
+            provider_declared_for_routing(settings, slug)
+                && provider_role_target(settings, slug, role).is_some()
+        }
+        other => {
+            if let Some((slug, _)) = other.split_once('/') {
+                provider_declared_for_routing(settings, slug)
+            } else {
+                settings.primary.is_some() || !settings.enabled.is_empty()
+            }
+        }
+    }
+}
+
+fn provider_declared_for_routing(settings: &ProvidersSettings, slug: &str) -> bool {
+    if settings.enabled.iter().any(|entry| entry == slug)
+        || settings.primary.as_deref() == Some(slug)
+        || settings.preferred_cheap_provider.as_deref() == Some(slug)
+        || settings.allowed_models.contains_key(slug)
+    {
+        return true;
+    }
+
+    if settings
+        .cheap_model
+        .as_deref()
+        .and_then(|spec| spec.split_once('/'))
+        .is_some_and(|(cheap_slug, _)| cheap_slug == slug)
+    {
+        return true;
+    }
+
+    settings.fallback_chain.iter().any(|target| {
+        target
+            .split_once('/')
+            .map(|(fallback_slug, _)| fallback_slug == slug)
+            .or_else(|| {
+                parse_provider_slot_selector(target).map(|(fallback_slug, _)| fallback_slug == slug)
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn provider_role_target(
@@ -1457,6 +2129,8 @@ fn route_target_known_cost_per_m_usd(target: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::settings::ProviderModelSlots;
 
     #[test]
     fn resolved_completion_request_clears_model_override() {
@@ -1481,9 +2155,11 @@ mod tests {
 
     #[test]
     fn normalize_promotes_legacy_models_into_provider_slots() {
-        let mut settings = Settings::default();
-        settings.llm_backend = Some("openai".to_string());
-        settings.selected_model = Some("gpt-4o".to_string());
+        let mut settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            ..Settings::default()
+        };
         settings.providers.cheap_model = Some("openai/gpt-4o-mini".to_string());
 
         let providers = normalize_providers_settings(&settings);
@@ -1676,5 +2352,102 @@ mod tests {
                 .and_then(|slots| slots.cheap.as_deref()),
             Some("gpt-4o-mini")
         );
+    }
+
+    #[test]
+    fn policy_rule_targets_collect_direct_and_fallback_targets() {
+        let rules = vec![
+            RoutingRule::LargeContext {
+                threshold: 8_000,
+                provider: "openai/gpt-4o".to_string(),
+            },
+            RoutingRule::RoundRobin {
+                providers: vec!["openai@cheap".to_string(), "anthropic@primary".to_string()],
+            },
+            RoutingRule::Fallback {
+                primary: "primary".to_string(),
+                fallbacks: vec!["openai/gpt-4o-mini".to_string()],
+            },
+        ];
+
+        let targets = policy_rule_targets(&rules);
+        assert!(targets.iter().any(|target| target == "openai/gpt-4o"));
+        assert!(targets.iter().any(|target| target == "openai@cheap"));
+        assert!(targets.iter().any(|target| target == "anthropic@primary"));
+        assert!(targets.iter().any(|target| target == "openai/gpt-4o-mini"));
+    }
+
+    #[test]
+    fn validate_flags_unresolvable_policy_targets() {
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai".to_string()],
+            routing_mode: RoutingMode::Policy,
+            ..ProvidersSettings::default()
+        };
+        providers.policy_rules = vec![RoutingRule::VisionContent {
+            provider: "anthropic@primary".to_string(),
+        }];
+
+        let diagnostics = validate_providers_settings(&providers);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|entry| entry.contains("cannot be resolved")),
+            "expected unresolved policy target diagnostic, got: {:?}",
+            diagnostics
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn advisor_target_primary_resolves_to_primary_provider_in_advisor_executor() {
+        let config = {
+            let _env_guard = crate::config::helpers::lock_env();
+            // SAFETY: guarded by crate-wide ENV_MUTEX.
+            unsafe {
+                std::env::set_var("LLM_BACKEND", "openai_compatible");
+                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
+                std::env::set_var("LLM_MODEL", "primary-model");
+                std::env::set_var(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                );
+            }
+            let loaded = Config::from_env().await.expect("config should load");
+            // SAFETY: guarded by crate-wide ENV_MUTEX.
+            unsafe {
+                std::env::remove_var("LLM_BACKEND");
+                std::env::remove_var("LLM_BASE_URL");
+                std::env::remove_var("LLM_MODEL");
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+            loaded
+        };
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("primary-model".to_string()),
+            cheap_model: Some("openai_compatible/cheap-model".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("primary-model".to_string()),
+                cheap: Some("cheap-model".to_string()),
+            },
+        );
+
+        let manager = LlmRuntimeManager::new(config, providers, None, None, "test-user", None)
+            .expect("runtime manager should build");
+
+        let provider = manager
+            .provider_handle_for_target("primary")
+            .expect("primary advisor target should resolve");
+
+        assert_eq!(provider.active_model_name(), "primary-model");
     }
 }

@@ -170,13 +170,13 @@ fn convert_links(s: &str) -> String {
             let link_text = &after_open[..bracket_close];
             let after_close = &after_open[bracket_close + 1..];
 
-            if after_close.starts_with('(') {
-                if let Some(paren_close) = after_close.find(')') {
-                    let url = &after_close[1..paren_close];
-                    out.push_str(&format!("<a href=\"{url}\">{link_text}</a>"));
-                    rest = &after_close[paren_close + 1..];
-                    continue;
-                }
+            if after_close.starts_with('(')
+                && let Some(paren_close) = after_close.find(')')
+            {
+                let url = &after_close[1..paren_close];
+                out.push_str(&format!("<a href=\"{url}\">{link_text}</a>"));
+                rest = &after_close[paren_close + 1..];
+                continue;
             }
 
             out.push('[');
@@ -197,8 +197,8 @@ fn strip_heading(line: &str) -> Option<&str> {
         let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
         if hashes <= 6 {
             let rest = &trimmed[hashes..];
-            if rest.starts_with(' ') {
-                return Some(rest[1..].trim());
+            if let Some(stripped) = rest.strip_prefix(' ') {
+                return Some(stripped.trim());
             }
         }
     }

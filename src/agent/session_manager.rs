@@ -1,7 +1,8 @@
 //! Session manager for multi-user, multi-thread conversation handling.
 //!
-//! Maps external channel thread IDs to internal UUIDs and manages undo state
-//! for each thread.
+//! Maps external thread aliases to internal UUIDs and manages undo state for
+//! each thread. Direct sessions are principal-scoped (cross-channel), while
+//! group sessions remain scope-isolated.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,8 +22,28 @@ const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct ThreadKey {
     scope_id: Uuid,
-    channel: String,
     external_thread_id: Option<String>,
+}
+
+fn normalize_external_thread_key(
+    conversation_kind: ConversationKind,
+    channel: &str,
+    external_thread_id: Option<&str>,
+) -> Option<String> {
+    let raw = external_thread_id
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())?;
+
+    match conversation_kind {
+        ConversationKind::Direct => {
+            if let Ok(uuid) = Uuid::parse_str(raw) {
+                Some(uuid.to_string())
+            } else {
+                Some(raw.to_string())
+            }
+        }
+        ConversationKind::Group => Some(format!("{channel}:{raw}")),
+    }
 }
 
 /// Manages sessions, threads, and undo state for all users.
@@ -38,6 +59,13 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    fn session_scope_for_identity(identity: &ResolvedIdentity) -> Uuid {
+        match identity.conversation_kind {
+            ConversationKind::Direct => Self::scope_id_for_user_id(&identity.principal_id),
+            ConversationKind::Group => identity.conversation_scope_id,
+        }
+    }
+
     /// Create a new session manager.
     pub fn new() -> Self {
         Self {
@@ -86,7 +114,7 @@ impl SessionManager {
         identity: &ResolvedIdentity,
     ) -> Arc<Mutex<Session>> {
         self.get_or_create_session_scoped(
-            identity.conversation_scope_id,
+            Self::session_scope_for_identity(identity),
             identity.principal_id.as_str(),
             identity.actor_id.as_str(),
             identity.conversation_kind,
@@ -163,8 +191,14 @@ impl SessionManager {
     ) -> (Arc<Mutex<Session>>, Uuid) {
         let session = self.get_or_create_session(user_id).await;
         let scope_id = Self::scope_id_for_user_id(user_id);
-        self.resolve_thread_with_scope(scope_id, session, channel, external_thread_id)
-            .await
+        self.resolve_thread_with_scope(
+            scope_id,
+            ConversationKind::Direct,
+            session,
+            channel,
+            external_thread_id,
+        )
+        .await
     }
 
     /// Resolve a thread using a resolved ingress identity.
@@ -174,9 +208,18 @@ impl SessionManager {
         channel: &str,
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
-        let session = self.get_or_create_session_for_identity(identity).await;
+        let scope_id = Self::session_scope_for_identity(identity);
+        let session = self
+            .get_or_create_session_scoped(
+                scope_id,
+                identity.principal_id.as_str(),
+                identity.actor_id.as_str(),
+                identity.conversation_kind,
+            )
+            .await;
         self.resolve_thread_with_scope(
-            identity.conversation_scope_id,
+            scope_id,
+            identity.conversation_kind,
             session,
             channel,
             external_thread_id,
@@ -187,14 +230,16 @@ impl SessionManager {
     async fn resolve_thread_with_scope(
         &self,
         scope_id: Uuid,
+        conversation_kind: ConversationKind,
         session: Arc<Mutex<Session>>,
         channel: &str,
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
+        let external_thread_id =
+            normalize_external_thread_key(conversation_kind, channel, external_thread_id);
         let key = ThreadKey {
             scope_id,
-            channel: channel.to_string(),
-            external_thread_id: external_thread_id.map(String::from),
+            external_thread_id: external_thread_id.clone(),
         };
 
         // Check if we have a mapping
@@ -212,36 +257,23 @@ impl SessionManager {
         // Check if external_thread_id is itself a known thread UUID that
         // exists in the session but was never registered in the thread_map
         // (e.g. created by chat_new_thread_handler or hydrated from DB).
-        // We only adopt it if no thread_map entry maps to this UUID —
-        // otherwise it belongs to a different channel scope.
-        if let Some(ext_tid) = external_thread_id
+        if let Some(ext_tid) = external_thread_id.as_deref()
             && let Ok(ext_uuid) = Uuid::parse_str(ext_tid)
         {
-            let thread_map = self.thread_map.read().await;
-            let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
-            drop(thread_map);
+            let sess = session.lock().await;
+            if sess.threads.contains_key(&ext_uuid) {
+                drop(sess);
 
-            if !mapped_elsewhere {
-                let sess = session.lock().await;
-                if sess.threads.contains_key(&ext_uuid) {
-                    drop(sess);
+                let mut thread_map = self.thread_map.write().await;
+                thread_map.insert(key, ext_uuid);
+                drop(thread_map);
 
-                    let mut thread_map = self.thread_map.write().await;
-                    // Re-check after acquiring write lock to prevent race condition
-                    // where another task mapped this UUID between our read and write.
-                    if !thread_map.values().any(|&v| v == ext_uuid) {
-                        thread_map.insert(key, ext_uuid);
-                        drop(thread_map);
-                        // Ensure undo manager exists
-                        let mut undo_managers = self.undo_managers.write().await;
-                        undo_managers
-                            .entry(ext_uuid)
-                            .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
-                        return (session, ext_uuid);
-                    }
-                    // If it was mapped elsewhere while we were unlocked, fall through
-                    // to create a new thread, preserving channel isolation.
-                }
+                // Ensure undo manager exists
+                let mut undo_managers = self.undo_managers.write().await;
+                undo_managers
+                    .entry(ext_uuid)
+                    .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                return (session, ext_uuid);
             }
         }
 
@@ -278,22 +310,30 @@ impl SessionManager {
         session: Arc<Mutex<Session>>,
     ) {
         let scope_id = Self::scope_id_for_user_id(user_id);
-        self.register_thread_for_scope(scope_id, channel, thread_id, session)
-            .await;
+        self.register_thread_for_scope(
+            scope_id,
+            ConversationKind::Direct,
+            channel,
+            thread_id,
+            session,
+        )
+        .await;
     }
 
     /// Register a hydrated thread for a specific conversation scope.
     pub async fn register_thread_for_scope(
         &self,
         scope_id: Uuid,
+        conversation_kind: ConversationKind,
         channel: &str,
         thread_id: Uuid,
         session: Arc<Mutex<Session>>,
     ) {
+        let external_thread_id =
+            normalize_external_thread_key(conversation_kind, channel, Some(&thread_id.to_string()));
         let key = ThreadKey {
             scope_id,
-            channel: channel.to_string(),
-            external_thread_id: Some(thread_id.to_string()),
+            external_thread_id,
         };
 
         {
@@ -618,9 +658,9 @@ mod tests {
         assert!(Arc::ptr_eq(&session1, &session2));
         assert_eq!(thread1, thread2);
 
-        // Different channel should get different thread
+        // Direct sessions now share the default thread across channels.
         let (_, thread3) = manager.resolve_thread("user-1", "http", None).await;
-        assert_ne!(thread1, thread3);
+        assert_eq!(thread1, thread3);
     }
 
     #[tokio::test]
@@ -751,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_thread_different_channels_isolated() {
+    async fn test_resolve_thread_different_channels_share_direct_aliases() {
         let manager = SessionManager::new();
 
         let (_, t1) = manager
@@ -761,8 +801,8 @@ mod tests {
             .resolve_thread("user-1", "telegram", Some("thread-x"))
             .await;
 
-        // Same user + same external ID but different channels = different threads
-        assert_ne!(t1, t2);
+        // Direct aliases are channel-agnostic now, so this resolves to one thread.
+        assert_eq!(t1, t2);
     }
 
     #[tokio::test]
@@ -986,7 +1026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_then_resolve_different_channel_creates_new() {
+    async fn test_register_then_resolve_different_channel_reuses_thread() {
         use crate::agent::session::{Session, Thread};
 
         let manager = SessionManager::new();
@@ -1004,12 +1044,12 @@ mod tests {
             .register_thread("user-cross", "gateway", tid, Arc::clone(&session))
             .await;
 
-        // Resolve on a different channel with the same UUID string should NOT
-        // find the registered thread (channel is part of the key)
+        // Resolve on a different channel with the same UUID string should reuse
+        // the same thread (cross-channel UUID aliasing for direct sessions).
         let (_, resolved) = manager
             .resolve_thread("user-cross", "telegram", Some(&tid.to_string()))
             .await;
-        assert_ne!(resolved, tid);
+        assert_eq!(resolved, tid);
     }
 
     #[tokio::test]
@@ -1049,5 +1089,69 @@ mod tests {
             1,
             "should have exactly 1 thread, not a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_for_identity_direct_uses_principal_scope() {
+        let manager = SessionManager::new();
+
+        let identity_gateway = ResolvedIdentity {
+            principal_id: "user-shared".to_string(),
+            actor_id: "phone".to_string(),
+            conversation_scope_id: scope_id_from_key("gateway://direct/user-shared/actor/phone"),
+            conversation_kind: ConversationKind::Direct,
+            raw_sender_id: "user-shared".to_string(),
+            stable_external_conversation_key: "gateway://direct/user-shared/actor/phone"
+                .to_string(),
+        };
+        let identity_cli = ResolvedIdentity {
+            principal_id: "user-shared".to_string(),
+            actor_id: "desktop".to_string(),
+            conversation_scope_id: scope_id_from_key("cli:direct:user-shared"),
+            conversation_kind: ConversationKind::Direct,
+            raw_sender_id: "user-shared".to_string(),
+            stable_external_conversation_key: "cli:direct:user-shared".to_string(),
+        };
+
+        let (session1, thread1) = manager
+            .resolve_thread_for_identity(&identity_gateway, "gateway", None)
+            .await;
+        let (session2, thread2) = manager
+            .resolve_thread_for_identity(&identity_cli, "cli", None)
+            .await;
+
+        assert!(Arc::ptr_eq(&session1, &session2));
+        assert_eq!(thread1, thread2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_for_identity_group_scope_stays_isolated() {
+        let manager = SessionManager::new();
+
+        let identity_signal_group = ResolvedIdentity {
+            principal_id: "user-group".to_string(),
+            actor_id: "user-group".to_string(),
+            conversation_scope_id: scope_id_from_key("signal:group:grp-1"),
+            conversation_kind: ConversationKind::Group,
+            raw_sender_id: "user-group".to_string(),
+            stable_external_conversation_key: "signal:group:grp-1".to_string(),
+        };
+        let identity_telegram_group = ResolvedIdentity {
+            principal_id: "user-group".to_string(),
+            actor_id: "user-group".to_string(),
+            conversation_scope_id: scope_id_from_key("telegram:group:grp-1"),
+            conversation_kind: ConversationKind::Group,
+            raw_sender_id: "user-group".to_string(),
+            stable_external_conversation_key: "telegram:group:grp-1".to_string(),
+        };
+
+        let (_, thread1) = manager
+            .resolve_thread_for_identity(&identity_signal_group, "signal", Some("grp-1"))
+            .await;
+        let (_, thread2) = manager
+            .resolve_thread_for_identity(&identity_telegram_group, "telegram", Some("grp-1"))
+            .await;
+
+        assert_ne!(thread1, thread2);
     }
 }

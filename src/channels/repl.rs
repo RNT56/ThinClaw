@@ -145,10 +145,13 @@ impl ConditionalEventHandler for EscInterruptHandler {
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
     let mut skin = MadSkin::default();
-    skin.set_headers_fg(termimad::crossterm::style::Color::Yellow);
+    skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
     skin.bold.set_fg(termimad::crossterm::style::Color::White);
-    skin.italic
-        .set_fg(termimad::crossterm::style::Color::Magenta);
+    skin.italic.set_fg(termimad::crossterm::style::Color::Rgb {
+        r: 120,
+        g: 150,
+        b: 210,
+    });
     skin.inline_code
         .set_fg(termimad::crossterm::style::Color::Green);
     skin.code_block
@@ -639,17 +642,18 @@ impl Channel for ReplChannel {
                 let width = crossterm::terminal::size()
                     .map(|(w, _)| w as usize)
                     .unwrap_or(80);
-                let prefix = match message_type.as_str() {
-                    "warning" => "\x1b[33m⚠️  ",
-                    "question" => "\x1b[36m❓ ",
-                    "interim_result" => "\x1b[32m📋 ",
-                    _ => "\x1b[34m💬 ",
+                let (label, color) = match message_type.as_str() {
+                    "warning" => ("warning", "\x1b[33m"),
+                    "question" => ("question", "\x1b[36m"),
+                    "interim_result" => ("interim result", "\x1b[32m"),
+                    _ => ("note", "\x1b[34m"),
                 };
-                eprintln!("{prefix}[agent]\x1b[0m");
+                eprintln!("  {color}┌─ agent {label} ─\x1b[0m");
                 let skin = make_skin();
                 let text = termimad::FmtText::from(&skin, &content, Some(width));
                 eprint!("{text}");
                 eprintln!();
+                eprintln!("  \x1b[90m└────────────────────────────────\x1b[0m");
             }
             // Lifecycle events are informational for the frontend;
             // the REPL already shows a streaming indicator via is_streaming.
@@ -657,11 +661,13 @@ impl Channel for ReplChannel {
 
             // Sub-agent lifecycle events
             StatusUpdate::SubagentSpawned { name, task, .. } => {
-                eprintln!("  \x1b[36m🔀 Sub-agent '{name}' spawned: {task}\x1b[0m");
+                eprintln!("  \x1b[36m┌─ sub-agent: {name}\x1b[0m");
+                eprintln!("  \x1b[90m│ task: {task}\x1b[0m");
+                eprintln!("  \x1b[90m└────────────────────────────────\x1b[0m");
             }
             StatusUpdate::SubagentProgress { message, .. } => {
                 let display = truncate_for_preview(&message, CLI_STATUS_MAX);
-                eprintln!("  \x1b[90m   ↳ {display}\x1b[0m");
+                eprintln!("  \x1b[90m│ progress: {display}\x1b[0m");
             }
             StatusUpdate::SubagentCompleted {
                 name,
@@ -671,9 +677,9 @@ impl Channel for ReplChannel {
             } => {
                 let secs = duration_ms as f64 / 1000.0;
                 if success {
-                    eprintln!("  \x1b[32m✅ Sub-agent '{name}' completed ({secs:.1}s)\x1b[0m");
+                    eprintln!("  \x1b[32m└─ sub-agent '{name}' completed in {secs:.1}s\x1b[0m");
                 } else {
-                    eprintln!("  \x1b[31m❌ Sub-agent '{name}' failed ({secs:.1}s)\x1b[0m");
+                    eprintln!("  \x1b[31m└─ sub-agent '{name}' failed after {secs:.1}s\x1b[0m");
                 }
             }
         }

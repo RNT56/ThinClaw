@@ -1,6 +1,6 @@
 //! Extensions wizard step: tool installation from registry.
 
-use crate::setup::prompts::{print_error, print_info, print_success, select_many};
+use crate::setup::prompts::{print_error, print_info, print_success, select_many, select_one};
 
 use super::helpers::{discover_installed_tools, load_registry_catalog};
 use super::{SetupError, SetupWizard};
@@ -10,7 +10,7 @@ impl SetupWizard {
         let catalog = match load_registry_catalog() {
             Some(c) => c,
             None => {
-                print_info("Extension registry not found. Skipping tool installation.");
+                print_info("Extension registry not found. Tool installation will be skipped.");
                 print_info("Install tools manually with: thinclaw tool install <path>");
                 return Ok(());
             }
@@ -23,14 +23,32 @@ impl SetupWizard {
             .collect();
 
         if tools.is_empty() {
-            print_info("No tools found in registry.");
+            print_info("No installable tools were found in the registry.");
             return Ok(());
         }
 
-        print_info("Available tools from the extension registry:");
-        print_info("Select which tools to install. You can install more later with:");
+        print_info("Tools available from the registry:");
+        print_info("Pick the tools to install now. You can add more later with:");
         print_info("  thinclaw registry install <name>");
         println!();
+
+        let default_bundle = match self.selected_profile {
+            super::OnboardingProfile::LocalAndPrivate => 0,
+            super::OnboardingProfile::BuilderAndCoding => 2,
+            super::OnboardingProfile::Balanced | super::OnboardingProfile::ChannelFirst => 1,
+            super::OnboardingProfile::CustomAdvanced => 0,
+        };
+        let bundle_options = [
+            "Safe      - installed tools plus low-friction defaults",
+            "Balanced  - installed tools plus registry defaults (recommended)",
+            "Power     - preselect every available tool for review",
+        ];
+        let bundle_choice = select_one("Tool bundle", &bundle_options).map_err(SetupError::Io)?;
+        let bundle_choice = if bundle_choice < bundle_options.len() {
+            bundle_choice
+        } else {
+            default_bundle
+        };
 
         // Check which tools are already installed
         let tools_dir = dirs::home_dir()
@@ -44,6 +62,11 @@ impl SetupWizard {
         for tool in &tools {
             let is_installed = installed_tools.contains(&tool.name);
             let is_default = tool.tags.contains(&"default".to_string());
+            let no_auth = tool
+                .auth_summary
+                .as_ref()
+                .and_then(|a| a.method.as_deref())
+                .is_none_or(|method| method == "none");
             let status = if is_installed { " (installed)" } else { "" };
             let auth_hint = tool
                 .auth_summary
@@ -56,7 +79,12 @@ impl SetupWizard {
                 "{}{}{} - {}",
                 tool.display_name, auth_hint, status, tool.description
             );
-            options.push((label, is_default || is_installed));
+            let preselected = match bundle_choice {
+                0 => is_installed || (is_default && no_auth),
+                2 => true,
+                _ => is_default || is_installed,
+            };
+            options.push((label, preselected));
         }
 
         let options_refs: Vec<(&str, bool)> =
@@ -66,7 +94,7 @@ impl SetupWizard {
             .map_err(SetupError::Io)?;
 
         if selected.is_empty() {
-            print_info("No tools selected.");
+            print_info("No tools selected. Skipping install.");
             return Ok(());
         }
 
@@ -94,7 +122,7 @@ impl SetupWizard {
                 match crate::registry::bundled_wasm::extract_bundled(&tool.name, &tools_dir).await {
                     Ok(()) => {
                         print_success(&format!(
-                            "Installed {} (from bundled binary)",
+                            "Installed {} from the bundled binary",
                             tool.display_name
                         ));
                         installed_count += 1;
@@ -163,7 +191,7 @@ impl SetupWizard {
 
         if !auth_needed.is_empty() {
             println!();
-            print_info("Some tools need authentication. Run after setup:");
+            print_info("Some tools still need authentication. Run these after setup:");
             for hint in &auth_needed {
                 print_info(hint);
             }

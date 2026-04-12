@@ -3,12 +3,12 @@
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
+    confirm, input, optional_input, print_error, print_info, print_success, print_warning,
+    secret_input, select_one,
 };
 
 use super::helpers::{
-    fetch_anthropic_models, fetch_ollama_models, fetch_openai_compatible_models,
+    capitalize_first, fetch_anthropic_models, fetch_ollama_models, fetch_openai_compatible_models,
     fetch_openai_models, mask_api_key,
 };
 use super::{SetupError, SetupWizard};
@@ -111,7 +111,7 @@ impl SetupWizard {
             .providers
             .provider_models
             .entry(provider_slug.to_string())
-            .or_insert_with(crate::settings::ProviderModelSlots::default);
+            .or_default();
 
         if slots.primary.is_none() {
             slots.primary = default_primary;
@@ -129,7 +129,7 @@ impl SetupWizard {
             .providers
             .provider_models
             .entry(provider_slug.to_string())
-            .or_insert_with(crate::settings::ProviderModelSlots::default);
+            .or_default();
         slots.primary = Some(model.clone());
         if slots.cheap.is_none() {
             slots.cheap = Self::suggested_cheap_model_for_provider(provider_slug, Some(&model))
@@ -150,7 +150,7 @@ impl SetupWizard {
             .providers
             .provider_models
             .entry(provider_slug.to_string())
-            .or_insert_with(crate::settings::ProviderModelSlots::default);
+            .or_default();
         if slots.primary.is_none() {
             slots.primary = Self::provider_default_model(provider_slug);
         }
@@ -188,6 +188,156 @@ impl SetupWizard {
         };
 
         Ok(selected)
+    }
+
+    fn print_ai_stack_summary(&self) {
+        let provider = self
+            .primary_provider_slug()
+            .map(Self::provider_display_name)
+            .unwrap_or_else(|| "unconfigured".to_string());
+        let primary_model = self
+            .settings
+            .providers
+            .primary_model
+            .clone()
+            .or_else(|| self.settings.selected_model.clone())
+            .unwrap_or_else(|| "unselected".to_string());
+        let routing = self.settings.providers.routing_mode.as_str();
+        let aux_model = self
+            .settings
+            .providers
+            .cheap_model
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let fallback_count = self.settings.providers.fallback_chain.len();
+        let embeddings = if self.settings.embeddings.enabled {
+            format!(
+                "{} / {}",
+                self.settings.embeddings.provider, self.settings.embeddings.model
+            )
+        } else {
+            "disabled".to_string()
+        };
+
+        print_info(&format!(
+            "AI stack: provider={}, primary={}, routing={}, aux={}, fallbacks={}, embeddings={}",
+            provider, primary_model, routing, aux_model, fallback_count, embeddings
+        ));
+    }
+
+    pub(super) async fn step_provider_review_skip_auth(&mut self) -> Result<(), SetupError> {
+        self.print_ai_stack_summary();
+        print_warning(
+            "Skip-auth mode keeps provider review credential-free. This step will not ask for API keys.",
+        );
+        println!();
+
+        let options = &[
+            "Keep current provider",
+            "Pick a provider without asking for credentials",
+        ];
+        let choice = select_one("Review mode", options).map_err(SetupError::Io)?;
+        if choice == 0
+            && let Some(current) = self
+                .primary_provider_slug()
+                .map(str::to_string)
+                .or_else(|| self.settings.llm_backend.clone())
+        {
+            self.ensure_provider_enabled(&current);
+            self.ensure_provider_slot_defaults(&current);
+            print_success(&format!(
+                "Keeping provider review on {} without changing credentials.",
+                Self::provider_display_name(&current)
+            ));
+            return Ok(());
+        }
+
+        print_info("Choose the provider ThinClaw should be ready for after onboarding.");
+        println!();
+        let options = &[
+            "Anthropic        - Claude models (add credentials later)",
+            "OpenAI           - GPT models (add credentials later)",
+            "Gemini           - Google Gemini via AI Studio (add credentials later)",
+            "Tinfoil          - Private inference API (add credentials later)",
+            "Ollama           - local models, no API key needed",
+            "AWS Bedrock      - add credentials later",
+            "llama.cpp        - local llama.cpp OpenAI-compatible server",
+            "OpenRouter       - OpenAI-compatible endpoint with a later API key",
+            "OpenAI-compatible - custom endpoint (base URL set now, auth optional later)",
+        ];
+        let choice = select_one("Provider", options).map_err(SetupError::Io)?;
+
+        match choice {
+            0 => {
+                self.settings.llm_backend = Some("anthropic".to_string());
+                self.settings.providers.primary = Some("anthropic".to_string());
+                self.ensure_provider_enabled("anthropic");
+                self.ensure_provider_slot_defaults("anthropic");
+            }
+            1 => {
+                self.settings.llm_backend = Some("openai".to_string());
+                self.settings.providers.primary = Some("openai".to_string());
+                self.ensure_provider_enabled("openai");
+                self.ensure_provider_slot_defaults("openai");
+            }
+            2 => {
+                self.settings.llm_backend = Some("gemini".to_string());
+                self.settings.providers.primary = Some("gemini".to_string());
+                self.ensure_provider_enabled("gemini");
+                self.ensure_provider_slot_defaults("gemini");
+            }
+            3 => {
+                self.settings.llm_backend = Some("tinfoil".to_string());
+                self.settings.providers.primary = Some("tinfoil".to_string());
+                self.ensure_provider_enabled("tinfoil");
+                self.ensure_provider_slot_defaults("tinfoil");
+            }
+            4 => {
+                self.setup_ollama()?;
+            }
+            5 => {
+                self.settings.llm_backend = Some("bedrock".to_string());
+                self.settings.providers.primary = Some("bedrock".to_string());
+                self.ensure_provider_enabled("bedrock");
+                self.ensure_provider_slot_defaults("bedrock");
+            }
+            6 => {
+                self.setup_llama_cpp()?;
+            }
+            7 => {
+                self.settings.llm_backend = Some("openai_compatible".to_string());
+                self.settings.openai_compatible_base_url =
+                    Some("https://openrouter.ai/api/v1".to_string());
+                self.settings.providers.primary = Some("openrouter".to_string());
+                self.ensure_provider_enabled("openrouter");
+                self.ensure_provider_slot_defaults("openrouter");
+            }
+            8 => {
+                self.settings.llm_backend = Some("openai_compatible".to_string());
+                let url = optional_input(
+                    "Base URL",
+                    self.settings
+                        .openai_compatible_base_url
+                        .as_deref()
+                        .or(Some("e.g. http://localhost:8000/v1")),
+                )
+                .map_err(SetupError::Io)?
+                .ok_or_else(|| {
+                    SetupError::Config(
+                        "Base URL is required when selecting an OpenAI-compatible endpoint."
+                            .to_string(),
+                    )
+                })?;
+                self.settings.openai_compatible_base_url = Some(url);
+                self.settings.providers.primary = Some("openai_compatible".to_string());
+                self.ensure_provider_enabled("openai_compatible");
+                self.ensure_provider_slot_defaults("openai_compatible");
+            }
+            _ => unreachable!(),
+        }
+
+        print_success("Provider review updated. You can add credentials later.");
+        Ok(())
     }
 
     pub(super) async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
@@ -230,7 +380,7 @@ impl SetupWizard {
                     | "openai_compatible"
             );
 
-            if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
+            if is_known && confirm("Keep this provider?", true).map_err(SetupError::Io)? {
                 if is_openrouter {
                     return self.setup_openrouter().await;
                 }
@@ -260,7 +410,7 @@ impl SetupWizard {
             }
         }
 
-        print_info("Select your inference provider:");
+        print_info("Choose your inference provider:");
         println!();
 
         let options = &[
@@ -271,7 +421,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "AWS Bedrock      - AWS-hosted models via native API key",
             "llama.cpp        - local llama.cpp OpenAI-compatible server",
-            "OpenRouter       - 200+ models via single API key",
+            "OpenRouter       - 200+ models with one API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
@@ -589,23 +739,21 @@ impl SetupWizard {
             }
         }
 
-        if self.primary_provider_slug() == Some("bedrock")
+        if (self.primary_provider_slug() == Some("bedrock")
             || self
                 .settings
                 .providers
                 .enabled
                 .iter()
-                .any(|slug| slug == "bedrock")
-        {
-            if self
+                .any(|slug| slug == "bedrock"))
+            && (self
                 .has_provider_secret("BEDROCK_API_KEY", "llm_bedrock_api_key")
                 .await
                 || self
                     .has_provider_secret("BEDROCK_PROXY_API_KEY", "llm_bedrock_proxy_api_key")
-                    .await
-            {
-                return true;
-            }
+                    .await)
+        {
+            return true;
         }
 
         false
@@ -633,7 +781,7 @@ impl SetupWizard {
             "Tinfoil     - Private inference",
         ];
 
-        let choice = select_one("Provider key to add:", options).map_err(SetupError::Io)?;
+        let choice = select_one("Provider to add:", options).map_err(SetupError::Io)?;
         match choice {
             0 => {
                 self.setup_additional_api_key_provider(
@@ -812,7 +960,7 @@ impl SetupWizard {
         }
 
         println!();
-        print_info(&format!("Get your API key from: {hint_url}"));
+        print_info(&format!("Get your API key here: {hint_url}"));
         println!();
 
         let key = secret_input(prompt_label).map_err(SetupError::Io)?;
@@ -830,7 +978,7 @@ impl SetupWizard {
             print_success("API key encrypted and saved");
         } else {
             print_info(&format!(
-                "Secrets not available. Set {env_var} in your environment."
+                "Secrets aren't available. Set {env_var} in your environment."
             ));
         }
 
@@ -881,7 +1029,7 @@ impl SetupWizard {
         }
 
         println!();
-        print_info(&format!("Get your API key from: {hint_url}"));
+        print_info(&format!("Get your API key here: {hint_url}"));
         println!();
 
         let key = secret_input(prompt_label).map_err(SetupError::Io)?;
@@ -896,7 +1044,7 @@ impl SetupWizard {
             print_success("API key encrypted and saved");
         } else {
             print_info(&format!(
-                "Secrets not available. Set {env_var} in your environment."
+                "Secrets aren't available. Set {env_var} in your environment."
             ));
         }
 
@@ -1010,7 +1158,7 @@ impl SetupWizard {
                     })?;
                 print_success("Bedrock API key encrypted and saved");
             } else {
-                print_info("Secrets not available. Set BEDROCK_API_KEY in your environment.");
+                print_info("Secrets aren't available. Set BEDROCK_API_KEY in your environment.");
             }
         }
 
@@ -1058,7 +1206,7 @@ impl SetupWizard {
                         print_success("Legacy Bedrock proxy API key encrypted and saved");
                     } else {
                         print_info(
-                            "Secrets not available. Set BEDROCK_PROXY_API_KEY in your environment.",
+                            "Secrets aren't available. Set BEDROCK_PROXY_API_KEY in your environment.",
                         );
                     }
                 }
@@ -1161,7 +1309,7 @@ impl SetupWizard {
                         })?;
                     print_success("API key encrypted and saved");
                 } else {
-                    print_info("Secrets not available. Set LLM_API_KEY in your environment.");
+                    print_info("Secrets aren't available. Set LLM_API_KEY in your environment.");
                 }
                 self.llm_api_key = Some(SecretString::from(key_str.to_string()));
             }
@@ -1176,6 +1324,8 @@ impl SetupWizard {
     /// Branches on the selected LLM backend and fetches models from the
     /// appropriate provider API, with static defaults as fallback.
     pub(super) async fn step_model_selection(&mut self) -> Result<(), SetupError> {
+        self.print_ai_stack_summary();
+
         // Show current model if already configured
         if let Some(ref current) = self.settings.selected_model {
             print_info(&format!("Current model: {}", current));
@@ -1211,10 +1361,10 @@ impl SetupWizard {
             models.push((default_model.clone(), default_model));
         }
         if provider_slug == "ollama" && models.is_empty() {
-            print_info("No models found. Pull one first: ollama pull llama3");
+            print_info("No models found. Pull one first with: ollama pull llama3");
         }
 
-        let selected = self.choose_model_from_list(&models, "Select a model:")?;
+        let selected = self.choose_model_from_list(&models, "Choose a model:")?;
         self.set_primary_slot_model(&provider_slug, selected.clone());
         print_success(&format!("Selected {}", selected));
 
@@ -1223,75 +1373,209 @@ impl SetupWizard {
 
     /// Step 6: Embeddings configuration.
     pub(super) fn step_embeddings(&mut self) -> Result<(), SetupError> {
-        print_info("Embeddings enable semantic search in your workspace memory.");
+        self.print_ai_stack_summary();
+        print_info("Embeddings turn on semantic search in workspace memory.");
         println!();
 
         if !confirm("Enable semantic search?", true).map_err(SetupError::Io)? {
             self.settings.embeddings.enabled = false;
-            print_info("Embeddings disabled. Workspace will use keyword search only.");
+            self.remove_followup("embeddings");
+            print_info("Embeddings disabled. Workspace will fall back to keyword search.");
             return Ok(());
         }
 
-        let backend = self
-            .settings
-            .llm_backend
-            .as_deref()
-            .unwrap_or("openai_compatible");
-        let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
-            || (backend == "openai" && self.llm_api_key.is_some());
+        let openai_is_primary = self.settings.llm_backend.as_deref() == Some("openai")
+            || self.settings.providers.primary.as_deref() == Some("openai");
+        let has_openai_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+            || (openai_is_primary && self.llm_api_key.is_some());
+        let has_local_ollama = self.settings.llm_backend.as_deref() == Some("ollama")
+            || self.settings.providers.primary.as_deref() == Some("ollama")
+            || self
+                .settings
+                .providers
+                .enabled
+                .iter()
+                .any(|slug| slug == "ollama")
+            || self.settings.ollama_base_url.is_some()
+            || std::env::var("OLLAMA_BASE_URL")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty());
 
-        // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
-        if backend == "openai" && has_openai_key {
+        if has_openai_key && !has_local_ollama {
             self.settings.embeddings.enabled = true;
             self.settings.embeddings.provider = "openai".to_string();
             self.settings.embeddings.model = "text-embedding-3-small".to_string();
-            print_success("Embeddings enabled via OpenAI (using existing API key)");
+            self.remove_followup("embeddings");
+            print_success("Embeddings enabled via OpenAI because a remote key was detected.");
             return Ok(());
         }
 
-        if !has_openai_key {
-            print_info("No OPENAI_API_KEY found for embeddings.");
-            print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
-            self.settings.embeddings.enabled = false;
+        if has_local_ollama && !has_openai_key {
+            self.settings.embeddings.enabled = true;
+            self.settings.embeddings.provider = "ollama".to_string();
+            self.settings.embeddings.model = "nomic-embed-text".to_string();
+            self.remove_followup("embeddings");
+            print_success("Embeddings enabled via Ollama because a local provider was detected.");
             return Ok(());
         }
 
-        let options = &["OpenAI (requires API key)", "Ollama (local, no API key)"];
-
-        let choice = select_one("Select embeddings provider:", options).map_err(SetupError::Io)?;
-
-        match choice {
-            1 => {
-                self.settings.embeddings.enabled = true;
-                self.settings.embeddings.provider = "ollama".to_string();
-                self.settings.embeddings.model = "nomic-embed-text".to_string();
-                print_success("Embeddings enabled via Ollama");
-            }
-            _ => {
-                if !has_openai_key {
-                    print_info("OPENAI_API_KEY not set in environment.");
-                    print_info("Add it to your .env file or environment to enable embeddings.");
+        if has_openai_key && has_local_ollama {
+            let choose_openai = match self.selected_profile {
+                super::OnboardingProfile::LocalAndPrivate => {
+                    let options = [
+                        "Ollama (recommended)       - local/private embeddings",
+                        "OpenAI (requires API key)  - higher-quality remote embeddings",
+                    ];
+                    let choice = select_one(
+                        "Select embeddings provider (Enter uses recommended):",
+                        &options,
+                    )
+                    .map_err(SetupError::Io)?;
+                    choice == 1
                 }
+                super::OnboardingProfile::CustomAdvanced => {
+                    let options = [
+                        "OpenAI                    - higher-quality remote embeddings",
+                        "Ollama                    - local/private embeddings",
+                    ];
+                    let choice = select_one("Select embeddings provider:", &options)
+                        .map_err(SetupError::Io)?;
+                    choice == 0
+                }
+                _ => {
+                    let options = [
+                        "OpenAI (recommended)       - higher-quality remote embeddings",
+                        "Ollama (local, no API key) - local/private embeddings",
+                    ];
+                    let choice = select_one(
+                        "Select embeddings provider (Enter uses recommended):",
+                        &options,
+                    )
+                    .map_err(SetupError::Io)?;
+                    choice == 0
+                }
+            };
+
+            if choose_openai {
                 self.settings.embeddings.enabled = true;
                 self.settings.embeddings.provider = "openai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
-                print_success("Embeddings configured for OpenAI");
+                self.remove_followup("embeddings");
+                print_success("Embeddings configured for OpenAI.");
+            } else {
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "ollama".to_string();
+                self.settings.embeddings.model = "nomic-embed-text".to_string();
+                self.remove_followup("embeddings");
+                print_success("Embeddings configured for Ollama.");
             }
+            return Ok(());
         }
+
+        print_warning("No ready embeddings backend was detected.");
+        print_info(
+            "You can continue now and keep semantic search disabled until credentials or a local embeddings service is ready.",
+        );
+        self.settings.embeddings.enabled = false;
+        self.add_followup(super::FollowupDraft {
+            id: "embeddings".to_string(),
+            title: "Enable semantic search".to_string(),
+            category: crate::settings::OnboardingFollowupCategory::Authentication,
+            status: crate::settings::OnboardingFollowupStatus::Optional,
+            instructions: "Embeddings were requested, but neither a usable OpenAI key nor a local Ollama embeddings path was detected during onboarding.".to_string(),
+            action_hint: Some("Set OPENAI_API_KEY or configure Ollama, then rerun `thinclaw onboard` to enable semantic search.".to_string()),
+        });
+        print_info("A follow-up was saved so onboarding can continue now.");
 
         Ok(())
     }
 
     pub(super) async fn step_smart_routing(&mut self) -> Result<(), SetupError> {
-        print_info("Smart Routing can use a cheaper/faster model for lightweight tasks");
-        print_info("(e.g., routing decisions, heartbeat checks, prompt evaluation).");
-        print_info("The primary model is still used for complex conversations.");
+        self.print_ai_stack_summary();
+        print_info("Choose how ThinClaw should split work across models.");
+        print_info("You can stay on one model, split cheaper work to a faster auxiliary model,");
+        print_info(
+            "or use advisor/executor mode so a lighter advisor can review work before heavy execution.",
+        );
         println!();
 
-        if !confirm("Configure a cheap model for smart routing?", false).map_err(SetupError::Io)? {
-            print_info("Smart routing disabled — all tasks use the primary model.");
-            return Ok(());
+        let recommended_mode = match self.selected_profile {
+            super::OnboardingProfile::LocalAndPrivate => {
+                Some(crate::settings::RoutingMode::PrimaryOnly)
+            }
+            super::OnboardingProfile::BuilderAndCoding => {
+                Some(crate::settings::RoutingMode::AdvisorExecutor)
+            }
+            super::OnboardingProfile::Balanced | super::OnboardingProfile::ChannelFirst => {
+                Some(crate::settings::RoutingMode::CheapSplit)
+            }
+            super::OnboardingProfile::CustomAdvanced => None,
+        };
+        if let Some(recommended_mode) = recommended_mode {
+            print_success(&format!(
+                "Recommended for this profile: {}",
+                recommended_mode.as_str()
+            ));
+        } else {
+            print_info(
+                "Custom / Advanced does not force a routing recommendation. Choose the mode that matches your own cost, control, and determinism goals.",
+            );
         }
+
+        let mode_options = &[
+            "Primary only      - one model handles everything",
+            "Cheap split       - send lighter work to a faster or cheaper auxiliary model",
+            "Advisor executor  - use an auxiliary advisor model before heavier execution",
+            "Policy            - keep or use advanced ordered routing rules",
+        ];
+        let mode_choice = select_one("Routing mode", mode_options).map_err(SetupError::Io)?;
+
+        match mode_choice {
+            0 => {
+                self.settings.providers.smart_routing_enabled = false;
+                self.settings.providers.routing_mode = crate::settings::RoutingMode::PrimaryOnly;
+                self.remove_followup("routing-policy");
+                print_success(
+                    "Primary-only routing enabled. ThinClaw will use the primary model for every request.",
+                );
+                return Ok(());
+            }
+            3 => {
+                self.settings.providers.smart_routing_enabled = true;
+                self.settings.providers.routing_mode = crate::settings::RoutingMode::Policy;
+                if self.settings.providers.policy_rules.is_empty() {
+                    print_warning(
+                        "No custom policy rules are configured yet. ThinClaw will keep your existing defaults until you add rules later.",
+                    );
+                    self.add_followup(super::FollowupDraft {
+                        id: "routing-policy".to_string(),
+                        title: "Add policy routing rules".to_string(),
+                        category: crate::settings::OnboardingFollowupCategory::Provider,
+                        status: crate::settings::OnboardingFollowupStatus::Optional,
+                        instructions: "Policy mode was selected, but no ordered policy rules are configured yet.".to_string(),
+                        action_hint: Some("Set `providers.policy_rules` later if you want deterministic rule-based routing.".to_string()),
+                    });
+                } else {
+                    self.remove_followup("routing-policy");
+                }
+                print_success("Policy routing enabled.");
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let routing_mode = if mode_choice == 2 {
+            crate::settings::RoutingMode::AdvisorExecutor
+        } else {
+            crate::settings::RoutingMode::CheapSplit
+        };
+        let aux_label = if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
+            "advisor"
+        } else {
+            "cheap"
+        };
 
         let current = self
             .settings
@@ -1300,15 +1584,23 @@ impl SetupWizard {
             .clone()
             .unwrap_or_default();
         if !current.is_empty() {
-            let keep = confirm(&format!("Keep current cheap model ({})?", current), true)
-                .map_err(SetupError::Io)?;
+            let keep = confirm(
+                &format!("Keep current {aux_label} model ({})?", current),
+                true,
+            )
+            .map_err(SetupError::Io)?;
             if keep {
                 self.settings.providers.smart_routing_enabled = true;
-                self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
+                self.settings.providers.routing_mode = routing_mode;
                 if let Some((slug, model)) = current.split_once('/') {
                     self.set_preferred_cheap_slot_model(slug, model.to_string());
                 }
-                print_success(&format!("Smart routing enabled — cheap model: {}", current));
+                self.remove_followup("routing-policy");
+                print_success(&format!(
+                    "{} routing enabled. {aux_label} model: {}",
+                    routing_mode.as_str(),
+                    current
+                ));
                 return Ok(());
             }
         }
@@ -1370,8 +1662,9 @@ impl SetupWizard {
             .collect();
         let provider_option_refs: Vec<&str> =
             provider_option_labels.iter().map(String::as_str).collect();
+        let provider_prompt = format!("{} model provider:", capitalize_first(aux_label));
         let provider_choice =
-            select_one("Cheap model provider:", &provider_option_refs).map_err(SetupError::Io)?;
+            select_one(&provider_prompt, &provider_option_refs).map_err(SetupError::Io)?;
         let cheap_provider_slug = provider_choices
             .get(provider_choice)
             .cloned()
@@ -1414,14 +1707,18 @@ impl SetupWizard {
             }
         }
 
-        let cheap_model_id =
-            self.choose_model_from_list(&model_options, "Select the cheap model:")?;
+        let model_prompt = format!("Select the {aux_label} model:");
+        let cheap_model_id = self.choose_model_from_list(&model_options, &model_prompt)?;
         self.settings.providers.smart_routing_enabled = true;
-        self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
+        self.settings.providers.routing_mode = routing_mode;
         self.set_preferred_cheap_slot_model(&cheap_provider_slug, cheap_model_id.clone());
+        self.remove_followup("routing-policy");
         print_success(&format!(
-            "Smart routing enabled — cheap model: {}/{} ({})",
-            cheap_provider_slug, cheap_model_id, display_name
+            "{} routing enabled — {aux_label} model: {}/{} ({})",
+            routing_mode.as_str(),
+            cheap_provider_slug,
+            cheap_model_id,
+            display_name
         ));
 
         // ── Check if the cheap model's provider needs a separate API key ──
@@ -1470,8 +1767,8 @@ impl SetupWizard {
                         // API key is missing — prompt the user.
                         println!();
                         print_info(&format!(
-                            "The cheap model uses {} — a different provider than your primary.",
-                            endpoint.display_name
+                            "The {} model uses a different provider than your primary.",
+                            aux_label
                         ));
                         print_info(&format!(
                             "An API key for {} is required.",
@@ -1495,9 +1792,9 @@ impl SetupWizard {
                         "Provider '{}' is not in the built-in catalog.",
                         cheap_provider_slug
                     ));
-                    print_info(&format!(
-                        "Make sure the API key is set via the appropriate environment variable."
-                    ));
+                    print_info(
+                        "Make sure the API key is set via the matching environment variable.",
+                    );
                 }
             }
         }
@@ -1510,12 +1807,13 @@ impl SetupWizard {
     /// Allows the user to add API keys for additional LLM providers so that
     /// the failover chain and agent-initiated model switching actually work.
     pub(super) async fn step_fallback_providers(&mut self) -> Result<(), SetupError> {
-        print_info("ThinClaw can use multiple LLM providers for failover and cost optimization.");
+        self.print_ai_stack_summary();
+        print_info("ThinClaw can use multiple LLM providers for failover and cost control.");
         print_info("If your primary provider is down, it will automatically try fallbacks.");
         println!();
 
         if !confirm("Add a fallback provider?", false).map_err(SetupError::Io)? {
-            print_info("No fallback providers configured — primary-only mode.");
+            print_info("No fallback providers configured. Primary-only mode is active.");
             return Ok(());
         }
 
@@ -1541,7 +1839,7 @@ impl SetupWizard {
 
         loop {
             println!();
-            print_info("Available providers:");
+            print_info("Available fallback providers:");
             for (i, (slug, ep)) in available.iter().enumerate() {
                 // Check if key already exists
                 let has_env = std::env::var(ep.env_key_name).is_ok();
@@ -1552,7 +1850,8 @@ impl SetupWizard {
                 println!("  {}. {} ({}){status}", i + 1, ep.display_name, slug);
             }
 
-            let choice = input("Select provider (number, or 'done')").map_err(SetupError::Io)?;
+            let choice =
+                input("Select a provider by number, or type 'done'").map_err(SetupError::Io)?;
             if choice.trim().eq_ignore_ascii_case("done") || choice.trim().is_empty() {
                 break;
             }
@@ -1586,7 +1885,7 @@ impl SetupWizard {
             } else {
                 // Prompt for API key
                 println!();
-                print_info(&format!("Enter your {} API key:", endpoint.display_name));
+                print_info(&format!("Enter the {} API key:", endpoint.display_name));
 
                 self.setup_additional_api_key_provider(
                     slug,
@@ -1616,7 +1915,7 @@ impl SetupWizard {
                 .providers
                 .provider_models
                 .entry(slug.to_string())
-                .or_insert_with(crate::settings::ProviderModelSlots::default);
+                .or_default();
             if slots.primary.is_none() {
                 slots.primary = Some(discovered_primary.clone());
             }
@@ -1625,7 +1924,7 @@ impl SetupWizard {
             }
             fallback_slugs.push(format!("{}/{}", slug, discovered_primary));
             print_success(&format!(
-                "Added {} to fallback chain.",
+                "Added {} to the fallback chain.",
                 endpoint.display_name
             ));
 
@@ -1645,7 +1944,7 @@ impl SetupWizard {
             println!();
             print_success(&format!("Fallback chain: {}", chain));
         } else {
-            print_info("No fallback providers added.");
+            print_info("No fallback providers were added.");
         }
 
         Ok(())

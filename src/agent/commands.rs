@@ -494,19 +494,19 @@ impl Agent {
                         Some(identity.actor_id.as_str()),
                     );
 
-                    if requested.eq_ignore_ascii_case("reset") {
-                        if let Some(ref override_lock) = self.deps.model_override {
-                            override_lock.clear(&scope_key).await;
-                            if let Some(store) = self.store() {
-                                let _ = mutate_thread_runtime(store, thread_id, |runtime| {
-                                    runtime.model_override = None;
-                                })
-                                .await;
-                            }
-                            return Ok(SubmissionResult::response(
-                                "Switched back to the default routed model.".to_string(),
-                            ));
+                    if requested.eq_ignore_ascii_case("reset")
+                        && let Some(ref override_lock) = self.deps.model_override
+                    {
+                        override_lock.clear(&scope_key).await;
+                        if let Some(store) = self.store() {
+                            let _ = mutate_thread_runtime(store, thread_id, |runtime| {
+                                runtime.model_override = None;
+                            })
+                            .await;
                         }
+                        return Ok(SubmissionResult::response(
+                            "Switched back to the default routed model.".to_string(),
+                        ));
                     }
 
                     // Validate the model exists

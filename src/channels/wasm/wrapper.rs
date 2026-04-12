@@ -2155,24 +2155,23 @@ impl Channel for WasmChannel {
                     }
 
                     // Extract message_id from the Telegram response
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(msg_id) = parsed
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let Some(msg_id) = parsed
                             .get("result")
                             .and_then(|r| r.get("message_id"))
                             .and_then(|v| v.as_i64())
-                        {
-                            tracing::debug!(
-                                channel = %self.name,
-                                chat_id = chat_id,
-                                message_id = msg_id,
-                                thread_id = ?message_thread_id,
-                                text_len = draft.accumulated.len(),
-                                "send_draft: initial message sent"
-                            );
-                            // Return the message_id as string so DraftReplyState can
-                            // track it for subsequent editMessageText calls
-                            return Ok(Some(msg_id.to_string()));
-                        }
+                    {
+                        tracing::debug!(
+                            channel = %self.name,
+                            chat_id = chat_id,
+                            message_id = msg_id,
+                            thread_id = ?message_thread_id,
+                            text_len = draft.accumulated.len(),
+                            "send_draft: initial message sent"
+                        );
+                        // Return the message_id as string so DraftReplyState can
+                        // track it for subsequent editMessageText calls
+                        return Ok(Some(msg_id.to_string()));
                     }
                     tracing::warn!(
                         "send_draft: could not extract message_id from sendMessage response"
@@ -2776,7 +2775,15 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             task,
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
-            message: format!("[subagent:spawned:{}] {} — {}", agent_id, name, task),
+            message: format!(
+                "[subagent:spawned:{}] {}",
+                agent_id,
+                serde_json::to_string(&serde_json::json!({
+                    "name": name,
+                    "task": task,
+                }))
+                .unwrap_or_else(|_| format!("{} - {}", name, task))
+            ),
             metadata_json,
         },
         StatusUpdate::SubagentProgress {
@@ -2785,23 +2792,43 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             category,
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
-            message: format!("[subagent:progress:{}:{}] {}", agent_id, category, message),
+            message: format!(
+                "[subagent:progress:{}:{}] {}",
+                agent_id,
+                category,
+                serde_json::to_string(&serde_json::json!({
+                    "message": message,
+                }))
+                .unwrap_or_else(|_| message.clone())
+            ),
             metadata_json,
         },
         StatusUpdate::SubagentCompleted {
             agent_id,
             name,
             success,
+            response,
             duration_ms,
+            iterations,
             ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
             message: format!(
-                "[subagent:{}:{}] {} ({:.1}s)",
+                "[subagent:{}:{}] {}",
                 if *success { "completed" } else { "failed" },
                 agent_id,
-                name,
-                *duration_ms as f64 / 1000.0
+                serde_json::to_string(&serde_json::json!({
+                    "name": name,
+                    "success": success,
+                    "response": response,
+                    "duration_ms": duration_ms,
+                    "iterations": iterations,
+                }))
+                .unwrap_or_else(|_| format!(
+                    "{} ({:.1}s)",
+                    name,
+                    *duration_ms as f64 / 1000.0
+                ))
             ),
             metadata_json,
         },
@@ -3460,6 +3487,95 @@ mod tests {
 
         assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
         assert_eq!(wit.message, "Awaiting approval");
+    }
+
+    #[test]
+    fn test_status_to_wit_subagent_spawned_uses_structured_payload() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::SubagentSpawned {
+                agent_id: "agent-1".to_string(),
+                name: "Researcher".to_string(),
+                task: "Check brave search".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+        assert!(wit.message.starts_with("[subagent:spawned:agent-1] "));
+
+        let payload = wit
+            .message
+            .split_once("] ")
+            .map(|(_, payload)| payload)
+            .expect("spawned message should include payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(payload).expect("spawned payload should be valid JSON");
+        assert_eq!(payload["name"], "Researcher");
+        assert_eq!(payload["task"], "Check brave search");
+    }
+
+    #[test]
+    fn test_status_to_wit_subagent_progress_uses_structured_payload() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::SubagentProgress {
+                agent_id: "agent-1".to_string(),
+                message: "Running brave-search".to_string(),
+                category: "tool".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+        assert!(wit.message.starts_with("[subagent:progress:agent-1:tool] "));
+
+        let payload = wit
+            .message
+            .split_once("] ")
+            .map(|(_, payload)| payload)
+            .expect("progress message should include payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(payload).expect("progress payload should be valid JSON");
+        assert_eq!(payload["message"], "Running brave-search");
+    }
+
+    #[test]
+    fn test_status_to_wit_subagent_completed_uses_structured_payload() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::SubagentCompleted {
+                agent_id: "agent-1".to_string(),
+                name: "Researcher".to_string(),
+                success: true,
+                response: "Done".to_string(),
+                duration_ms: 1850,
+                iterations: 3,
+            },
+            &metadata,
+        );
+
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+        assert!(wit.message.starts_with("[subagent:completed:agent-1] "));
+
+        let payload = wit
+            .message
+            .split_once("] ")
+            .map(|(_, payload)| payload)
+            .expect("completed message should include payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(payload).expect("completed payload should be valid JSON");
+        assert_eq!(payload["name"], "Researcher");
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["response"], "Done");
+        assert_eq!(payload["duration_ms"], 1850);
+        assert_eq!(payload["iterations"], 3);
     }
 
     #[test]

@@ -1,13 +1,14 @@
 //! Final wizard summary: save settings and print configuration overview.
 
 use crate::settings::KeySource;
-use crate::setup::prompts::{confirm, print_info, print_success};
+use crate::setup::prompts::{confirm, print_info, print_success, print_warning};
 
 use super::helpers::capitalize_first;
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
+        self.persist_followups();
         self.settings.onboard_completed = true;
 
         // Final persist (idempotent — earlier incremental saves already wrote
@@ -27,9 +28,10 @@ impl SetupWizard {
         print_success("Configuration saved to database");
         println!();
 
-        // Print summary
-        println!("Configuration Summary:");
+        let readiness = self.readiness_summary();
+        println!("Ready to Use");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("  Status: {}", readiness.headline);
 
         let backend = self
             .settings
@@ -68,7 +70,7 @@ impl SetupWizard {
                 "openai_compatible" => "OpenAI-compatible",
                 other => other,
             };
-            println!("  Provider: {}", display);
+            println!("  AI Provider: {}", display);
         }
 
         if let Some(ref model) = self.settings.selected_model {
@@ -79,16 +81,16 @@ impl SetupWizard {
             } else {
                 model.clone()
             };
-            println!("  Model: {}", display);
+            println!("  Primary Model: {}", display);
         }
 
         if self.settings.embeddings.enabled {
             println!(
-                "  Embeddings: {} ({})",
+                "  Semantic Search: {} ({})",
                 self.settings.embeddings.provider, self.settings.embeddings.model
             );
         } else {
-            println!("  Embeddings: disabled");
+            println!("  Semantic Search: disabled");
         }
 
         if let Some(ref tunnel_url) = self.settings.tunnel.public_url {
@@ -154,7 +156,16 @@ impl SetupWizard {
         }
 
         if let Some(ref cheap_model) = self.settings.providers.cheap_model {
-            println!("  Smart routing: {} (cheap)", cheap_model);
+            println!(
+                "  Routing: {} ({})",
+                self.settings.providers.routing_mode.as_str(),
+                cheap_model
+            );
+        } else {
+            println!(
+                "  Routing: {}",
+                self.settings.providers.routing_mode.as_str()
+            );
         }
 
         if self.settings.heartbeat.enabled {
@@ -195,8 +206,30 @@ impl SetupWizard {
 
         if self.settings.observability_backend != "none" {
             println!("  Observability: {}", self.settings.observability_backend);
+        } else {
+            println!("  Observability: disabled");
         }
 
+        println!();
+
+        println!("Needs Attention");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        if self.followups.is_empty() {
+            print_success("No follow-up items were deferred.");
+        } else {
+            for followup in &self.followups {
+                print_warning(&format!("{} — {}", followup.title, followup.instructions));
+                if let Some(ref hint) = followup.action_hint {
+                    print_info(hint);
+                }
+            }
+        }
+        println!();
+
+        println!("What Happens Next");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        print_info("ThinClaw will start normally with the settings you just reviewed.");
+        print_info("There is no second setup loop here; the runtime uses these settings directly.");
         println!();
 
         // ── PATH check & symlink offer ──────────────────────────
@@ -204,10 +237,12 @@ impl SetupWizard {
         // the user can just type `thinclaw` from any terminal.
         self.offer_path_setup();
 
-        println!("To start the agent, run:");
+        println!("Resume Later");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("To start ThinClaw, run:");
         println!("  thinclaw");
         println!();
-        println!("To change settings later:");
+        println!("To update settings later:");
         println!("  thinclaw config set <setting> <value>");
         println!("  thinclaw onboard");
         println!();
@@ -267,8 +302,8 @@ impl SetupWizard {
                 println!();
                 print_info(&format!(
                     "Tip: add thinclaw to your PATH:\n  \
-                     sudo ln -sf {} /usr/local/bin/thinclaw\n  \
-                     Or: export PATH=\"{}:$PATH\"",
+                 sudo ln -sf {} /usr/local/bin/thinclaw\n  \
+                 Or export PATH=\"{}:$PATH\"",
                     current_exe.display(),
                     current_exe
                         .parent()
@@ -332,7 +367,7 @@ impl SetupWizard {
                     }
                     _ => {
                         print_info(&format!(
-                            "Symlink failed. Add manually:\n  \
+                            "Symlink failed. Add it manually:\n  \
                              sudo ln -sf {} {}",
                             current_exe.display(),
                             target.display()
@@ -342,7 +377,7 @@ impl SetupWizard {
             }
             _ => {
                 print_info(&format!(
-                    "Skipped. To add later:\n  \
+                    "Skipped. To add it later:\n  \
                      sudo ln -sf {} {}",
                     current_exe.display(),
                     target.display()

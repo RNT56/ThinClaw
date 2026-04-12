@@ -6,13 +6,14 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) fn step_routines(&mut self) -> Result<(), SetupError> {
-        print_info("Routines let ThinClaw execute scheduled tasks automatically.");
-        print_info("Examples: periodic file backups, daily summaries, cron-style jobs.");
+        print_info("Routines let ThinClaw run scheduled work for you.");
+        print_info("Examples: backups, daily summaries, and cron-style jobs.");
+        print_info("Recommended: keep routines on unless you want a very minimal setup.");
         println!();
 
         if !confirm("Enable routines?", true).map_err(SetupError::Io)? {
             self.settings.routines_enabled = false;
-            print_info("Routines disabled. Enable later with ROUTINES_ENABLED=true.");
+            print_info("Routines disabled. You can turn them back on with ROUTINES_ENABLED=true.");
             return Ok(());
         }
 
@@ -23,14 +24,17 @@ impl SetupWizard {
 
     /// Step 14: Skills.
     pub(super) fn step_skills(&mut self) -> Result<(), SetupError> {
-        print_info("Skills are composable capability plugins that give ThinClaw");
-        print_info("domain-specific knowledge (e.g., coding standards, deployment");
-        print_info("procedures). They are loaded from ~/.thinclaw/skills/.");
+        print_info("Skills are reusable capability packs that add domain knowledge.");
+        print_info(
+            "Examples include coding standards, deployment steps, and project-specific rules.",
+        );
+        print_info("They load from ~/.thinclaw/skills/.");
+        print_info("Recommended: keep skills on unless you want a very minimal local runtime.");
         println!();
 
         if !confirm("Enable skills system?", true).map_err(SetupError::Io)? {
             self.settings.skills_enabled = false;
-            print_info("Skills disabled. Enable later with SKILLS_ENABLED=true.");
+            print_info("Skills disabled. You can turn them back on with SKILLS_ENABLED=true.");
             return Ok(());
         }
 
@@ -41,11 +45,35 @@ impl SetupWizard {
 
     /// Step 11: Claude Code sandbox.
     pub(super) fn step_heartbeat(&mut self) -> Result<(), SetupError> {
-        print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
-        print_info("monitoring for notifications, running scheduled workflows).");
+        print_info(
+            "Heartbeat runs scheduled background tasks like calendar checks and notifications.",
+        );
+        if matches!(
+            self.selected_profile,
+            super::OnboardingProfile::ChannelFirst
+        ) {
+            print_info(
+                "Recommended for this profile: wait to enable heartbeat until your notification channel is ready.",
+            );
+        } else if matches!(
+            self.selected_profile,
+            super::OnboardingProfile::CustomAdvanced
+        ) {
+            print_info(
+                "Custom / Advanced keeps heartbeat opt-in. Leave it off until your channels, routines, and notification routing are exactly how you want them.",
+            );
+        } else {
+            print_info(
+                "Recommended: keep heartbeat off for day one unless you already know where alerts should go.",
+            );
+        }
         println!();
 
-        if !confirm("Enable heartbeat?", false).map_err(SetupError::Io)? {
+        let default_enabled = matches!(
+            self.selected_profile,
+            super::OnboardingProfile::ChannelFirst
+        ) && self.settings.notifications.preferred_channel.is_some();
+        if !confirm("Enable heartbeat?", default_enabled).map_err(SetupError::Io)? {
             self.settings.heartbeat.enabled = false;
             print_info("Heartbeat disabled.");
             return Ok(());

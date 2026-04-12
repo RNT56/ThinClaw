@@ -5,6 +5,7 @@ expression: settings
 ---
 {
   "onboard_completed": false,
+  "onboarding_followups": [],
   "database_backend": null,
   "database_url": null,
   "database_pool_size": null,
@@ -49,6 +50,7 @@ expression: settings
     "signal_group_allow_from": null,
     "telegram_owner_id": null,
     "telegram_stream_mode": null,
+    "telegram_subagent_session_mode": "temp_topic",
     "discord_enabled": false,
     "discord_bot_token": null,
     "discord_guild_id": null,
@@ -72,12 +74,12 @@ expression: settings
     "apple_mail_enabled": false,
     "apple_mail_allow_from": null,
     "apple_mail_poll_interval": null,
-    "apple_mail_unread_only": false,
-    "apple_mail_mark_as_read": false,
+    "apple_mail_unread_only": true,
+    "apple_mail_mark_as_read": true,
     "gateway_port": null,
     "gateway_auth_token": null,
     "wasm_channels": [],
-    "wasm_channels_enabled": false,
+    "wasm_channels_enabled": true,
     "wasm_channels_dir": null
   },
   "notifications": {
@@ -106,6 +108,7 @@ expression: settings
   "webchat_accent_color": null,
   "webchat_show_branding": false,
   "observability_backend": "",
+  "user_timezone": null,
   "agent": {
     "name": "thinclaw",
     "max_parallel_jobs": 5,
@@ -121,6 +124,7 @@ expression: settings
     "thinking_budget_tokens": 10000,
     "auto_approve_tools": false,
     "allow_local_tools": false,
+    "subagent_transparency_level": "balanced",
     "workspace_mode": null
   },
   "wasm": {
@@ -159,6 +163,8 @@ expression: settings
     "primary_model": null,
     "cheap_model": null,
     "preferred_cheap_provider": null,
+    "primary_pool_order": [],
+    "cheap_pool_order": [],
     "provider_models": {},
     "smart_routing_enabled": true,
     "routing_mode": "primary_only",
@@ -167,6 +173,8 @@ expression: settings
     "tool_phase_primary_thinking_enabled": true,
     "allowed_models": {},
     "fallback_chain": [],
-    "policy_rules": []
+    "policy_rules": [],
+    "advisor_max_calls": 3,
+    "advisor_escalation_prompt": null
   }
 }

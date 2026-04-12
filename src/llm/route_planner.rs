@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy};
+use crate::llm::routing_policy::{
+    ProviderCapabilitiesMetadata, RouteCandidate, RoutingContext, RoutingPolicy,
+};
 use crate::llm::smart_routing::{SmartRoutingConfig, TaskComplexity, classify_message};
 use crate::settings::RoutingMode;
 
@@ -42,23 +44,23 @@ impl RequiredCapabilities {
 }
 
 /// Provider capability metadata returned by `LlmProvider::capabilities()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderCapabilities {
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
-    pub supports_vision: bool,
-    pub supports_thinking: bool,
+    pub supports_streaming: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_vision: Option<bool>,
+    pub supports_thinking: Option<bool>,
     pub max_context_tokens: Option<u32>,
 }
 
-impl Default for ProviderCapabilities {
-    fn default() -> Self {
+impl ProviderCapabilities {
+    fn from_candidate(metadata: &ProviderCapabilitiesMetadata) -> Self {
         Self {
-            supports_streaming: true,
-            supports_tools: true,
-            supports_vision: true,
-            supports_thinking: false,
-            max_context_tokens: None,
+            supports_streaming: metadata.supports_streaming,
+            supports_tools: metadata.supports_tools,
+            supports_vision: metadata.supports_vision,
+            supports_thinking: metadata.supports_thinking,
+            max_context_tokens: metadata.max_context_tokens,
         }
     }
 }
@@ -72,6 +74,19 @@ pub struct RoutingScoreBreakdown {
     pub health: f64,
     pub policy_bias: f64,
     pub composite: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateScore {
+    pub target: String,
+    pub telemetry_key: Option<String>,
+    pub breakdown: RoutingScoreBreakdown,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateRejection {
+    pub target: String,
+    pub reason: String,
 }
 
 /// Weights for score dimensions.
@@ -112,6 +127,8 @@ pub struct RoutePlannerInput {
     pub budget_utilization: Option<f64>,
     /// The last user message text (for CheapSplit classification).
     pub last_user_message: Option<String>,
+    /// Optional advisor escalation prompt override (AdvisorExecutor mode).
+    pub advisor_escalation_prompt: Option<String>,
 }
 
 /// How to handle post-response quality escalation.
@@ -145,6 +162,14 @@ pub struct RouteDecision {
     pub reason: String,
     /// Score breakdown for observability (None for override/simple paths).
     pub score: Option<RoutingScoreBreakdown>,
+    /// Candidate targets considered for this decision.
+    pub candidate_list: Vec<String>,
+    /// Candidates hard-rejected by capability/context gates.
+    pub rejections: Vec<CandidateRejection>,
+    /// Per-candidate score breakdown for explainability.
+    pub score_breakdown: Vec<CandidateScore>,
+    /// Planner diagnostics (including fail-open capability notes).
+    pub diagnostics: Vec<String>,
     /// Canonical telemetry key: "logical_role|provider_slug|model_id".
     pub telemetry_key: String,
     /// Index of the matched policy rule, if any.
@@ -164,6 +189,10 @@ impl RouteDecision {
             fallbacks: Vec::new(),
             reason: reason.into(),
             score: None,
+            candidate_list: Vec::new(),
+            rejections: Vec::new(),
+            score_breakdown: Vec::new(),
+            diagnostics: Vec::new(),
             telemetry_key: "primary||".to_string(),
             matched_rule_index: None,
             cascade: CascadePolicy::None,
@@ -210,6 +239,12 @@ pub struct RouteScorer {
     weights: RoutingWeights,
 }
 
+#[derive(Debug, Clone)]
+pub enum ScoreOutcome {
+    Scored(RoutingScoreBreakdown),
+    Rejected(String),
+}
+
 impl RouteScorer {
     pub fn new(weights: RoutingWeights) -> Self {
         Self { weights }
@@ -226,32 +261,41 @@ impl RouteScorer {
         policy_bias: f64,
         budget_utilization: Option<f64>,
         estimated_input_tokens: u32,
-    ) -> Option<RoutingScoreBreakdown> {
+    ) -> ScoreOutcome {
         // ── Hard gates ─────────────────────────────────────────
-        if required.streaming && !capabilities.supports_streaming {
-            return None;
+        if required.streaming && capabilities.supports_streaming == Some(false) {
+            return ScoreOutcome::Rejected("missing required capability: streaming".to_string());
         }
-        if required.tool_use && !capabilities.supports_tools {
-            return None;
+        if required.tool_use && capabilities.supports_tools == Some(false) {
+            return ScoreOutcome::Rejected("missing required capability: tool_use".to_string());
         }
-        if required.vision && !capabilities.supports_vision {
-            return None;
+        if required.vision && capabilities.supports_vision == Some(false) {
+            return ScoreOutcome::Rejected("missing required capability: vision".to_string());
         }
-        if required.extended_thinking && !capabilities.supports_thinking {
-            return None;
+        if required.extended_thinking && capabilities.supports_thinking == Some(false) {
+            return ScoreOutcome::Rejected(
+                "missing required capability: extended_thinking".to_string(),
+            );
         }
 
         // Context window gate
-        if let Some(max_ctx) = capabilities.max_context_tokens {
-            if estimated_input_tokens > max_ctx {
-                return None;
-            }
+        if let Some(max_ctx) = capabilities.max_context_tokens
+            && estimated_input_tokens > max_ctx
+        {
+            return ScoreOutcome::Rejected(format!(
+                "context overflow: {} > {} tokens",
+                estimated_input_tokens, max_ctx
+            ));
         }
 
         // ── Dimension scores ───────────────────────────────────
-        let quality = model_quality_tier(&candidate.target);
-        let cost = cost_score(candidate.cost_per_m_usd);
-        let latency = latency_score(latency_p50_ms);
+        let quality = model_quality_tier_for_candidate(candidate);
+        let mut cost = cost_score(candidate.cost_per_m_usd);
+        if candidate.cost_stale {
+            // Penalize stale dynamic pricing so fresh-priced candidates win ties.
+            cost *= 0.75;
+        }
+        let latency = latency_score(candidate.latency_p50_ms.or(latency_p50_ms));
 
         // ── Budget-aware cost pressure ─────────────────────────
         let cost_weight = match budget_utilization {
@@ -267,7 +311,7 @@ impl RouteScorer {
             + self.weights.health * health
             + policy_bias;
 
-        Some(RoutingScoreBreakdown {
+        ScoreOutcome::Scored(RoutingScoreBreakdown {
             quality,
             cost,
             latency,
@@ -286,25 +330,30 @@ fn model_quality_tier(target: &str) -> f64 {
         0.95
     } else if lower.contains("gpt-4o") && !lower.contains("mini") {
         0.90
-    } else if lower.contains("sonnet") {
-        0.85
-    } else if lower.contains("gemini-2") && lower.contains("pro") {
+    } else if lower.contains("sonnet") || (lower.contains("gemini-2") && lower.contains("pro")) {
         0.85
     } else if lower.contains("flash") && !lower.contains("lite") {
         0.60
-    } else if lower.contains("haiku") {
-        0.50
-    } else if lower.contains("gpt-4o-mini") || lower.contains("4o-mini") {
+    } else if lower.contains("haiku")
+        || lower.contains("gpt-4o-mini")
+        || lower.contains("4o-mini")
+        || lower == "cheap"
+    {
         0.50
     } else if lower.contains("flash-lite") {
         0.35
     } else if lower == "primary" {
         0.85 // assume primary is a quality model
-    } else if lower == "cheap" {
-        0.50 // assume cheap is a cost model
     } else {
         0.50 // unknown
     }
+}
+
+fn model_quality_tier_for_candidate(candidate: &RouteCandidate) -> f64 {
+    if let Some(model_id) = candidate.model_id.as_deref() {
+        return model_quality_tier(model_id);
+    }
+    model_quality_tier(&candidate.target)
 }
 
 /// Cost score: cheaper is higher (inverted, normalized 0–1).
@@ -314,8 +363,8 @@ fn cost_score(cost_per_m_usd: Option<f64>) -> f64 {
             // Normalize: $0/M → 1.0, $100/M → ~0.0
             1.0 / (1.0 + c / 10.0)
         }
-        Some(_) => 1.0,  // free or zero cost
-        None => 0.5,     // unknown cost
+        Some(_) => 1.0, // free or zero cost
+        None => 0.5,    // unknown cost
     }
 }
 
@@ -327,7 +376,7 @@ fn latency_score(p50_ms: Option<f64>) -> f64 {
             1.0 / (1.0 + ms / 2000.0)
         }
         Some(_) => 1.0,
-        None => 0.5,     // unknown latency
+        None => 0.5, // unknown latency
     }
 }
 
@@ -394,11 +443,7 @@ impl RoutePlanner {
     /// 1. Explicit model override → bypass scoring
     /// 2. Mode-specific logic (PrimaryOnly / CheapSplit / AdvisorExecutor / Policy)
     /// 3. Fallback chain
-    pub fn plan(
-        &self,
-        input: &RoutePlannerInput,
-        policy: Option<&RoutingPolicy>,
-    ) -> RouteDecision {
+    pub fn plan(&self, input: &RoutePlannerInput, policy: Option<&RoutingPolicy>) -> RouteDecision {
         // ── 1. Explicit override ───────────────────────────────
         if let Some(ref model_override) = input.model_override {
             return RouteDecision {
@@ -406,6 +451,10 @@ impl RoutePlanner {
                 fallbacks: Vec::new(),
                 reason: format!("Explicit model override: {}", model_override),
                 score: None,
+                candidate_list: input.candidates.iter().map(|c| c.target.clone()).collect(),
+                rejections: Vec::new(),
+                score_breakdown: Vec::new(),
+                diagnostics: Vec::new(),
                 telemetry_key: format!("override||{}", model_override),
                 matched_rule_index: None,
                 cascade: CascadePolicy::None,
@@ -416,7 +465,7 @@ impl RoutePlanner {
 
         // ── 2. Mode-specific logic ─────────────────────────────
         match input.routing_mode {
-            RoutingMode::PrimaryOnly => self.plan_primary_only(),
+            RoutingMode::PrimaryOnly => self.plan_primary_only(input),
             RoutingMode::CheapSplit => self.plan_cheap_split(input),
             RoutingMode::AdvisorExecutor => self.plan_advisor_executor(input),
             RoutingMode::Policy => self.plan_policy(input, policy),
@@ -425,8 +474,10 @@ impl RoutePlanner {
 
     // -- PrimaryOnly --
 
-    fn plan_primary_only(&self) -> RouteDecision {
-        RouteDecision::primary("PrimaryOnly mode")
+    fn plan_primary_only(&self, input: &RoutePlannerInput) -> RouteDecision {
+        let mut decision = RouteDecision::primary("PrimaryOnly mode");
+        decision.candidate_list = input.candidates.iter().map(|c| c.target.clone()).collect();
+        decision
     }
 
     // -- CheapSplit (preserved) --
@@ -434,10 +485,10 @@ impl RoutePlanner {
     fn plan_cheap_split(&self, input: &RoutePlannerInput) -> RouteDecision {
         // Hard override: tools/streaming → always primary
         if input.required_capabilities.tool_use || input.required_capabilities.streaming {
-            let mut decision = RouteDecision::primary(
-                "CheapSplit: tool/streaming request → primary (always)"
-            );
+            let mut decision =
+                RouteDecision::primary("CheapSplit: tool/streaming request → primary (always)");
             decision.telemetry_key = "primary||".to_string();
+            decision.candidate_list = input.candidates.iter().map(|c| c.target.clone()).collect();
 
             // Tool-phase synthesis decision
             if input.required_capabilities.tool_use
@@ -451,57 +502,97 @@ impl RoutePlanner {
             return decision;
         }
 
-        // Classify by message content
-        let msg = input.last_user_message.as_deref().unwrap_or("");
-        let complexity = classify_message(msg, &self.cheap_split_config);
+        let complexity = self.derive_cheap_split_complexity(input);
+        let (bias_cheap, bias_primary, reason) = match complexity {
+            TaskComplexity::Simple => (
+                0.25,
+                -0.08,
+                "CheapSplit: simple context/profile favors cheap model",
+            ),
+            TaskComplexity::Complex => (
+                -0.08,
+                0.25,
+                "CheapSplit: complex context/profile favors primary model",
+            ),
+            TaskComplexity::Moderate => (
+                0.12,
+                0.08,
+                if self.cascade_enabled {
+                    "CheapSplit: moderate context/profile favors cheap with cascade"
+                } else {
+                    "CheapSplit: moderate context/profile favors cheap without cascade"
+                },
+            ),
+        };
 
-        match complexity {
-            TaskComplexity::Simple => RouteDecision {
-                target: "cheap".to_string(),
-                fallbacks: vec!["primary".to_string()],
-                reason: "CheapSplit: Simple task → cheap model".to_string(),
-                score: None,
-                telemetry_key: "cheap||".to_string(),
-                matched_rule_index: None,
-                cascade: CascadePolicy::None,
-                advisor: None,
-                tool_phase_synthesis: false,
-            },
-            TaskComplexity::Complex => RouteDecision {
-                target: "primary".to_string(),
-                fallbacks: Vec::new(),
-                reason: "CheapSplit: Complex task → primary model".to_string(),
-                score: None,
-                telemetry_key: "primary||".to_string(),
-                matched_rule_index: None,
-                cascade: CascadePolicy::None,
-                advisor: None,
-                tool_phase_synthesis: false,
-            },
-            TaskComplexity::Moderate => {
-                let cascade = if self.cascade_enabled {
-                    CascadePolicy::InspectAndEscalate
+        let evaluation = self.evaluate_candidates(
+            input,
+            |candidate| {
+                if candidate.target == "cheap" || candidate.target.ends_with("@cheap") {
+                    bias_cheap
+                } else if candidate.target == "primary" || candidate.target.ends_with("@primary") {
+                    bias_primary
                 } else {
-                    CascadePolicy::None
-                };
-                let reason = if self.cascade_enabled {
-                    "CheapSplit: Moderate task → cheap (cascade enabled)"
-                } else {
-                    "CheapSplit: Moderate task → cheap (cascade disabled)"
-                };
-                RouteDecision {
-                    target: "cheap".to_string(),
-                    fallbacks: vec!["primary".to_string()],
-                    reason: reason.to_string(),
-                    score: None,
-                    telemetry_key: "cheap||".to_string(),
-                    matched_rule_index: None,
-                    cascade,
-                    advisor: None,
-                    tool_phase_synthesis: false,
+                    0.0
                 }
+            },
+            Some(&["cheap", "primary"]),
+        );
+
+        let cascade = if complexity == TaskComplexity::Moderate && self.cascade_enabled {
+            CascadePolicy::InspectAndEscalate
+        } else {
+            CascadePolicy::None
+        };
+
+        let selected = evaluation
+            .ranked
+            .first()
+            .or_else(|| evaluation.ranked_all.first());
+        if let Some(selected) = selected {
+            let mut fallbacks = Vec::new();
+            if selected.target == "cheap" {
+                fallbacks.push("primary".to_string());
             }
+            if selected.target != "primary" && !fallbacks.iter().any(|fb| fb == "primary") {
+                fallbacks.push("primary".to_string());
+            }
+
+            return RouteDecision {
+                target: selected.target.clone(),
+                fallbacks,
+                reason: reason.to_string(),
+                score: Some(selected.breakdown.clone()),
+                candidate_list: evaluation.candidate_list,
+                rejections: evaluation.rejections,
+                score_breakdown: evaluation.score_breakdown,
+                diagnostics: evaluation.diagnostics,
+                telemetry_key: selected
+                    .telemetry_key
+                    .clone()
+                    .unwrap_or_else(|| selected.target.clone()),
+                matched_rule_index: None,
+                cascade,
+                advisor: None,
+                tool_phase_synthesis: false,
+            };
         }
+
+        let mut decision = RouteDecision::primary(reason);
+        decision.candidate_list = evaluation.candidate_list;
+        decision.rejections = evaluation.rejections;
+        decision.score_breakdown = evaluation.score_breakdown;
+        decision.diagnostics = evaluation.diagnostics;
+        if !decision
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("NO_CAPABLE_CANDIDATE"))
+        {
+            decision
+                .diagnostics
+                .push("NO_CAPABLE_CANDIDATE: all candidates hard-rejected".to_string());
+        }
+        decision
     }
 
     // -- AdvisorExecutor (new) --
@@ -529,7 +620,11 @@ impl RoutePlanner {
             Some(AdvisorConfig {
                 advisor_target: "primary".to_string(),
                 max_advisor_calls: self.advisor_max_calls,
-                advisor_system_prompt: ADVISOR_SYSTEM_PROMPT.to_string(),
+                advisor_system_prompt: input
+                    .advisor_escalation_prompt
+                    .clone()
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .unwrap_or_else(|| ADVISOR_SYSTEM_PROMPT.to_string()),
             })
         } else {
             None
@@ -540,6 +635,10 @@ impl RoutePlanner {
             fallbacks: vec!["primary".to_string()],
             reason,
             score: None,
+            candidate_list: input.candidates.iter().map(|c| c.target.clone()).collect(),
+            rejections: Vec::new(),
+            score_breakdown: Vec::new(),
+            diagnostics: Vec::new(),
             telemetry_key: if has_cheap {
                 "executor||".to_string()
             } else {
@@ -564,20 +663,68 @@ impl RoutePlanner {
         };
 
         let decision = policy.select_decision(&input.routing_context, &input.candidates);
-        let reason = decision
-            .matched_rule_index
-            .map(|idx| format!("Policy rule {} matched", idx))
-            .unwrap_or_else(|| "Policy default target".to_string());
+        let evaluation = self.evaluate_candidates(input, |_candidate| 0.0, None);
+
+        let selected_from_policy = evaluation
+            .ranked_all
+            .iter()
+            .find(|ranked| ranked.target == decision.target);
+        let fallback_selection = evaluation.ranked_all.first();
+
+        let (selected, reason) = if let Some(selected) = selected_from_policy {
+            let reason = decision
+                .matched_rule_index
+                .map(|idx| format!("Policy rule {} matched", idx))
+                .unwrap_or_else(|| "Policy default target".to_string());
+            (selected, reason)
+        } else if let Some(selected) = fallback_selection {
+            let mut reason = decision
+                .matched_rule_index
+                .map(|idx| {
+                    format!(
+                        "Policy rule {} matched but target unavailable/capability-rejected",
+                        idx
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "Policy default target unavailable; scorer tie-break".to_string()
+                });
+            reason.push_str("; selected highest scored capable candidate");
+            (selected, reason)
+        } else {
+            let mut fallback = RouteDecision::primary("Policy mode: no capable candidates");
+            fallback.candidate_list = evaluation.candidate_list;
+            fallback.rejections = evaluation.rejections;
+            fallback.score_breakdown = evaluation.score_breakdown;
+            fallback.diagnostics = evaluation.diagnostics;
+            if !fallback
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("NO_CAPABLE_CANDIDATE"))
+            {
+                fallback
+                    .diagnostics
+                    .push("NO_CAPABLE_CANDIDATE: all candidates hard-rejected".to_string());
+            }
+            fallback.matched_rule_index = decision.matched_rule_index;
+            return fallback;
+        };
 
         RouteDecision {
-            target: decision.target,
+            target: selected.target.clone(),
             fallbacks: decision.fallbacks,
             reason,
-            score: None,
-            telemetry_key: decision
-                .matched_rule_index
-                .map(|idx| format!("policy_rule_{}||", idx))
-                .unwrap_or_else(|| "policy_default||".to_string()),
+            score: Some(selected.breakdown.clone()),
+            candidate_list: evaluation.candidate_list,
+            rejections: evaluation.rejections,
+            score_breakdown: evaluation.score_breakdown,
+            diagnostics: evaluation.diagnostics,
+            telemetry_key: selected.telemetry_key.clone().unwrap_or_else(|| {
+                decision
+                    .matched_rule_index
+                    .map(|idx| format!("policy_rule_{}||", idx))
+                    .unwrap_or_else(|| "policy_default||".to_string())
+            }),
             matched_rule_index: decision.matched_rule_index,
             cascade: CascadePolicy::None,
             advisor: None,
@@ -588,10 +735,188 @@ impl RoutePlanner {
     // -- Helper --
 
     fn has_cheap_candidate(&self, input: &RoutePlannerInput) -> bool {
-        input
-            .candidates
-            .iter()
-            .any(|c| c.target == "cheap")
+        input.candidates.iter().any(|c| c.target == "cheap")
+    }
+
+    fn derive_cheap_split_complexity(&self, input: &RoutePlannerInput) -> TaskComplexity {
+        // Runtime context first: avoid empty-message defaults.
+        let mut base = if input.routing_context.has_vision
+            || input.routing_context.estimated_input_tokens >= 12_000
+        {
+            TaskComplexity::Complex
+        } else if input.routing_context.estimated_input_tokens <= 600
+            && !input.routing_context.has_tools
+            && !input.routing_context.requires_streaming
+        {
+            TaskComplexity::Simple
+        } else {
+            TaskComplexity::Moderate
+        };
+
+        // Optional enrichment from last user message (only when non-empty).
+        if let Some(msg) = input
+            .last_user_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|msg| !msg.is_empty())
+        {
+            let text_complexity = classify_message(msg, &self.cheap_split_config);
+            base = merge_complexity(base, text_complexity);
+        }
+
+        base
+    }
+
+    fn evaluate_candidates<F>(
+        &self,
+        input: &RoutePlannerInput,
+        policy_bias_for: F,
+        target_filter: Option<&[&str]>,
+    ) -> CandidateEvaluation
+    where
+        F: Fn(&RouteCandidate) -> f64,
+    {
+        let mut ranked_all = Vec::new();
+        let mut ranked_filtered = Vec::new();
+        let mut rejections = Vec::new();
+        let mut score_breakdown = Vec::new();
+        let mut diagnostics = Vec::new();
+        let candidate_list: Vec<String> =
+            input.candidates.iter().map(|c| c.target.clone()).collect();
+
+        for candidate in &input.candidates {
+            let capabilities = ProviderCapabilities::from_candidate(&candidate.capabilities);
+            if input.required_capabilities.streaming && capabilities.supports_streaming.is_none() {
+                diagnostics.push(format!(
+                    "Capability metadata unknown (streaming) for '{}'; fail-open",
+                    candidate.target
+                ));
+            }
+            if input.required_capabilities.tool_use && capabilities.supports_tools.is_none() {
+                diagnostics.push(format!(
+                    "Capability metadata unknown (tool_use) for '{}'; fail-open",
+                    candidate.target
+                ));
+            }
+            if input.required_capabilities.vision && capabilities.supports_vision.is_none() {
+                diagnostics.push(format!(
+                    "Capability metadata unknown (vision) for '{}'; fail-open",
+                    candidate.target
+                ));
+            }
+
+            let health = candidate
+                .health
+                .or_else(|| {
+                    candidate
+                        .telemetry_key
+                        .as_ref()
+                        .and_then(|key| input.provider_health.get(key).copied())
+                })
+                .or_else(|| input.provider_health.get(&candidate.target).copied())
+                .unwrap_or(0.8);
+            let latency = candidate.latency_p50_ms;
+            let policy_bias = policy_bias_for(candidate);
+            match self.scorer.score(
+                candidate,
+                &capabilities,
+                &input.required_capabilities,
+                health,
+                latency,
+                policy_bias,
+                input.budget_utilization,
+                input.routing_context.estimated_input_tokens,
+            ) {
+                ScoreOutcome::Scored(breakdown) => {
+                    let scored = ScoredCandidate {
+                        target: candidate.target.clone(),
+                        telemetry_key: candidate.telemetry_key.clone(),
+                        breakdown: breakdown.clone(),
+                    };
+                    ranked_all.push(scored.clone());
+                    let passes_filter = match target_filter {
+                        None => true,
+                        Some(filters) => filters.iter().any(|entry| {
+                            if *entry == "cheap" {
+                                candidate.target == "cheap" || candidate.target.ends_with("@cheap")
+                            } else if *entry == "primary" {
+                                candidate.target == "primary"
+                                    || candidate.target.ends_with("@primary")
+                            } else {
+                                *entry == candidate.target
+                            }
+                        }),
+                    };
+                    if passes_filter {
+                        ranked_filtered.push(scored.clone());
+                    }
+                    score_breakdown.push(CandidateScore {
+                        target: candidate.target.clone(),
+                        telemetry_key: candidate.telemetry_key.clone(),
+                        breakdown,
+                    });
+                }
+                ScoreOutcome::Rejected(reason) => {
+                    rejections.push(CandidateRejection {
+                        target: candidate.target.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        ranked_all.sort_by(|a, b| {
+            b.breakdown
+                .composite
+                .partial_cmp(&a.breakdown.composite)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ranked_filtered.sort_by(|a, b| {
+            b.breakdown
+                .composite
+                .partial_cmp(&a.breakdown.composite)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        diagnostics.sort();
+        diagnostics.dedup();
+        if ranked_all.is_empty() && !candidate_list.is_empty() {
+            diagnostics.push("NO_CAPABLE_CANDIDATE: all candidates hard-rejected".to_string());
+        }
+
+        CandidateEvaluation {
+            candidate_list,
+            rejections,
+            score_breakdown,
+            diagnostics,
+            ranked: ranked_filtered,
+            ranked_all,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScoredCandidate {
+    target: String,
+    telemetry_key: Option<String>,
+    breakdown: RoutingScoreBreakdown,
+}
+
+#[derive(Debug, Clone)]
+struct CandidateEvaluation {
+    candidate_list: Vec<String>,
+    rejections: Vec<CandidateRejection>,
+    score_breakdown: Vec<CandidateScore>,
+    diagnostics: Vec<String>,
+    ranked: Vec<ScoredCandidate>,
+    ranked_all: Vec<ScoredCandidate>,
+}
+
+fn merge_complexity(a: TaskComplexity, b: TaskComplexity) -> TaskComplexity {
+    match (a, b) {
+        (TaskComplexity::Complex, _) | (_, TaskComplexity::Complex) => TaskComplexity::Complex,
+        (TaskComplexity::Moderate, _) | (_, TaskComplexity::Moderate) => TaskComplexity::Moderate,
+        _ => TaskComplexity::Simple,
     }
 }
 
@@ -600,9 +925,7 @@ impl RoutePlanner {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Validate provider settings and return warnings.
-pub fn validate_providers_settings(
-    settings: &crate::settings::ProvidersSettings,
-) -> Vec<String> {
+pub fn validate_providers_settings(settings: &crate::settings::ProvidersSettings) -> Vec<String> {
     let mut warnings = Vec::new();
 
     // AdvisorExecutor requires a cheap model (executor)
@@ -627,15 +950,14 @@ pub fn validate_providers_settings(
     }
 
     // cheap_model references disabled provider
-    if let Some(ref spec) = settings.cheap_model {
-        if let Some((slug, _)) = spec.split_once('/') {
-            if !settings.enabled.iter().any(|e| e == slug) {
-                warnings.push(format!(
-                    "cheap_model '{}' references provider '{}' not in enabled list",
-                    spec, slug
-                ));
-            }
-        }
+    if let Some(ref spec) = settings.cheap_model
+        && let Some((slug, _)) = spec.split_once('/')
+        && !settings.enabled.iter().any(|e| e == slug)
+    {
+        warnings.push(format!(
+            "cheap_model '{}' references provider '{}' not in enabled list",
+            spec, slug
+        ));
     }
 
     warnings
@@ -657,11 +979,7 @@ pub fn canonical_telemetry_key(logical_role: &str, provider_slug: &str, model_id
 ///
 /// Call this after the planner resolves a target to a concrete provider,
 /// so the telemetry key reflects the actual provider and model used.
-pub fn enrich_telemetry_key(
-    decision: &mut RouteDecision,
-    provider_slug: &str,
-    model_id: &str,
-) {
+pub fn enrich_telemetry_key(decision: &mut RouteDecision, provider_slug: &str, model_id: &str) {
     // Extract logical role from the current key (the part before the first '|')
     let logical_role = decision
         .telemetry_key
@@ -686,6 +1004,9 @@ pub fn log_routing_decision(decision: &RouteDecision, mode: &str) {
         tool_phase_synthesis = decision.tool_phase_synthesis,
         matched_rule = ?decision.matched_rule_index,
         fallback_count = decision.fallbacks.len(),
+        candidate_count = decision.candidate_list.len(),
+        rejection_count = decision.rejections.len(),
+        diagnostics = ?decision.diagnostics,
         quality_score = decision.score.as_ref().map(|s| s.quality),
         cost_score = decision.score.as_ref().map(|s| s.cost),
         composite_score = decision.score.as_ref().map(|s| s.composite),
@@ -850,6 +1171,7 @@ mod tests {
             turn_cost_usd: 0.0,
             budget_utilization: None,
             last_user_message: None,
+            advisor_escalation_prompt: None,
         }
     }
 
@@ -908,10 +1230,8 @@ mod tests {
         let mut input = default_input();
         input.routing_mode = RoutingMode::CheapSplit;
         // A message that's moderate: not matching simple or complex keywords, mid-length
-        input.last_user_message = Some(
-            "Can you tell me about the differences between these approaches?"
-                .to_string(),
-        );
+        input.last_user_message =
+            Some("Can you tell me about the differences between these approaches?".to_string());
         let d = p.plan(&input, None);
         assert_eq!(d.target, "cheap");
         assert_eq!(d.cascade, CascadePolicy::InspectAndEscalate);
@@ -1033,7 +1353,7 @@ mod tests {
     fn scorer_hard_gate_streaming() {
         let scorer = RouteScorer::new(RoutingWeights::default());
         let caps = ProviderCapabilities {
-            supports_streaming: false,
+            supports_streaming: Some(false),
             ..Default::default()
         };
         let required = RequiredCapabilities {
@@ -1050,7 +1370,31 @@ mod tests {
             None,
             100,
         );
-        assert!(result.is_none());
+        assert!(matches!(result, ScoreOutcome::Rejected(_)));
+    }
+
+    #[test]
+    fn scorer_fail_open_on_unknown_capability_metadata() {
+        let scorer = RouteScorer::new(RoutingWeights::default());
+        let caps = ProviderCapabilities::default(); // unknown capability metadata => fail-open
+        let required = RequiredCapabilities {
+            streaming: true,
+            ..Default::default()
+        };
+        let result = scorer.score(
+            &RouteCandidate::new("test", Some(10.0)),
+            &caps,
+            &required,
+            1.0,
+            None,
+            0.0,
+            None,
+            100,
+        );
+        assert!(
+            matches!(result, ScoreOutcome::Scored(_)),
+            "unknown capability metadata must fail-open"
+        );
     }
 
     #[test]
@@ -1071,7 +1415,7 @@ mod tests {
             None,
             8000, // exceeds context window
         );
-        assert!(result.is_none());
+        assert!(matches!(result, ScoreOutcome::Rejected(_)));
     }
 
     #[test]
@@ -1080,34 +1424,62 @@ mod tests {
         let caps = ProviderCapabilities::default();
         let required = RequiredCapabilities::default();
 
-        let normal = scorer
-            .score(
-                &RouteCandidate::new("test", Some(10.0)),
-                &caps,
-                &required,
-                1.0,
-                None,
-                0.0,
-                Some(0.3), // low budget usage
-                100,
-            )
-            .unwrap();
+        let normal = match scorer.score(
+            &RouteCandidate::new("test", Some(10.0)),
+            &caps,
+            &required,
+            1.0,
+            None,
+            0.0,
+            Some(0.3), // low budget usage
+            100,
+        ) {
+            ScoreOutcome::Scored(score) => score,
+            ScoreOutcome::Rejected(reason) => panic!("unexpected rejection: {reason}"),
+        };
 
-        let high_pressure = scorer
-            .score(
-                &RouteCandidate::new("test", Some(10.0)),
-                &caps,
-                &required,
-                1.0,
-                None,
-                0.0,
-                Some(0.95), // near budget limit
-                100,
-            )
-            .unwrap();
+        let high_pressure = match scorer.score(
+            &RouteCandidate::new("test", Some(10.0)),
+            &caps,
+            &required,
+            1.0,
+            None,
+            0.0,
+            Some(0.95), // near budget limit
+            100,
+        ) {
+            ScoreOutcome::Scored(score) => score,
+            ScoreOutcome::Rejected(reason) => panic!("unexpected rejection: {reason}"),
+        };
 
         // High budget pressure should increase cost weight, changing composite
         assert!(high_pressure.composite != normal.composite);
+    }
+
+    #[test]
+    fn scorer_prefers_resolved_model_identity_for_quality() {
+        let scorer = RouteScorer::new(RoutingWeights::default());
+        let caps = ProviderCapabilities::default();
+        let required = RequiredCapabilities::default();
+
+        let high_quality = RouteCandidate::new("openai@primary", Some(30.0))
+            .with_identity(Some("openai".to_string()), Some("gpt-4o".to_string()));
+        let low_quality = RouteCandidate::new("openai@cheap", Some(1.0))
+            .with_identity(Some("openai".to_string()), Some("gpt-4o-mini".to_string()));
+
+        let high = match scorer.score(&high_quality, &caps, &required, 1.0, None, 0.0, None, 256) {
+            ScoreOutcome::Scored(score) => score,
+            ScoreOutcome::Rejected(reason) => panic!("unexpected rejection: {reason}"),
+        };
+        let low = match scorer.score(&low_quality, &caps, &required, 1.0, None, 0.0, None, 256) {
+            ScoreOutcome::Scored(score) => score,
+            ScoreOutcome::Rejected(reason) => panic!("unexpected rejection: {reason}"),
+        };
+
+        assert!(
+            high.quality > low.quality,
+            "expected model identity-aware quality to rank gpt-4o above gpt-4o-mini"
+        );
     }
 
     // -- Quality tiers --
@@ -1121,20 +1493,71 @@ mod tests {
         assert!(model_quality_tier("cheap") < 0.6);
     }
 
+    #[test]
+    fn cheap_split_accepts_provider_slot_aliases_for_bias() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::CheapSplit;
+        input.last_user_message = Some("hello".to_string());
+        input.candidates = vec![
+            RouteCandidate::new("openai@primary", Some(30.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-4o".to_string())),
+            RouteCandidate::new("openai@cheap", Some(1.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-4o-mini".to_string())),
+        ];
+        let decision = p.plan(&input, None);
+        assert!(
+            decision.target == "openai@cheap" || decision.target == "cheap",
+            "expected cheap split to favor cheap slot target, got {}",
+            decision.target
+        );
+    }
+
+    #[test]
+    fn policy_emits_no_capable_candidate_diagnostic_when_all_hard_rejected() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::Policy;
+        input.required_capabilities.streaming = true;
+        input.candidates = vec![
+            RouteCandidate::new("primary", Some(30.0)).with_capabilities(
+                crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(false),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let policy = RoutingPolicy::new("primary");
+        let decision = p.plan(&input, Some(&policy));
+        assert!(
+            decision
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("NO_CAPABLE_CANDIDATE")),
+            "expected NO_CAPABLE_CANDIDATE diagnostic, got {:?}",
+            decision.diagnostics
+        );
+    }
+
     // -- Config validation --
 
     #[test]
     fn validate_advisor_without_cheap_model() {
-        let mut settings = crate::settings::ProvidersSettings::default();
-        settings.routing_mode = RoutingMode::AdvisorExecutor;
+        let settings = crate::settings::ProvidersSettings {
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..crate::settings::ProvidersSettings::default()
+        };
         let warnings = validate_providers_settings(&settings);
         assert!(warnings.iter().any(|w| w.contains("AdvisorExecutor")));
     }
 
     #[test]
     fn validate_policy_without_rules() {
-        let mut settings = crate::settings::ProvidersSettings::default();
-        settings.routing_mode = RoutingMode::Policy;
+        let settings = crate::settings::ProvidersSettings {
+            routing_mode: RoutingMode::Policy,
+            ..crate::settings::ProvidersSettings::default()
+        };
         let warnings = validate_providers_settings(&settings);
         assert!(warnings.iter().any(|w| w.contains("no rules")));
     }
@@ -1213,13 +1636,15 @@ mod tests {
 
     #[test]
     fn latency_weighted_health_low_latency() {
-        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(500.0));
+        let probe =
+            LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(500.0));
         assert_eq!(probe.health_score(), 1.0); // No penalty below 2000ms
     }
 
     #[test]
     fn latency_weighted_health_high_latency() {
-        let probe = LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(5500.0));
+        let probe =
+            LatencyWeightedHealthProbe::new("test", CircuitBreakerState::Closed, Some(5500.0));
         let score = probe.health_score();
         assert!(score < 0.8, "High latency should penalize score: {}", score);
         assert!(score >= 0.1, "Score should never drop below 0.1: {}", score);
@@ -1234,8 +1659,14 @@ mod tests {
     #[test]
     fn build_health_map_from_probes() {
         let probes: Vec<Box<dyn HealthProbe>> = vec![
-            Box::new(CircuitBreakerHealthProbe::new("primary", CircuitBreakerState::Closed)),
-            Box::new(CircuitBreakerHealthProbe::new("cheap", CircuitBreakerState::HalfOpen)),
+            Box::new(CircuitBreakerHealthProbe::new(
+                "primary",
+                CircuitBreakerState::Closed,
+            )),
+            Box::new(CircuitBreakerHealthProbe::new(
+                "cheap",
+                CircuitBreakerState::HalfOpen,
+            )),
         ];
         let map = build_health_map(&probes);
         assert_eq!(map.get("primary"), Some(&1.0));

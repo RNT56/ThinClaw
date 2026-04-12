@@ -43,6 +43,10 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 # 2. Run onboarding
 thinclaw onboard
+# or force the full-screen Humanist Cockpit shell:
+# thinclaw onboard --ui tui
+# or fully reset ThinClaw state and start over:
+# thinclaw reset --yes
 
 # 3. Start ThinClaw locally
 thinclaw run --no-onboard
@@ -52,6 +56,8 @@ thinclaw run --no-onboard
 ```
 
 For a deeper setup path, including service mode, remote access, and provider guidance, use the docs hub at [docs/README.md](docs/README.md).
+
+The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries and saved follow-up notes so operators can pause setup without losing context.
 
 ## Why ThinClaw
 
@@ -97,11 +103,13 @@ You can run ThinClaw:
 ## Core Capabilities
 
 - Multi-surface operation through the CLI, gateway, channels, and background jobs
+- Humanist Cockpit onboarding with shared CLI/TUI readiness framing and saved follow-up notes
 - Hybrid delivery across native channels and packaged WASM channels
 - Workspace-backed memory with search, citations, and identity files
 - Extension support through built-in tools, WASM tools, and MCP servers
 - Multi-provider LLM routing, failover, and cost controls
 - Operator-facing gateway UI for chat, memory, routines, logs, extensions, providers, and settings
+- Operator-facing transparency controls for subagent detail levels and Telegram subagent session routing
 
 ## Deployment Modes
 

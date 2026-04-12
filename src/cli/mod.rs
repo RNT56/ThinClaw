@@ -31,6 +31,7 @@ pub mod nodes;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+mod reset;
 #[cfg(feature = "repl")]
 mod service;
 pub mod session_export;
@@ -59,6 +60,7 @@ pub use message::{MessageCommand, run_message_command};
 pub use models::{ModelCommand, run_model_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+pub use reset::{ResetCommand, run_reset_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
@@ -67,6 +69,8 @@ pub use tool::{ToolCommand, run_tool_command};
 pub use update::{UpdateCommand, run_update_command};
 
 use clap::{Parser, Subcommand};
+
+use crate::setup::UiMode;
 
 #[derive(Parser, Debug)]
 #[command(name = "thinclaw")]
@@ -113,7 +117,14 @@ pub enum Command {
         /// Reconfigure channels only
         #[arg(long)]
         channels_only: bool,
+
+        /// Onboarding interface mode
+        #[arg(long, value_enum, default_value_t = UiMode::Auto)]
+        ui: UiMode,
     },
+
+    /// Fully reset ThinClaw state so onboarding can start fresh
+    Reset(ResetCommand),
 
     /// Manage configuration settings
     #[command(subcommand)]

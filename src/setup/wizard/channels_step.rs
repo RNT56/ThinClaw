@@ -20,16 +20,6 @@ use super::helpers::{
 };
 use super::{SetupError, SetupWizard};
 
-#[allow(unused_imports)]
-use super::{
-    CHANNEL_INDEX_DISCORD, CHANNEL_INDEX_GMAIL, CHANNEL_INDEX_HTTP, CHANNEL_INDEX_NOSTR,
-    CHANNEL_INDEX_SIGNAL, CHANNEL_INDEX_SLACK,
-};
-
-#[cfg(target_os = "macos")]
-#[allow(unused_imports)]
-use super::{CHANNEL_INDEX_APPLE_MAIL, CHANNEL_INDEX_IMESSAGE};
-
 impl SetupWizard {
     pub(super) async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
         // Get crypto (should be set from step 2, or load from keychain/env)
@@ -190,65 +180,91 @@ impl SetupWizard {
         // Build channel list from registry (if available) + bundled + discovered
         let wasm_channel_names = build_channel_options(&discovered_channels);
 
-        // Build options list dynamically: native channels first, then WASM
-        let mut options: Vec<(String, bool)> = vec![
-            ("CLI/TUI (always enabled)".to_string(), true),
-            (
-                "HTTP webhook".to_string(),
-                self.settings.channels.http_enabled,
-            ),
-            ("Signal".to_string(), self.settings.channels.signal_enabled),
-            (
-                "Discord".to_string(),
-                self.settings.channels.discord_enabled,
-            ),
-            ("Slack".to_string(), self.settings.channels.slack_enabled),
-            ("Nostr".to_string(), self.settings.channels.nostr_enabled),
-            ("Gmail".to_string(), self.settings.channels.gmail_enabled),
+        print_info("Choose the channels ThinClaw should listen on.");
+        print_info("Channels are grouped into Common, Native, WASM, and Advanced.");
+        print_info(
+            "Bundled or registry-backed WASM channels are installed automatically when selected.",
+        );
+        print_info(
+            "A verification pass runs after setup and does not send live messages unless you test later.",
+        );
+        println!();
+
+        print_info("Common channels");
+        let common_options = [("HTTP webhook", self.settings.channels.http_enabled)];
+        let common_selected =
+            select_many("Enable common channels", &common_options).map_err(SetupError::Io)?;
+        let enable_http = common_selected.contains(&0);
+        println!();
+
+        print_info("Native channels");
+        let mut native_options: Vec<(&str, bool)> = vec![
+            ("Signal", self.settings.channels.signal_enabled),
+            ("Discord", self.settings.channels.discord_enabled),
+            ("Slack", self.settings.channels.slack_enabled),
+            ("Gmail", self.settings.channels.gmail_enabled),
         ];
-
+        let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail"];
         #[cfg(target_os = "macos")]
-        options.push((
-            "iMessage".to_string(),
-            self.settings.channels.imessage_enabled,
-        ));
-
-        #[cfg(target_os = "macos")]
-        options.push((
-            "Apple Mail".to_string(),
-            self.settings.channels.apple_mail_enabled,
-        ));
-
-        let native_count = options.len();
-
-        // Add available WASM channels (installed + bundled + registry)
-        for name in &wasm_channel_names {
-            let is_enabled = self.settings.channels.wasm_channels.contains(name);
-            let label = if installed_names.contains(name) {
-                format!("{} (installed)", capitalize_first(name))
-            } else {
-                format!("{} (will install)", capitalize_first(name))
-            };
-            options.push((label, is_enabled));
+        {
+            native_options.push(("iMessage", self.settings.channels.imessage_enabled));
+            native_options.push(("Apple Mail", self.settings.channels.apple_mail_enabled));
+            native_keys.push("imessage");
+            native_keys.push("apple_mail");
         }
+        let native_selected =
+            select_many("Enable native channels", &native_options).map_err(SetupError::Io)?;
+        let pick_native = |key: &str| {
+            native_keys
+                .iter()
+                .position(|existing| *existing == key)
+                .is_some_and(|idx| native_selected.contains(&idx))
+        };
+        let enable_signal = pick_native("signal");
+        let enable_discord = pick_native("discord");
+        let enable_slack = pick_native("slack");
+        let enable_gmail = pick_native("gmail");
+        #[cfg(target_os = "macos")]
+        let enable_imessage = pick_native("imessage");
+        #[cfg(target_os = "macos")]
+        let enable_apple_mail = pick_native("apple_mail");
+        println!();
 
-        let options_refs: Vec<(&str, bool)> =
-            options.iter().map(|(s, b)| (s.as_str(), *b)).collect();
+        print_info("Advanced channels");
+        let advanced_options = [("Nostr", self.settings.channels.nostr_enabled)];
+        let advanced_selected =
+            select_many("Enable advanced channels", &advanced_options).map_err(SetupError::Io)?;
+        let enable_nostr = advanced_selected.contains(&0);
+        println!();
 
-        let selected = select_many("Which channels do you want to enable?", &options_refs)
-            .map_err(SetupError::Io)?;
-
-        let selected_wasm_channels: Vec<String> = wasm_channel_names
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, name)| {
-                if selected.contains(&(native_count + idx)) {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let selected_wasm_channels = if wasm_channel_names.is_empty() {
+            Vec::new()
+        } else {
+            print_info("WASM channels");
+            let wasm_options: Vec<(String, bool)> = wasm_channel_names
+                .iter()
+                .map(|name| {
+                    let enabled = self.settings.channels.wasm_channels.contains(name);
+                    let label = if installed_names.contains(name) {
+                        format!("{} (installed)", capitalize_first(name))
+                    } else {
+                        format!("{} (will install)", capitalize_first(name))
+                    };
+                    (label, enabled)
+                })
+                .collect();
+            let wasm_option_refs: Vec<(&str, bool)> = wasm_options
+                .iter()
+                .map(|(label, enabled)| (label.as_str(), *enabled))
+                .collect();
+            let wasm_selected =
+                select_many("Enable WASM channels", &wasm_option_refs).map_err(SetupError::Io)?;
+            println!();
+            wasm_selected
+                .into_iter()
+                .filter_map(|idx| wasm_channel_names.get(idx).cloned())
+                .collect()
+        };
 
         // Install selected channels that aren't already on disk
         let mut any_installed = false;
@@ -295,10 +311,8 @@ impl SetupWizard {
             discovered_channels = discover_wasm_channels(&channels_dir).await;
         }
 
-        let needs_secrets = selected.contains(&CHANNEL_INDEX_HTTP)
-            || selected.contains(&CHANNEL_INDEX_DISCORD)
-            || selected.contains(&CHANNEL_INDEX_SLACK)
-            || !selected_wasm_channels.is_empty();
+        let needs_secrets =
+            enable_http || enable_discord || enable_slack || !selected_wasm_channels.is_empty();
         if needs_secrets && secrets.is_none() {
             print_info(
                 "Secrets not available. Channel tokens must be set via environment variables.",
@@ -306,7 +320,7 @@ impl SetupWizard {
         }
 
         // HTTP channel
-        if selected.contains(&CHANNEL_INDEX_HTTP) {
+        if enable_http {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
@@ -317,14 +331,16 @@ impl SetupWizard {
                 self.settings.channels.http_enabled = true;
                 self.settings.channels.http_port = Some(8080);
                 self.settings.channels.http_host = Some("0.0.0.0".to_string());
-                print_info("HTTP webhook enabled on port 8080 (set HTTP_WEBHOOK_SECRET in env)");
+                print_info(
+                    "HTTP webhook enabled on port 8080. Set HTTP_WEBHOOK_SECRET in your environment.",
+                );
             }
         } else {
             self.settings.channels.http_enabled = false;
         }
 
         // Signal channel
-        if selected.contains(&CHANNEL_INDEX_SIGNAL) {
+        if enable_signal {
             println!();
             let result = setup_signal(&self.settings).await?;
             self.settings.channels.signal_enabled = result.enabled;
@@ -347,10 +363,10 @@ impl SetupWizard {
         }
 
         // Discord channel
-        if selected.contains(&CHANNEL_INDEX_DISCORD) {
+        if enable_discord {
             println!();
             print_info(
-                "Discord requires a Bot Token from https://discord.com/developers/applications",
+                "Discord needs a bot token from https://discord.com/developers/applications",
             );
             println!();
 
@@ -380,36 +396,34 @@ impl SetupWizard {
             };
 
             // Store via secrets if available
-            if let Some(ref ctx) = secrets {
-                if let Err(e) = ctx
+            if let Some(ref ctx) = secrets
+                && let Err(e) = ctx
                     .save_secret(
                         "discord_bot_token",
                         &secrecy::SecretString::from(token.clone()),
                     )
                     .await
-                {
-                    print_info(&format!("Could not store token in secrets: {}", e));
-                }
+            {
+                print_info(&format!("Could not store token in secrets: {}", e));
             }
             self.settings.channels.discord_bot_token =
                 if secrets.is_some() { None } else { Some(token) };
 
-            let guild_id =
-                optional_input("Guild ID (restrict to single server, blank = all)", None)
-                    .map_err(SetupError::Io)?;
-            if let Some(ref gid) = guild_id {
-                if !gid.is_empty() {
-                    self.settings.channels.discord_guild_id = Some(gid.clone());
-                }
+            let guild_id = optional_input("Guild ID (limit to one server, blank = all)", None)
+                .map_err(SetupError::Io)?;
+            if let Some(ref gid) = guild_id
+                && !gid.is_empty()
+            {
+                self.settings.channels.discord_guild_id = Some(gid.clone());
             }
 
             let allow_from =
                 optional_input("Allowed channel IDs (comma-separated, blank = all)", None)
                     .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from {
-                if !af.is_empty() {
-                    self.settings.channels.discord_allow_from = Some(af.clone());
-                }
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.discord_allow_from = Some(af.clone());
             }
 
             self.settings.channels.discord_enabled = true;
@@ -420,12 +434,12 @@ impl SetupWizard {
         }
 
         // Slack channel
-        if selected.contains(&CHANNEL_INDEX_SLACK) {
+        if enable_slack {
             println!();
             print_info(
-                "Slack requires both a Bot Token (xoxb-...) and an App-Level Token (xapp-...)",
+                "Slack needs both a bot token (xoxb-...) and an app-level token (xapp-...).",
             );
-            print_info("Create these at https://api.slack.com/apps");
+            print_info("Create them at https://api.slack.com/apps");
             println!();
 
             let bot_token = if let Some(existing) = std::env::var("SLACK_BOT_TOKEN")
@@ -506,10 +520,10 @@ impl SetupWizard {
                 None,
             )
             .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from {
-                if !af.is_empty() {
-                    self.settings.channels.slack_allow_from = Some(af.clone());
-                }
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.slack_allow_from = Some(af.clone());
             }
 
             self.settings.channels.slack_enabled = true;
@@ -521,7 +535,7 @@ impl SetupWizard {
         }
 
         // Nostr channel
-        if selected.contains(&CHANNEL_INDEX_NOSTR) {
+        if enable_nostr {
             println!();
             print_info("Nostr connects to relay servers to receive and send messages.");
             println!();
@@ -539,23 +553,21 @@ impl SetupWizard {
                 None,
             )
             .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from {
-                if !af.is_empty() {
-                    self.settings.channels.nostr_allow_from = Some(af.clone());
-                }
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.nostr_allow_from = Some(af.clone());
             }
 
             self.settings.channels.nostr_enabled = true;
             print_success("Nostr channel configured");
-            print_info(
-                "Set NOSTR_SECRET_KEY env var with your nsec/hex private key before starting.",
-            );
+            print_info("Set NOSTR_SECRET_KEY in your environment before starting.");
         } else {
             self.settings.channels.nostr_enabled = false;
         }
 
         // Gmail channel
-        if selected.contains(&CHANNEL_INDEX_GMAIL) {
+        if enable_gmail {
             println!();
             print_info("Gmail requires GCP project with Pub/Sub and Gmail API enabled.");
             print_info("Follow: https://developers.google.com/gmail/api/guides/push");
@@ -573,10 +585,10 @@ impl SetupWizard {
             let allowed_senders =
                 optional_input("Allowed sender emails (comma-separated, blank = all)", None)
                     .map_err(SetupError::Io)?;
-            if let Some(ref senders) = allowed_senders {
-                if !senders.is_empty() {
-                    self.settings.channels.gmail_allowed_senders = Some(senders.clone());
-                }
+            if let Some(ref senders) = allowed_senders
+                && !senders.is_empty()
+            {
+                self.settings.channels.gmail_allowed_senders = Some(senders.clone());
             }
 
             self.settings.channels.gmail_enabled = true;
@@ -590,10 +602,10 @@ impl SetupWizard {
 
         // iMessage channel (macOS only)
         #[cfg(target_os = "macos")]
-        if selected.contains(&CHANNEL_INDEX_IMESSAGE) {
+        if enable_imessage {
             println!();
             print_info("iMessage uses the native macOS Messages database.");
-            print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
+            print_info("Grant Full Disk Access in System Settings > Privacy.");
             println!();
 
             let allow_from = optional_input(
@@ -601,60 +613,60 @@ impl SetupWizard {
                 None,
             )
             .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from {
-                if !af.is_empty() {
-                    self.settings.channels.imessage_allow_from = Some(af.clone());
-                }
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.imessage_allow_from = Some(af.clone());
             }
 
             let poll_interval =
                 optional_input("Polling interval in seconds", Some("5")).map_err(SetupError::Io)?;
-            if let Some(ref pi) = poll_interval {
-                if let Ok(n) = pi.parse::<u64>() {
-                    self.settings.channels.imessage_poll_interval = Some(n);
-                }
+            if let Some(ref pi) = poll_interval
+                && let Ok(n) = pi.parse::<u64>()
+            {
+                self.settings.channels.imessage_poll_interval = Some(n);
             }
 
             self.settings.channels.imessage_enabled = true;
             print_success("iMessage channel configured");
         }
         #[cfg(target_os = "macos")]
-        if !selected.contains(&CHANNEL_INDEX_IMESSAGE) {
+        if !enable_imessage {
             self.settings.channels.imessage_enabled = false;
         }
 
         // Apple Mail channel (macOS only)
         #[cfg(target_os = "macos")]
-        if selected.contains(&CHANNEL_INDEX_APPLE_MAIL) {
+        if enable_apple_mail {
             println!();
             print_info("Apple Mail uses the native macOS Mail.app Envelope Index database.");
-            print_info("ThinClaw will need Full Disk Access in System Settings > Privacy.");
-            print_info("Make sure Mail.app is configured and signed into your account.");
+            print_info("Grant Full Disk Access in System Settings > Privacy.");
+            print_info("Make sure Mail.app is signed in and already configured.");
             print_info(
-                "⚠️  IMPORTANT: If you leave this blank, ANY email sender can give instructions to your agent.",
+                "Important: if you leave this blank, any email sender can give instructions to your agent.",
             );
             print_info(
-                "   For security, specify your email address(es) so only you can control it via email.",
+                "For safety, enter your own email addresses so only you can control it through email.",
             );
             println!();
 
             let allow_from = optional_input(
-                "Your email address(es) to allow (comma-separated, ⚠️ blank = ANYONE can control agent)",
+                "Allowed email addresses (comma-separated, blank = anyone can control the agent)",
                 None,
             )
             .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from {
-                if !af.is_empty() {
-                    self.settings.channels.apple_mail_allow_from = Some(af.clone());
-                }
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.apple_mail_allow_from = Some(af.clone());
             }
 
             let poll_interval = optional_input("Polling interval in seconds", Some("10"))
                 .map_err(SetupError::Io)?;
-            if let Some(ref pi) = poll_interval {
-                if let Ok(n) = pi.parse::<u64>() {
-                    self.settings.channels.apple_mail_poll_interval = Some(n);
-                }
+            if let Some(ref pi) = poll_interval
+                && let Ok(n) = pi.parse::<u64>()
+            {
+                self.settings.channels.apple_mail_poll_interval = Some(n);
             }
 
             let unread_only =
@@ -669,7 +681,7 @@ impl SetupWizard {
             print_success("Apple Mail channel configured");
         }
         #[cfg(target_os = "macos")]
-        if !selected.contains(&CHANNEL_INDEX_APPLE_MAIL) {
+        if !enable_apple_mail {
             self.settings.channels.apple_mail_enabled = false;
         }
 
@@ -695,7 +707,7 @@ impl SetupWizard {
                         }
                     } else {
                         print_info(&format!(
-                            "No setup configuration found for {}",
+                            "No setup instructions are available for {}",
                             channel_name
                         ));
                         crate::setup::channels::WasmChannelSetupResult {
@@ -705,7 +717,7 @@ impl SetupWizard {
                     }
                 } else {
                     print_info(&format!(
-                        "Channel '{}' is selected but not available on disk.",
+                        "Selected channel '{}' is not available on disk.",
                         channel_name
                     ));
                     continue;
@@ -717,7 +729,7 @@ impl SetupWizard {
             } else {
                 // No secrets context, just enable the channel
                 print_info(&format!(
-                    "{} enabled (configure tokens via environment)",
+                    "{} enabled; configure tokens through environment variables.",
                     capitalize_first(&channel_name)
                 ));
                 enabled_wasm_channels.push(channel_name.clone());

@@ -96,8 +96,12 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
-const SKILL_ADMIN_TOOLS: &[&str] =
-    &["skill_search", "skill_install", "skill_remove", "skill_reload"];
+const SKILL_ADMIN_TOOLS: &[&str] = &[
+    "skill_search",
+    "skill_install",
+    "skill_remove",
+    "skill_reload",
+];
 
 /// Registry of available tools.
 pub struct ToolRegistry {
@@ -219,10 +223,7 @@ impl ToolRegistry {
     }
 
     /// Parse an optional string-array allowlist from metadata.
-    pub fn metadata_string_list(
-        metadata: &serde_json::Value,
-        key: &str,
-    ) -> Option<Vec<String>> {
+    pub fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<Vec<String>> {
         metadata.get(key).and_then(|value| {
             value.as_array().map(|items| {
                 items
@@ -281,11 +282,7 @@ impl ToolRegistry {
     ) -> Vec<ToolDefinition> {
         defs.into_iter()
             .filter(|def| {
-                Self::tool_name_allowed_for_capabilities(
-                    &def.name,
-                    allowed_tools,
-                    allowed_skills,
-                )
+                Self::tool_name_allowed_for_capabilities(&def.name, allowed_tools, allowed_skills)
             })
             .collect()
     }
@@ -692,14 +689,9 @@ impl ToolRegistry {
     /// When the routing mode is AdvisorExecutor, this injects the `consult_advisor`
     /// tool which the executor model can call to get guidance from the advisor.
     /// In other modes, this is a no-op.
-    pub fn register_advisor_tool(
-        &self,
-        routing_mode: crate::settings::RoutingMode,
-    ) {
+    pub fn register_advisor_tool(&self, routing_mode: crate::settings::RoutingMode) {
         if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
-            self.register_sync(Arc::new(
-                crate::tools::builtin::advisor::ConsultAdvisorTool,
-            ));
+            self.register_sync(Arc::new(crate::tools::builtin::advisor::ConsultAdvisorTool));
             tracing::info!("Registered consult_advisor tool (AdvisorExecutor mode)");
         }
     }
@@ -990,12 +982,28 @@ mod tests {
             "allowed_skills": ["github"]
         });
 
-        assert!(ToolRegistry::tool_name_allowed_by_metadata(&metadata, "read_file"));
-        assert!(ToolRegistry::tool_name_allowed_by_metadata(&metadata, "agent_think"));
-        assert!(!ToolRegistry::tool_name_allowed_by_metadata(&metadata, "shell"));
-        assert!(!ToolRegistry::tool_name_allowed_by_metadata(&metadata, "skill_install"));
-        assert!(ToolRegistry::skill_name_allowed_by_metadata(&metadata, "github"));
-        assert!(!ToolRegistry::skill_name_allowed_by_metadata(&metadata, "openai-docs"));
+        assert!(ToolRegistry::tool_name_allowed_by_metadata(
+            &metadata,
+            "read_file"
+        ));
+        assert!(ToolRegistry::tool_name_allowed_by_metadata(
+            &metadata,
+            "agent_think"
+        ));
+        assert!(!ToolRegistry::tool_name_allowed_by_metadata(
+            &metadata, "shell"
+        ));
+        assert!(!ToolRegistry::tool_name_allowed_by_metadata(
+            &metadata,
+            "skill_install"
+        ));
+        assert!(ToolRegistry::skill_name_allowed_by_metadata(
+            &metadata, "github"
+        ));
+        assert!(!ToolRegistry::skill_name_allowed_by_metadata(
+            &metadata,
+            "openai-docs"
+        ));
     }
 
     #[tokio::test]

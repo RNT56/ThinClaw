@@ -29,13 +29,11 @@ impl SetupWizard {
         print_info(
             "ThinClaw can also reuse this Anthropic API key for the general Anthropic provider.",
         );
-        print_info(
-            "That makes it available in Provider Vault, the WebUI, and normal Anthropic model routing.",
-        );
+        print_info("That makes it available in Provider Vault, the Web UI, and Anthropic routing.");
         println!();
 
         if !confirm(
-            "Also save this API key for ThinClaw's Anthropic provider and WebUI?",
+            "Also save this API key for ThinClaw's Anthropic provider and Web UI?",
             true,
         )
         .map_err(SetupError::Io)?
@@ -45,7 +43,7 @@ impl SetupWizard {
 
         let Ok(ctx) = self.init_secrets_context().await else {
             print_info(
-                "Secrets store not available. Claude Code will still use the key, but Anthropic provider reuse was not persisted.",
+                "Secrets store not available. Claude Code will still use the key, but the shared Anthropic provider key was not saved.",
             );
             return Ok(());
         };
@@ -66,7 +64,7 @@ impl SetupWizard {
         }
 
         self.enable_anthropic_provider_for_claude_code_key();
-        print_success("Anthropic provider credentials saved for general use.");
+        print_success("Anthropic provider credentials saved for reuse.");
         Ok(())
     }
 
@@ -75,14 +73,14 @@ impl SetupWizard {
         println!();
         print_info("═══ Main Agent: Local Tools ═══");
         println!();
-        print_info("ThinClaw's main agent always runs natively on your machine.");
-        print_info("Enabling local tools gives the agent full access to:");
+        print_info("ThinClaw's main agent always runs on your machine.");
+        print_info("Enabling local tools gives the agent access to:");
         print_info("  • Shell commands (run scripts, install packages, etc.)");
         print_info("  • File read/write anywhere on disk");
         print_info("  • Screen capture (if enabled separately)");
         println!();
         print_info("Without local tools, the agent can only use web search, memory,");
-        print_info("and WASM-sandboxed extensions. No direct host access.");
+        print_info("and WASM-sandboxed extensions. It won't have direct host access.");
         println!();
 
         let allow_local = confirm("Allow ThinClaw to use local tools on your machine?", false)
@@ -90,7 +88,7 @@ impl SetupWizard {
         self.settings.agent.allow_local_tools = allow_local;
 
         if allow_local {
-            print_success("Local tools enabled. The agent can run commands and access files.");
+            print_success("Local tools enabled. The agent can run commands and read/write files.");
             print_info("You can disable this later with ALLOW_LOCAL_TOOLS=false.");
         } else {
             print_info("Local tools disabled. The agent will use sandboxed tools only.");
@@ -99,21 +97,22 @@ impl SetupWizard {
 
         // ── Part B: Docker sandbox for worker processes ──────────────────
         println!();
-        print_info("═══ Docker Sandbox (Worker Processes) ═══");
+        print_info("═══ Docker Sandbox for Worker Processes ═══");
         println!();
         print_info("Docker sandboxing is separate from local tools above.");
-        print_info("It isolates *worker processes* like Claude Code — they run inside");
-        print_info("Docker containers with no access to your credentials or full filesystem.");
+        print_info("It isolates worker processes like Claude Code so they run inside");
+        print_info("Docker containers without access to your credentials or full filesystem.");
         println!();
-        print_info("This does NOT affect ThinClaw's main agent. The main agent always");
-        print_info("runs natively, governed by the 'local tools' setting above.");
+        print_info(
+            "This does not affect ThinClaw's main agent. It still follows the local tools setting above.",
+        );
         println!();
-        print_info("Docker is required for: Claude Code sandbox, container-based builds.");
+        print_info("Docker is required for the Claude Code sandbox and container-based builds.");
         println!();
 
         if !confirm("Enable Docker sandbox for worker processes?", false).map_err(SetupError::Io)? {
             self.settings.sandbox.enabled = false;
-            print_info("Docker sandbox disabled. Worker processes will not use containers.");
+            print_info("Docker sandbox disabled. Worker processes will run without containers.");
             print_info("You can enable it later with SANDBOX_ENABLED=true.");
             return Ok(());
         }
@@ -157,9 +156,9 @@ impl SetupWizard {
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
-                            "Docker still not available. Worker sandbox disabled for now."
+                            "Docker still isn't available. Worker sandbox is disabled for now."
                         } else {
-                            "Docker still not responding. Worker sandbox disabled for now."
+                            "Docker still isn't responding. Worker sandbox is disabled for now."
                         });
                     }
                 } else {
@@ -195,9 +194,12 @@ impl SetupWizard {
             if image_exists {
                 print_success(&format!("Worker image '{}' already exists.", image_name));
             } else {
-                print_info(&format!("Worker image '{}' not found locally.", image_name));
-                print_info("This image is required for Docker sandbox and Claude Code jobs.");
-                print_info("Building it now takes 5-15 minutes (one-time).");
+                print_info(&format!(
+                    "Worker image '{}' wasn't found locally.",
+                    image_name
+                ));
+                print_info("This image is required for the Docker sandbox and Claude Code jobs.");
+                print_info("Building it now usually takes 5-15 minutes, one time.");
                 println!();
 
                 if confirm("Build the worker image now?", true).map_err(SetupError::Io)? {
@@ -247,20 +249,22 @@ impl SetupWizard {
     pub(super) async fn step_claude_code(&mut self) -> Result<(), SetupError> {
         // Claude Code requires the Docker sandbox to be enabled
         if !self.settings.sandbox.enabled {
-            print_info("Claude Code requires Docker sandbox (not enabled in step 10).");
-            print_info("Skipping Claude Code configuration.");
+            print_info("Claude Code requires the Docker sandbox, which is not enabled yet.");
+            print_info("Skipping Claude Code setup.");
             self.settings.claude_code_enabled = false;
             return Ok(());
         }
 
-        print_info("Claude Code sandbox allows ThinClaw to delegate complex coding");
-        print_info("tasks to Anthropic's Claude Code CLI running inside a Docker container.");
-        print_info("Requires an Anthropic API key or Claude Code OAuth session.");
+        print_info("Claude Code sandbox lets ThinClaw delegate complex coding tasks");
+        print_info("to Anthropic's Claude Code CLI running inside a Docker container.");
+        print_info("It requires either an Anthropic API key or a Claude Code OAuth session.");
         println!();
 
         if !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)? {
             self.settings.claude_code_enabled = false;
-            print_info("Claude Code disabled. Enable later with CLAUDE_CODE_ENABLED=true.");
+            print_info(
+                "Claude Code disabled. You can turn it on later with CLAUDE_CODE_ENABLED=true.",
+            );
             return Ok(());
         }
 
@@ -284,24 +288,24 @@ impl SetupWizard {
         .filter(|value| !value.trim().is_empty());
 
         if let Some(api_key) = env_api_key.as_deref() {
-            print_success("✓ ANTHROPIC_API_KEY found in environment. This will be used.");
+            print_success("✓ ANTHROPIC_API_KEY found in the environment. Using it now.");
             self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
                 .await?;
         } else if let Some(api_key) = keychain_api_key.as_deref() {
-            print_success("✓ Anthropic API key found in OS keychain. This will be used.");
+            print_success("✓ Anthropic API key found in the OS keychain. Using it now.");
             self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
                 .await?;
         } else if has_oauth {
-            print_success("✓ Claude Code OAuth session found. This will be used.");
+            print_success("✓ Claude Code OAuth session found. Using it now.");
             print_info("  (Token from 'claude login' — typically valid for 8-12 hours)");
         } else {
-            print_info("No existing auth found. Claude Code containers need one of:");
+            print_info("No existing auth found. Claude Code containers need one of these:");
             print_info("  1. Anthropic API key (stored securely in OS keychain)");
             print_info("  2. OAuth session from 'claude login' on this machine");
             println!();
 
             if confirm(
-                "Enter an Anthropic API key to store in the OS keychain?",
+                "Do you want to store an Anthropic API key in the OS keychain?",
                 true,
             )
             .map_err(SetupError::Io)?
@@ -316,7 +320,7 @@ impl SetupWizard {
                     .await
                     {
                         Ok(()) => {
-                            print_success("API key stored securely in OS keychain.");
+                            print_success("API key stored securely in the OS keychain.");
                             print_info(
                                 "It will be injected into Claude Code containers at runtime.",
                             );
@@ -331,7 +335,9 @@ impl SetupWizard {
                         }
                     }
                 } else {
-                    print_error("Key doesn't look like an Anthropic API key (expected sk-ant-...)");
+                    print_error(
+                        "That doesn't look like an Anthropic API key (expected sk-ant-...).",
+                    );
                     print_info("You can set ANTHROPIC_API_KEY in your environment later.");
                 }
             } else {
@@ -345,19 +351,18 @@ impl SetupWizard {
         println!();
         let model =
             optional_input("Claude Code model", Some("default: sonnet")).map_err(SetupError::Io)?;
-        if let Some(m) = model {
-            if !m.is_empty() {
-                self.settings.claude_code_model = Some(m);
-            }
+        if let Some(m) = model
+            && !m.is_empty()
+        {
+            self.settings.claude_code_model = Some(m);
         }
 
         // Max turns
-        let turns =
-            optional_input("Max agentic turns", Some("default: 50")).map_err(SetupError::Io)?;
-        if let Some(t) = turns {
-            if let Ok(n) = t.parse::<u32>() {
-                self.settings.claude_code_max_turns = Some(n);
-            }
+        let turns = optional_input("Maximum turns", Some("default: 50")).map_err(SetupError::Io)?;
+        if let Some(t) = turns
+            && let Ok(n) = t.parse::<u32>()
+        {
+            self.settings.claude_code_max_turns = Some(n);
         }
 
         let model_display = self

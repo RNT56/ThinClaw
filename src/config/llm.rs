@@ -573,6 +573,8 @@ mod tests {
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
+        crate::config::clear_bridge_vars();
+        crate::config::clear_injected_vars_for_tests();
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -706,9 +708,13 @@ mod tests {
 
     /// Helper to clear provider-specific env vars so tests are isolated.
     fn clear_provider_env() {
+        crate::config::clear_bridge_vars();
+        crate::config::clear_injected_vars_for_tests();
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
             std::env::remove_var("OPENAI_MODEL");
             std::env::remove_var("ANTHROPIC_MODEL");
             std::env::remove_var("OLLAMA_MODEL");

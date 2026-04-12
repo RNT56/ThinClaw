@@ -161,7 +161,7 @@ impl TuiApp {
             scroll_offset: 0,
             model: "default".to_string(),
             agent_id: "main".to_string(),
-            status_text: "Connected".to_string(),
+            status_text: "Connected • ready".to_string(),
             active_stream: None,
             show_thinking: true,
             last_ctrl_c: None,
@@ -195,7 +195,8 @@ impl TuiApp {
     ) -> io::Result<()> {
         // Add welcome message
         self.messages.push(ChatMessage::System {
-            text: "Welcome to ThinClaw TUI. Type /help for commands.".to_string(),
+            text: "ThinClaw cockpit online. Type /help for controls, or send a message to begin."
+                .to_string(),
         });
 
         loop {
@@ -440,7 +441,7 @@ impl TuiApp {
                     result: None,
                     is_error: false,
                 });
-                self.status_text = format!("Running tool: {name}");
+                self.status_text = format!("Inspecting tool: {name}");
             }
             TuiUpdate::ToolResult {
                 name,
@@ -457,7 +458,7 @@ impl TuiApp {
                     *r = Some(result);
                     *e = is_error;
                 }
-                self.status_text = format!("Tool {name} completed");
+                self.status_text = format!("Tool {name} finished");
             }
             TuiUpdate::Response(text) => {
                 // Finalize the stream
@@ -475,11 +476,13 @@ impl TuiApp {
                     text: final_text,
                     model: Some(self.model.clone()),
                 });
-                self.status_text = "Ready".to_string();
+                self.status_text = "Ready for the next turn".to_string();
                 self.scroll_offset = u16::MAX;
             }
             TuiUpdate::Status(text) => {
-                self.status_text = text;
+                if !text.trim().is_empty() {
+                    self.status_text = text;
+                }
             }
             TuiUpdate::ModelChanged(model) => {
                 self.model = model;
@@ -491,14 +494,14 @@ impl TuiApp {
                 self.messages.push(ChatMessage::System {
                     text: format!("⚠ Approval needed: {} — {}", tool_name, description),
                 });
-                self.status_text = format!("Waiting for approval: {tool_name}");
+                self.status_text = format!("Awaiting approval for {tool_name}");
             }
             TuiUpdate::Error(msg) => {
                 self.active_stream = None;
                 self.messages.push(ChatMessage::System {
                     text: format!("❌ {msg}"),
                 });
-                self.status_text = "Error".to_string();
+                self.status_text = "Needs attention".to_string();
             }
         }
     }
@@ -678,19 +681,19 @@ impl From<StatusUpdate> for TuiUpdate {
 }
 
 const HELP_TEXT: &str = "\
-━━━ ThinClaw TUI Commands ━━━
+━━━ ThinClaw cockpit controls ━━━
 
-  /help          Show this help
-  /clear         Clear chat history
-  /new, /reset   Start a new session
-  /think         Toggle thinking display
-  /status        Show current model and status
-  /interrupt     Abort current operation
-  /exit, /quit   Exit the TUI
+  /help          Show this guide
+  /clear         Clear the visible log
+  /new, /reset   Start a fresh session
+  /think         Toggle thinking updates
+  /status        Show the current agent state
+  /interrupt     Stop the current operation
+  /exit, /quit   Leave the TUI
 
   /undo          Undo the last turn
   /redo          Redo an undone turn
-  /compact       Compact context window
+  /compact       Compact the context window
   /model <name>  Switch model
   /models        List available models
   /agent <name>  Switch agent
@@ -698,13 +701,13 @@ const HELP_TEXT: &str = "\
 
   !<command>     Run a local shell command
 
-━━━ Key Bindings ━━━
+━━━ Movement ━━━
 
-  Enter          Send message
-  Ctrl+C         Abort active run / double-tap to exit
-  Ctrl+L         Clear screen
-  Up/Down        Input history
-  PageUp/Down    Scroll chat
+  Enter          Send a message
+  Ctrl+C         Abort active run, press twice to exit
+  Ctrl+L         Clear the screen
+  Up/Down        Browse input history
+  PageUp/Down    Scroll the conversation
   Tab            Autocomplete commands
   Home/End       Jump to start/end of input
 ";

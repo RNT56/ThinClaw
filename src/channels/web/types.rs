@@ -144,6 +144,36 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    #[serde(rename = "subagent_spawned")]
+    SubagentSpawned {
+        agent_id: String,
+        name: String,
+        task: String,
+        timestamp: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "subagent_progress")]
+    SubagentProgress {
+        agent_id: String,
+        message: String,
+        category: String,
+        timestamp: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "subagent_completed")]
+    SubagentCompleted {
+        agent_id: String,
+        name: String,
+        success: bool,
+        response: String,
+        duration_ms: u64,
+        iterations: usize,
+        timestamp: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "job_started")]
     JobStarted {
         job_id: String,
@@ -763,6 +793,9 @@ impl WsServerMessage {
             SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
+            SseEvent::SubagentSpawned { .. } => "subagent_spawned",
+            SseEvent::SubagentProgress { .. } => "subagent_progress",
+            SseEvent::SubagentCompleted { .. } => "subagent_completed",
             SseEvent::JobStarted { .. } => "job_started",
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
             SseEvent::AuthRequired { .. } => "auth_required",
@@ -1024,6 +1057,48 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_subagent_spawned_serialize() {
+        let event = SseEvent::SubagentSpawned {
+            agent_id: "agent-1".to_string(),
+            name: "researcher".to_string(),
+            task: "Check docs".to_string(),
+            timestamp: "2026-04-12T12:00:00Z".to_string(),
+            thread_id: Some("thread-1".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "subagent_spawned");
+        assert_eq!(parsed["agent_id"], "agent-1");
+        assert_eq!(parsed["name"], "researcher");
+        assert_eq!(parsed["task"], "Check docs");
+        assert_eq!(parsed["timestamp"], "2026-04-12T12:00:00Z");
+        assert_eq!(parsed["thread_id"], "thread-1");
+    }
+
+    #[test]
+    fn test_sse_subagent_completed_serialize() {
+        let event = SseEvent::SubagentCompleted {
+            agent_id: "agent-2".to_string(),
+            name: "summarizer".to_string(),
+            success: true,
+            response: "Done".to_string(),
+            duration_ms: 1250,
+            iterations: 3,
+            timestamp: "2026-04-12T12:00:03Z".to_string(),
+            thread_id: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "subagent_completed");
+        assert_eq!(parsed["agent_id"], "agent-2");
+        assert_eq!(parsed["response"], "Done");
+        assert_eq!(parsed["duration_ms"], 1250);
+        assert_eq!(parsed["iterations"], 3);
+        assert_eq!(parsed["timestamp"], "2026-04-12T12:00:03Z");
+        assert!(parsed.get("thread_id").is_none());
+    }
+
+    #[test]
     fn test_send_message_request_accepts_legacy_message_field() {
         let json = r#"{"message":"hello","user_id":"family-1"}"#;
         let req: SendMessageRequest = serde_json::from_str(json).unwrap();
@@ -1047,6 +1122,29 @@ mod tests {
                 assert_eq!(event_type, "approval_needed");
                 assert_eq!(data["tool_name"], "shell");
                 assert_eq!(data["thread_id"], "t1");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_subagent_progress() {
+        let sse = SseEvent::SubagentProgress {
+            agent_id: "agent-3".to_string(),
+            message: "Inspecting files".to_string(),
+            category: "tool".to_string(),
+            timestamp: "2026-04-12T12:00:01Z".to_string(),
+            thread_id: Some("thread-2".to_string()),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "subagent_progress");
+                assert_eq!(data["agent_id"], "agent-3");
+                assert_eq!(data["message"], "Inspecting files");
+                assert_eq!(data["category"], "tool");
+                assert_eq!(data["timestamp"], "2026-04-12T12:00:01Z");
+                assert_eq!(data["thread_id"], "thread-2");
             }
             _ => panic!("Expected Event variant"),
         }

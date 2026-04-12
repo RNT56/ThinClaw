@@ -16,10 +16,8 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::error::LlmError;
-use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider,
-};
-use crate::llm::route_planner::{AdvisorConfig, ADVISOR_SYSTEM_PROMPT};
+use crate::llm::route_planner::{ADVISOR_SYSTEM_PROMPT, AdvisorConfig};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Name of the advisor tool that executors can call.

@@ -41,6 +41,8 @@ pub struct AgentConfig {
     pub thinking_budget_tokens: u32,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// Default user-facing transparency level for subagent activity.
+    pub subagent_transparency_level: String,
     /// Per-model thinking overrides. Key is a model name (exact or prefix match).
     /// When a model matches, its override takes precedence over global thinking settings.
     /// Format of env var: `MODEL_THINKING_OVERRIDE=model1:true:16000,model2:false`
@@ -112,6 +114,11 @@ impl AgentConfig {
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
             )?,
+            subagent_transparency_level: normalize_subagent_transparency_level(
+                optional_env("AGENT_SUBAGENT_TRANSPARENCY_LEVEL")?
+                    .or(optional_env("SUBAGENT_TRANSPARENCY_LEVEL")?)
+                    .unwrap_or_else(|| settings.agent.subagent_transparency_level.clone()),
+            ),
             model_thinking_overrides: parse_model_thinking_overrides()?,
             workspace_mode: optional_env("WORKSPACE_MODE")?
                 .or_else(|| settings.agent.workspace_mode.clone())
@@ -145,6 +152,20 @@ impl AgentConfig {
         }
         // Global default
         (self.thinking_enabled, self.thinking_budget_tokens)
+    }
+}
+
+fn normalize_subagent_transparency_level(value: impl AsRef<str>) -> String {
+    match value.as_ref().trim().to_ascii_lowercase().as_str() {
+        "" | "balanced" | "default" | "normal" => "balanced".to_string(),
+        "detailed" | "detail" | "verbose" | "full" => "detailed".to_string(),
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Unknown agent subagent transparency level; falling back to balanced"
+            );
+            "balanced".to_string()
+        }
     }
 }
 
@@ -200,4 +221,21 @@ fn parse_model_thinking_overrides() -> Result<HashMap<String, ModelThinkingOverr
         );
     }
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_subagent_transparency_level_accepts_aliases() {
+        assert_eq!(
+            normalize_subagent_transparency_level("balanced"),
+            "balanced"
+        );
+        assert_eq!(normalize_subagent_transparency_level("default"), "balanced");
+        assert_eq!(normalize_subagent_transparency_level("verbose"), "detailed");
+        assert_eq!(normalize_subagent_transparency_level("full"), "detailed");
+        assert_eq!(normalize_subagent_transparency_level("unknown"), "balanced");
+    }
 }

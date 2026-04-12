@@ -814,10 +814,16 @@ async fn execute_full_job(
     let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
     if let Some(obj) = metadata.as_object_mut() {
         if let Some(allowed_tools) = allowed_tools {
-            obj.insert("allowed_tools".to_string(), serde_json::json!(allowed_tools));
+            obj.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(allowed_tools),
+            );
         }
         if let Some(allowed_skills) = allowed_skills {
-            obj.insert("allowed_skills".to_string(), serde_json::json!(allowed_skills));
+            obj.insert(
+                "allowed_skills".to_string(),
+                serde_json::json!(allowed_skills),
+            );
         }
     }
 

@@ -561,6 +561,7 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[tokio::test]
     async fn test_echo_command() {
@@ -900,8 +901,10 @@ mod tests {
 
     // ── Environment scrubbing tests ────────────────────────────────────
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_hides_secrets() {
+        let _env_guard = lock_env();
         // Set a fake secret in the current process environment.
         // SAFETY: test-only, single-threaded tokio runtime, no concurrent env access.
         let secret_var = "THINCLAW_TEST_SECRET_KEY";
@@ -963,8 +966,10 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_common_secret_patterns() {
+        let _env_guard = lock_env();
         // Simulate common secret env vars that agents/tools might set
         let secrets = [
             ("OPENAI_API_KEY", "sk-test-fake-key-123"),

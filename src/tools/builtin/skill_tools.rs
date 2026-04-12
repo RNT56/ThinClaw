@@ -179,9 +179,9 @@ impl Tool for SkillListTool {
             .skills()
             .iter()
             .filter(|s| {
-                allowed_skills.as_ref().is_none_or(|allowed| {
-                    allowed.contains(s.manifest.name.as_str())
-                })
+                allowed_skills
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(s.manifest.name.as_str()))
             })
             .map(|s| {
                 let mut entry = serde_json::json!({
@@ -455,15 +455,15 @@ impl Tool for SkillInstallTool {
         // ── Force-update: remove old version first ─────────────────────
         if force {
             let mut guard = self.registry.write().await;
-            if guard.has(&skill_name_from_parse) {
-                if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
-                    let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
-                    let _ = guard.commit_remove(&skill_name_from_parse);
-                    tracing::info!(
-                        skill = %skill_name_from_parse,
-                        "Force-update: removed previous version"
-                    );
-                }
+            if guard.has(&skill_name_from_parse)
+                && let Ok(path) = guard.validate_remove(&skill_name_from_parse)
+            {
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                let _ = guard.commit_remove(&skill_name_from_parse);
+                tracing::info!(
+                    skill = %skill_name_from_parse,
+                    "Force-update: removed previous version"
+                );
             }
         }
 

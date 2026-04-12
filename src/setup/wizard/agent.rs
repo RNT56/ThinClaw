@@ -44,13 +44,14 @@ impl SetupWizard {
         let detected_str = detected.to_string();
 
         // If already set from a previous run, show the current value
-        if let Some(ref existing) = self.settings.user_timezone {
-            if !existing.is_empty() && existing != "UTC" {
-                print_info(&format!("Current timezone: {}", existing));
-                if confirm(&format!("Keep '{}'?", existing), true).map_err(SetupError::Io)? {
-                    print_success(&format!("Timezone: {}", existing));
-                    return Ok(());
-                }
+        if let Some(ref existing) = self.settings.user_timezone
+            && !existing.is_empty()
+            && existing != "UTC"
+        {
+            print_info(&format!("Current timezone: {}", existing));
+            if confirm(&format!("Keep '{}'?", existing), true).map_err(SetupError::Io)? {
+                print_success(&format!("Timezone: {}", existing));
+                return Ok(());
             }
         }
 
@@ -83,10 +84,60 @@ impl SetupWizard {
     }
 
     /// Step 13: Routines (scheduled tasks).
-    pub(super) fn step_notification_preferences(&mut self) -> Result<(), SetupError> {
+    pub(super) async fn step_notification_preferences(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw sends proactive notifications (heartbeat alerts, routine results,");
         print_info("self-repair messages) to a channel of your choice.");
         println!();
+
+        let secrets = self.init_secrets_context().await.ok();
+        let discord_has_token = self
+            .settings
+            .channels
+            .discord_bot_token
+            .as_ref()
+            .is_some_and(|token| !token.trim().is_empty())
+            || std::env::var("DISCORD_BOT_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty())
+            || if let Some(ref ctx) = secrets {
+                ctx.secret_exists("discord_bot_token").await
+            } else {
+                false
+            };
+        let slack_has_bot_token = self
+            .settings
+            .channels
+            .slack_bot_token
+            .as_ref()
+            .is_some_and(|token| !token.trim().is_empty())
+            || std::env::var("SLACK_BOT_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty())
+            || if let Some(ref ctx) = secrets {
+                ctx.secret_exists("slack_bot_token").await
+            } else {
+                false
+            };
+        let slack_has_app_token = self
+            .settings
+            .channels
+            .slack_app_token
+            .as_ref()
+            .is_some_and(|token| !token.trim().is_empty())
+            || std::env::var("SLACK_APP_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty())
+            || if let Some(ref ctx) = secrets {
+                ctx.secret_exists("slack_app_token").await
+            } else {
+                false
+            };
+        let is_ready = |channel: &str, fallback: bool| {
+            self.verified_channels
+                .get(channel)
+                .copied()
+                .unwrap_or(fallback)
+        };
 
         // Collect configured channels
         let mut channels: Vec<String> = Vec::new();
@@ -108,16 +159,22 @@ impl SetupWizard {
         if self.settings.channels.apple_mail_enabled {
             channels.push("apple_mail".to_string());
         }
-        if self.settings.channels.signal_enabled {
+        if self.settings.channels.signal_enabled
+            && is_ready("signal", self.settings.channels.signal_account.is_some())
+        {
             channels.push("signal".to_string());
         }
-        if self.settings.channels.discord_enabled {
+        if self.settings.channels.discord_enabled && is_ready("discord", discord_has_token) {
             channels.push("discord".to_string());
         }
-        if self.settings.channels.slack_enabled {
+        if self.settings.channels.slack_enabled
+            && is_ready("slack", slack_has_bot_token && slack_has_app_token)
+        {
             channels.push("slack".to_string());
         }
-        if self.settings.channels.nostr_enabled {
+        if self.settings.channels.nostr_enabled
+            && is_ready("nostr", self.settings.channels.nostr_relays.is_some())
+        {
             channels.push("nostr".to_string());
         }
 
@@ -263,7 +320,7 @@ impl SetupWizard {
             "Autonomous — Auto-approve safe operations, still block destructive commands\n               (rm -rf, DROP TABLE, git push --force, etc.)",
             "Full Auto  — Skip ALL approval checks (for benchmarks/CI only)\n               ⚠️  WARNING: The agent can execute ANY command without asking!",
         ];
-        let option_refs: Vec<&str> = options.iter().map(|s| *s).collect();
+        let option_refs: Vec<&str> = options.to_vec();
         let choice = select_one("Tool approval mode", &option_refs).map_err(SetupError::Io)?;
 
         match choice {

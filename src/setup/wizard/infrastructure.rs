@@ -38,7 +38,7 @@ impl SetupWizard {
                 }
                 if backend != "postgres" && backend != "postgresql" {
                     print_info(&format!(
-                        "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
+                        "Unknown DATABASE_BACKEND '{}'. Defaulting to PostgreSQL.",
                         backend
                     ));
                 }
@@ -51,12 +51,32 @@ impl SetupWizard {
                 _ => 0,
             });
 
+            print_info("Core runtime recommendation:");
+            match self.selected_profile {
+                super::OnboardingProfile::Balanced
+                | super::OnboardingProfile::LocalAndPrivate
+                | super::OnboardingProfile::ChannelFirst => {
+                    print_success(
+                        "Recommended: libSQL with a local file. It is the simplest day-one setup and does not need a separate server.",
+                    );
+                }
+                super::OnboardingProfile::BuilderAndCoding => {
+                    print_success(
+                        "Recommended: libSQL unless you already need shared PostgreSQL infrastructure.",
+                    );
+                }
+                super::OnboardingProfile::CustomAdvanced => {
+                    print_info(
+                        "Custom / Advanced leaves this open: libSQL is simpler, while PostgreSQL fits existing shared infrastructure.",
+                    );
+                }
+            }
             print_info("Which database backend would you like to use?");
             println!();
 
             let options = &[
-                "PostgreSQL  - production-grade, requires a running server",
-                "libSQL      - embedded SQLite, zero dependencies, optional Turso cloud sync",
+                "PostgreSQL  - requires a running server",
+                "libSQL      - embedded SQLite, optional Turso sync",
             ];
             let choice =
                 select_one("Select a database backend:", options).map_err(SetupError::Io)?;
@@ -104,7 +124,7 @@ impl SetupWizard {
             if confirm("Use this database?", true).map_err(SetupError::Io)? {
                 if let Err(e) = self.test_database_connection_postgres(url).await {
                     print_error(&format!("Connection failed: {}", e));
-                    print_info("Let's configure a new database URL.");
+                    print_info("Let's set up a new database URL.");
                 } else {
                     print_success("Database connection successful");
                     // Run migrations to ensure new tables exist on older schemas
@@ -117,7 +137,7 @@ impl SetupWizard {
 
         println!();
         print_info("Enter your PostgreSQL connection URL.");
-        print_info("Format: postgres://user:password@host:port/database");
+        print_info("Example: postgres://user:password@host:port/database");
         println!();
 
         loop {
@@ -204,8 +224,8 @@ impl SetupWizard {
         }
 
         println!();
-        print_info("ThinClaw uses an embedded SQLite database (libSQL).");
-        print_info("No external database server required.");
+        print_info("ThinClaw uses libSQL, an embedded SQLite database.");
+        print_info("No external database server is required.");
         println!();
 
         let path_input = optional_input(
@@ -219,11 +239,11 @@ impl SetupWizard {
         // Ask about Turso cloud sync
         println!();
         let use_turso =
-            confirm("Enable Turso cloud sync (remote replica)?", false).map_err(SetupError::Io)?;
+            confirm("Add Turso cloud sync (remote replica)?", false).map_err(SetupError::Io)?;
 
         let (turso_url, turso_token) = if use_turso {
             print_info("Enter your Turso database URL and auth token.");
-            print_info("Format: libsql://your-db.turso.io");
+            print_info("Example: libsql://your-db.turso.io");
             println!();
 
             let url = input("Turso URL").map_err(SetupError::Io)?;
@@ -362,11 +382,15 @@ impl SetupWizard {
 
     /// Step 2: Security (secrets master key).
     pub(super) async fn step_security(&mut self) -> Result<(), SetupError> {
+        print_info("Recommended: use the OS keychain for local installs.");
+        print_info("Use environment mode only when your deployment already supplies secrets.");
+        println!();
+
         // Check current configuration
         let env_key_exists = std::env::var("SECRETS_MASTER_KEY").is_ok();
 
         if env_key_exists {
-            print_info("Secrets master key found in SECRETS_MASTER_KEY environment variable.");
+            print_info("Found SECRETS_MASTER_KEY in the environment.");
             self.settings.secrets_master_key_source = KeySource::Env;
             print_success("Security configured (env var)");
             return Ok(());
@@ -376,7 +400,7 @@ impl SetupWizard {
         // instead of has_master_key() so we can cache the key bytes and build
         // SecretsCrypto eagerly, avoiding redundant keychain accesses later
         // (each access triggers macOS system dialogs).
-        print_info("Checking OS keychain for existing master key...");
+        print_info("Checking the OS keychain for an existing master key...");
         if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
             let key_hex: String = keychain_key_bytes
                 .iter()
@@ -387,7 +411,7 @@ impl SetupWizard {
                     .map_err(|e| SetupError::Config(e.to_string()))?,
             ));
 
-            print_info("Existing master key found in OS keychain.");
+            print_info("Found an existing master key in the OS keychain.");
             if confirm("Use existing keychain key?", true).map_err(SetupError::Io)? {
                 self.settings.secrets_master_key_source = KeySource::Keychain;
                 print_success("Security configured (keychain)");
@@ -406,7 +430,7 @@ impl SetupWizard {
 
         let options = [
             "OS Keychain (recommended for local installs)",
-            "Environment variable (for CI/Docker)",
+            "Environment variable (for CI or Docker)",
             "Skip (disable secrets features)",
         ];
 
@@ -432,7 +456,7 @@ impl SetupWizard {
                 ));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
-                print_success("Master key generated and stored in OS keychain");
+                print_success("Master key generated and saved to the OS keychain");
             }
             1 => {
                 // Env var mode
@@ -444,11 +468,13 @@ impl SetupWizard {
                 print_info("Add this to your shell profile or .env file.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
-                print_success("Configured for environment variable");
+                print_success("Configured for environment storage");
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;
-                print_info("Secrets features disabled. Channel tokens must be set via env vars.");
+                print_info(
+                    "Secrets features are disabled. Channel tokens must be set through environment variables.",
+                );
             }
         }
 

@@ -147,19 +147,16 @@ fn from_cache(cache: &PricingCache) -> HashMap<String, (Decimal, Decimal)> {
 }
 
 /// Attempt to load cached pricing from the database.
-pub async fn load_from_db(
-    db: &dyn crate::db::Database,
-) -> Option<HashMap<String, (Decimal, Decimal)>> {
+pub async fn load_cache_from_db(db: &dyn crate::db::Database) -> Option<PricingCache> {
     match db.get_setting(PRICING_DB_NAMESPACE, PRICING_DB_KEY).await {
         Ok(Some(json_value)) => match serde_json::from_value::<PricingCache>(json_value) {
             Ok(cache) => {
-                let pricing = from_cache(&cache);
                 tracing::info!(
-                    models = pricing.len(),
+                    models = cache.models.len(),
                     fetched_at = %cache.fetched_at,
                     "Loaded pricing cache from database"
                 );
-                Some(pricing)
+                Some(cache)
             }
             Err(e) => {
                 tracing::warn!("Failed to parse pricing cache from DB: {}", e);
@@ -175,6 +172,13 @@ pub async fn load_from_db(
             None
         }
     }
+}
+
+/// Attempt to load cached pricing from the database.
+pub async fn load_from_db(
+    db: &dyn crate::db::Database,
+) -> Option<HashMap<String, (Decimal, Decimal)>> {
+    load_cache_from_db(db).await.map(|cache| from_cache(&cache))
 }
 
 /// Persist pricing to the database for cross-restart durability.
@@ -232,10 +236,14 @@ pub fn spawn_pricing_sync(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Step 1: Try loading from DB cache for instant startup pricing
-        if let Some(ref db) = db {
-            if let Some(cached) = load_from_db(db.as_ref()).await {
-                costs::set_dynamic_pricing(cached);
-            }
+        if let Some(ref db) = db
+            && let Some(cache) = load_cache_from_db(db.as_ref()).await
+        {
+            let fetched_at = chrono::DateTime::parse_from_rfc3339(&cache.fetched_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            let cached = from_cache(&cache);
+            costs::set_dynamic_pricing_with_fetched_at(cached, fetched_at);
         }
 
         // Step 2: Fetch fresh pricing from OpenRouter

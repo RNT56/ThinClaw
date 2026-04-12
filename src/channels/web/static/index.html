@@ -76,17 +76,29 @@
           <span class="assistant-label">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
+        <div class="subsession-tree assistant-subsessions" id="assistant-subsessions"></div>
         <div class="threads-section-header">
           <span>Conversations</span>
         </div>
         <div class="thread-list" id="thread-list"></div>
       </div>
       <div class="chat-container">
-        <div class="chat-messages" id="chat-messages"></div>
-        <div class="chat-status" id="chat-status"></div>
-        <div class="chat-input">
-          <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
-          <button id="send-btn" onclick="sendMessage()">Send</button>
+        <div class="chat-workspace">
+          <div class="chat-stage" id="chat-stage">
+            <div class="chat-messages" id="chat-messages"></div>
+            <div class="chat-status" id="chat-status"></div>
+            <div class="chat-input">
+              <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+              <button id="send-btn" onclick="sendMessage()">Send</button>
+            </div>
+          </div>
+          <aside class="subsession-panel hidden" id="subsession-panel" aria-live="polite">
+            <div class="subsession-panel-empty">
+              <div class="subsession-panel-kicker">Temporal Subsession</div>
+              <h3>Agent transcript</h3>
+              <p>Select a running or completed subagent session to inspect what it worked on without interrupting the main thread.</p>
+            </div>
+          </aside>
         </div>
       </div>
     </div>

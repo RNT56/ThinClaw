@@ -207,10 +207,9 @@ async fn resolve_routine(
             .get_routine(id)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
+        && r.owner_actor_id() == actor_id
     {
-        if r.owner_actor_id() == actor_id {
-            return Ok(r);
-        }
+        return Ok(r);
     }
 
     // Try by name

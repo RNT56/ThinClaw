@@ -180,6 +180,14 @@ pub struct Settings {
     #[serde(default, alias = "setup_completed")]
     pub onboard_completed: bool,
 
+    /// Deferred onboarding work that still needs operator attention.
+    ///
+    /// This is intentionally additive and optional so the setup wizard can
+    /// preserve incomplete external-auth or verification tasks without
+    /// introducing a second configuration store.
+    #[serde(default)]
+    pub onboarding_followups: Vec<OnboardingFollowup>,
+
     // === Step 1: Database ===
     /// Database backend: "postgres" or "libsql".
     #[serde(default)]
@@ -334,6 +342,43 @@ pub struct Settings {
     pub providers: ProvidersSettings,
 }
 
+/// Follow-up categories produced by onboarding when setup cannot be completed
+/// fully inside the current run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingFollowupCategory {
+    Authentication,
+    Verification,
+    Channel,
+    Provider,
+    Automation,
+    Runtime,
+}
+
+/// Follow-up urgency for a deferred onboarding task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingFollowupStatus {
+    Pending,
+    NeedsAttention,
+    Optional,
+}
+
+/// Persisted onboarding follow-up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingFollowup {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    pub category: OnboardingFollowupCategory,
+    pub status: OnboardingFollowupStatus,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub action_hint: Option<String>,
+}
+
 /// Source for the secrets master key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -389,7 +434,7 @@ impl Default for EmbeddingsSettings {
 ///
 /// - If only one channel is configured, it's auto-selected.
 /// - If multiple channels exist, the user should explicitly set their preference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NotificationSettings {
     /// Preferred channel for proactive notifications.
     /// e.g. "telegram", "imessage", "signal", "web".
@@ -405,15 +450,6 @@ pub struct NotificationSettings {
     /// None = use "default" (web-only, no external messaging).
     #[serde(default)]
     pub recipient: Option<String>,
-}
-
-impl Default for NotificationSettings {
-    fn default() -> Self {
-        Self {
-            preferred_channel: None,
-            recipient: None,
-        }
-    }
 }
 
 /// Tunnel settings for public webhook endpoints.
@@ -468,7 +504,7 @@ pub struct TunnelSettings {
 }
 
 /// Channel-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
@@ -525,6 +561,11 @@ pub struct ChannelSettings {
     /// Telegram progressive message streaming mode (e.g. "edit" or "status").
     #[serde(default)]
     pub telegram_stream_mode: Option<String>,
+
+    /// How Telegram should surface temporary subagent sessions.
+    /// Supported values: "temp_topic", "reply_chain", "compact_off".
+    #[serde(default = "default_telegram_subagent_session_mode")]
+    pub telegram_subagent_session_mode: String,
 
     // === Discord ===
     /// Whether Discord channel is enabled.
@@ -654,6 +695,57 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: false,
+            http_port: None,
+            http_host: None,
+            signal_enabled: false,
+            signal_http_url: None,
+            signal_account: None,
+            signal_allow_from: None,
+            signal_allow_from_groups: None,
+            signal_dm_policy: None,
+            signal_group_policy: None,
+            signal_group_allow_from: None,
+            telegram_owner_id: None,
+            telegram_stream_mode: None,
+            telegram_subagent_session_mode: default_telegram_subagent_session_mode(),
+            discord_enabled: false,
+            discord_bot_token: None,
+            discord_guild_id: None,
+            discord_allow_from: None,
+            discord_stream_mode: None,
+            slack_enabled: false,
+            slack_bot_token: None,
+            slack_app_token: None,
+            slack_allow_from: None,
+            nostr_enabled: false,
+            nostr_relays: None,
+            nostr_allow_from: None,
+            gmail_enabled: false,
+            gmail_project_id: None,
+            gmail_subscription_id: None,
+            gmail_topic_id: None,
+            gmail_allowed_senders: None,
+            imessage_enabled: false,
+            imessage_allow_from: None,
+            imessage_poll_interval: None,
+            apple_mail_enabled: false,
+            apple_mail_allow_from: None,
+            apple_mail_poll_interval: None,
+            apple_mail_unread_only: true,
+            apple_mail_mark_as_read: true,
+            gateway_port: None,
+            gateway_auth_token: None,
+            wasm_channels: Vec::new(),
+            wasm_channels_enabled: true,
+            wasm_channels_dir: None,
+        }
+    }
 }
 
 /// Heartbeat configuration.
@@ -810,6 +902,11 @@ pub struct AgentSettings {
     #[serde(default)]
     pub allow_local_tools: bool,
 
+    /// How much subagent activity should be surfaced to users by default.
+    /// Supported values: "balanced", "detailed".
+    #[serde(default = "default_subagent_transparency_level")]
+    pub subagent_transparency_level: String,
+
     /// Workspace mode: "unrestricted", "sandboxed", or "project".
     /// Controls the system prompt and filesystem restrictions.
     /// - "unrestricted": full access to host filesystem and OS APIs
@@ -860,6 +957,14 @@ fn default_thinking_budget_tokens() -> u32 {
     10_000
 }
 
+fn default_subagent_transparency_level() -> String {
+    "balanced".to_string()
+}
+
+fn default_telegram_subagent_session_mode() -> String {
+    "temp_topic".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -889,6 +994,7 @@ impl Default for AgentSettings {
             thinking_budget_tokens: default_thinking_budget_tokens(),
             auto_approve_tools: false,
             allow_local_tools: false,
+            subagent_transparency_level: default_subagent_transparency_level(),
             workspace_mode: None,
         }
     }
@@ -1700,6 +1806,41 @@ mod tests {
             .set("channels.telegram_owner_id", "987654321")
             .unwrap();
         assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
+    }
+
+    #[test]
+    fn test_subagent_transparency_defaults_and_set() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.agent.subagent_transparency_level, "balanced");
+
+        settings
+            .set("agent.subagent_transparency_level", "detailed")
+            .unwrap();
+        assert_eq!(settings.agent.subagent_transparency_level, "detailed");
+    }
+
+    #[test]
+    fn test_telegram_subagent_session_mode_defaults_and_round_trip() {
+        let mut settings = Settings::default();
+        assert_eq!(
+            settings.channels.telegram_subagent_session_mode,
+            "temp_topic"
+        );
+
+        settings
+            .set("channels.telegram_subagent_session_mode", "reply_chain")
+            .unwrap();
+        assert_eq!(
+            settings.channels.telegram_subagent_session_mode,
+            "reply_chain"
+        );
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(
+            restored.channels.telegram_subagent_session_mode,
+            "reply_chain"
+        );
     }
 
     /// Regression test: numeric-looking chat IDs stored as JSON strings in the

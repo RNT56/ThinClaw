@@ -442,10 +442,10 @@ end tell"#
 
     /// Extract sender email from a "Name <email>" or bare "email" format.
     fn extract_email(sender: &str) -> &str {
-        if let Some(start) = sender.find('<') {
-            if let Some(end) = sender.find('>') {
-                return &sender[start + 1..end];
-            }
+        if let Some(start) = sender.find('<')
+            && let Some(end) = sender.find('>')
+        {
+            return &sender[start + 1..end];
         }
         sender
     }

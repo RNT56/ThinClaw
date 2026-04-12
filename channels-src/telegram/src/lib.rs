@@ -300,6 +300,25 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Workspace path for the configured subagent session mode.
+const SUBAGENT_SESSION_MODE_PATH: &str = "state/subagent_session_mode";
+
+/// Workspace path for active subagent session routing state.
+const SUBAGENT_SESSIONS_PATH: &str = "state/subagent_sessions";
+
+/// Workspace path for remembering last orphan-session GC run.
+const SUBAGENT_GC_LAST_RUN_PATH: &str = "state/subagent_gc_last_run";
+
+/// TTL for subagent routing sessions. Stale entries are removed to avoid
+/// indefinite growth when subagent completion events are never observed.
+const SUBAGENT_SESSION_TTL_SECS: u64 = 6 * 60 * 60;
+
+/// Maximum number of persisted subagent sessions to retain.
+const SUBAGENT_SESSION_STORE_CAP: usize = 256;
+
+/// Minimum interval between periodic orphan-session GC runs.
+const SUBAGENT_GC_INTERVAL_SECS: u64 = 5 * 60;
+
 /// Telegram limits messages to 4096 UTF-8 characters.
 /// https://core.telegram.org/bots/api#sendmessage
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
@@ -347,17 +366,17 @@ struct TelegramMessageMetadata {
     /// Stable sender identifier used for continuity within Telegram.
     #[serde(default)]
     stable_sender_id: Option<String>,
+
+    /// Optional per-message override for subagent session rendering mode.
+    #[serde(default, alias = "telegram_subagent_session_mode")]
+    subagent_session_mode: Option<String>,
 }
 
 fn conversation_kind(is_private: bool) -> &'static str {
     if is_private { "direct" } else { "group" }
 }
 
-fn conversation_scope_id(
-    chat_id: i64,
-    message_thread_id: Option<i64>,
-    is_private: bool,
-) -> String {
+fn conversation_scope_id(chat_id: i64, message_thread_id: Option<i64>, is_private: bool) -> String {
     if is_private {
         format!("telegram:direct:{chat_id}")
     } else if let Some(thread_id) = message_thread_id {
@@ -418,6 +437,15 @@ struct TelegramConfig {
     /// Telegram will include this in the X-Telegram-Bot-Api-Secret-Token header.
     #[serde(default)]
     webhook_secret: Option<String>,
+
+    /// How subagent activity should be surfaced in Telegram.
+    /// Supported values: "temp_topic", "reply_chain", "compact_off".
+    #[serde(
+        default,
+        alias = "telegram_subagent_session_mode",
+        alias = "channels.telegram_subagent_session_mode"
+    )]
+    subagent_session_mode: Option<String>,
 }
 
 // ============================================================================
@@ -430,9 +458,80 @@ struct TelegramChannel;
 enum TelegramStatusAction {
     Typing,
     Notify(String),
+    Subagent(SubagentEvent),
 }
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramSubagentSessionMode {
+    TempTopic,
+    ReplyChain,
+    CompactOff,
+}
+
+impl TelegramSubagentSessionMode {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "temp_topic" | "temptopic" | "topic" => Some(Self::TempTopic),
+            "reply_chain" | "replychain" | "reply" => Some(Self::ReplyChain),
+            "compact_off" | "compact" | "off" => Some(Self::CompactOff),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TempTopic => "temp_topic",
+            Self::ReplyChain => "reply_chain",
+            Self::CompactOff => "compact_off",
+        }
+    }
+}
+
+impl Default for TelegramSubagentSessionMode {
+    fn default() -> Self {
+        Self::TempTopic
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubagentEvent {
+    Spawned {
+        agent_id: String,
+        name: String,
+        task: String,
+    },
+    Progress {
+        agent_id: String,
+        category: String,
+        message: String,
+    },
+    Completed {
+        agent_id: String,
+        name: String,
+        success: bool,
+        response: Option<String>,
+        duration_ms: Option<u64>,
+        iterations: Option<usize>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredSubagentSession {
+    chat_id: i64,
+    parent_message_id: i64,
+    parent_thread_id: Option<i64>,
+    topic_thread_id: Option<i64>,
+    mode: String,
+    #[serde(default = "now_epoch_secs")]
+    last_touched_epoch_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForumTopic {
+    message_thread_id: i64,
+}
 
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
@@ -467,6 +566,9 @@ fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction>
         // Tool telemetry can be noisy in chat; keep it as typing-only UX.
         StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => None,
         StatusType::Status => {
+            if let Some(event) = parse_subagent_event(&update.message) {
+                return Some(TelegramStatusAction::Subagent(event));
+            }
             let msg = update.message.trim();
             if msg.eq_ignore_ascii_case("Done")
                 || msg.eq_ignore_ascii_case("Interrupted")
@@ -487,6 +589,637 @@ fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction>
     }
 }
 
+fn parse_subagent_event(message: &str) -> Option<SubagentEvent> {
+    let trimmed = message.trim();
+    let closing = trimmed.find(']')?;
+    let prefix = trimmed.get(..=closing)?;
+    if !prefix.starts_with("[subagent:") {
+        return None;
+    }
+
+    let remainder = trimmed
+        .get(closing + 1..)
+        .unwrap_or_default()
+        .trim_start()
+        .to_string();
+    let prefix_body = prefix.trim_start_matches('[').trim_end_matches(']');
+    let parts: Vec<&str> = prefix_body.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    match parts[1] {
+        "spawned" => {
+            let agent_id = parts[2].to_string();
+            if remainder.starts_with('{') {
+                let payload: serde_json::Value = serde_json::from_str(&remainder).ok()?;
+                let name = payload.get("name")?.as_str()?.to_string();
+                let task = payload.get("task")?.as_str()?.to_string();
+                Some(SubagentEvent::Spawned {
+                    agent_id,
+                    name,
+                    task,
+                })
+            } else {
+                let (name, task) = remainder
+                    .split_once(" — ")
+                    .or_else(|| remainder.split_once(" - "))
+                    .map(|(name, task)| (name.trim().to_string(), task.trim().to_string()))?;
+                Some(SubagentEvent::Spawned {
+                    agent_id,
+                    name,
+                    task,
+                })
+            }
+        }
+        "progress" => {
+            if parts.len() < 4 {
+                return None;
+            }
+            let agent_id = parts[2].to_string();
+            let category = parts[3].to_string();
+            let message = if remainder.starts_with('{') {
+                let payload: serde_json::Value = serde_json::from_str(&remainder).ok()?;
+                payload
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                remainder
+            };
+            if message.trim().is_empty() {
+                None
+            } else {
+                Some(SubagentEvent::Progress {
+                    agent_id,
+                    category,
+                    message,
+                })
+            }
+        }
+        "completed" | "failed" => {
+            let agent_id = parts[2].to_string();
+            let success = parts[1] == "completed";
+            if remainder.starts_with('{') {
+                let payload: serde_json::Value = serde_json::from_str(&remainder).ok()?;
+                Some(SubagentEvent::Completed {
+                    agent_id,
+                    name: payload
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("subagent")
+                        .to_string(),
+                    success: payload
+                        .get("success")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(success),
+                    response: payload
+                        .get("response")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string),
+                    duration_ms: payload.get("duration_ms").and_then(|value| value.as_u64()),
+                    iterations: payload
+                        .get("iterations")
+                        .and_then(|value| value.as_u64())
+                        .map(|value| value as usize),
+                })
+            } else {
+                let name = remainder
+                    .split_once(" (")
+                    .map(|(value, _)| value.trim().to_string())
+                    .unwrap_or_else(|| remainder.clone());
+                Some(SubagentEvent::Completed {
+                    agent_id,
+                    name,
+                    success,
+                    response: None,
+                    duration_ms: None,
+                    iterations: None,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_subagent_session_mode_from_value(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("telegram_subagent_session_mode")
+        .and_then(|mode| mode.as_str())
+        .or_else(|| {
+            value.get("channels").and_then(|channels| {
+                channels
+                    .get("telegram_subagent_session_mode")
+                    .and_then(|mode| mode.as_str())
+            })
+        })
+        .map(|mode| mode.trim().to_string())
+        .filter(|mode| !mode.is_empty())
+}
+
+fn extract_subagent_session_mode_from_json(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| extract_subagent_session_mode_from_value(&value))
+}
+
+fn parse_telegram_metadata(raw: &str) -> Result<TelegramMessageMetadata, serde_json::Error> {
+    let mut metadata: TelegramMessageMetadata = serde_json::from_str(raw)?;
+    if metadata.subagent_session_mode.is_none() {
+        metadata.subagent_session_mode = extract_subagent_session_mode_from_json(raw);
+    }
+    Ok(metadata)
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn maybe_close_orphaned_topic(session: &StoredSubagentSession) {
+    if TelegramSubagentSessionMode::from_str(&session.mode) != Some(TelegramSubagentSessionMode::TempTopic)
+    {
+        return;
+    }
+
+    if let Some(topic_thread_id) = session.topic_thread_id {
+        if let Err(error) = close_forum_topic(session.chat_id, topic_thread_id) {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Failed to close stale temp forum topic for orphaned subagent session: {}",
+                    error
+                ),
+            );
+        }
+    }
+}
+
+fn prune_orphaned_subagent_sessions(
+    sessions: &mut std::collections::HashMap<String, StoredSubagentSession>,
+    now: u64,
+    close_topics: bool,
+) -> usize {
+    let mut removed = 0usize;
+
+    let stale_ids: Vec<String> = sessions
+        .iter()
+        .filter_map(|(agent_id, session)| {
+            let age_secs = now.saturating_sub(session.last_touched_epoch_secs);
+            if age_secs > SUBAGENT_SESSION_TTL_SECS {
+                Some(agent_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for agent_id in stale_ids {
+        if let Some(session) = sessions.remove(&agent_id) {
+            removed += 1;
+            if close_topics {
+                maybe_close_orphaned_topic(&session);
+            }
+        }
+    }
+
+    if sessions.len() > SUBAGENT_SESSION_STORE_CAP {
+        let overflow = sessions.len() - SUBAGENT_SESSION_STORE_CAP;
+        let mut by_oldest_touch: Vec<(String, u64)> = sessions
+            .iter()
+            .map(|(agent_id, session)| (agent_id.clone(), session.last_touched_epoch_secs))
+            .collect();
+        by_oldest_touch.sort_by_key(|(_, touched)| *touched);
+
+        for (agent_id, _) in by_oldest_touch.into_iter().take(overflow) {
+            if let Some(session) = sessions.remove(&agent_id) {
+                removed += 1;
+                if close_topics {
+                    maybe_close_orphaned_topic(&session);
+                }
+            }
+        }
+    }
+
+    removed
+}
+
+fn read_subagent_sessions() -> std::collections::HashMap<String, StoredSubagentSession> {
+    let mut sessions = channel_host::workspace_read(SUBAGENT_SESSIONS_PATH)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let now = now_epoch_secs();
+    let removed = prune_orphaned_subagent_sessions(&mut sessions, now, true);
+    if removed > 0 {
+        write_subagent_sessions(&sessions);
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Cleaned up {} stale subagent session entries from Telegram state",
+                removed
+            ),
+        );
+    }
+    sessions
+}
+
+fn write_subagent_sessions(sessions: &std::collections::HashMap<String, StoredSubagentSession>) {
+    if let Ok(serialized) = serde_json::to_string(sessions) {
+        if let Err(error) = channel_host::workspace_write(SUBAGENT_SESSIONS_PATH, &serialized) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to persist subagent session state: {}", error),
+            );
+        }
+    }
+}
+
+fn run_subagent_session_gc(force: bool) {
+    let now = now_epoch_secs();
+
+    if !force {
+        let last_run = channel_host::workspace_read(SUBAGENT_GC_LAST_RUN_PATH)
+            .and_then(|raw| raw.parse::<u64>().ok());
+        if let Some(last_run) = last_run {
+            if now.saturating_sub(last_run) < SUBAGENT_GC_INTERVAL_SECS {
+                return;
+            }
+        }
+    }
+
+    let _ = read_subagent_sessions();
+    let _ = channel_host::workspace_write(SUBAGENT_GC_LAST_RUN_PATH, &now.to_string());
+}
+
+fn resolve_subagent_session_mode(
+    metadata: &TelegramMessageMetadata,
+) -> TelegramSubagentSessionMode {
+    metadata
+        .subagent_session_mode
+        .as_deref()
+        .and_then(TelegramSubagentSessionMode::from_str)
+        .or_else(|| {
+            channel_host::workspace_read(SUBAGENT_SESSION_MODE_PATH)
+                .as_deref()
+                .and_then(TelegramSubagentSessionMode::from_str)
+        })
+        .unwrap_or_default()
+}
+
+fn truncate_topic_name(name: &str, task: &str) -> String {
+    let base = if task.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        format!("{}: {}", name.trim(), task.trim())
+    };
+    let limit = 64usize;
+    if base.chars().count() <= limit {
+        return base;
+    }
+    let mut out = String::new();
+    for ch in base.chars().take(limit.saturating_sub(3)) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
+}
+
+fn create_forum_topic(chat_id: i64, name: &str) -> Result<i64, String> {
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "name": name,
+    });
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createForumTopic",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "Telegram API returned status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    let api_response: TelegramApiResponse<ForumTopic> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    if !api_response.ok {
+        return Err(api_response
+            .description
+            .unwrap_or_else(|| "unknown topic creation error".to_string()));
+    }
+
+    api_response
+        .result
+        .map(|result| result.message_thread_id)
+        .ok_or_else(|| "Telegram did not return a topic thread id".to_string())
+}
+
+fn close_forum_topic(chat_id: i64, message_thread_id: i64) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "message_thread_id": message_thread_id,
+    });
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/closeForumTopic",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "Telegram API returned status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    let api_response: TelegramApiResponse<bool> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    if api_response.ok {
+        Ok(())
+    } else {
+        Err(api_response
+            .description
+            .unwrap_or_else(|| "unknown close topic error".to_string()))
+    }
+}
+
+fn send_subagent_compact_notice(session: &StoredSubagentSession, text: &str) -> bool {
+    if let Err(error) = send_message(session.chat_id, text, None, None, session.parent_thread_id) {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!("Failed to send compact subagent notice: {}", error),
+        );
+        false
+    } else {
+        true
+    }
+}
+
+fn send_subagent_reply_or_compact(
+    session: &StoredSubagentSession,
+    text: &str,
+) -> TelegramSubagentSessionMode {
+    if send_message(
+        session.chat_id,
+        text,
+        Some(session.parent_message_id),
+        None,
+        session.parent_thread_id,
+    )
+    .is_ok()
+    {
+        return TelegramSubagentSessionMode::ReplyChain;
+    }
+
+    let _ = send_subagent_compact_notice(session, text);
+    TelegramSubagentSessionMode::CompactOff
+}
+
+fn render_subagent_spawn_notice(name: &str, task: &str) -> String {
+    format!(
+        "{} is working on: {}",
+        name,
+        truncate_status_message(task, 220)
+    )
+}
+
+fn render_subagent_progress_notice(category: &str, message: &str) -> String {
+    let label = match category {
+        "tool" => "Tool",
+        "question" => "Question",
+        "warning" => "Warning",
+        _ => "Progress",
+    };
+    format!("{label}: {}", truncate_status_message(message, 280))
+}
+
+fn render_subagent_completion_notice(
+    name: &str,
+    success: bool,
+    response: Option<&str>,
+    duration_ms: Option<u64>,
+    iterations: Option<usize>,
+) -> String {
+    let mut lines = vec![format!(
+        "{} {}",
+        if success {
+            "Completed"
+        } else {
+            "Finished with issues"
+        },
+        name
+    )];
+    let mut meta = Vec::new();
+    if let Some(duration_ms) = duration_ms {
+        meta.push(format!("{:.1}s", duration_ms as f64 / 1000.0));
+    }
+    if let Some(iterations) = iterations {
+        meta.push(format!("{iterations} iterations"));
+    }
+    if !meta.is_empty() {
+        lines.push(meta.join(" · "));
+    }
+    if let Some(response) = response.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(truncate_status_message(response, 500));
+    }
+    lines.join("\n")
+}
+
+fn handle_subagent_status(metadata: &TelegramMessageMetadata, event: SubagentEvent) {
+    let mut sessions = read_subagent_sessions();
+
+    match event {
+        SubagentEvent::Spawned {
+            agent_id,
+            name,
+            task,
+        } => {
+            let now = now_epoch_secs();
+            let requested_mode = resolve_subagent_session_mode(metadata);
+            let mut session = StoredSubagentSession {
+                chat_id: metadata.chat_id,
+                parent_message_id: metadata.message_id,
+                parent_thread_id: metadata.message_thread_id,
+                topic_thread_id: None,
+                mode: requested_mode.as_str().to_string(),
+                last_touched_epoch_secs: now,
+            };
+
+            let kickoff = render_subagent_spawn_notice(&name, &task);
+            match requested_mode {
+                TelegramSubagentSessionMode::TempTopic => {
+                    let topic_name = truncate_topic_name(&name, &task);
+                    match create_forum_topic(metadata.chat_id, &topic_name) {
+                        Ok(topic_thread_id) => {
+                            session.topic_thread_id = Some(topic_thread_id);
+                            if let Err(error) = send_message(
+                                metadata.chat_id,
+                                &kickoff,
+                                None,
+                                None,
+                                Some(topic_thread_id),
+                            ) {
+                                channel_host::log(
+                                    channel_host::LogLevel::Warn,
+                                    &format!(
+                                        "Failed to send subagent kickoff to temp topic: {}",
+                                        error
+                                    ),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Warn,
+                                &format!(
+                                    "Failed to create temp topic for subagent '{}': {}. Falling back to reply chain.",
+                                    agent_id, error
+                                ),
+                            );
+                            let fallback_mode = send_subagent_reply_or_compact(&session, &kickoff);
+                            session.mode = fallback_mode.as_str().to_string();
+                        }
+                    }
+                }
+                TelegramSubagentSessionMode::ReplyChain => {
+                    let fallback_mode = send_subagent_reply_or_compact(&session, &kickoff);
+                    session.mode = fallback_mode.as_str().to_string();
+                }
+                TelegramSubagentSessionMode::CompactOff => {
+                    let _ = send_subagent_compact_notice(&session, &kickoff);
+                    session.mode = TelegramSubagentSessionMode::CompactOff.as_str().to_string();
+                }
+            }
+
+            sessions.insert(agent_id, session);
+            write_subagent_sessions(&sessions);
+        }
+        SubagentEvent::Progress {
+            agent_id,
+            category,
+            message,
+        } => {
+            let Some(session) = sessions.get_mut(&agent_id) else {
+                return;
+            };
+            session.last_touched_epoch_secs = now_epoch_secs();
+            let notice = render_subagent_progress_notice(&category, &message);
+            let mode = TelegramSubagentSessionMode::from_str(&session.mode).unwrap_or_default();
+            match mode {
+                TelegramSubagentSessionMode::TempTopic => {
+                    if let Some(topic_thread_id) = session.topic_thread_id {
+                        if let Err(error) = send_message(
+                            session.chat_id,
+                            &notice,
+                            None,
+                            None,
+                            Some(topic_thread_id),
+                        ) {
+                            channel_host::log(
+                                channel_host::LogLevel::Warn,
+                                &format!(
+                                    "Failed to send subagent progress to topic, falling back: {}",
+                                    error
+                                ),
+                            );
+                            let fallback_mode = send_subagent_reply_or_compact(session, &notice);
+                            session.mode = fallback_mode.as_str().to_string();
+                            session.topic_thread_id = None;
+                        }
+                    } else {
+                        let fallback_mode = send_subagent_reply_or_compact(session, &notice);
+                        session.mode = fallback_mode.as_str().to_string();
+                    }
+                }
+                TelegramSubagentSessionMode::ReplyChain => {
+                    let fallback_mode = send_subagent_reply_or_compact(session, &notice);
+                    session.mode = fallback_mode.as_str().to_string();
+                }
+                TelegramSubagentSessionMode::CompactOff => {
+                    let _ = send_subagent_compact_notice(session, &notice);
+                }
+            }
+            write_subagent_sessions(&sessions);
+        }
+        SubagentEvent::Completed {
+            agent_id,
+            name,
+            success,
+            response,
+            duration_ms,
+            iterations,
+        } => {
+            let Some(session) = sessions.remove(&agent_id) else {
+                return;
+            };
+            let notice = render_subagent_completion_notice(
+                &name,
+                success,
+                response.as_deref(),
+                duration_ms,
+                iterations,
+            );
+            let mode = TelegramSubagentSessionMode::from_str(&session.mode).unwrap_or_default();
+            match mode {
+                TelegramSubagentSessionMode::TempTopic => {
+                    if let Some(topic_thread_id) = session.topic_thread_id {
+                        if let Err(error) = send_message(
+                            session.chat_id,
+                            &notice,
+                            None,
+                            None,
+                            Some(topic_thread_id),
+                        ) {
+                            channel_host::log(
+                                channel_host::LogLevel::Warn,
+                                &format!(
+                                    "Failed to send subagent completion to topic, falling back: {}",
+                                    error
+                                ),
+                            );
+                            let _ = send_subagent_reply_or_compact(&session, &notice);
+                        }
+                        if let Err(error) = close_forum_topic(session.chat_id, topic_thread_id) {
+                            channel_host::log(
+                                channel_host::LogLevel::Debug,
+                                &format!("Failed to close temp forum topic: {}", error),
+                            );
+                        }
+                    } else {
+                        let _ = send_subagent_reply_or_compact(&session, &notice);
+                    }
+                }
+                TelegramSubagentSessionMode::ReplyChain => {
+                    let _ = send_subagent_reply_or_compact(&session, &notice);
+                }
+                TelegramSubagentSessionMode::CompactOff => {
+                    let _ = send_subagent_compact_notice(&session, &notice);
+                }
+            }
+            write_subagent_sessions(&sessions);
+        }
+    }
+}
+
 impl Guest for TelegramChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
         channel_host::log(
@@ -494,7 +1227,9 @@ impl Guest for TelegramChannel {
             &format!("Telegram channel config: {}", config_json),
         );
 
-        let config: TelegramConfig = serde_json::from_str(&config_json)
+        let raw_config: serde_json::Value = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse config JSON: {}", e))?;
+        let config: TelegramConfig = serde_json::from_value(raw_config.clone())
             .map_err(|e| format!("Failed to parse config: {}", e))?;
 
         channel_host::log(channel_host::LogLevel::Info, "Telegram channel starting");
@@ -545,6 +1280,17 @@ impl Guest for TelegramChannel {
             &config.respond_to_all_group_messages.to_string(),
         );
 
+        let configured_subagent_mode = config
+            .subagent_session_mode
+            .clone()
+            .or_else(|| extract_subagent_session_mode_from_value(&raw_config));
+        let subagent_mode = configured_subagent_mode
+            .as_deref()
+            .and_then(TelegramSubagentSessionMode::from_str)
+            .unwrap_or_default();
+        let _ = channel_host::workspace_write(SUBAGENT_SESSION_MODE_PATH, subagent_mode.as_str());
+        run_subagent_session_gc(true);
+
         // Mode is determined by whether the host injected a tunnel_url
         // If tunnel is configured, use webhooks. Otherwise, use polling.
         let mut webhook_mode = config.tunnel_url.is_some();
@@ -565,7 +1311,10 @@ impl Guest for TelegramChannel {
                 if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
                     channel_host::log(
                         channel_host::LogLevel::Error,
-                        &format!("Failed to register webhook: {} — falling back to polling mode", e),
+                        &format!(
+                            "Failed to register webhook: {} — falling back to polling mode",
+                            e
+                        ),
                     );
                     // Fall back to polling mode — delete any stale webhook so
                     // getUpdates works, then flip the mode flag.
@@ -614,6 +1363,10 @@ impl Guest for TelegramChannel {
     }
 
     fn on_http_request(req: IncomingHttpRequest) -> OutgoingHttpResponse {
+        // Keep orphan-session GC active in webhook mode as well.
+        // The interval gate in run_subagent_session_gc avoids per-request overhead.
+        run_subagent_session_gc(false);
+
         // Check if webhook secret validation passed (if required)
         // The host validates X-Telegram-Bot-Api-Secret-Token header and sets secret_validated
         // If require_secret was true in config but validation failed, secret_validated will be false
@@ -658,6 +1411,7 @@ impl Guest for TelegramChannel {
     }
 
     fn on_poll() {
+        run_subagent_session_gc(false);
         // Read last offset from workspace storage
         let offset = match channel_host::workspace_read(POLLING_STATE_PATH) {
             Some(s) => s.parse::<i64>().unwrap_or(0),
@@ -781,7 +1535,10 @@ impl Guest for TelegramChannel {
             channel_host::LogLevel::Info,
             &format!(
                 "on_respond: chat_id={}, message_thread_id={:?}, is_private={}, metadata_json={}",
-                metadata.chat_id, metadata.message_thread_id, metadata.is_private, response.metadata_json
+                metadata.chat_id,
+                metadata.message_thread_id,
+                metadata.is_private,
+                response.metadata_json
             ),
         );
 
@@ -824,7 +1581,8 @@ impl Guest for TelegramChannel {
                         &format!("HTML parse failed ({}), retrying as plain text", detail),
                     );
                     // Fall back to original plain-text content for this chunk
-                    let plain_chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LENGTH);
+                    let plain_chunks =
+                        split_message(&response.content, TELEGRAM_MAX_MESSAGE_LENGTH);
                     let plain_chunk = plain_chunks.get(i).map(|s| s.as_str()).unwrap_or(chunk);
                     send_message(
                         metadata.chat_id,
@@ -849,7 +1607,8 @@ impl Guest for TelegramChannel {
         };
 
         // Parse chat_id from metadata
-        let metadata: TelegramMessageMetadata = match serde_json::from_str(&update.metadata_json) {
+        let metadata: TelegramMessageMetadata = match parse_telegram_metadata(&update.metadata_json)
+        {
             Ok(m) => m,
             Err(_) => {
                 channel_host::log(
@@ -898,9 +1657,13 @@ impl Guest for TelegramChannel {
             }
             TelegramStatusAction::Notify(prompt) => {
                 // Send user-visible status updates for actionable events.
-                if let Err(first_err) =
-                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None, metadata.message_thread_id)
-                {
+                if let Err(first_err) = send_message(
+                    metadata.chat_id,
+                    &prompt,
+                    Some(metadata.message_id),
+                    None,
+                    metadata.message_thread_id,
+                ) {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
                         &format!(
@@ -909,7 +1672,13 @@ impl Guest for TelegramChannel {
                         ),
                     );
 
-                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None, metadata.message_thread_id) {
+                    if let Err(retry_err) = send_message(
+                        metadata.chat_id,
+                        &prompt,
+                        None,
+                        None,
+                        metadata.message_thread_id,
+                    ) {
                         channel_host::log(
                             channel_host::LogLevel::Debug,
                             &format!(
@@ -919,6 +1688,9 @@ impl Guest for TelegramChannel {
                         );
                     }
                 }
+            }
+            TelegramStatusAction::Subagent(event) => {
+                handle_subagent_status(&metadata, event);
             }
         }
     }
@@ -1066,7 +1838,9 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
         let search_area = &remaining[..max_len];
 
         // Priority 1: split at a paragraph break (\n\n)
-        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1) // include first \n
+        let split_at = search_area
+            .rfind("\n\n")
+            .map(|pos| pos + 1) // include first \n
             // Priority 2: split at a line break
             .or_else(|| search_area.rfind('\n'))
             // Priority 3: split at a space
@@ -1456,6 +2230,7 @@ fn handle_message(message: TelegramMessage) {
         )),
         raw_sender_id: Some(stable_sender_id.clone()),
         stable_sender_id: Some(stable_sender_id),
+        subagent_session_mode: None,
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -1492,7 +2267,11 @@ fn handle_message(message: TelegramMessage) {
         channel_host::LogLevel::Info,
         &format!(
             "handle_message: chat_id={}, message_id={}, message_thread_id={:?}, is_private={}, chat_type={}",
-            message.chat.id, message.message_id, message.message_thread_id, is_private, message.chat.chat_type
+            message.chat.id,
+            message.message_id,
+            message.message_thread_id,
+            is_private,
+            message.chat.chat_type
         ),
     );
 
@@ -1509,7 +2288,10 @@ fn handle_message(message: TelegramMessage) {
         channel_host::LogLevel::Info,
         &format!(
             "Emitted message from user {} in chat {} (thread: {:?}, attachments: {})",
-            from.id, message.chat.id, message.message_thread_id, media_descriptors.len()
+            from.id,
+            message.chat.id,
+            message.message_thread_id,
+            media_descriptors.len()
         ),
     );
 }
@@ -1684,8 +2466,9 @@ fn download_telegram_file(file_id: &str, headers_json: &str) -> Result<Vec<u8>, 
         file_id
     );
 
-    let response = channel_host::http_request("GET", &get_file_url, headers_json, None, Some(10_000))
-        .map_err(|e| format!("getFile HTTP failed: {}", e))?;
+    let response =
+        channel_host::http_request("GET", &get_file_url, headers_json, None, Some(10_000))
+            .map_err(|e| format!("getFile HTTP failed: {}", e))?;
 
     if response.status != 200 {
         return Err(format!("getFile returned HTTP {}", response.status));
@@ -1697,7 +2480,9 @@ fn download_telegram_file(file_id: &str, headers_json: &str) -> Result<Vec<u8>, 
     if !api_response.ok {
         return Err(format!(
             "getFile API error: {}",
-            api_response.description.unwrap_or_else(|| "unknown".to_string())
+            api_response
+                .description
+                .unwrap_or_else(|| "unknown".to_string())
         ));
     }
 
@@ -1732,7 +2517,6 @@ fn download_telegram_file(file_id: &str, headers_json: &str) -> Result<Vec<u8>, 
 
     Ok(download_response.body)
 }
-
 
 /// Clean message text by removing bot commands and @mentions at the start.
 /// When bot_username is set, only strips that specific mention; otherwise strips any leading @mention.
@@ -2014,12 +2798,70 @@ mod tests {
         let json = r#"{
             "bot_username": "my_bot",
             "owner_id": 42,
-            "respond_to_all_group_messages": true
+            "respond_to_all_group_messages": true,
+            "telegram_subagent_session_mode": "reply_chain"
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
         assert_eq!(config.owner_id, Some(42));
         assert!(config.respond_to_all_group_messages);
+        assert_eq!(config.subagent_session_mode.as_deref(), Some("reply_chain"));
+    }
+
+    #[test]
+    fn test_extract_subagent_session_mode_from_nested_config() {
+        let value = serde_json::json!({
+            "channels": {
+                "telegram_subagent_session_mode": "compact_off"
+            }
+        });
+
+        assert_eq!(
+            extract_subagent_session_mode_from_value(&value).as_deref(),
+            Some("compact_off")
+        );
+    }
+
+    #[test]
+    fn test_parse_telegram_metadata_with_nested_subagent_mode() {
+        let raw = serde_json::json!({
+            "chat_id": 123,
+            "message_id": 456,
+            "user_id": 789,
+            "is_private": false,
+            "channels": {
+                "telegram_subagent_session_mode": "reply_chain"
+            }
+        })
+        .to_string();
+
+        let metadata = parse_telegram_metadata(&raw).unwrap();
+        assert_eq!(
+            metadata.subagent_session_mode.as_deref(),
+            Some("reply_chain")
+        );
+    }
+
+    #[test]
+    fn test_resolve_subagent_session_mode_prefers_metadata_override() {
+        let metadata = TelegramMessageMetadata {
+            chat_id: 1,
+            message_id: 2,
+            user_id: 3,
+            is_private: true,
+            message_thread_id: None,
+            conversation_kind: None,
+            conversation_scope_id: None,
+            external_conversation_key: None,
+            raw_sender_id: None,
+            stable_sender_id: None,
+            subagent_session_mode: Some("compact_off".to_string()),
+        };
+
+        assert_eq!(
+            resolve_subagent_session_mode(&metadata),
+            TelegramSubagentSessionMode::CompactOff
+        );
     }
 
     #[test]
@@ -2079,10 +2921,7 @@ mod tests {
     fn test_normalized_conversation_metadata() {
         assert_eq!(conversation_kind(true), "direct");
         assert_eq!(conversation_kind(false), "group");
-        assert_eq!(
-            conversation_scope_id(42, None, true),
-            "telegram:direct:42"
-        );
+        assert_eq!(conversation_scope_id(42, None, true), "telegram:direct:42");
         assert_eq!(
             conversation_scope_id(42, Some(7), false),
             "telegram:group:42:topic:7"
@@ -2284,6 +3123,125 @@ mod tests {
                 "Context compaction started".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn test_parse_subagent_event_spawned_legacy() {
+        assert_eq!(
+            parse_subagent_event("[subagent:spawned:agent-1] Researcher - Check brave search"),
+            Some(SubagentEvent::Spawned {
+                agent_id: "agent-1".to_string(),
+                name: "Researcher".to_string(),
+                task: "Check brave search".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_subagent_event_progress_json() {
+        assert_eq!(
+            parse_subagent_event(
+                r#"[subagent:progress:agent-1:tool] {"message":"Running brave-search"}"#
+            ),
+            Some(SubagentEvent::Progress {
+                agent_id: "agent-1".to_string(),
+                category: "tool".to_string(),
+                message: "Running brave-search".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_subagent_event_completed_json() {
+        assert_eq!(
+            parse_subagent_event(
+                r#"[subagent:completed:agent-1] {"name":"Researcher","success":true,"response":"Done","duration_ms":1850,"iterations":3}"#
+            ),
+            Some(SubagentEvent::Completed {
+                agent_id: "agent-1".to_string(),
+                name: "Researcher".to_string(),
+                success: true,
+                response: Some("Done".to_string()),
+                duration_ms: Some(1850),
+                iterations: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_subagent_event() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: r#"[subagent:progress:agent-1:tool] {"message":"Running brave-search"}"#
+                .to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Subagent(SubagentEvent::Progress {
+                agent_id: "agent-1".to_string(),
+                category: "tool".to_string(),
+                message: "Running brave-search".to_string(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_prune_orphaned_subagent_sessions_removes_stale_entries() {
+        let now = 100_000u64;
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            "stale-agent".to_string(),
+            StoredSubagentSession {
+                chat_id: 1,
+                parent_message_id: 10,
+                parent_thread_id: None,
+                topic_thread_id: None,
+                mode: "reply_chain".to_string(),
+                last_touched_epoch_secs: now.saturating_sub(SUBAGENT_SESSION_TTL_SECS + 1),
+            },
+        );
+        sessions.insert(
+            "fresh-agent".to_string(),
+            StoredSubagentSession {
+                chat_id: 1,
+                parent_message_id: 11,
+                parent_thread_id: None,
+                topic_thread_id: None,
+                mode: "reply_chain".to_string(),
+                last_touched_epoch_secs: now,
+            },
+        );
+
+        let removed = prune_orphaned_subagent_sessions(&mut sessions, now, false);
+        assert_eq!(removed, 1);
+        assert!(!sessions.contains_key("stale-agent"));
+        assert!(sessions.contains_key("fresh-agent"));
+    }
+
+    #[test]
+    fn test_prune_orphaned_subagent_sessions_enforces_store_cap() {
+        let now = 20_000u64;
+        let mut sessions = std::collections::HashMap::new();
+
+        for idx in 0..(SUBAGENT_SESSION_STORE_CAP + 3) {
+            sessions.insert(
+                format!("agent-{idx}"),
+                StoredSubagentSession {
+                    chat_id: 1,
+                    parent_message_id: idx as i64,
+                    parent_thread_id: None,
+                    topic_thread_id: None,
+                    mode: "reply_chain".to_string(),
+                    last_touched_epoch_secs: now.saturating_sub((SUBAGENT_SESSION_STORE_CAP + 3 - idx) as u64),
+                },
+            );
+        }
+
+        let removed = prune_orphaned_subagent_sessions(&mut sessions, now, false);
+        assert_eq!(removed, 3);
+        assert_eq!(sessions.len(), SUBAGENT_SESSION_STORE_CAP);
     }
 
     #[test]

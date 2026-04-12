@@ -75,13 +75,12 @@ mod platform {
 
     /// Retrieve the master key from the macOS Keychain.
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
-        if let Ok(cache) = get_cache().lock() {
-            if let Some(password) = cache.get(MASTER_KEY_ACCOUNT) {
-                let hex_str = String::from_utf8(password.clone()).map_err(|_| {
-                    SecretError::KeychainError("Invalid UTF-8 in keychain".to_string())
-                })?;
-                return hex_to_bytes(&hex_str);
-            }
+        if let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(MASTER_KEY_ACCOUNT)
+        {
+            let hex_str = String::from_utf8(password.clone())
+                .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in keychain".to_string()))?;
+            return hex_to_bytes(&hex_str);
         }
 
         let password = get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
@@ -112,10 +111,10 @@ mod platform {
 
     /// Check if a master key exists in the keychain.
     pub async fn has_master_key() -> bool {
-        if let Ok(cache) = get_cache().lock() {
-            if cache.contains_key(MASTER_KEY_ACCOUNT) {
-                return true;
-            }
+        if let Ok(cache) = get_cache().lock()
+            && cache.contains_key(MASTER_KEY_ACCOUNT)
+        {
+            return true;
         }
         match get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT) {
             Ok(password) => {
@@ -145,10 +144,10 @@ mod platform {
     ///
     /// Returns `None` if the key doesn't exist (rather than an error).
     pub async fn get_api_key(account: &str) -> Option<String> {
-        if let Ok(cache) = get_cache().lock() {
-            if let Some(password) = cache.get(account) {
-                return String::from_utf8(password.clone()).ok();
-            }
+        if let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(account)
+        {
+            return String::from_utf8(password.clone()).ok();
         }
         match get_generic_password(SERVICE_NAME, account) {
             Ok(bytes) => {
@@ -160,6 +159,17 @@ mod platform {
             }
             Err(_) => None,
         }
+    }
+
+    /// Delete an arbitrary API key string from the keychain.
+    pub async fn delete_api_key(account: &str) -> Result<(), SecretError> {
+        delete_generic_password(SERVICE_NAME, account).map_err(|e| {
+            SecretError::KeychainError(format!("Failed to delete {} from keychain: {}", account, e))
+        })?;
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.remove(account);
+        }
+        Ok(())
     }
 }
 
@@ -410,6 +420,36 @@ mod platform {
 
         String::from_utf8(secret).ok()
     }
+
+    /// Delete an arbitrary API key string from the secret service.
+    pub async fn delete_api_key(account: &str) -> Result<(), SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+            })?;
+
+        let items = ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", account)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+
+        for item in items.unlocked.iter().chain(items.locked.iter()) {
+            item.delete()
+                .await
+                .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
+        }
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.remove(account);
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -451,11 +491,18 @@ mod platform {
     pub async fn get_api_key(_account: &str) -> Option<String> {
         None
     }
+
+    pub async fn delete_api_key(_account: &str) -> Result<(), SecretError> {
+        Err(SecretError::KeychainError(
+            "Keychain not supported on this platform".to_string(),
+        ))
+    }
 }
 
 // Re-export platform-specific functions
 pub use platform::{
-    delete_master_key, get_api_key, get_master_key, has_master_key, store_api_key, store_master_key,
+    delete_api_key, delete_master_key, get_api_key, get_master_key, has_master_key, store_api_key,
+    store_master_key,
 };
 
 /// Keychain account name for the Claude Code API key.

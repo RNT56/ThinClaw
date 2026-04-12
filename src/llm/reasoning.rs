@@ -1164,6 +1164,9 @@ Respond with a JSON plan in this format:
         // Extension guidance (only when extension tools are available)
         let extensions_section = self.build_extensions_section(context);
 
+        // Transparency + delegation guidance based on available tools
+        let execution_style_section = self.build_execution_style_section(context);
+
         // Runtime context (agent metadata)
         let runtime_section = self.build_runtime_section();
 
@@ -1177,7 +1180,7 @@ Respond with a JSON plan in this format:
             r#"## Tooling
 {tools_raw}
 Call tools when they would help. For multi-step tasks, call independent tools in parallel.
-Don't narrate routine tool calls — just call them.
+{execution_style}
 
 ## Memory
 After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: "daily_log").
@@ -1219,6 +1222,7 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
                     .collect::<Vec<_>>()
                     .join("\n")
             },
+            execution_style = execution_style_section,
             ext = extensions_section,
             workspace = workspace_section,
             channel = channel_section,
@@ -1235,6 +1239,39 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
                 String::new()
             },
         )
+    }
+
+    fn build_execution_style_section(&self, context: &ReasoningContext) -> String {
+        let has_emit_user_message = context
+            .available_tools
+            .iter()
+            .any(|tool| tool.name == "emit_user_message");
+        let has_spawn_subagent = context
+            .available_tools
+            .iter()
+            .any(|tool| tool.name == "spawn_subagent");
+
+        let mut lines = vec![
+            "- Narrate meaningful milestones, blockers, plan changes, and interim findings when that helps the user stay oriented.".to_string(),
+            "- Avoid noisy play-by-play updates for every routine step or tool call unless the user explicitly asks for detailed progress.".to_string(),
+        ];
+
+        if has_emit_user_message {
+            lines.push(
+                "- Use `emit_user_message` for durable checkpoints: starting a major phase, surfacing an interim result, flagging a blocker, or asking a clarifying question without ending your work.".to_string(),
+            );
+        }
+
+        if has_spawn_subagent {
+            lines.push(
+                "- Use `spawn_subagent` when work can be cleanly delegated into bounded, independent tracks with clear deliverables, especially when those tracks can run in parallel without blocking each other.".to_string(),
+            );
+            lines.push(
+                "- Do not delegate tiny tasks, tightly coupled loops, or work that requires constant shared context between the main agent and the sub-agent.".to_string(),
+            );
+        }
+
+        lines.join("\n")
     }
 
     fn build_extensions_section(&self, context: &ReasoningContext) -> String {
@@ -1304,17 +1341,17 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         if !self.active_channels.is_empty() {
             let channel_list: Vec<String> = self.active_channels.iter().map(|c| {
                 match c.as_str() {
-                    "apple_mail" => format!("- **apple_mail**: Apple Mail.app (reads inbox via Envelope Index, sends via AppleScript — no API key needed)"),
-                    "imessage" => format!("- **imessage**: iMessage via Messages.app (reads chat.db, sends via AppleScript)"),
-                    "gmail" => format!("- **gmail**: Gmail channel (receives emails via Pub/Sub push)"),
-                    "telegram" => format!("- **telegram**: Telegram bot (receives messages via webhook/polling)"),
-                    "discord" => format!("- **discord**: Discord bot (receives messages via gateway)"),
-                    "slack" => format!("- **slack**: Slack bot (receives messages via events API)"),
-                    "signal" => format!("- **signal**: Signal messenger (receives messages via signal-cli)"),
-                    "nostr" => format!("- **nostr**: Nostr protocol (NIP-04 encrypted DMs)"),
-                    "gateway" => format!("- **gateway**: Web UI chat interface"),
-                    "repl" => format!("- **repl**: CLI/TUI terminal interface"),
-                    "http" => format!("- **http**: HTTP webhook endpoint"),
+                    "apple_mail" => "- **apple_mail**: Apple Mail.app (reads inbox via Envelope Index, sends via AppleScript — no API key needed)".to_string(),
+                    "imessage" => "- **imessage**: iMessage via Messages.app (reads chat.db, sends via AppleScript)".to_string(),
+                    "gmail" => "- **gmail**: Gmail channel (receives emails via Pub/Sub push)".to_string(),
+                    "telegram" => "- **telegram**: Telegram bot (receives messages via webhook/polling)".to_string(),
+                    "discord" => "- **discord**: Discord bot (receives messages via gateway)".to_string(),
+                    "slack" => "- **slack**: Slack bot (receives messages via events API)".to_string(),
+                    "signal" => "- **signal**: Signal messenger (receives messages via signal-cli)".to_string(),
+                    "nostr" => "- **nostr**: Nostr protocol (NIP-04 encrypted DMs)".to_string(),
+                    "gateway" => "- **gateway**: Web UI chat interface".to_string(),
+                    "repl" => "- **repl**: CLI/TUI terminal interface".to_string(),
+                    "http" => "- **http**: HTTP webhook endpoint".to_string(),
                     other => format!("- **{}**: active channel", other),
                 }
             }).collect();
@@ -1428,6 +1465,7 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, ToolCompletionRequest,
         ToolCompletionResponse,
     };
+    use crate::testing::StubLlm;
 
     struct FinishReasonTestLlm {
         response: FinishReason,
@@ -1579,5 +1617,53 @@ mod tests {
 
         assert_eq!(streamed, "text response");
         assert_eq!(output.finish_reason, FinishReason::ContentFilter);
+    }
+
+    #[test]
+    fn conversation_prompt_includes_selective_transparency_guidance() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+        );
+        let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
+            name: "emit_user_message".to_string(),
+            description: "Send a progress message.".to_string(),
+            parameters: serde_json::json!({"type":"object"}),
+        }]);
+
+        let prompt = reasoning.build_conversation_prompt(&context);
+
+        assert!(prompt.contains("Narrate meaningful milestones"));
+        assert!(prompt.contains("Avoid noisy play-by-play updates"));
+        assert!(prompt.contains("Use `emit_user_message` for durable checkpoints"));
+        assert!(!prompt.contains("Don't narrate routine tool calls"));
+    }
+
+    #[test]
+    fn conversation_prompt_includes_spawn_subagent_guidance_when_available() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+        );
+        let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
+            name: "spawn_subagent".to_string(),
+            description: "Delegate work to a focused sub-agent.".to_string(),
+            parameters: serde_json::json!({"type":"object"}),
+        }]);
+
+        let prompt = reasoning.build_conversation_prompt(&context);
+
+        assert!(prompt.contains("Use `spawn_subagent` when work can be cleanly delegated"));
+        assert!(prompt.contains("Do not delegate tiny tasks"));
     }
 }
