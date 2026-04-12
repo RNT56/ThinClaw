@@ -482,7 +482,7 @@ impl AppBuilder {
                 ws = ws.with_embeddings(emb.clone());
             }
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws), None);
+            tools.register_memory_tools(Arc::clone(&ws), Some(Arc::clone(db)), None);
 
             Some(ws)
         } else {

@@ -173,6 +173,207 @@ impl Default for ProvidersSettings {
     }
 }
 
+fn default_learning_auto_apply_classes() -> Vec<String> {
+    vec![
+        "memory".to_string(),
+        "skill".to_string(),
+        "prompt".to_string(),
+    ]
+}
+
+fn default_learning_publish_mode() -> String {
+    "branch_pr_draft".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningSafeModeThresholds {
+    /// Auto-pause mutation class when rollback ratio exceeds this value.
+    #[serde(default = "default_learning_safe_mode_rollback_ratio")]
+    pub rollback_ratio: f64,
+    /// Auto-pause mutation class when harmful feedback ratio exceeds this value.
+    #[serde(default = "default_learning_safe_mode_negative_feedback_ratio")]
+    pub negative_feedback_ratio: f64,
+    /// Minimum sample size before thresholds are enforced.
+    #[serde(default = "default_learning_safe_mode_min_samples")]
+    pub min_samples: u32,
+}
+
+fn default_learning_safe_mode_rollback_ratio() -> f64 {
+    0.25
+}
+
+fn default_learning_safe_mode_negative_feedback_ratio() -> f64 {
+    0.20
+}
+
+fn default_learning_safe_mode_min_samples() -> u32 {
+    8
+}
+
+impl Default for LearningSafeModeThresholds {
+    fn default() -> Self {
+        Self {
+            rollback_ratio: default_learning_safe_mode_rollback_ratio(),
+            negative_feedback_ratio: default_learning_safe_mode_negative_feedback_ratio(),
+            min_samples: default_learning_safe_mode_min_samples(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningSafeModeSettings {
+    /// Enables automatic pause logic when quality degrades.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub thresholds: LearningSafeModeThresholds,
+}
+
+impl Default for LearningSafeModeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            thresholds: LearningSafeModeThresholds::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningReflectionSettings {
+    /// Minimum tool calls before reflection/candidate generation.
+    #[serde(default = "default_learning_reflection_min_tool_calls")]
+    pub min_tool_calls: u32,
+    /// Minimum explicit correction count before prioritizing a correction candidate.
+    #[serde(default = "default_learning_reflection_correction_threshold")]
+    pub user_correction_threshold: u32,
+}
+
+fn default_learning_reflection_min_tool_calls() -> u32 {
+    2
+}
+
+fn default_learning_reflection_correction_threshold() -> u32 {
+    1
+}
+
+impl Default for LearningReflectionSettings {
+    fn default() -> Self {
+        Self {
+            min_tool_calls: default_learning_reflection_min_tool_calls(),
+            user_correction_threshold: default_learning_reflection_correction_threshold(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningProviderSettings {
+    /// Whether this external memory provider is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider-specific config values (base_url, api_key_env, project_id, etc).
+    #[serde(default)]
+    pub config: HashMap<String, String>,
+}
+
+impl Default for LearningProviderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            config: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LearningProvidersSettings {
+    #[serde(default)]
+    pub honcho: LearningProviderSettings,
+    #[serde(default)]
+    pub zep: LearningProviderSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningPromptMutationSettings {
+    /// Gate autonomous prompt mutation via prompt_manage.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for LearningPromptMutationSettings {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningCodeProposalSettings {
+    /// Enables creation of approval-gated code change proposals.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Publish mode after approval: `branch_pr_draft`, `branch_only`, or `bundle_only`.
+    #[serde(default = "default_learning_publish_mode")]
+    pub publish_mode: String,
+}
+
+impl Default for LearningCodeProposalSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            publish_mode: default_learning_publish_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningExportSettings {
+    /// Enables optional trajectory/export hooks.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for LearningExportSettings {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningSettings {
+    /// Master toggle for self-improvement runtime.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Auto-applied classes when risk-tier routing allows it.
+    #[serde(default = "default_learning_auto_apply_classes")]
+    pub auto_apply_classes: Vec<String>,
+    #[serde(default)]
+    pub safe_mode: LearningSafeModeSettings,
+    #[serde(default)]
+    pub reflection: LearningReflectionSettings,
+    #[serde(default)]
+    pub prompt_mutation: LearningPromptMutationSettings,
+    #[serde(default)]
+    pub providers: LearningProvidersSettings,
+    #[serde(default)]
+    pub code_proposals: LearningCodeProposalSettings,
+    #[serde(default)]
+    pub exports: LearningExportSettings,
+}
+
+impl Default for LearningSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_apply_classes: default_learning_auto_apply_classes(),
+            safe_mode: LearningSafeModeSettings::default(),
+            reflection: LearningReflectionSettings::default(),
+            prompt_mutation: LearningPromptMutationSettings::default(),
+            providers: LearningProvidersSettings::default(),
+            code_proposals: LearningCodeProposalSettings::default(),
+            exports: LearningExportSettings::default(),
+        }
+    }
+}
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -340,6 +541,10 @@ pub struct Settings {
     /// Enables failover, smart routing, and model allowlists.
     #[serde(default)]
     pub providers: ProvidersSettings,
+
+    /// Closed-loop learning and self-improvement settings.
+    #[serde(default)]
+    pub learning: LearningSettings,
 }
 
 /// Follow-up categories produced by onboarding when setup cannot be completed
@@ -793,7 +998,7 @@ pub struct HeartbeatSettings {
     pub active_end_hour: Option<u8>,
 
     /// Custom heartbeat prompt body. When set, replaces the default
-    /// OpenClaw-style prompt. The agent can modify this at runtime.
+    /// checklist-style prompt. The agent can modify this at runtime.
     #[serde(default)]
     pub prompt: Option<String>,
 

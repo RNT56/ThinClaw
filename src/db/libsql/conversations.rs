@@ -10,6 +10,8 @@ use crate::db::ConversationStore;
 use crate::error::DatabaseError;
 use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
+    LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
+    LearningEvent, LearningFeedbackRecord, LearningRollbackRecord, SessionSearchHit,
 };
 
 fn handoff_from_metadata(metadata: &serde_json::Value) -> Option<ConversationHandoffMetadata> {
@@ -76,6 +78,144 @@ fn message_from_row(row: &libsql::Row) -> ConversationMessage {
         raw_sender_id: get_opt_text(row, 5),
         metadata: get_json(row, 6),
         created_at: get_ts(row, 7),
+    }
+}
+
+fn search_hit_from_row(row: &libsql::Row) -> SessionSearchHit {
+    SessionSearchHit {
+        conversation_id: get_text(row, 0).parse().unwrap_or_default(),
+        message_id: get_text(row, 1).parse().unwrap_or_default(),
+        user_id: get_text(row, 2),
+        actor_id: get_opt_text(row, 3),
+        channel: get_text(row, 4),
+        thread_id: get_opt_text(row, 5),
+        conversation_kind: ConversationKind::from_db(row.get::<String>(6).ok().as_deref()),
+        role: get_text(row, 7),
+        content: get_text(row, 8),
+        excerpt: get_text(row, 9),
+        metadata: get_json(row, 10),
+        created_at: get_ts(row, 11),
+        score: row.get::<f64>(12).ok(),
+    }
+}
+
+fn learning_event_from_row(row: &libsql::Row) -> LearningEvent {
+    LearningEvent {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        user_id: get_text(row, 1),
+        actor_id: get_opt_text(row, 2),
+        channel: get_opt_text(row, 3),
+        thread_id: get_opt_text(row, 4),
+        conversation_id: get_opt_text(row, 5).and_then(|s| s.parse().ok()),
+        message_id: get_opt_text(row, 6).and_then(|s| s.parse().ok()),
+        job_id: get_opt_text(row, 7).and_then(|s| s.parse().ok()),
+        event_type: get_text(row, 8),
+        source: get_text(row, 9),
+        payload: get_json(row, 10),
+        metadata: match row.get::<String>(11) {
+            Ok(value) => serde_json::from_str(&value).ok(),
+            Err(_) => None,
+        },
+        created_at: get_ts(row, 12),
+    }
+}
+
+fn learning_evaluation_from_row(row: &libsql::Row) -> LearningEvaluation {
+    LearningEvaluation {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        learning_event_id: get_text(row, 1).parse().unwrap_or_default(),
+        user_id: get_text(row, 2),
+        evaluator: get_text(row, 3),
+        status: get_text(row, 4),
+        score: row.get::<f64>(5).ok(),
+        details: get_json(row, 6),
+        created_at: get_ts(row, 7),
+    }
+}
+
+fn learning_candidate_from_row(row: &libsql::Row) -> LearningCandidate {
+    LearningCandidate {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        learning_event_id: get_opt_text(row, 1).and_then(|v| v.parse().ok()),
+        user_id: get_text(row, 2),
+        candidate_type: get_text(row, 3),
+        risk_tier: get_text(row, 4),
+        confidence: row.get::<f64>(5).ok(),
+        target_type: get_opt_text(row, 6),
+        target_name: get_opt_text(row, 7),
+        summary: get_opt_text(row, 8),
+        proposal: get_json(row, 9),
+        created_at: get_ts(row, 10),
+    }
+}
+
+fn learning_artifact_version_from_row(row: &libsql::Row) -> LearningArtifactVersion {
+    LearningArtifactVersion {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        candidate_id: get_opt_text(row, 1).and_then(|v| v.parse().ok()),
+        user_id: get_text(row, 2),
+        artifact_type: get_text(row, 3),
+        artifact_name: get_text(row, 4),
+        version_label: get_opt_text(row, 5),
+        status: get_text(row, 6),
+        diff_summary: get_opt_text(row, 7),
+        before_content: get_opt_text(row, 8),
+        after_content: get_opt_text(row, 9),
+        provenance: get_json(row, 10),
+        created_at: get_ts(row, 11),
+    }
+}
+
+fn learning_feedback_from_row(row: &libsql::Row) -> LearningFeedbackRecord {
+    LearningFeedbackRecord {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        user_id: get_text(row, 1),
+        target_type: get_text(row, 2),
+        target_id: get_text(row, 3),
+        verdict: get_text(row, 4),
+        note: get_opt_text(row, 5),
+        metadata: get_json(row, 6),
+        created_at: get_ts(row, 7),
+    }
+}
+
+fn learning_rollback_from_row(row: &libsql::Row) -> LearningRollbackRecord {
+    LearningRollbackRecord {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        user_id: get_text(row, 1),
+        artifact_type: get_text(row, 2),
+        artifact_name: get_text(row, 3),
+        artifact_version_id: get_opt_text(row, 4).and_then(|v| v.parse().ok()),
+        reason: get_text(row, 5),
+        metadata: get_json(row, 6),
+        created_at: get_ts(row, 7),
+    }
+}
+
+fn learning_code_proposal_from_row(row: &libsql::Row) -> LearningCodeProposal {
+    LearningCodeProposal {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        learning_event_id: get_opt_text(row, 1).and_then(|v| v.parse().ok()),
+        user_id: get_text(row, 2),
+        status: get_text(row, 3),
+        title: get_text(row, 4),
+        rationale: get_text(row, 5),
+        target_files: get_json(row, 6)
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        diff: get_text(row, 7),
+        validation_results: get_json(row, 8),
+        rollback_note: get_opt_text(row, 9),
+        confidence: row.get::<f64>(10).ok(),
+        branch_name: get_opt_text(row, 11),
+        pr_url: get_opt_text(row, 12),
+        metadata: get_json(row, 13),
+        created_at: get_ts(row, 14),
+        updated_at: get_ts(row, 15),
     }
 }
 
@@ -609,6 +749,660 @@ impl ConversationStore for LibSqlBackend {
             messages.push(message_from_row(&row));
         }
         Ok(messages)
+    }
+
+    async fn search_conversation_messages(
+        &self,
+        user_id: &str,
+        query: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
+        let query = query.trim();
+        if query.is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.id,
+                    m.id,
+                    c.user_id,
+                    c.actor_id,
+                    c.channel,
+                    c.thread_id,
+                    c.conversation_kind,
+                    m.role,
+                    m.content,
+                    substr(m.content, 1, 240) AS excerpt,
+                    m.metadata,
+                    m.created_at,
+                    -bm25(conversation_messages_fts) AS score
+                FROM conversation_messages_fts
+                JOIN conversation_messages m ON m.rowid = conversation_messages_fts.rowid
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE conversation_messages_fts MATCH ?1
+                  AND c.user_id = ?2
+                  AND (?3 IS NULL OR COALESCE(NULLIF(c.actor_id, ''), c.user_id) = ?3)
+                  AND (?4 IS NULL OR c.channel = ?4)
+                  AND (?5 IS NULL OR c.thread_id = ?5)
+                ORDER BY score DESC, m.created_at DESC, m.rowid DESC
+                LIMIT ?6
+                "#,
+                params![query, user_id, actor_id, channel, thread_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut hits = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            hits.push(search_hit_from_row(&row));
+        }
+        Ok(hits)
+    }
+
+    async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if event.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            event.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_events (
+                id, user_id, actor_id, channel, thread_id, conversation_id,
+                message_id, job_id, event_type, source, payload, metadata, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                id.to_string(),
+                event.user_id.as_str(),
+                event.actor_id.as_deref(),
+                event.channel.as_deref(),
+                event.thread_id.as_deref(),
+                event.conversation_id.map(|id| id.to_string()),
+                event.message_id.map(|id| id.to_string()),
+                event.job_id.map(|id| id.to_string()),
+                event.event_type.as_str(),
+                event.source.as_str(),
+                event.payload.to_string(),
+                event
+                    .metadata
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}))
+                    .to_string(),
+                fmt_ts(&event.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_events(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningEvent>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id,
+                    user_id,
+                    actor_id,
+                    channel,
+                    thread_id,
+                    conversation_id,
+                    message_id,
+                    job_id,
+                    event_type,
+                    source,
+                    payload,
+                    metadata,
+                    created_at
+                FROM learning_events
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR COALESCE(NULLIF(actor_id, ''), user_id) = ?2)
+                  AND (?3 IS NULL OR channel = ?3)
+                  AND (?4 IS NULL OR thread_id = ?4)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?5
+                "#,
+                params![user_id, actor_id, channel, thread_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut events = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            events.push(learning_event_from_row(&row));
+        }
+        Ok(events)
+    }
+
+    async fn insert_learning_evaluation(
+        &self,
+        evaluation: &LearningEvaluation,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if evaluation.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            evaluation.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_evaluations (
+                id, learning_event_id, user_id, evaluator, status, score, details, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                id.to_string(),
+                evaluation.learning_event_id.to_string(),
+                evaluation.user_id.as_str(),
+                evaluation.evaluator.as_str(),
+                evaluation.status.as_str(),
+                evaluation.score,
+                evaluation.details.to_string(),
+                fmt_ts(&evaluation.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_evaluations(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LearningEvaluation>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, learning_event_id, user_id, evaluator, status, score, details, created_at
+                FROM learning_evaluations
+                WHERE user_id = ?1
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?2
+                "#,
+                params![user_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut evaluations = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            evaluations.push(learning_evaluation_from_row(&row));
+        }
+        Ok(evaluations)
+    }
+
+    async fn insert_learning_candidate(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if candidate.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            candidate.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_candidates (
+                id, learning_event_id, user_id, candidate_type, risk_tier, confidence,
+                target_type, target_name, summary, proposal, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                id.to_string(),
+                candidate.learning_event_id.map(|value| value.to_string()),
+                candidate.user_id.as_str(),
+                candidate.candidate_type.as_str(),
+                candidate.risk_tier.as_str(),
+                candidate.confidence,
+                candidate.target_type.as_deref(),
+                candidate.target_name.as_deref(),
+                candidate.summary.as_deref(),
+                candidate.proposal.to_string(),
+                fmt_ts(&candidate.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_candidates(
+        &self,
+        user_id: &str,
+        candidate_type: Option<&str>,
+        risk_tier: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCandidate>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, learning_event_id, user_id, candidate_type, risk_tier, confidence,
+                    target_type, target_name, summary, proposal, created_at
+                FROM learning_candidates
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR candidate_type = ?2)
+                  AND (?3 IS NULL OR risk_tier = ?3)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?4
+                "#,
+                params![user_id, candidate_type, risk_tier, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            candidates.push(learning_candidate_from_row(&row));
+        }
+        Ok(candidates)
+    }
+
+    async fn insert_learning_artifact_version(
+        &self,
+        version: &LearningArtifactVersion,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if version.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            version.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_artifact_versions (
+                id, candidate_id, user_id, artifact_type, artifact_name, version_label,
+                status, diff_summary, before_content, after_content, provenance, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                id.to_string(),
+                version.candidate_id.map(|value| value.to_string()),
+                version.user_id.as_str(),
+                version.artifact_type.as_str(),
+                version.artifact_name.as_str(),
+                version.version_label.as_deref(),
+                version.status.as_str(),
+                version.diff_summary.as_deref(),
+                version.before_content.as_deref(),
+                version.after_content.as_deref(),
+                version.provenance.to_string(),
+                fmt_ts(&version.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_artifact_versions(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningArtifactVersion>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, candidate_id, user_id, artifact_type, artifact_name, version_label,
+                    status, diff_summary, before_content, after_content, provenance, created_at
+                FROM learning_artifact_versions
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR artifact_type = ?2)
+                  AND (?3 IS NULL OR artifact_name = ?3)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?4
+                "#,
+                params![user_id, artifact_type, artifact_name, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut versions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            versions.push(learning_artifact_version_from_row(&row));
+        }
+        Ok(versions)
+    }
+
+    async fn insert_learning_feedback(
+        &self,
+        feedback: &LearningFeedbackRecord,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if feedback.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            feedback.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_feedback (
+                id, user_id, target_type, target_id, verdict, note, metadata, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                id.to_string(),
+                feedback.user_id.as_str(),
+                feedback.target_type.as_str(),
+                feedback.target_id.as_str(),
+                feedback.verdict.as_str(),
+                feedback.note.as_deref(),
+                feedback.metadata.to_string(),
+                fmt_ts(&feedback.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_feedback(
+        &self,
+        user_id: &str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningFeedbackRecord>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, target_type, target_id, verdict, note, metadata, created_at
+                FROM learning_feedback
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR target_type = ?2)
+                  AND (?3 IS NULL OR target_id = ?3)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?4
+                "#,
+                params![user_id, target_type, target_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut feedback = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            feedback.push(learning_feedback_from_row(&row));
+        }
+        Ok(feedback)
+    }
+
+    async fn insert_learning_rollback(
+        &self,
+        rollback: &LearningRollbackRecord,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if rollback.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            rollback.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_rollbacks (
+                id, user_id, artifact_type, artifact_name, artifact_version_id, reason, metadata, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                id.to_string(),
+                rollback.user_id.as_str(),
+                rollback.artifact_type.as_str(),
+                rollback.artifact_name.as_str(),
+                rollback.artifact_version_id.map(|value| value.to_string()),
+                rollback.reason.as_str(),
+                rollback.metadata.to_string(),
+                fmt_ts(&rollback.created_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn list_learning_rollbacks(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningRollbackRecord>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, user_id, artifact_type, artifact_name, artifact_version_id, reason, metadata, created_at
+                FROM learning_rollbacks
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR artifact_type = ?2)
+                  AND (?3 IS NULL OR artifact_name = ?3)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?4
+                "#,
+                params![user_id, artifact_type, artifact_name, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut rollbacks = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            rollbacks.push(learning_rollback_from_row(&row));
+        }
+        Ok(rollbacks)
+    }
+
+    async fn insert_learning_code_proposal(
+        &self,
+        proposal: &LearningCodeProposal,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if proposal.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            proposal.id
+        };
+        conn.execute(
+            r#"
+            INSERT INTO learning_code_proposals (
+                id, learning_event_id, user_id, status, title, rationale, target_files, diff,
+                validation_results, rollback_note, confidence, branch_name, pr_url, metadata, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            "#,
+            params![
+                id.to_string(),
+                proposal.learning_event_id.map(|value| value.to_string()),
+                proposal.user_id.as_str(),
+                proposal.status.as_str(),
+                proposal.title.as_str(),
+                proposal.rationale.as_str(),
+                serde_json::to_string(&proposal.target_files).unwrap_or_else(|_| "[]".to_string()),
+                proposal.diff.as_str(),
+                proposal.validation_results.to_string(),
+                proposal.rollback_note.as_deref(),
+                proposal.confidence,
+                proposal.branch_name.as_deref(),
+                proposal.pr_url.as_deref(),
+                proposal.metadata.to_string(),
+                fmt_ts(&proposal.created_at),
+                fmt_ts(&proposal.updated_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
+    async fn get_learning_code_proposal(
+        &self,
+        user_id: &str,
+        proposal_id: Uuid,
+    ) -> Result<Option<LearningCodeProposal>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, learning_event_id, user_id, status, title, rationale, target_files, diff,
+                    validation_results, rollback_note, confidence, branch_name, pr_url, metadata, created_at, updated_at
+                FROM learning_code_proposals
+                WHERE id = ?1 AND user_id = ?2
+                LIMIT 1
+                "#,
+                params![proposal_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(learning_code_proposal_from_row(&row)))
+    }
+
+    async fn list_learning_code_proposals(
+        &self,
+        user_id: &str,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCodeProposal>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, learning_event_id, user_id, status, title, rationale, target_files, diff,
+                    validation_results, rollback_note, confidence, branch_name, pr_url, metadata, created_at, updated_at
+                FROM learning_code_proposals
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR status = ?2)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?3
+                "#,
+                params![user_id, status, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut proposals = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            proposals.push(learning_code_proposal_from_row(&row));
+        }
+        Ok(proposals)
+    }
+
+    async fn update_learning_code_proposal(
+        &self,
+        proposal_id: Uuid,
+        status: &str,
+        branch_name: Option<&str>,
+        pr_url: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let metadata_patch = metadata.cloned();
+        conn.execute(
+            r#"
+            UPDATE learning_code_proposals
+            SET status = ?2,
+                branch_name = COALESCE(?3, branch_name),
+                pr_url = COALESCE(?4, pr_url),
+                metadata = CASE
+                    WHEN ?5 IS NULL THEN metadata
+                    ELSE json_patch(coalesce(metadata, '{}'), ?5)
+                END,
+                updated_at = ?6
+            WHERE id = ?1
+            "#,
+            params![
+                proposal_id.to_string(),
+                status,
+                branch_name,
+                pr_url,
+                metadata_patch.map(|value| value.to_string()),
+                fmt_ts(&Utc::now()),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 
     async fn conversation_belongs_to_user(

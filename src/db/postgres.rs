@@ -21,8 +21,10 @@ use crate::db::{
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
-    ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow, Store,
+    ConversationMessage, ConversationSummary, JobEventRecord, LearningArtifactVersion,
+    LearningCandidate, LearningCodeProposal, LearningEvaluation, LearningEvent,
+    LearningFeedbackRecord, LearningRollbackRecord, LlmCallRecord, SandboxJobRecord,
+    SandboxJobSummary, SessionSearchHit, SettingRow, Store,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, EndpointApprovalStatus,
@@ -262,6 +264,169 @@ impl ConversationStore for PgBackend {
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
         self.store.list_conversation_messages(conversation_id).await
+    }
+
+    async fn search_conversation_messages(
+        &self,
+        user_id: &str,
+        query: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
+        self.store
+            .search_conversation_messages(user_id, query, actor_id, channel, thread_id, limit)
+            .await
+    }
+
+    async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_event(event).await
+    }
+
+    async fn list_learning_events(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningEvent>, DatabaseError> {
+        self.store
+            .list_learning_events(user_id, actor_id, channel, thread_id, limit)
+            .await
+    }
+
+    async fn insert_learning_evaluation(
+        &self,
+        evaluation: &LearningEvaluation,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_evaluation(evaluation).await
+    }
+
+    async fn list_learning_evaluations(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LearningEvaluation>, DatabaseError> {
+        self.store.list_learning_evaluations(user_id, limit).await
+    }
+
+    async fn insert_learning_candidate(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_candidate(candidate).await
+    }
+
+    async fn list_learning_candidates(
+        &self,
+        user_id: &str,
+        candidate_type: Option<&str>,
+        risk_tier: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCandidate>, DatabaseError> {
+        self.store
+            .list_learning_candidates(user_id, candidate_type, risk_tier, limit)
+            .await
+    }
+
+    async fn insert_learning_artifact_version(
+        &self,
+        version: &LearningArtifactVersion,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_artifact_version(version).await
+    }
+
+    async fn list_learning_artifact_versions(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningArtifactVersion>, DatabaseError> {
+        self.store
+            .list_learning_artifact_versions(user_id, artifact_type, artifact_name, limit)
+            .await
+    }
+
+    async fn insert_learning_feedback(
+        &self,
+        feedback: &LearningFeedbackRecord,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_feedback(feedback).await
+    }
+
+    async fn list_learning_feedback(
+        &self,
+        user_id: &str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningFeedbackRecord>, DatabaseError> {
+        self.store
+            .list_learning_feedback(user_id, target_type, target_id, limit)
+            .await
+    }
+
+    async fn insert_learning_rollback(
+        &self,
+        rollback: &LearningRollbackRecord,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_rollback(rollback).await
+    }
+
+    async fn list_learning_rollbacks(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningRollbackRecord>, DatabaseError> {
+        self.store
+            .list_learning_rollbacks(user_id, artifact_type, artifact_name, limit)
+            .await
+    }
+
+    async fn insert_learning_code_proposal(
+        &self,
+        proposal: &LearningCodeProposal,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_learning_code_proposal(proposal).await
+    }
+
+    async fn get_learning_code_proposal(
+        &self,
+        user_id: &str,
+        proposal_id: Uuid,
+    ) -> Result<Option<LearningCodeProposal>, DatabaseError> {
+        self.store
+            .get_learning_code_proposal(user_id, proposal_id)
+            .await
+    }
+
+    async fn list_learning_code_proposals(
+        &self,
+        user_id: &str,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCodeProposal>, DatabaseError> {
+        self.store
+            .list_learning_code_proposals(user_id, status, limit)
+            .await
+    }
+
+    async fn update_learning_code_proposal(
+        &self,
+        proposal_id: Uuid,
+        status: &str,
+        branch_name: Option<&str>,
+        pr_url: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_learning_code_proposal(proposal_id, status, branch_name, pr_url, metadata)
+            .await
     }
 
     async fn conversation_belongs_to_user(

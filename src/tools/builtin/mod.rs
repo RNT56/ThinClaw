@@ -61,6 +61,7 @@ pub use llm_tools::{
 pub use location::LocationTool;
 pub use memory::{
     MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    SessionSearchTool,
 };
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,

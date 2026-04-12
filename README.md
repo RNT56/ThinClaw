@@ -1,20 +1,29 @@
 <p align="center">
-  <img src="Thinclaw_IC_01_nobg.png" alt="ThinClaw" width="200"/>
+  <img src="Thinclaw_IC_01_nobg.png" alt="ThinClaw" width="180"/>
 </p>
 
 <h1 align="center">ThinClaw</h1>
 
 <p align="center">
-  <strong>A self-hosted personal agent runtime in Rust</strong>
+  <em>A self-hosted personal agent runtime in Rust</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/RNT56/ThinClaw/releases"><img src="https://img.shields.io/github/v/release/RNT56/ThinClaw?color=green&label=release" alt="Latest Release" /></a>
-  <a href="https://github.com/RNT56/ThinClaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RNT56/ThinClaw/ci.yml?branch=main&label=CI" alt="CI" /></a>
-  <a href="#quick-start">Quick Start</a>
-  <a href="#why-thinclaw">Why ThinClaw</a>
-  <a href="#deployment-modes">Deployment Modes</a>
-  <a href="#documentation-map">Docs</a>
+  <a href="https://github.com/RNT56/ThinClaw/releases"><img src="https://img.shields.io/github/v/release/RNT56/ThinClaw?style=flat-square&color=2ea44f&label=release" alt="Latest Release" /></a>
+  &nbsp;
+  <a href="https://github.com/RNT56/ThinClaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RNT56/ThinClaw/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
+  &nbsp;
+  <a href="https://github.com/RNT56/ThinClaw/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat-square" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-grey?style=flat-square" alt="Quick Start" /></a>&nbsp;
+  <a href="#why-thinclaw"><img src="https://img.shields.io/badge/Why_ThinClaw-grey?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
+  <a href="#core-capabilities"><img src="https://img.shields.io/badge/Capabilities-grey?style=flat-square" alt="Capabilities" /></a>&nbsp;
+  <a href="#deployment-modes"><img src="https://img.shields.io/badge/Deployment-grey?style=flat-square" alt="Deployment" /></a>&nbsp;
+  <a href="#security-and-trust"><img src="https://img.shields.io/badge/Security-grey?style=flat-square" alt="Security" /></a>&nbsp;
+  <a href="#documentation-map"><img src="https://img.shields.io/badge/Docs-grey?style=flat-square" alt="Docs" /></a>&nbsp;
+  <a href="#development"><img src="https://img.shields.io/badge/Development-grey?style=flat-square" alt="Development" /></a>
 </p>
 
 ---

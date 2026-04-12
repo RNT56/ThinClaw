@@ -49,6 +49,8 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |
 | Security and trust | [SECURITY.md](SECURITY.md) |
 | Extension architecture | [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md) |
+| LLM provider configuration | [LLM_PROVIDERS.md](LLM_PROVIDERS.md) |
+| Provider catalog (code) | [../src/config/provider_catalog.rs](../src/config/provider_catalog.rs) |
 | Tool implementation guidance | [../src/tools/README.md](../src/tools/README.md) |
 | Memory and workspace model | [../src/workspace/README.md](../src/workspace/README.md) |
 | Deep network model | [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md) |

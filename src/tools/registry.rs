@@ -22,10 +22,10 @@ use crate::tools::builtin::{
     HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListAgentsTool, ListDirTool,
     ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
     MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptQueue, ReadFileTool,
-    RemoveAgentTool, SharedModelOverride, ShellTool, SkillInstallTool, SkillListTool,
-    SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
-    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
-    UpdateAgentTool, WriteFileTool,
+    RemoveAgentTool, SessionSearchTool, SharedModelOverride, ShellTool, SkillInstallTool,
+    SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    TtsTool, UpdateAgentTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -50,6 +50,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "list_dir",
     "apply_patch",
     "memory_search",
+    "session_search",
     "memory_write",
     "memory_read",
     "memory_tree",
@@ -501,9 +502,15 @@ impl ToolRegistry {
     pub fn register_memory_tools(
         &self,
         workspace: Arc<Workspace>,
+        db: Option<Arc<dyn Database>>,
         sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     ) {
+        let mut memory_tool_count = 5;
         self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
+        if let Some(db) = db {
+            self.register_sync(Arc::new(SessionSearchTool::new(db)));
+            memory_tool_count += 1;
+        }
         self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryTreeTool::new(Arc::clone(&workspace))));
@@ -513,7 +520,7 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(delete_tool));
 
-        tracing::info!("Registered 5 memory tools");
+        tracing::info!("Registered {} memory tools", memory_tool_count);
     }
 
     /// Register job management tools.

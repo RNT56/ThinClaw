@@ -25,6 +25,7 @@ mod dispatcher_helpers;
 pub mod global_session;
 pub(crate) mod heartbeat;
 pub mod job_monitor;
+pub mod learning;
 pub mod management_api;
 pub mod presence;
 mod router;
@@ -53,6 +54,10 @@ pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use cron_stagger::{CronGate, FinishedRunPayload, StaggerConfig};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
+pub use learning::{
+    ArtifactVersion, ImprovementCandidate, ImprovementClass, LearningDecision, LearningEvent,
+    LearningFeedback, ProposalState, RiskTier,
+};
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::RoutineEngine;

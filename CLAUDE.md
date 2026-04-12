@@ -38,6 +38,8 @@ Use these as the current documentation authority before updating surrounding doc
 | Tool implementation guidance | `src/tools/README.md` |
 | Workspace and memory model | `src/workspace/README.md` |
 | Security and network model | `src/NETWORK_SECURITY.md` |
+| LLM provider catalog | `src/config/provider_catalog.rs` |
+| LLM provider user guide | `docs/LLM_PROVIDERS.md` |
 | Feature-tracking changes | `FEATURE_PARITY.md` |
 
 When these docs disagree with broad overview docs, code and canonical docs win.
@@ -52,7 +54,8 @@ The codebase is easier to reason about by subsystem than by file count.
 - `src/config/`: config loading, overlays, defaults, feature-specific settings
 - `src/context/`: compaction, memory injection, read audit
 - `src/extensions/`: extension lifecycle, registry integration, manifest handling
-- `src/llm/`: provider selection, routing, failover, pricing, caching
+- `src/llm/`: provider selection, routing, failover, pricing, caching, discovery
+- `src/skills/`: skill registry, workspace/bundled skill loading, hot-reload
 - `src/safety/`, `src/sandbox/`, `src/secrets/`: trust boundaries and execution controls
 - `src/setup/`: onboarding wizard and first-run configuration
 - `src/tools/`: built-in tools, extension tools, WASM runtime, MCP client

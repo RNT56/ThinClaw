@@ -27,7 +27,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "get_repo",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw"
 }
 ```
@@ -37,7 +37,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "list_issues",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "state": "open",
   "limit": 10
@@ -49,7 +49,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "create_issue",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "title": "Bug: Something is broken",
   "body": "Detailed description...",
@@ -62,7 +62,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "list_pull_requests",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "state": "open",
   "limit": 5
@@ -74,7 +74,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "create_pr_review",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "pr_number": 42,
   "body": "LGTM! Great work.",
@@ -87,7 +87,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "get_file_content",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "path": "README.md",
   "ref": "main"
@@ -99,7 +99,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "trigger_workflow",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "workflow_id": "ci.yml",
   "ref": "main",
@@ -114,7 +114,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "get_workflow_runs",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "limit": 5
 }
@@ -125,7 +125,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```json
 {
   "action": "get_workflow_runs",
-  "owner": "nearai",
+  "owner": "RNT56",
   "repo": "thinclaw",
   "limit": 5,
   "page": 2

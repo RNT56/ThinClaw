@@ -12,13 +12,16 @@
 //! Use `memory_write` to persist important facts that should be remembered
 //! across sessions.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::context::JobContext;
-use crate::identity::ConversationKind;
+use crate::db::Database;
+use crate::history::{ConversationKind as HistoryConversationKind, ConversationSummary};
+use crate::identity::ConversationKind as IdentityConversationKind;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
 
@@ -88,7 +91,7 @@ fn shared_root_path(path: &str) -> String {
     }
 }
 
-fn job_conversation_kind(metadata: &serde_json::Value) -> ConversationKind {
+fn job_conversation_kind(metadata: &serde_json::Value) -> IdentityConversationKind {
     let kind = metadata
         .get("conversation_kind")
         .and_then(|v| v.as_str())
@@ -96,8 +99,8 @@ fn job_conversation_kind(metadata: &serde_json::Value) -> ConversationKind {
         .unwrap_or("direct")
         .to_ascii_lowercase();
     match kind.as_str() {
-        "group" | "channel" | "supergroup" => ConversationKind::Group,
-        _ => ConversationKind::Direct,
+        "group" | "channel" | "supergroup" => IdentityConversationKind::Group,
+        _ => IdentityConversationKind::Direct,
     }
 }
 
@@ -109,7 +112,8 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
         .or_else(|| ctx.metadata.get("actor"))
         .and_then(|v| v.as_str());
     let direct_actor =
-        job_conversation_kind(&ctx.metadata) == ConversationKind::Direct && actor_id.is_some();
+        job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
+            && actor_id.is_some();
 
     match explicit_scope {
         Some(MemoryScope::Shared) => (shared_root_path(&bare_target), false),
@@ -142,6 +146,31 @@ fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
         .and_then(|v| Uuid::parse_str(v).ok())
         .or_else(|| base.agent_id());
     base.scoped_clone(ctx.user_id.clone(), agent_workspace_id)
+}
+
+fn normalized_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    for token in query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() > 1)
+    {
+        if seen.insert(token.clone()) {
+            terms.push(token);
+        }
+    }
+    terms
+}
+
+fn collapse_preview(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview: String = collapsed.chars().take(max_chars).collect();
+    if collapsed.chars().count() > max_chars {
+        format!("{}…", preview)
+    } else {
+        preview
+    }
 }
 
 /// Tool for searching workspace memory.
@@ -262,6 +291,312 @@ impl Tool for MemorySearchTool {
 
     fn requires_sanitization(&self) -> bool {
         false // Internal memory, trusted content
+    }
+}
+
+/// Tool for searching DB-backed conversation transcripts.
+///
+/// This is intentionally transcript-only: it queries conversation history from
+/// the database, not workspace documents or memory files.
+pub struct SessionSearchTool {
+    store: Arc<dyn Database>,
+}
+
+impl SessionSearchTool {
+    /// Create a new session search tool.
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self { store }
+    }
+
+    fn current_scope_filters(&self, ctx: &JobContext) -> (String, String, bool, Option<Uuid>) {
+        let principal_id = ctx
+            .metadata
+            .get("principal_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| ctx.principal_id.clone());
+        let actor_id = ctx
+            .metadata
+            .get("actor_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| ctx.actor_id.clone())
+            .unwrap_or_else(|| principal_id.clone());
+        let include_group_history =
+            job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Group;
+        let conversation_id = ctx
+            .conversation_id
+            .or_else(|| {
+                ctx.metadata
+                    .get("conversation_id")
+                    .or_else(|| ctx.metadata.get("thread_id"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            })
+            .or_else(|| {
+                ctx.metadata
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            });
+        (
+            principal_id,
+            actor_id,
+            include_group_history,
+            conversation_id,
+        )
+    }
+
+    async fn collect_candidate_conversations(
+        &self,
+        ctx: &JobContext,
+        include_current_thread: bool,
+        recent_limit: usize,
+    ) -> Result<Vec<ConversationSummary>, ToolError> {
+        let (principal_id, actor_id, include_group_history, current_conversation_id) =
+            self.current_scope_filters(ctx);
+
+        let mut conversations = Vec::new();
+        if include_current_thread && let Some(conversation_id) = current_conversation_id {
+            if let Ok(Some(metadata)) = self.store.get_conversation_metadata(conversation_id).await
+            {
+                let kind = metadata
+                    .get("conversation_kind")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value.to_ascii_lowercase())
+                    .map(|value| match value.as_str() {
+                        "group" | "channel" | "supergroup" => HistoryConversationKind::Group,
+                        _ => HistoryConversationKind::Direct,
+                    })
+                    .unwrap_or(HistoryConversationKind::Direct);
+                let channel = metadata
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| ctx.metadata.get("channel").and_then(|v| v.as_str()))
+                    .unwrap_or("unknown")
+                    .to_string();
+                let summary = ConversationSummary {
+                    id: conversation_id,
+                    user_id: principal_id.clone(),
+                    actor_id: Some(actor_id.clone()),
+                    conversation_scope_id: Some(
+                        metadata
+                            .get("conversation_scope_id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                            .unwrap_or(conversation_id),
+                    ),
+                    conversation_kind: kind,
+                    channel,
+                    title: metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .or_else(|| Some(ctx.title.clone())),
+                    message_count: 0,
+                    started_at: chrono::Utc::now(),
+                    last_activity: chrono::Utc::now(),
+                    thread_type: metadata
+                        .get("thread_type")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    handoff: None,
+                    stable_external_conversation_key: metadata
+                        .get("stable_external_conversation_key")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                };
+                conversations.push(summary);
+            }
+        }
+
+        let mut recalled = self
+            .store
+            .list_actor_conversations_for_recall(
+                &principal_id,
+                &actor_id,
+                include_group_history,
+                recent_limit as i64,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
+
+        conversations.append(&mut recalled);
+        conversations.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        conversations.dedup_by(|a, b| a.id == b.id);
+        Ok(conversations)
+    }
+
+    async fn search_conversation_messages(
+        &self,
+        conversation: &ConversationSummary,
+        query_terms: &[String],
+        message_limit: usize,
+    ) -> Result<Vec<serde_json::Value>, ToolError> {
+        let (messages, _) = self
+            .store
+            .list_conversation_messages_paginated(conversation.id, None, message_limit as i64)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
+
+        let mut results = Vec::new();
+        for message in messages {
+            let haystack = message.content.to_ascii_lowercase();
+            let mut score = 0.0_f32;
+            for term in query_terms {
+                let occurrences = haystack.matches(term).count() as f32;
+                if occurrences > 0.0 {
+                    score += occurrences;
+                }
+            }
+            if score <= 0.0 {
+                continue;
+            }
+
+            if !query_terms.is_empty() && haystack.contains(&query_terms.join(" ")) {
+                score += 2.0;
+            }
+
+            let preview = collapse_preview(&message.content, 220);
+            results.push(serde_json::json!({
+                "conversation_id": conversation.id,
+                "message_id": message.id,
+                "role": message.role,
+                "created_at": message.created_at.to_rfc3339(),
+                "score": score,
+                "channel": conversation.channel.clone(),
+                "conversation_kind": conversation.conversation_kind.as_str(),
+                "actor_id": conversation.actor_id.clone(),
+                "title": conversation.title.clone(),
+                "excerpt": preview,
+                "metadata": message.metadata,
+            }));
+        }
+
+        Ok(results)
+    }
+}
+
+#[async_trait]
+impl Tool for SessionSearchTool {
+    fn name(&self) -> &str {
+        "session_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search DB-backed conversation transcripts for prior messages, decisions, and workflow history. \
+         Use before answering questions about prior work or repeated conversations. \
+         This searches conversation history only, not workspace documents."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The transcript search query."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 8, max: 25)",
+                    "default": 8,
+                    "minimum": 1,
+                    "maximum": 25
+                },
+                "include_current_thread": {
+                    "type": "boolean",
+                    "description": "Include the current conversation thread even if it is not in the recall list.",
+                    "default": true
+                },
+                "conversation_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of conversations to scan (default: 12, max: 40)",
+                    "default": 12,
+                    "minimum": 1,
+                    "maximum": 40
+                },
+                "message_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of messages to inspect per conversation (default: 40, max: 100)",
+                    "default": 40,
+                    "minimum": 1,
+                    "maximum": 100
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let query = require_str(&params, "query")?;
+        let result_limit = params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8)
+            .clamp(1, 25) as usize;
+        let include_current_thread = params
+            .get("include_current_thread")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let conversation_limit = params
+            .get("conversation_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(12)
+            .clamp(1, 40) as usize;
+        let message_limit = params
+            .get("message_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(40)
+            .clamp(1, 100) as usize;
+
+        let query_terms = normalized_search_terms(query);
+        if query_terms.is_empty() {
+            return Err(ToolError::InvalidParameters(
+                "query must contain at least one searchable term".to_string(),
+            ));
+        }
+
+        let conversations = self
+            .collect_candidate_conversations(ctx, include_current_thread, conversation_limit)
+            .await?;
+
+        let mut hits = Vec::new();
+        for conversation in conversations {
+            let mut conversation_hits = self
+                .search_conversation_messages(&conversation, &query_terms, message_limit)
+                .await?;
+            hits.append(&mut conversation_hits);
+            if hits.len() >= result_limit * 4 {
+                break;
+            }
+        }
+
+        hits.sort_by(|a, b| {
+            let a_score = a.get("score").and_then(|v| v.as_f64()).unwrap_or_default();
+            let b_score = b.get("score").and_then(|v| v.as_f64()).unwrap_or_default();
+            b_score
+                .partial_cmp(&a_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(result_limit);
+
+        let output = serde_json::json!({
+            "query": query,
+            "result_count": hits.len(),
+            "results": hits,
+        });
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
     }
 }
 

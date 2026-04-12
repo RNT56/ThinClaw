@@ -35,7 +35,9 @@ use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
 use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
-    JobEventRecord, LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
+    JobEventRecord, LearningArtifactVersion, LearningCandidate, LearningCodeProposal,
+    LearningEvaluation, LearningEvent, LearningFeedbackRecord, LearningRollbackRecord,
+    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
@@ -193,6 +195,100 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError>;
+    async fn search_conversation_messages(
+        &self,
+        user_id: &str,
+        query: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError>;
+    async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_events(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningEvent>, DatabaseError>;
+    async fn insert_learning_evaluation(
+        &self,
+        evaluation: &LearningEvaluation,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_evaluations(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LearningEvaluation>, DatabaseError>;
+    async fn insert_learning_candidate(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_candidates(
+        &self,
+        user_id: &str,
+        candidate_type: Option<&str>,
+        risk_tier: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCandidate>, DatabaseError>;
+    async fn insert_learning_artifact_version(
+        &self,
+        version: &LearningArtifactVersion,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_artifact_versions(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningArtifactVersion>, DatabaseError>;
+    async fn insert_learning_feedback(
+        &self,
+        feedback: &LearningFeedbackRecord,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_feedback(
+        &self,
+        user_id: &str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningFeedbackRecord>, DatabaseError>;
+    async fn insert_learning_rollback(
+        &self,
+        rollback: &LearningRollbackRecord,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_learning_rollbacks(
+        &self,
+        user_id: &str,
+        artifact_type: Option<&str>,
+        artifact_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningRollbackRecord>, DatabaseError>;
+    async fn insert_learning_code_proposal(
+        &self,
+        proposal: &LearningCodeProposal,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn get_learning_code_proposal(
+        &self,
+        user_id: &str,
+        proposal_id: Uuid,
+    ) -> Result<Option<LearningCodeProposal>, DatabaseError>;
+    async fn list_learning_code_proposals(
+        &self,
+        user_id: &str,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<LearningCodeProposal>, DatabaseError>;
+    async fn update_learning_code_proposal(
+        &self,
+        proposal_id: Uuid,
+        status: &str,
+        branch_name: Option<&str>,
+        pr_url: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), DatabaseError>;
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,

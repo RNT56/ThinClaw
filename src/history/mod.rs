@@ -15,6 +15,8 @@ pub use analytics::{JobStats, ToolStats};
 pub use store::Store;
 pub use store::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationScope,
-    ConversationSummary, JobEventRecord, LinkedConversationRecall, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow,
+    ConversationSummary, JobEventRecord, LearningArtifactVersion, LearningCandidate,
+    LearningCodeProposal, LearningEvaluation, LearningEvent, LearningFeedbackRecord,
+    LearningRollbackRecord, LinkedConversationRecall, LlmCallRecord, SandboxJobRecord,
+    SandboxJobSummary, SessionSearchHit, SettingRow,
 };

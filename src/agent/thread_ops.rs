@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -14,6 +15,7 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
+use crate::agent::learning::{ImprovementClass, LearningEvent, RiskTier};
 use crate::agent::session::{
     PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
 };
@@ -120,6 +122,90 @@ impl Agent {
             return None;
         }
         Some(store)
+    }
+
+    fn compact_text_preview(text: &str) -> String {
+        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let preview: String = collapsed.chars().take(120).collect();
+        if collapsed.chars().count() > 120 {
+            format!("{}…", preview)
+        } else {
+            preview
+        }
+    }
+
+    async fn best_effort_record_learning_event(
+        &self,
+        store: &Arc<dyn Database>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+        role: &str,
+        content: &str,
+    ) {
+        let learning_event = LearningEvent::new(
+            format!("thread_ops::persist_{}_message", role),
+            ImprovementClass::Memory,
+            RiskTier::Low,
+            format!("Persisted {} message to conversation history", role),
+        )
+        .with_target("conversation_history")
+        .with_metadata(json!({
+            "thread_id": thread_id.to_string(),
+            "channel": message.channel.clone(),
+            "role": role,
+            "principal_id": identity.principal_id.clone(),
+            "actor_id": identity.actor_id.clone(),
+            "conversation_kind": identity.conversation_kind.as_str(),
+            "message_id": message.id.to_string(),
+            "content_length": content.len(),
+            "content_preview": Self::compact_text_preview(content),
+            "received_at": message.received_at.to_rfc3339(),
+        }));
+
+        let payload = serde_json::to_value(&learning_event).unwrap_or_else(|_| {
+            json!({
+                "id": learning_event.id.to_string(),
+                "source": learning_event.source,
+                "class": learning_event.class,
+                "risk_tier": learning_event.risk_tier,
+                "summary": learning_event.summary,
+                "target": learning_event.target,
+                "confidence": learning_event.confidence,
+                "metadata": learning_event.metadata,
+                "created_at": learning_event.created_at.to_rfc3339(),
+            })
+        });
+
+        if let Some(job_id) = message
+            .metadata
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok())
+        {
+            if let Err(err) = store
+                .save_job_event(job_id, "learning_event", &payload)
+                .await
+            {
+                tracing::debug!(
+                    thread = %thread_id,
+                    job_id = %job_id,
+                    error = %err,
+                    "Best-effort learning event job write failed"
+                );
+            }
+        }
+
+        if let Err(err) = store
+            .update_conversation_metadata_field(thread_id, "learning_last_event", &payload)
+            .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Best-effort learning event conversation metadata write failed"
+            );
+        }
     }
 
     pub(super) async fn persist_thread_runtime_snapshot(
@@ -840,7 +926,13 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist user message: {}", e);
+            return;
         }
+
+        self.best_effort_record_learning_event(
+            &store, thread_id, message, &identity, "user", user_input,
+        )
+        .await;
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
@@ -875,7 +967,18 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
+            return;
         }
+
+        self.best_effort_record_learning_event(
+            &store,
+            thread_id,
+            message,
+            &identity,
+            "assistant",
+            response,
+        )
+        .await;
     }
 
     pub(super) async fn process_undo(

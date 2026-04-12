@@ -63,6 +63,195 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
     ON conversation_messages(conversation_id);
 
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_created_at
+    ON conversation_messages(conversation_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_actor_created_at
+    ON conversation_messages(actor_id, created_at DESC);
+
+-- FTS5 search index for transcript lookup.
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
+    content,
+    content='conversation_messages',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_insert
+    AFTER INSERT ON conversation_messages
+    FOR EACH ROW
+    BEGIN
+        INSERT INTO conversation_messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+    END;
+
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_delete
+    AFTER DELETE ON conversation_messages
+    FOR EACH ROW
+    BEGIN
+        INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+    END;
+
+CREATE TRIGGER IF NOT EXISTS conversation_messages_fts_update
+    AFTER UPDATE ON conversation_messages
+    FOR EACH ROW
+    BEGIN
+        INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        INSERT INTO conversation_messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+    END;
+
+-- ==================== Learning ====================
+
+CREATE TABLE IF NOT EXISTS learning_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    actor_id TEXT,
+    channel TEXT,
+    thread_id TEXT,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    message_id TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+    job_id TEXT REFERENCES agent_jobs(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_events_user_created
+    ON learning_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_events_actor_created
+    ON learning_events(actor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_events_channel_created
+    ON learning_events(channel, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_events_thread_created
+    ON learning_events(thread_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_events_conversation
+    ON learning_events(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_learning_events_job
+    ON learning_events(job_id);
+CREATE INDEX IF NOT EXISTS idx_learning_events_event_type
+    ON learning_events(event_type);
+
+CREATE TABLE IF NOT EXISTS learning_evaluations (
+    id TEXT PRIMARY KEY,
+    learning_event_id TEXT NOT NULL REFERENCES learning_events(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    evaluator TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    score REAL,
+    details TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_evaluations_event
+    ON learning_evaluations(learning_event_id);
+CREATE INDEX IF NOT EXISTS idx_learning_evaluations_user_created
+    ON learning_evaluations(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS learning_candidates (
+    id TEXT PRIMARY KEY,
+    learning_event_id TEXT REFERENCES learning_events(id) ON DELETE SET NULL,
+    user_id TEXT NOT NULL,
+    candidate_type TEXT NOT NULL,
+    risk_tier TEXT NOT NULL,
+    confidence REAL,
+    target_type TEXT,
+    target_name TEXT,
+    summary TEXT,
+    proposal TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_candidates_event
+    ON learning_candidates(learning_event_id);
+CREATE INDEX IF NOT EXISTS idx_learning_candidates_user_created
+    ON learning_candidates(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_candidates_type
+    ON learning_candidates(candidate_type);
+
+CREATE TABLE IF NOT EXISTS learning_artifact_versions (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT REFERENCES learning_candidates(id) ON DELETE SET NULL,
+    user_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    artifact_name TEXT NOT NULL,
+    version_label TEXT,
+    status TEXT NOT NULL,
+    diff_summary TEXT,
+    before_content TEXT,
+    after_content TEXT,
+    provenance TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_artifact_versions_candidate
+    ON learning_artifact_versions(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_learning_artifact_versions_user_created
+    ON learning_artifact_versions(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_artifact_versions_artifact
+    ON learning_artifact_versions(artifact_type, artifact_name);
+
+CREATE TABLE IF NOT EXISTS learning_feedback (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    note TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_feedback_user_created
+    ON learning_feedback(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_feedback_target
+    ON learning_feedback(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS learning_rollbacks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    artifact_name TEXT NOT NULL,
+    artifact_version_id TEXT,
+    reason TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_rollbacks_user_created
+    ON learning_rollbacks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_rollbacks_artifact
+    ON learning_rollbacks(artifact_type, artifact_name);
+
+CREATE TABLE IF NOT EXISTS learning_code_proposals (
+    id TEXT PRIMARY KEY,
+    learning_event_id TEXT REFERENCES learning_events(id) ON DELETE SET NULL,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    title TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    target_files TEXT NOT NULL DEFAULT '[]',
+    diff TEXT NOT NULL DEFAULT '',
+    validation_results TEXT NOT NULL DEFAULT '{}',
+    rollback_note TEXT,
+    confidence REAL,
+    branch_name TEXT,
+    pr_url TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_event
+    ON learning_code_proposals(learning_event_id);
+CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_user_status_created
+    ON learning_code_proposals(user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_status
+    ON learning_code_proposals(status);
+
 -- ==================== Identity Registry ====================
 
 CREATE TABLE IF NOT EXISTS actors (
@@ -731,4 +920,29 @@ pub const DATA_REPAIRS: &[&str] = &[
     WHERE embedding IS NOT NULL
       AND (embedding_blob IS NULL OR embedding_dim IS NULL)
     "#,
+    r#"
+    INSERT INTO conversation_messages_fts(conversation_messages_fts)
+    VALUES ('rebuild')
+    "#,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{DATA_REPAIRS, SCHEMA};
+
+    #[test]
+    fn schema_includes_learning_tables() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_events"));
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_code_proposals"));
+        assert!(SCHEMA.contains("conversation_messages_fts"));
+    }
+
+    #[test]
+    fn repairs_rebuild_transcript_fts() {
+        assert!(
+            DATA_REPAIRS
+                .iter()
+                .any(|stmt| stmt.contains("conversation_messages_fts") && stmt.contains("rebuild"))
+        );
+    }
+}
