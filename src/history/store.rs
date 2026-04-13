@@ -2407,7 +2407,7 @@ impl Store {
                 LIMIT $6
                 "#,
                 &[&user_id, &query, &actor_id, &channel, &thread_id, &limit],
-        )
+            )
             .await?;
 
         Ok(rows.iter().map(session_search_hit_from_row).collect())

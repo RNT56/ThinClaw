@@ -290,7 +290,9 @@ impl ConversationStore for PgBackend {
         limit: i64,
     ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
         self.store
-            .list_conversation_messages_for_learning(user_id, actor_id, channel, thread_id, role, limit)
+            .list_conversation_messages_for_learning(
+                user_id, actor_id, channel, thread_id, role, limit,
+            )
             .await
     }
 

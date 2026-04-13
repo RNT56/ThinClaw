@@ -209,7 +209,12 @@ impl VoiceWakeRuntime {
                 WakeBackend::EnergyDetector => {
                     Self::detection_loop_cpal(running, event_tx, config).await;
                 }
-                WakeBackend::SherpaOnnx { model_path, encoder_filename, decoder_filename, joiner_filename } => {
+                WakeBackend::SherpaOnnx {
+                    model_path,
+                    encoder_filename,
+                    decoder_filename,
+                    joiner_filename,
+                } => {
                     Self::detection_loop_sherpa(
                         running,
                         event_tx,
@@ -467,15 +472,9 @@ impl VoiceWakeRuntime {
         let mut child = match Command::new("sherpa-onnx-keyword-spotter")
             .args([
                 "--encoder",
-                &format!(
-                    "{}/{}",
-                    model_path, encoder_filename
-                ),
+                &format!("{}/{}", model_path, encoder_filename),
                 "--decoder",
-                &format!(
-                    "{}/{}",
-                    model_path, decoder_filename
-                ),
+                &format!("{}/{}", model_path, decoder_filename),
                 "--joiner",
                 &format!("{}/{}", model_path, joiner_filename),
                 "--tokens",
