@@ -72,11 +72,24 @@ pub struct SensorRequest {
     pub reason: String,
 }
 
+/// How a sensor access request was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SensorResponseKind {
+    /// Request succeeded — sensor data is available.
+    Success,
+    /// User explicitly denied the request.
+    Denied,
+    /// A system/hardware error prevented access.
+    Error,
+}
+
 /// Response from a sensor access request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorResponse {
     /// Whether the request was approved and succeeded.
     pub success: bool,
+    /// How the request was resolved (success / user denial / system error).
+    pub kind: SensorResponseKind,
     /// The sensor data (e.g., base64-encoded image, audio bytes).
     /// None if denied or failed.
     pub data: Option<serde_json::Value>,
@@ -91,26 +104,29 @@ impl SensorResponse {
     pub fn ok(data: serde_json::Value) -> Self {
         Self {
             success: true,
+            kind: SensorResponseKind::Success,
             data: Some(data),
             error: None,
             session_approved: false,
         }
     }
 
-    /// Create a denied response.
+    /// Create a denied response (user explicitly refused access).
     pub fn denied(message: impl Into<String>) -> Self {
         Self {
             success: false,
+            kind: SensorResponseKind::Denied,
             data: None,
             error: Some(message.into()),
             session_approved: false,
         }
     }
 
-    /// Create an error response.
+    /// Create an error response (system/hardware failure, not user denial).
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             success: false,
+            kind: SensorResponseKind::Error,
             data: None,
             error: Some(message.into()),
             session_approved: false,

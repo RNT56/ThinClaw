@@ -280,6 +280,20 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn list_conversation_messages_for_learning(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        role: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
+        self.store
+            .list_conversation_messages_for_learning(user_id, actor_id, channel, thread_id, role, limit)
+            .await
+    }
+
     async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError> {
         self.store.insert_learning_event(event).await
     }

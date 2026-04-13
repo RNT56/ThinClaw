@@ -810,6 +810,63 @@ impl ConversationStore for LibSqlBackend {
         Ok(hits)
     }
 
+    async fn list_conversation_messages_for_learning(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        role: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.id,
+                    m.id,
+                    c.user_id,
+                    c.actor_id,
+                    c.channel,
+                    c.thread_id,
+                    c.conversation_kind,
+                    m.role,
+                    m.content,
+                    substr(m.content, 1, 240) AS excerpt,
+                    m.metadata,
+                    m.created_at,
+                    CAST(NULL AS REAL) AS score
+                FROM conversation_messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE c.user_id = ?1
+                  AND (?2 IS NULL OR COALESCE(NULLIF(c.actor_id, ''), c.user_id) = ?2)
+                  AND (?3 IS NULL OR c.channel = ?3)
+                  AND (?4 IS NULL OR c.thread_id = ?4)
+                  AND (?5 IS NULL OR m.role = ?5)
+                ORDER BY m.created_at DESC, m.rowid DESC
+                LIMIT ?6
+                "#,
+                params![user_id, actor_id, channel, thread_id, role, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut hits = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            hits.push(search_hit_from_row(&row));
+        }
+        Ok(hits)
+    }
+
     async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
         let id = if event.id.is_nil() {

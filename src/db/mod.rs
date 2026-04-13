@@ -204,6 +204,15 @@ pub trait ConversationStore: Send + Sync {
         thread_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<SessionSearchHit>, DatabaseError>;
+    async fn list_conversation_messages_for_learning(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        role: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError>;
     async fn insert_learning_event(&self, event: &LearningEvent) -> Result<Uuid, DatabaseError>;
     async fn list_learning_events(
         &self,
@@ -325,7 +334,9 @@ pub trait IdentityStore: Send + Sync {
     }
     async fn get_actor(&self, actor_id: &str) -> Result<Option<ActorRecord>, DatabaseError> {
         let _ = actor_id;
-        Ok(None)
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
     }
     async fn upsert_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError> {
         let _ = actor;
@@ -375,14 +386,18 @@ pub trait IdentityStore: Send + Sync {
         external_user_id: &str,
     ) -> Result<bool, DatabaseError> {
         let _ = (channel, external_user_id);
-        Ok(false)
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
     }
     async fn list_actor_endpoints(
         &self,
         actor_id: &str,
     ) -> Result<Vec<ActorEndpointRecord>, DatabaseError> {
         let _ = actor_id;
-        Ok(Vec::new())
+        Err(DatabaseError::Pool(
+            "actor identity registry is not available in this build".to_string(),
+        ))
     }
 }
 

@@ -2407,6 +2407,55 @@ impl Store {
                 LIMIT $6
                 "#,
                 &[&user_id, &query, &actor_id, &channel, &thread_id, &limit],
+        )
+            .await?;
+
+        Ok(rows.iter().map(session_search_hit_from_row).collect())
+    }
+
+    /// List conversation messages for learning workflows with bounded scope.
+    pub async fn list_conversation_messages_for_learning(
+        &self,
+        user_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        thread_id: Option<&str>,
+        role: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchHit>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.id AS conversation_id,
+                    m.id AS message_id,
+                    c.user_id,
+                    c.actor_id,
+                    c.channel,
+                    c.thread_id,
+                    c.conversation_kind,
+                    m.role,
+                    m.content,
+                    LEFT(m.content, 240) AS excerpt,
+                    COALESCE(m.metadata, '{}'::jsonb) AS metadata,
+                    m.created_at,
+                    NULL::double precision AS score
+                FROM conversation_messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE c.user_id = $1
+                  AND ($2::text IS NULL OR COALESCE(NULLIF(c.actor_id, ''), c.user_id) = $2)
+                  AND ($3::text IS NULL OR c.channel = $3)
+                  AND ($4::text IS NULL OR c.thread_id = $4)
+                  AND ($5::text IS NULL OR m.role = $5)
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT $6
+                "#,
+                &[&user_id, &actor_id, &channel, &thread_id, &role, &limit],
             )
             .await?;
 

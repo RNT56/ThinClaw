@@ -58,9 +58,31 @@ pub enum WakeBackend {
     /// Sherpa-ONNX keyword spotter (requires sherpa-rs dependency).
     #[allow(dead_code)]
     SherpaOnnx {
-        /// Path to the keyword model file.
+        /// Path to the model directory.
         model_path: String,
+        /// Encoder ONNX filename (relative to `model_path`).
+        /// Default: `"encoder-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        encoder_filename: String,
+        /// Decoder ONNX filename (relative to `model_path`).
+        /// Default: `"decoder-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        decoder_filename: String,
+        /// Joiner ONNX filename (relative to `model_path`).
+        /// Default: `"joiner-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        joiner_filename: String,
     },
+}
+
+impl WakeBackend {
+    /// Create a `SherpaOnnx` backend with default model filenames.
+    #[allow(dead_code)]
+    pub fn sherpa_onnx(model_path: impl Into<String>) -> Self {
+        Self::SherpaOnnx {
+            model_path: model_path.into(),
+            encoder_filename: "encoder-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
+            decoder_filename: "decoder-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
+            joiner_filename: "joiner-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
+        }
+    }
 }
 
 /// Events emitted by the voice wake system.
@@ -187,12 +209,15 @@ impl VoiceWakeRuntime {
                 WakeBackend::EnergyDetector => {
                     Self::detection_loop_cpal(running, event_tx, config).await;
                 }
-                WakeBackend::SherpaOnnx { model_path } => {
+                WakeBackend::SherpaOnnx { model_path, encoder_filename, decoder_filename, joiner_filename } => {
                     Self::detection_loop_sherpa(
                         running,
                         event_tx,
                         config.clone(),
                         model_path.clone(),
+                        encoder_filename.clone(),
+                        decoder_filename.clone(),
+                        joiner_filename.clone(),
                     )
                     .await;
                 }
@@ -356,6 +381,9 @@ impl VoiceWakeRuntime {
         event_tx: mpsc::Sender<VoiceWakeEvent>,
         config: VoiceWakeConfig,
         model_path: String,
+        encoder_filename: String,
+        decoder_filename: String,
+        joiner_filename: String,
     ) {
         use std::io::Write;
         use std::process::{Command, Stdio};
@@ -440,16 +468,16 @@ impl VoiceWakeRuntime {
             .args([
                 "--encoder",
                 &format!(
-                    "{}/encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-                    model_path
+                    "{}/{}",
+                    model_path, encoder_filename
                 ),
                 "--decoder",
                 &format!(
-                    "{}/decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
-                    model_path
+                    "{}/{}",
+                    model_path, decoder_filename
                 ),
                 "--joiner",
-                &format!("{}/joiner-epoch-12-avg-2-chunk-16-left-64.onnx", model_path),
+                &format!("{}/{}", model_path, joiner_filename),
                 "--tokens",
                 &format!("{}/tokens.txt", model_path),
                 "--keywords-file",
