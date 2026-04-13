@@ -45,6 +45,7 @@
       <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
       <button data-tab="extensions"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg> Extensions</button>
       <button data-tab="skills"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> Skills</button>
+      <button data-tab="learning"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 19.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg> Learning</button>
       <button data-tab="providers"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Providers</button>
       <button data-tab="costs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Costs</button>
       <button data-tab="settings"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</button>
@@ -235,6 +236,188 @@
             </div>
           </section>
           <div class="routine-detail" id="routine-detail" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Learning Tab -->
+    <div class="tab-panel" id="tab-learning">
+      <div class="learning-container ui-dashboard-shell">
+        <div class="learning-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Learning</h2>
+            <p class="ui-panel-desc">Review recent learning signals, inspect code proposals, and record feedback or rollbacks without leaving the gateway.</p>
+          </div>
+        </div>
+        <div class="learning-shell ui-panel-stack" id="learning-content">
+          <div class="learning-summary ui-panel-grid ui-panel-grid--cards" id="learning-summary"></div>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Provider Health</h3>
+                <p class="ui-panel-desc">See whether the external memory providers are enabled, healthy, and responsive.</p>
+              </div>
+            </div>
+            <div class="ui-panel-grid ui-panel-grid--cards" id="learning-provider-health"></div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Recent History</h3>
+                <p class="ui-panel-desc">Look through recent learning events and evaluations that fed the improvement loop.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Source</th>
+                    <th>Class</th>
+                    <th>Risk</th>
+                    <th>Summary</th>
+                    <th>Target</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-history-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-history-empty" style="display:none">No learning events recorded yet.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Candidates</h3>
+                <p class="ui-panel-desc">Inspect distilled improvements and their risk tier before they move into broader changes.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Risk</th>
+                    <th>Target</th>
+                    <th>Summary</th>
+                    <th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-candidates-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-candidates-empty" style="display:none">No candidates available.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Code Proposals</h3>
+                <p class="ui-panel-desc">Approve, reject, or inspect approval-gated code changes generated by the learning loop.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Status</th>
+                    <th>Title</th>
+                    <th>Files</th>
+                    <th>Confidence</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-proposals-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-proposals-empty" style="display:none">No code proposals available.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Feedback</h3>
+                <p class="ui-panel-desc">Record operator feedback against a proposal, event, or artifact to keep the learning loop grounded.</p>
+              </div>
+            </div>
+            <div class="learning-feedback-form">
+              <input type="text" id="learning-feedback-target-type" placeholder="Target type, e.g. code_proposal">
+              <input type="text" id="learning-feedback-target-id" placeholder="Target ID">
+              <select id="learning-feedback-verdict">
+                <option value="helpful">Helpful</option>
+                <option value="harmful">Harmful</option>
+                <option value="review">Needs review</option>
+                <option value="dont_learn">Don't learn</option>
+              </select>
+              <input type="text" id="learning-feedback-note" placeholder="Optional note">
+              <button class="btn-restart" onclick="submitLearningFeedback()">Submit Feedback</button>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Target</th>
+                    <th>Verdict</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-feedback-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-feedback-empty" style="display:none">No feedback entries yet.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Artifact Versions</h3>
+                <p class="ui-panel-desc">Inspect versioned learning artifacts and capture rollback records when a mutation needs to be undone.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Artifact</th>
+                    <th>Status</th>
+                    <th>Summary</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-artifacts-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-artifacts-empty" style="display:none">No artifact versions recorded.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Rollbacks</h3>
+                <p class="ui-panel-desc">Review rollback records that were captured for previously learned artifacts.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Artifact</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-rollbacks-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-rollbacks-empty" style="display:none">No rollbacks recorded.</div>
+          </section>
         </div>
       </div>
     </div>

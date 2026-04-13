@@ -3,6 +3,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use crate::api::learning::{
+    LearningArtifactVersionItem, LearningArtifactVersionResponse, LearningCandidateItem,
+    LearningCandidateResponse, LearningCodeProposalItem, LearningCodeProposalResponse,
+    LearningCodeProposalReviewRequest, LearningCodeProposalReviewResponse, LearningEvaluationItem,
+    LearningEventItem, LearningFeedbackActionResponse, LearningFeedbackItem,
+    LearningFeedbackRequest, LearningFeedbackResponse, LearningHistoryResponse, LearningListQuery,
+    LearningProviderHealthItem, LearningProviderHealthResponse, LearningProviderHealthSummary,
+    LearningRecentCounts, LearningRollbackActionResponse, LearningRollbackItem,
+    LearningRollbackRequest, LearningRollbackResponse, LearningStatusResponse,
+};
 use crate::api::system::ModelInfo;
 
 // --- Chat ---

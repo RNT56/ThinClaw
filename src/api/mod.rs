@@ -16,11 +16,13 @@
 //! | [`extensions`] | Extension lifecycle (install/activate/remove) |
 //! | [`skills`] | Skill registry + catalog operations |
 //! | [`routines`] | Routine CRUD + manual trigger |
+//! | [`learning`] | Learning status, history, providers, and code proposals |
 //! | [`system`] | Engine status, model info |
 
 pub mod chat;
 pub mod config;
 pub mod extensions;
+pub mod learning;
 pub mod memory;
 pub mod routines;
 pub mod sessions;

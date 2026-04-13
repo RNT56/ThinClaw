@@ -12,7 +12,6 @@
 //! Use `memory_write` to persist important facts that should be remembered
 //! across sessions.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,7 +19,6 @@ use uuid::Uuid;
 
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::history::{ConversationKind as HistoryConversationKind, ConversationSummary};
 use crate::identity::ConversationKind as IdentityConversationKind;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
@@ -32,15 +30,14 @@ use crate::workspace::{SearchConfig, Workspace, paths};
 /// strictly append-only in the future, add it here.
 const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[];
 
+/// Files protected from deletion through memory_delete.
+const DELETE_PROTECTED_FILES: &[&str] = &[paths::IDENTITY];
+
 /// Files the agent may FULLY REWRITE (replace entire content, append: false).
 ///
-/// These personality/identity/preference files accumulate stale sections over
-/// time if only appended to. The agent should use memory_write with
-/// append: false to fully restructure them into clean, well-formatted markdown.
-/// IDENTITY.md is included here so the agent can clean up after bootstrap
-/// instead of accreting duplicate identity blocks.
-const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] =
-    &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+/// IDENTITY.md remains writable through memory_write because prompt_manage
+/// intentionally excludes it in V1.
+const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemoryScope {
@@ -111,9 +108,8 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
         .get("actor_id")
         .or_else(|| ctx.metadata.get("actor"))
         .and_then(|v| v.as_str());
-    let direct_actor =
-        job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
-            && actor_id.is_some();
+    let direct_actor = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
+        && actor_id.is_some();
 
     match explicit_scope {
         Some(MemoryScope::Shared) => (shared_root_path(&bare_target), false),
@@ -146,31 +142,6 @@ fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
         .and_then(|v| Uuid::parse_str(v).ok())
         .or_else(|| base.agent_id());
     base.scoped_clone(ctx.user_id.clone(), agent_workspace_id)
-}
-
-fn normalized_search_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut seen = HashSet::new();
-    for token in query
-        .split(|c: char| !c.is_alphanumeric())
-        .map(|token| token.trim().to_ascii_lowercase())
-        .filter(|token| token.len() > 1)
-    {
-        if seen.insert(token.clone()) {
-            terms.push(token);
-        }
-    }
-    terms
-}
-
-fn collapse_preview(text: &str, max_chars: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let preview: String = collapsed.chars().take(max_chars).collect();
-    if collapsed.chars().count() > max_chars {
-        format!("{}…", preview)
-    } else {
-        preview
-    }
 }
 
 /// Tool for searching workspace memory.
@@ -346,135 +317,6 @@ impl SessionSearchTool {
             conversation_id,
         )
     }
-
-    async fn collect_candidate_conversations(
-        &self,
-        ctx: &JobContext,
-        include_current_thread: bool,
-        recent_limit: usize,
-    ) -> Result<Vec<ConversationSummary>, ToolError> {
-        let (principal_id, actor_id, include_group_history, current_conversation_id) =
-            self.current_scope_filters(ctx);
-
-        let mut conversations = Vec::new();
-        if include_current_thread && let Some(conversation_id) = current_conversation_id {
-            if let Ok(Some(metadata)) = self.store.get_conversation_metadata(conversation_id).await
-            {
-                let kind = metadata
-                    .get("conversation_kind")
-                    .and_then(|v| v.as_str())
-                    .map(|value| value.to_ascii_lowercase())
-                    .map(|value| match value.as_str() {
-                        "group" | "channel" | "supergroup" => HistoryConversationKind::Group,
-                        _ => HistoryConversationKind::Direct,
-                    })
-                    .unwrap_or(HistoryConversationKind::Direct);
-                let channel = metadata
-                    .get("channel")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| ctx.metadata.get("channel").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown")
-                    .to_string();
-                let summary = ConversationSummary {
-                    id: conversation_id,
-                    user_id: principal_id.clone(),
-                    actor_id: Some(actor_id.clone()),
-                    conversation_scope_id: Some(
-                        metadata
-                            .get("conversation_scope_id")
-                            .and_then(|v| v.as_str())
-                            .and_then(|value| Uuid::parse_str(value).ok())
-                            .unwrap_or(conversation_id),
-                    ),
-                    conversation_kind: kind,
-                    channel,
-                    title: metadata
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or_else(|| Some(ctx.title.clone())),
-                    message_count: 0,
-                    started_at: chrono::Utc::now(),
-                    last_activity: chrono::Utc::now(),
-                    thread_type: metadata
-                        .get("thread_type")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    handoff: None,
-                    stable_external_conversation_key: metadata
-                        .get("stable_external_conversation_key")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                };
-                conversations.push(summary);
-            }
-        }
-
-        let mut recalled = self
-            .store
-            .list_actor_conversations_for_recall(
-                &principal_id,
-                &actor_id,
-                include_group_history,
-                recent_limit as i64,
-            )
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
-
-        conversations.append(&mut recalled);
-        conversations.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-        conversations.dedup_by(|a, b| a.id == b.id);
-        Ok(conversations)
-    }
-
-    async fn search_conversation_messages(
-        &self,
-        conversation: &ConversationSummary,
-        query_terms: &[String],
-        message_limit: usize,
-    ) -> Result<Vec<serde_json::Value>, ToolError> {
-        let (messages, _) = self
-            .store
-            .list_conversation_messages_paginated(conversation.id, None, message_limit as i64)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
-
-        let mut results = Vec::new();
-        for message in messages {
-            let haystack = message.content.to_ascii_lowercase();
-            let mut score = 0.0_f32;
-            for term in query_terms {
-                let occurrences = haystack.matches(term).count() as f32;
-                if occurrences > 0.0 {
-                    score += occurrences;
-                }
-            }
-            if score <= 0.0 {
-                continue;
-            }
-
-            if !query_terms.is_empty() && haystack.contains(&query_terms.join(" ")) {
-                score += 2.0;
-            }
-
-            let preview = collapse_preview(&message.content, 220);
-            results.push(serde_json::json!({
-                "conversation_id": conversation.id,
-                "message_id": message.id,
-                "role": message.role,
-                "created_at": message.created_at.to_rfc3339(),
-                "score": score,
-                "channel": conversation.channel.clone(),
-                "conversation_kind": conversation.conversation_kind.as_str(),
-                "actor_id": conversation.actor_id.clone(),
-                "title": conversation.title.clone(),
-                "excerpt": preview,
-                "metadata": message.metadata,
-            }));
-        }
-
-        Ok(results)
-    }
 }
 
 #[async_trait]
@@ -506,22 +348,13 @@ impl Tool for SessionSearchTool {
                 },
                 "include_current_thread": {
                     "type": "boolean",
-                    "description": "Include the current conversation thread even if it is not in the recall list.",
+                    "description": "If true, constrain search to the current thread when thread metadata is available.",
                     "default": true
                 },
-                "conversation_limit": {
-                    "type": "integer",
-                    "description": "Maximum number of conversations to scan (default: 12, max: 40)",
-                    "default": 12,
-                    "minimum": 1,
-                    "maximum": 40
-                },
-                "message_limit": {
-                    "type": "integer",
-                    "description": "Maximum number of messages to inspect per conversation (default: 40, max: 100)",
-                    "default": 40,
-                    "minimum": 1,
-                    "maximum": 100
+                "all_channels": {
+                    "type": "boolean",
+                    "description": "If true, search all channels for this actor/user scope. If false (default), search is limited to the current channel.",
+                    "default": false
                 }
             },
             "required": ["query"]
@@ -544,47 +377,61 @@ impl Tool for SessionSearchTool {
             .get("include_current_thread")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let conversation_limit = params
-            .get("conversation_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(12)
-            .clamp(1, 40) as usize;
-        let message_limit = params
-            .get("message_limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(40)
-            .clamp(1, 100) as usize;
+        let all_channels = params
+            .get("all_channels")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let query_terms = normalized_search_terms(query);
-        if query_terms.is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "query must contain at least one searchable term".to_string(),
-            ));
-        }
+        let (principal_id, actor_id, _include_group_history, _conversation_id) =
+            self.current_scope_filters(ctx);
 
-        let conversations = self
-            .collect_candidate_conversations(ctx, include_current_thread, conversation_limit)
-            .await?;
+        let channel_filter = if all_channels {
+            None
+        } else {
+            ctx.metadata
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let thread_filter = if include_current_thread {
+            ctx.metadata
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        };
 
-        let mut hits = Vec::new();
-        for conversation in conversations {
-            let mut conversation_hits = self
-                .search_conversation_messages(&conversation, &query_terms, message_limit)
-                .await?;
-            hits.append(&mut conversation_hits);
-            if hits.len() >= result_limit * 4 {
-                break;
-            }
-        }
-
-        hits.sort_by(|a, b| {
-            let a_score = a.get("score").and_then(|v| v.as_f64()).unwrap_or_default();
-            let b_score = b.get("score").and_then(|v| v.as_f64()).unwrap_or_default();
-            b_score
-                .partial_cmp(&a_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        hits.truncate(result_limit);
+        let hits = self
+            .store
+            .search_conversation_messages(
+                &principal_id,
+                query,
+                Some(&actor_id),
+                channel_filter.as_deref(),
+                thread_filter.as_deref(),
+                result_limit as i64,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?
+            .into_iter()
+            .map(|hit| {
+                serde_json::json!({
+                    "conversation_id": hit.conversation_id,
+                    "message_id": hit.message_id,
+                    "user_id": hit.user_id,
+                    "actor_id": hit.actor_id,
+                    "channel": hit.channel,
+                    "thread_id": hit.thread_id,
+                    "conversation_kind": hit.conversation_kind.as_str(),
+                    "role": hit.role,
+                    "created_at": hit.created_at.to_rfc3339(),
+                    "score": hit.score,
+                    "excerpt": hit.excerpt,
+                    "metadata": hit.metadata,
+                })
+            })
+            .collect::<Vec<_>>();
 
         let output = serde_json::json!({
             "query": query,
@@ -625,8 +472,8 @@ impl Tool for MemoryWriteTool {
         "Write to persistent memory (database-backed, NOT the local filesystem). \
          Use for facts, decisions, preferences, or lessons to remember across sessions. \
          Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
-         'heartbeat' (HEARTBEAT.md checklist), 'IDENTITY.md' / 'SOUL.md' / 'USER.md' / 'AGENTS.md' \
-         (freely rewritable — use append: false to fully restructure after bootstrap), \
+         'heartbeat' (HEARTBEAT.md checklist), and 'IDENTITY.md'. \
+         For SOUL.md / AGENTS.md / USER.md use prompt_manage instead of memory_write. \
          or a custom path. In direct DMs, memory/user/profile writes default to the actor overlay; \
          prefix with 'shared:' to force the household root. \
          ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
@@ -713,8 +560,18 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        // SOUL.md / AGENTS.md / USER.md — freely rewritable.
-        // With append: false the agent can fully restructure the file.
+        // SOUL.md / AGENTS.md / USER.md must be mutated through prompt_manage.
+        if [paths::SOUL, paths::AGENTS, paths::USER]
+            .iter()
+            .any(|p| file_name.eq_ignore_ascii_case(p))
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "'{}' must be managed through prompt_manage (bounded prompt mutation).",
+                target
+            )));
+        }
+
+        // IDENTITY.md remains freely rewritable through memory_write.
         if FREELY_REWRITABLE_IDENTITY_FILES
             .iter()
             .any(|p| file_name.eq_ignore_ascii_case(p))
@@ -1118,7 +975,7 @@ impl Tool for MemoryDeleteTool {
     fn description(&self) -> &str {
         "Delete a file from workspace memory (database-backed storage). \
          Cannot delete IDENTITY.md (append to it instead). \
-         SOUL.md / AGENTS.md / USER.md can be fully rewritten with memory_write(append: false) \
+         SOUL.md / AGENTS.md / USER.md can be fully rewritten with prompt_manage \
          rather than deleted. \
          Primary use-case: memory_delete('BOOTSTRAP.md') after the identity ritual completes."
     }
@@ -1147,16 +1004,16 @@ impl Tool for MemoryDeleteTool {
         let path = require_str(&params, "path")?;
 
         // Only IDENTITY.md is delete-protected.
-        // SOUL/AGENTS/USER should be restructured with memory_write(append: false) instead.
+        // SOUL/AGENTS/USER should be restructured with prompt_manage instead.
         let normalized = path.trim_start_matches('/');
-        if APPEND_ONLY_IDENTITY_FILES
+        if DELETE_PROTECTED_FILES
             .iter()
             .any(|p| normalized.eq_ignore_ascii_case(p))
         {
             return Err(ToolError::NotAuthorized(format!(
-                "'{}' cannot be deleted. Use memory_write(append: true) to add sections. \
+                "'{}' cannot be deleted. Use memory_write to edit identity content. \
                  To restructure SOUL.md / AGENTS.md / USER.md entirely, use \
-                 memory_write with append: false instead of deleting.",
+                 prompt_manage instead of deleting.",
                 path
             )));
         }

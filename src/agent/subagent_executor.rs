@@ -31,6 +31,9 @@ use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent::learning::{
+    ImprovementClass, LearningEvent as RuntimeLearningEvent, LearningOrchestrator, RiskTier,
+};
 use crate::agent::routine::RunStatus;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
@@ -580,6 +583,75 @@ impl SubagentExecutor {
                     }
                 }
             };
+
+            // Persist a learning event for sub-agent completions so the
+            // orchestrator can learn from delegated task outcomes.
+            if let Some(ref store) = store_for_task {
+                let conversation_id = Uuid::parse_str(&parent_thread_id).ok();
+                let actor = parent_identity
+                    .as_ref()
+                    .map(|identity| identity.actor_id.clone())
+                    .or_else(|| actor_id.clone());
+
+                let event = RuntimeLearningEvent::new(
+                    "subagent_executor::completion",
+                    ImprovementClass::Skill,
+                    if subagent_result.success {
+                        RiskTier::Low
+                    } else {
+                        RiskTier::Medium
+                    },
+                    if subagent_result.success {
+                        "Sub-agent completed successfully"
+                    } else {
+                        "Sub-agent failed to complete task"
+                    },
+                )
+                .with_target("subagent")
+                .with_confidence(if subagent_result.success { 0.82 } else { 0.38 })
+                .with_metadata(serde_json::json!({
+                    "subagent_id": subagent_result.agent_id,
+                    "subagent_name": subagent_result.name,
+                    "success": subagent_result.success,
+                    "iterations": subagent_result.iterations,
+                    "duration_ms": subagent_result.duration_ms,
+                    "error": subagent_result.error,
+                    "response_preview": truncate_progress_preview(&subagent_result.response, 240),
+                    "target_type": "subagent",
+                    "target": subagent_result.name,
+                    "correction_count": if subagent_result.success { 0 } else { 1 },
+                    "repeated_failures": if subagent_result.success { 0 } else { 1 },
+                }));
+
+                let persisted = event.into_persisted(
+                    parent_user_id.clone(),
+                    actor,
+                    Some(ch_name.clone()),
+                    Some(parent_thread_id.clone()),
+                    conversation_id,
+                    None,
+                    None,
+                );
+                if let Err(err) = store.insert_learning_event(&persisted).await {
+                    tracing::debug!(
+                        error = %err,
+                        subagent_id = %subagent_result.agent_id,
+                        "Failed to persist subagent learning event"
+                    );
+                } else {
+                    let orchestrator = LearningOrchestrator::new(Arc::clone(store), None, None);
+                    if let Err(err) = orchestrator
+                        .handle_event("subagent_completion", &persisted)
+                        .await
+                    {
+                        tracing::debug!(
+                            error = %err,
+                            subagent_id = %subagent_result.agent_id,
+                            "Learning orchestrator skipped subagent completion event"
+                        );
+                    }
+                }
+            }
 
             // ── Routine run finalization ─────────────────────────────
             // If this subagent was spawned by a routine, finalize the

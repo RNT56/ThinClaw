@@ -1,6 +1,6 @@
 # ThinClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-03-29 15:30 CET
+> **Last reconciled:** 2026-04-13 03:05 CEST
 
 This document tracks feature parity between ThinClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -188,6 +188,10 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
 | Session pruning | ✅ | ✅ | `sessions prune` CLI + auto-cleanup with configurable TTL |
 | Context compaction | ✅ | ✅ | Auto summarization |
+| Closed-loop learning orchestrator | ❌ | ✅ | Event→evaluation→candidate loop with dedupe/cooldown, safe-mode thresholds, Tier A auto-apply, Tier C approval-gated code proposals ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/agent/thread_ops.rs`](src/agent/thread_ops.rs)) |
+| Learning tool suite | ❌ | ✅ | `session_search`, `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
+| Learning API + audit UI | ❌ | ✅ | `/api/learning/*` endpoints + dedicated Web Learning tab with proposals, feedback, rollbacks, and provider health ([`src/api/learning.rs`](src/api/learning.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html)) |
+| Optional external memory providers | ❌ | ✅ | Honcho + Zep adapters, local-first canonical memory, non-fatal provider fallback ([`src/agent/learning.rs`](src/agent/learning.rs)) |
 | Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |

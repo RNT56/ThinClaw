@@ -19,6 +19,7 @@ mod file;
 mod http;
 mod job;
 mod json;
+mod learning_tools;
 mod location;
 mod memory;
 pub mod routine;
@@ -55,6 +56,10 @@ pub use job::{
     PromptQueue,
 };
 pub use json::JsonTool;
+pub use learning_tools::{
+    LearningFeedbackTool, LearningHistoryTool, LearningProposalReviewTool, LearningStatusTool,
+    PromptManageTool, SkillManageTool,
+};
 pub use llm_tools::{
     LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override,
 };

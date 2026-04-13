@@ -4443,6 +4443,85 @@ mark {
   color: #f4b2b2;
 }
 
+/* Learning Tab */
+.learning-container {
+  min-width: 0;
+}
+
+.learning-shell {
+  width: 100%;
+  max-width: 1680px;
+  margin-inline: auto;
+}
+
+.learning-summary .summary-card .count {
+  font-size: 28px;
+}
+
+.learning-feedback-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(180px, 1.1fr) minmax(140px, 0.8fr) minmax(220px, 1.5fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.learning-feedback-form input,
+.learning-feedback-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.learning-feedback-form input:focus,
+.learning-feedback-form select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+}
+
+.learning-feedback-form .btn-restart {
+  justify-self: start;
+  white-space: nowrap;
+}
+
+.learning-table {
+  min-width: 920px;
+}
+
+.learning-provider-card {
+  min-height: 100%;
+}
+
+.learning-provider-card .ui-resource-name {
+  text-transform: capitalize;
+}
+
+.learning-error {
+  color: #f4b2b2;
+}
+
+@media (max-width: 1200px) {
+  .learning-feedback-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .learning-feedback-form .btn-restart {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
+
+@media (max-width: 720px) {
+  .learning-feedback-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .routing-panel {
   margin-bottom: 24px;
 }

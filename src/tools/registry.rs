@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::agent::learning::LearningOrchestrator;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -19,13 +20,14 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
     CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool,
-    HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListAgentsTool, ListDirTool,
-    ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptQueue, ReadFileTool,
-    RemoveAgentTool, SessionSearchTool, SharedModelOverride, ShellTool, SkillInstallTool,
-    SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    TtsTool, UpdateAgentTool, WriteFileTool,
+    HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool,
+    LearningHistoryTool, LearningProposalReviewTool, LearningStatusTool, ListAgentsTool,
+    ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptManageTool,
+    PromptQueue, ReadFileTool, RemoveAgentTool, SessionSearchTool, SharedModelOverride, ShellTool,
+    SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -94,6 +96,12 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message_agent",
     "extract_document",
     "consult_advisor",
+    "prompt_manage",
+    "skill_manage",
+    "learning_status",
+    "learning_history",
+    "learning_feedback",
+    "learning_proposal_review",
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
@@ -102,6 +110,7 @@ const SKILL_ADMIN_TOOLS: &[&str] = &[
     "skill_install",
     "skill_remove",
     "skill_reload",
+    "skill_manage",
 ];
 
 /// Registry of available tools.
@@ -614,6 +623,51 @@ impl ToolRegistry {
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillReloadTool::new(registry)));
         tracing::info!("Registered 6 skill management tools");
+    }
+
+    /// Register learning tools for prompt mutation and learning-ledger access.
+    pub fn register_learning_tools(
+        &self,
+        store: Arc<dyn Database>,
+        workspace: Option<Arc<Workspace>>,
+        skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
+    ) {
+        let orchestrator = Arc::new(LearningOrchestrator::new(
+            Arc::clone(&store),
+            workspace.clone(),
+            skill_registry.clone(),
+        ));
+        let mut count = 0;
+
+        if let Some(workspace) = workspace {
+            self.register_sync(Arc::new(PromptManageTool::new(
+                Arc::clone(&orchestrator),
+                Arc::clone(&store),
+                workspace,
+            )));
+            count += 1;
+        }
+
+        if let Some(skill_registry) = skill_registry {
+            self.register_sync(Arc::new(SkillManageTool::new(
+                Arc::clone(&store),
+                skill_registry,
+            )));
+            count += 1;
+        }
+
+        self.register_sync(Arc::new(LearningStatusTool::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&store),
+        )));
+        self.register_sync(Arc::new(LearningHistoryTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(LearningFeedbackTool::new(Arc::clone(
+            &orchestrator,
+        ))));
+        self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
+        count += 4;
+
+        tracing::info!("Registered {} learning tools", count);
     }
 
     /// Register routine management tools.

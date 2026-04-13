@@ -15,7 +15,7 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
-use crate::agent::learning::{ImprovementClass, LearningEvent, RiskTier};
+use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::session::{
     PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
 };
@@ -36,6 +36,51 @@ fn to_history_conversation_kind(
         crate::identity::ConversationKind::Direct => HistoryConversationKind::Direct,
         crate::identity::ConversationKind::Group => HistoryConversationKind::Group,
     }
+}
+
+fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
+    if !role.eq_ignore_ascii_case("user") {
+        return 0;
+    }
+    let normalized = content.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return 0;
+    }
+
+    let correction_prefixes = [
+        "actually",
+        "correction:",
+        "to clarify",
+        "that's incorrect",
+        "that is incorrect",
+        "not quite",
+        "no,",
+        "no.",
+        "use this instead",
+        "please use",
+        "instead:",
+    ];
+    if correction_prefixes
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        return 1;
+    }
+
+    let correction_markers = [
+        "you should have",
+        "please do not",
+        "this is wrong",
+        "the correct way is",
+    ];
+    if correction_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return 1;
+    }
+
+    0
 }
 
 impl Agent {
@@ -142,14 +187,43 @@ impl Agent {
         identity: &ResolvedIdentity,
         role: &str,
         content: &str,
+        persisted_message_id: Option<Uuid>,
     ) {
+        let correction_count = detect_user_correction_signal(role, content);
+        let class = if correction_count > 0 {
+            ImprovementClass::Skill
+        } else {
+            ImprovementClass::Memory
+        };
+        let risk_tier = if correction_count > 0 {
+            RiskTier::Medium
+        } else {
+            RiskTier::Low
+        };
+        let summary = if correction_count > 0 {
+            "Persisted explicit user correction to conversation history".to_string()
+        } else {
+            format!("Persisted {} message to conversation history", role)
+        };
+        let target = if correction_count > 0 {
+            "workflow_correction"
+        } else {
+            "conversation_history"
+        };
+
+        let job_id = message
+            .metadata
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok());
+
         let learning_event = LearningEvent::new(
             format!("thread_ops::persist_{}_message", role),
-            ImprovementClass::Memory,
-            RiskTier::Low,
-            format!("Persisted {} message to conversation history", role),
+            class,
+            risk_tier,
+            summary,
         )
-        .with_target("conversation_history")
+        .with_target(target)
         .with_metadata(json!({
             "thread_id": thread_id.to_string(),
             "channel": message.channel.clone(),
@@ -161,28 +235,92 @@ impl Agent {
             "content_length": content.len(),
             "content_preview": Self::compact_text_preview(content),
             "received_at": message.received_at.to_rfc3339(),
+            "correction_count": correction_count,
+            "repeated_failures": correction_count,
+            "success": !(role.eq_ignore_ascii_case("user") && correction_count > 0),
         }));
 
-        let payload = serde_json::to_value(&learning_event).unwrap_or_else(|_| {
+        let persisted_event = learning_event.into_persisted(
+            identity.principal_id.clone(),
+            Some(identity.actor_id.clone()),
+            Some(message.channel.clone()),
+            Some(thread_id.to_string()),
+            Some(thread_id),
+            persisted_message_id,
+            job_id,
+        );
+
+        let mut outcome_payload = serde_json::json!({});
+        match store.insert_learning_event(&persisted_event).await {
+            Ok(event_id) => {
+                let orchestrator = LearningOrchestrator::new(
+                    Arc::clone(store),
+                    self.workspace().cloned(),
+                    self.skill_registry().cloned(),
+                );
+                match orchestrator
+                    .handle_event(
+                        if role.eq_ignore_ascii_case("assistant") {
+                            "assistant_turn_complete"
+                        } else {
+                            "user_turn_input"
+                        },
+                        &persisted_event,
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        outcome_payload = serde_json::json!(outcome);
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            thread = %thread_id,
+                            event_id = %event_id,
+                            error = %err,
+                            "Learning orchestrator skipped event"
+                        );
+                    }
+                }
+
+                orchestrator
+                    .export_turn_to_providers(
+                        &identity.principal_id,
+                        &serde_json::json!({
+                            "event_id": event_id,
+                            "conversation_id": thread_id,
+                            "message_id": persisted_message_id,
+                            "role": role,
+                            "channel": message.channel.clone(),
+                            "content_preview": Self::compact_text_preview(content),
+                            "content_length": content.len(),
+                            "received_at": message.received_at.to_rfc3339(),
+                            "actor_id": identity.actor_id.clone(),
+                            "conversation_kind": identity.conversation_kind.as_str(),
+                        }),
+                    )
+                    .await;
+            }
+            Err(err) => {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Best-effort learning event insert failed"
+                );
+            }
+        }
+
+        let payload = serde_json::to_value(&persisted_event).unwrap_or_else(|_| {
             json!({
-                "id": learning_event.id.to_string(),
-                "source": learning_event.source,
-                "class": learning_event.class,
-                "risk_tier": learning_event.risk_tier,
-                "summary": learning_event.summary,
-                "target": learning_event.target,
-                "confidence": learning_event.confidence,
-                "metadata": learning_event.metadata,
-                "created_at": learning_event.created_at.to_rfc3339(),
+                "id": persisted_event.id.to_string(),
+                "source": persisted_event.source,
+                "event_type": persisted_event.event_type,
+                "payload": persisted_event.payload,
+                "metadata": persisted_event.metadata,
+                "created_at": persisted_event.created_at.to_rfc3339(),
             })
         });
 
-        if let Some(job_id) = message
-            .metadata
-            .get("job_id")
-            .and_then(|v| v.as_str())
-            .and_then(|value| Uuid::parse_str(value).ok())
-        {
+        if let Some(job_id) = job_id {
             if let Err(err) = store
                 .save_job_event(job_id, "learning_event", &payload)
                 .await
@@ -196,8 +334,12 @@ impl Agent {
             }
         }
 
+        let summary_payload = serde_json::json!({
+            "event": payload,
+            "outcome": outcome_payload,
+        });
         if let Err(err) = store
-            .update_conversation_metadata_field(thread_id, "learning_last_event", &payload)
+            .update_conversation_metadata_field(thread_id, "learning_last_event", &summary_payload)
             .await
         {
             tracing::debug!(
@@ -647,6 +789,43 @@ impl Agent {
                 let pct = self.context_monitor.usage_percent(&messages);
                 tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
+                if let Some(store) = self.store().map(Arc::clone) {
+                    let identity = message.resolved_identity();
+                    let event = LearningEvent::new(
+                        "thread_ops::pre_compaction_nudge",
+                        ImprovementClass::Memory,
+                        RiskTier::Low,
+                        "Context nearing limit; compaction nudge emitted before turn",
+                    )
+                    .with_target("context_compaction")
+                    .with_metadata(json!({
+                        "thread_id": thread_id.to_string(),
+                        "channel": message.channel,
+                        "usage_percent": pct,
+                        "strategy": format!("{:?}", strategy),
+                    }))
+                    .into_persisted(
+                        identity.principal_id.clone(),
+                        Some(identity.actor_id.clone()),
+                        Some(message.channel.clone()),
+                        Some(thread_id.to_string()),
+                        Some(thread_id),
+                        None,
+                        None,
+                    );
+
+                    if store.insert_learning_event(&event).await.is_ok() {
+                        let orchestrator = LearningOrchestrator::new(
+                            store,
+                            self.workspace().cloned(),
+                            self.skill_registry().cloned(),
+                        );
+                        let _ = orchestrator
+                            .handle_event("pre_compaction_memory_nudge", &event)
+                            .await;
+                    }
+                }
+
                 // Notify the user that compaction is happening
                 let _ = self
                     .channels
@@ -913,7 +1092,7 @@ impl Agent {
             return;
         };
 
-        if let Err(e) = store
+        let persisted_message_id = match store
             .add_conversation_message_with_attribution(
                 thread_id,
                 "user",
@@ -925,12 +1104,21 @@ impl Agent {
             )
             .await
         {
-            tracing::warn!("Failed to persist user message: {}", e);
-            return;
-        }
+            Ok(message_id) => Some(message_id),
+            Err(e) => {
+                tracing::warn!("Failed to persist user message: {}", e);
+                return;
+            }
+        };
 
         self.best_effort_record_learning_event(
-            &store, thread_id, message, &identity, "user", user_input,
+            &store,
+            thread_id,
+            message,
+            &identity,
+            "user",
+            user_input,
+            persisted_message_id,
         )
         .await;
     }
@@ -954,7 +1142,7 @@ impl Agent {
             return;
         };
 
-        if let Err(e) = store
+        let persisted_message_id = match store
             .add_conversation_message_with_attribution(
                 thread_id,
                 "assistant",
@@ -966,9 +1154,12 @@ impl Agent {
             )
             .await
         {
-            tracing::warn!("Failed to persist assistant message: {}", e);
-            return;
-        }
+            Ok(message_id) => Some(message_id),
+            Err(e) => {
+                tracing::warn!("Failed to persist assistant message: {}", e);
+                return;
+            }
+        };
 
         self.best_effort_record_learning_event(
             &store,
@@ -977,6 +1168,7 @@ impl Agent {
             &identity,
             "assistant",
             response,
+            persisted_message_id,
         )
         .await;
     }
@@ -2060,5 +2252,34 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_user_correction_signal;
+
+    #[test]
+    fn detects_correction_prefixes() {
+        assert_eq!(
+            detect_user_correction_signal("user", "Actually, please use this endpoint."),
+            1
+        );
+        assert_eq!(
+            detect_user_correction_signal("user", "No, that's incorrect."),
+            1
+        );
+    }
+
+    #[test]
+    fn ignores_non_correction_messages() {
+        assert_eq!(
+            detect_user_correction_signal("user", "Can you summarize this for me?"),
+            0
+        );
+        assert_eq!(
+            detect_user_correction_signal("assistant", "Actually this is fine."),
+            0
+        );
     }
 }

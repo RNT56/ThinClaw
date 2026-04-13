@@ -1126,6 +1126,14 @@ impl AppBuilder {
             (None, None)
         };
 
+        if let Some(db) = self.db.as_ref() {
+            tools.register_learning_tools(
+                Arc::clone(db),
+                workspace.as_ref().cloned(),
+                skill_registry.clone(),
+            );
+        }
+
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
 
         // Register hardware bridge tools if a bridge was injected

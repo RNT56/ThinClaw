@@ -2700,7 +2700,10 @@ impl Store {
                 &[&user_id, &artifact_type, &artifact_name, &limit],
             )
             .await?;
-        Ok(rows.iter().map(learning_artifact_version_from_row).collect())
+        Ok(rows
+            .iter()
+            .map(learning_artifact_version_from_row)
+            .collect())
     }
 
     /// Persist explicit feedback on a learned target.
@@ -3038,8 +3041,14 @@ fn learning_candidate_from_row(row: &tokio_postgres::Row) -> LearningCandidate {
         candidate_type: row.get("candidate_type"),
         risk_tier: row.get("risk_tier"),
         confidence: row.try_get::<_, Option<f64>>("confidence").ok().flatten(),
-        target_type: row.try_get::<_, Option<String>>("target_type").ok().flatten(),
-        target_name: row.try_get::<_, Option<String>>("target_name").ok().flatten(),
+        target_type: row
+            .try_get::<_, Option<String>>("target_type")
+            .ok()
+            .flatten(),
+        target_name: row
+            .try_get::<_, Option<String>>("target_name")
+            .ok()
+            .flatten(),
         summary: row.try_get::<_, Option<String>>("summary").ok().flatten(),
         proposal: row
             .try_get::<_, Option<serde_json::Value>>("proposal")
@@ -3054,15 +3063,30 @@ fn learning_candidate_from_row(row: &tokio_postgres::Row) -> LearningCandidate {
 fn learning_artifact_version_from_row(row: &tokio_postgres::Row) -> LearningArtifactVersion {
     LearningArtifactVersion {
         id: row.get("id"),
-        candidate_id: row.try_get::<_, Option<Uuid>>("candidate_id").ok().flatten(),
+        candidate_id: row
+            .try_get::<_, Option<Uuid>>("candidate_id")
+            .ok()
+            .flatten(),
         user_id: row.get("user_id"),
         artifact_type: row.get("artifact_type"),
         artifact_name: row.get("artifact_name"),
-        version_label: row.try_get::<_, Option<String>>("version_label").ok().flatten(),
+        version_label: row
+            .try_get::<_, Option<String>>("version_label")
+            .ok()
+            .flatten(),
         status: row.get("status"),
-        diff_summary: row.try_get::<_, Option<String>>("diff_summary").ok().flatten(),
-        before_content: row.try_get::<_, Option<String>>("before_content").ok().flatten(),
-        after_content: row.try_get::<_, Option<String>>("after_content").ok().flatten(),
+        diff_summary: row
+            .try_get::<_, Option<String>>("diff_summary")
+            .ok()
+            .flatten(),
+        before_content: row
+            .try_get::<_, Option<String>>("before_content")
+            .ok()
+            .flatten(),
+        after_content: row
+            .try_get::<_, Option<String>>("after_content")
+            .ok()
+            .flatten(),
         provenance: row
             .try_get::<_, Option<serde_json::Value>>("provenance")
             .ok()
@@ -3135,9 +3159,15 @@ fn learning_code_proposal_from_row(row: &tokio_postgres::Row) -> LearningCodePro
             .ok()
             .flatten()
             .unwrap_or_else(|| serde_json::json!({})),
-        rollback_note: row.try_get::<_, Option<String>>("rollback_note").ok().flatten(),
+        rollback_note: row
+            .try_get::<_, Option<String>>("rollback_note")
+            .ok()
+            .flatten(),
         confidence: row.try_get::<_, Option<f64>>("confidence").ok().flatten(),
-        branch_name: row.try_get::<_, Option<String>>("branch_name").ok().flatten(),
+        branch_name: row
+            .try_get::<_, Option<String>>("branch_name")
+            .ok()
+            .flatten(),
         pr_url: row.try_get::<_, Option<String>>("pr_url").ok().flatten(),
         metadata: row
             .try_get::<_, Option<serde_json::Value>>("metadata")

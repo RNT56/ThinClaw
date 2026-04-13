@@ -1809,6 +1809,7 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
+  if (tab === 'learning') loadLearning();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') {
     loadExtensions();
@@ -3677,6 +3678,346 @@ function deleteRoutine(id, name) {
     .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
 }
 
+// --- Learning ---
+
+function loadLearning() {
+  const summary = document.getElementById('learning-summary');
+  if (summary) summary.innerHTML = '<div class="settings-loading">Loading learning data...</div>';
+  const providerHealth = document.getElementById('learning-provider-health');
+  if (providerHealth) providerHealth.innerHTML = '<div class="settings-loading">Loading provider health...</div>';
+
+  Promise.allSettled([
+    apiFetch('/api/learning/status?limit=50'),
+    apiFetch('/api/learning/provider-health'),
+    apiFetch('/api/learning/history?limit=50'),
+    apiFetch('/api/learning/candidates?limit=50'),
+    apiFetch('/api/learning/code-proposals?limit=50'),
+    apiFetch('/api/learning/feedback?limit=50'),
+    apiFetch('/api/learning/artifact-versions?limit=50'),
+    apiFetch('/api/learning/rollbacks?limit=50'),
+  ]).then((results) => {
+    const [statusRes, healthRes, historyRes, candidatesRes, proposalsRes, feedbackRes, artifactsRes, rollbacksRes] = results;
+    const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
+    const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
+    const history = historyRes.status === 'fulfilled' ? historyRes.value : null;
+    const candidates = candidatesRes.status === 'fulfilled' ? candidatesRes.value : null;
+    const proposals = proposalsRes.status === 'fulfilled' ? proposalsRes.value : null;
+    const feedback = feedbackRes.status === 'fulfilled' ? feedbackRes.value : null;
+    const artifacts = artifactsRes.status === 'fulfilled' ? artifactsRes.value : null;
+    const rollbacks = rollbacksRes.status === 'fulfilled' ? rollbacksRes.value : null;
+
+    if (status) {
+      renderLearningSummary(status);
+    } else if (summary) {
+      summary.innerHTML = '<div class="empty-state ui-panel-empty">Failed to load learning status.</div>';
+    }
+
+    if (health) renderLearningProviderHealth(health);
+    else if (providerHealth) providerHealth.innerHTML = '<div class="empty-state ui-panel-empty">Failed to load provider health.</div>';
+
+    renderLearningHistory(history);
+    renderLearningCandidates(candidates);
+    renderLearningProposals(proposals);
+    renderLearningFeedback(feedback);
+    renderLearningArtifacts(artifacts);
+    renderLearningRollbacks(rollbacks);
+  });
+}
+
+function learningBadgeClass(value) {
+  const normalized = String(value || '').toLowerCase();
+  if (['healthy', 'enabled', 'active', 'approved', 'applied', 'recorded', 'helpful'].includes(normalized)) {
+    return 'completed';
+  }
+  if (['failed', 'unhealthy', 'rejected', 'harmful'].includes(normalized)) {
+    return 'failed';
+  }
+  if (['warning', 'stuck', 'needs_review', 'review', 'pending', 'proposed', 'degraded'].includes(normalized)) {
+    return 'stuck';
+  }
+  return 'pending';
+}
+
+function formatLearningConfidence(value) {
+  if (value == null) return '-';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return (num <= 1 ? Math.round(num * 100) : Math.round(num)) + '%';
+}
+
+function renderLearningSummary(status) {
+  const summary = document.getElementById('learning-summary');
+  if (!summary) return;
+
+  summary.innerHTML = ''
+    + summaryCard('Events', status.recent?.events || 0, 'active')
+    + summaryCard('Candidates', status.recent?.candidates || 0, 'completed')
+    + summaryCard('Proposals', status.recent?.code_proposals || 0, 'stuck')
+    + summaryCard('Feedback', status.recent?.feedback || 0, '')
+    + summaryCard('Rollbacks', status.recent?.rollbacks || 0, 'failed')
+    + summaryCard('Healthy Providers', (status.provider_health?.healthy || 0) + ' / ' + (status.provider_health?.total || 0), 'completed');
+}
+
+function renderLearningProviderHealth(data) {
+  const container = document.getElementById('learning-provider-health');
+  if (!container) return;
+  const providers = data.providers || [];
+  if (!providers.length) {
+    container.innerHTML = '<div class="empty-state ui-panel-empty">No learning providers configured.</div>';
+    return;
+  }
+
+  container.innerHTML = providers.map((provider) => {
+    const badgeClass = provider.healthy ? 'completed' : provider.enabled ? 'stuck' : 'pending';
+    const statusLabel = provider.healthy ? 'healthy' : provider.enabled ? 'degraded' : 'disabled';
+    const latency = provider.latency_ms != null ? provider.latency_ms + ' ms' : '-';
+    const error = provider.error ? '<div class="ui-resource-note learning-error">' + escapeHtml(provider.error) + '</div>' : '';
+    return '<article class="ui-panel ui-panel--subtle ui-resource-card learning-provider-card">'
+      + '<div class="ui-resource-header">'
+      + '<div class="ui-resource-name"><strong>' + escapeHtml(provider.provider) + '</strong></div>'
+      + '<span class="badge ' + badgeClass + '">' + escapeHtml(statusLabel) + '</span>'
+      + '</div>'
+      + '<div class="ui-resource-meta">Enabled: ' + (provider.enabled ? 'yes' : 'no') + '</div>'
+      + '<div class="ui-resource-meta">Latency: ' + escapeHtml(latency) + '</div>'
+      + error
+      + '</article>';
+  }).join('');
+}
+
+function renderLearningHistory(data) {
+  const tbody = document.getElementById('learning-history-tbody');
+  const empty = document.getElementById('learning-history-empty');
+  if (!tbody || !empty) return;
+  const events = data?.events || [];
+
+  if (!events.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = events.map((event) => {
+    const target = event.target || '-';
+    const actionLabel = event.id
+      ? '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'learning_event\', \'' + escapeJsString(event.id) + '\')">Feedback</button>'
+      : '';
+    return '<tr>'
+      + '<td>' + formatDate(event.created_at) + '</td>'
+      + '<td>' + escapeHtml(event.source) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(event.class) + '">' + escapeHtml(event.class) + '</span></td>'
+      + '<td><span class="badge ' + learningBadgeClass(event.risk_tier) + '">' + escapeHtml(event.risk_tier) + '</span></td>'
+      + '<td title="' + escapeHtml(event.summary) + '">' + escapeHtml(event.summary) + '</td>'
+      + '<td>' + escapeHtml(target) + '</td>'
+      + '<td>' + actionLabel + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningCandidates(data) {
+  const tbody = document.getElementById('learning-candidates-tbody');
+  const empty = document.getElementById('learning-candidates-empty');
+  if (!tbody || !empty) return;
+  const candidates = data?.candidates || [];
+
+  if (!candidates.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = candidates.map((candidate) => {
+    const target = candidate.target_name || candidate.target_type || '-';
+    return '<tr>'
+      + '<td>' + formatDate(candidate.created_at) + '</td>'
+      + '<td>' + escapeHtml(candidate.candidate_type) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(candidate.risk_tier) + '">' + escapeHtml(candidate.risk_tier) + '</span></td>'
+      + '<td>' + escapeHtml(target) + '</td>'
+      + '<td title="' + escapeHtml(candidate.summary || '') + '">' + escapeHtml(candidate.summary || '-') + '</td>'
+      + '<td>' + escapeHtml(formatLearningConfidence(candidate.confidence)) + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningProposals(data) {
+  const tbody = document.getElementById('learning-proposals-tbody');
+  const empty = document.getElementById('learning-proposals-empty');
+  if (!tbody || !empty) return;
+  const proposals = data?.proposals || [];
+
+  if (!proposals.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = proposals.map((proposal) => {
+    const files = proposal.target_files && proposal.target_files.length ? proposal.target_files.join(', ') : '-';
+    const isPending = ['proposed', 'draft', 'pending_approval'].includes(String(proposal.status || '').toLowerCase());
+    const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'code_proposal\', \'' + escapeJsString(proposal.id) + '\')">Feedback</button>';
+    const approveBtn = isPending ? '<button class="btn-restart" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'approve\')">Approve</button>' : '';
+    const rejectBtn = isPending ? '<button class="btn-cancel" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'reject\')">Reject</button>' : '';
+    return '<tr>'
+      + '<td>' + formatDate(proposal.created_at) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(proposal.status) + '">' + escapeHtml(proposal.status) + '</span></td>'
+      + '<td title="' + escapeHtml(proposal.rationale) + '">' + escapeHtml(proposal.title) + '</td>'
+      + '<td title="' + escapeHtml(files) + '">' + escapeHtml(files) + '</td>'
+      + '<td>' + escapeHtml(formatLearningConfidence(proposal.confidence)) + '</td>'
+      + '<td>' + approveBtn + ' ' + rejectBtn + ' ' + feedbackBtn + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningFeedback(data) {
+  const tbody = document.getElementById('learning-feedback-tbody');
+  const empty = document.getElementById('learning-feedback-empty');
+  if (!tbody || !empty) return;
+  const feedback = data?.feedback || [];
+
+  if (!feedback.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = feedback.map((entry) => {
+    const target = entry.target_type + ' / ' + entry.target_id;
+    return '<tr>'
+      + '<td>' + formatDate(entry.created_at) + '</td>'
+      + '<td>' + escapeHtml(target) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(entry.verdict) + '">' + escapeHtml(entry.verdict) + '</span></td>'
+      + '<td>' + escapeHtml(entry.note || '-') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningArtifacts(data) {
+  const tbody = document.getElementById('learning-artifacts-tbody');
+  const empty = document.getElementById('learning-artifacts-empty');
+  if (!tbody || !empty) return;
+  const versions = data?.versions || [];
+
+  if (!versions.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = versions.map((version) => {
+    const label = version.version_label || version.id;
+    const rollbackBtn = '<button class="btn-cancel" onclick="recordLearningRollback(\'' + escapeJsString(version.id) + '\', \'' + escapeJsString(version.artifact_type) + '\', \'' + escapeJsString(version.artifact_name) + '\')">Rollback</button>';
+    const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'artifact_version\', \'' + escapeJsString(version.id) + '\')">Feedback</button>';
+    return '<tr>'
+      + '<td>' + formatDate(version.created_at) + '</td>'
+      + '<td>' + escapeHtml(version.artifact_type + ' / ' + version.artifact_name) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(version.status) + '">' + escapeHtml(version.status) + '</span></td>'
+      + '<td title="' + escapeHtml(version.diff_summary || '') + '">' + escapeHtml(version.diff_summary || label) + '</td>'
+      + '<td>' + rollbackBtn + ' ' + feedbackBtn + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningRollbacks(data) {
+  const tbody = document.getElementById('learning-rollbacks-tbody');
+  const empty = document.getElementById('learning-rollbacks-empty');
+  if (!tbody || !empty) return;
+  const rollbacks = data?.rollbacks || [];
+
+  if (!rollbacks.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = rollbacks.map((rollback) => {
+    return '<tr>'
+      + '<td>' + formatDate(rollback.created_at) + '</td>'
+      + '<td>' + escapeHtml(rollback.artifact_type + ' / ' + rollback.artifact_name) + '</td>'
+      + '<td title="' + escapeHtml(rollback.reason) + '">' + escapeHtml(rollback.reason) + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function setLearningFeedbackTarget(targetType, targetId) {
+  const typeInput = document.getElementById('learning-feedback-target-type');
+  const idInput = document.getElementById('learning-feedback-target-id');
+  if (typeInput) typeInput.value = targetType || '';
+  if (idInput) idInput.value = targetId || '';
+  const verdict = document.getElementById('learning-feedback-verdict');
+  if (verdict && !verdict.value) verdict.value = 'helpful';
+  showToast('Learning feedback target set', 'success');
+}
+
+function submitLearningFeedback() {
+  const targetType = document.getElementById('learning-feedback-target-type')?.value.trim();
+  const targetId = document.getElementById('learning-feedback-target-id')?.value.trim();
+  const verdict = document.getElementById('learning-feedback-verdict')?.value.trim();
+  const note = document.getElementById('learning-feedback-note')?.value.trim();
+
+  if (!targetType || !targetId || !verdict) {
+    showToast('Target type, target ID, and verdict are required', 'error');
+    return;
+  }
+
+  apiFetch('/api/learning/feedback', {
+    method: 'POST',
+    body: {
+      target_type: targetType,
+      target_id: targetId,
+      verdict: verdict,
+      note: note || null,
+    },
+  }).then(() => {
+    showToast('Feedback recorded', 'success');
+    const noteInput = document.getElementById('learning-feedback-note');
+    if (noteInput) noteInput.value = '';
+    loadLearning();
+  }).catch((err) => {
+    showToast('Failed to record feedback: ' + err.message, 'error');
+  });
+}
+
+function reviewLearningProposal(proposalId, decision) {
+  if (decision === 'reject' && !confirm('Reject this learning proposal?')) return;
+
+  apiFetch('/api/learning/code-proposals/' + proposalId + '/review', {
+    method: 'POST',
+    body: {
+      decision: decision,
+    },
+  }).then((res) => {
+    showToast('Proposal ' + (res.status || decision), 'success');
+    loadLearning();
+  }).catch((err) => {
+    showToast('Failed to update proposal: ' + err.message, 'error');
+  });
+}
+
+function recordLearningRollback(versionId, artifactType, artifactName) {
+  const reason = prompt('Rollback reason for ' + artifactType + ' / ' + artifactName + ':');
+  if (!reason) return;
+
+  apiFetch('/api/learning/rollbacks', {
+    method: 'POST',
+    body: {
+      artifact_type: artifactType,
+      artifact_name: artifactName,
+      artifact_version_id: versionId || null,
+      reason: reason,
+    },
+  }).then(() => {
+    showToast('Rollback recorded', 'success');
+    loadLearning();
+  }).catch((err) => {
+    showToast('Failed to record rollback: ' + err.message, 'error');
+  });
+}
+
 function formatRelativeTime(isoString) {
   if (!isoString) return '-';
   const d = new Date(isoString);
@@ -4848,6 +5189,14 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function escapeJsString(str) {
+  return String(str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
 }
 
 function formatDate(isoString) {

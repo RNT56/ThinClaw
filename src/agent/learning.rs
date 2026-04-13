@@ -19,10 +19,9 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::history::{
-    LearningArtifactVersion as DbLearningArtifactVersion,
-    LearningCandidate as DbLearningCandidate, LearningCodeProposal as DbLearningCodeProposal,
-    LearningEvaluation as DbLearningEvaluation, LearningEvent as DbLearningEvent,
-    LearningFeedbackRecord as DbLearningFeedbackRecord,
+    LearningArtifactVersion as DbLearningArtifactVersion, LearningCandidate as DbLearningCandidate,
+    LearningCodeProposal as DbLearningCodeProposal, LearningEvaluation as DbLearningEvaluation,
+    LearningEvent as DbLearningEvent, LearningFeedbackRecord as DbLearningFeedbackRecord,
 };
 use crate::settings::LearningSettings;
 use crate::skills::registry::SkillRegistry;
@@ -189,7 +188,10 @@ impl LearningEvent {
                 "risk_tier".to_string(),
                 serde_json::json!(self.risk_tier.as_str()),
             );
-            obj.insert("summary".to_string(), serde_json::json!(self.summary.clone()));
+            obj.insert(
+                "summary".to_string(),
+                serde_json::json!(self.summary.clone()),
+            );
             if let Some(target) = self.target.clone() {
                 obj.insert("target".to_string(), serde_json::json!(target));
             }
@@ -360,7 +362,9 @@ fn provider_token(config: &std::collections::HashMap<String, String>) -> Option<
         .cloned()
         .filter(|v| !v.trim().is_empty())
     {
-        return std::env::var(env_name).ok().filter(|v| !v.trim().is_empty());
+        return std::env::var(env_name)
+            .ok()
+            .filter(|v| !v.trim().is_empty());
     }
     None
 }
@@ -677,16 +681,16 @@ pub struct LearningOrchestrator {
     providers: Vec<Arc<dyn MemoryProvider>>,
 }
 
+const PROPOSAL_SUPPRESSION_WINDOW_HOURS: i64 = 24 * 7;
+
 impl LearningOrchestrator {
     pub fn new(
         store: Arc<dyn Database>,
         workspace: Option<Arc<Workspace>>,
         skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     ) -> Self {
-        let providers: Vec<Arc<dyn MemoryProvider>> = vec![
-            Arc::new(HonchoProvider),
-            Arc::new(ZepProvider),
-        ];
+        let providers: Vec<Arc<dyn MemoryProvider>> =
+            vec![Arc::new(HonchoProvider), Arc::new(ZepProvider)];
         Self {
             store,
             workspace,
@@ -769,10 +773,40 @@ impl LearningOrchestrator {
             metadata: metadata.cloned().unwrap_or_else(|| serde_json::json!({})),
             created_at: Utc::now(),
         };
-        self.store
+        let id = self
+            .store
             .insert_learning_feedback(&record)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        let feedback_event = LearningEvent::new(
+            "learning::explicit_feedback",
+            ImprovementClass::Unknown,
+            RiskTier::Medium,
+            "Explicit user learning feedback received",
+        )
+        .with_target(format!("{target_type}:{target_id}"))
+        .with_metadata(serde_json::json!({
+            "target_type": target_type,
+            "target_id": target_id,
+            "verdict": verdict,
+            "note": note,
+            "feedback_id": id,
+            "source": "learning_feedback_tool",
+        }))
+        .into_persisted(user_id.to_string(), None, None, None, None, None, None);
+        if self
+            .store
+            .insert_learning_event(&feedback_event)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .handle_event("explicit_user_feedback", &feedback_event)
+                .await;
+        }
+
+        Ok(id)
     }
 
     pub async fn handle_event(
@@ -790,6 +824,13 @@ impl LearningOrchestrator {
             code_proposal_id: None,
             notes: Vec::new(),
         };
+
+        if event.source == "learning::explicit_feedback" {
+            outcome
+                .notes
+                .push("explicit feedback event recorded".to_string());
+            return Ok(outcome);
+        }
 
         if !settings.enabled {
             outcome
@@ -876,11 +917,19 @@ impl LearningOrchestrator {
         }
 
         if risk.rank() >= RiskTier::High.rank() || class == ImprovementClass::Code {
-            let proposal_id = self.create_code_proposal(event, &candidate).await?;
-            outcome.code_proposal_id = Some(proposal_id);
-            outcome
-                .notes
-                .push("high-risk candidate routed to approval-gated code proposal".to_string());
+            match self.create_code_proposal(event, &candidate).await {
+                Ok(proposal_id) => {
+                    outcome.code_proposal_id = Some(proposal_id);
+                    outcome.notes.push(
+                        "high-risk candidate routed to approval-gated code proposal".to_string(),
+                    );
+                }
+                Err(err) => {
+                    outcome
+                        .notes
+                        .push(format!("high-risk proposal suppressed: {err}"));
+                }
+            }
             return Ok(outcome);
         }
 
@@ -996,7 +1045,7 @@ impl LearningOrchestrator {
         let confidence = ((score as f32 / 100.0)
             + if correction_count > 0 { 0.15 } else { 0.0 }
             + if repeated_failures > 0 { 0.1 } else { 0.0 })
-            .clamp(0.0, 1.0);
+        .clamp(0.0, 1.0);
 
         let status = if score >= 70 {
             "accepted"
@@ -1136,10 +1185,7 @@ impl LearningOrchestrator {
             })
             .unwrap_or_else(|| paths::USER.to_string());
 
-        if !matches!(
-            target.as_str(),
-            paths::SOUL | paths::AGENTS | paths::USER | "SOUL.md" | "AGENTS.md" | "USER.md"
-        ) {
+        if !matches!(target.as_str(), paths::SOUL | paths::AGENTS | paths::USER) {
             return Ok(false);
         }
 
@@ -1157,7 +1203,10 @@ impl LearningOrchestrator {
             .ok()
             .map(|doc| doc.content)
             .unwrap_or_default();
-        workspace.write(&target, content).await.map_err(|e| e.to_string())?;
+        workspace
+            .write(&target, content)
+            .await
+            .map_err(|e| e.to_string())?;
         let after = workspace
             .read(&target)
             .await
@@ -1205,7 +1254,9 @@ impl LearningOrchestrator {
         let skill_name = parsed.manifest.name.clone();
 
         let mut guard = registry.write().await;
-        let before_content = guard.find_by_name(&skill_name).map(|s| s.prompt_content.clone());
+        let before_content = guard
+            .find_by_name(&skill_name)
+            .map(|s| s.prompt_content.clone());
         if guard.has(&skill_name) {
             let _ = guard.remove_skill(&skill_name).await;
         }
@@ -1214,7 +1265,9 @@ impl LearningOrchestrator {
             .await
             .map_err(|e| e.to_string())?;
 
-        let after_content = guard.find_by_name(&skill_name).map(|s| s.prompt_content.clone());
+        let after_content = guard
+            .find_by_name(&skill_name)
+            .map(|s| s.prompt_content.clone());
 
         let version = DbLearningArtifactVersion {
             id: Uuid::new_v4(),
@@ -1240,39 +1293,83 @@ impl LearningOrchestrator {
         event: &DbLearningEvent,
         candidate: &DbLearningCandidate,
     ) -> Result<Uuid, String> {
+        let title = event
+            .payload
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Learning-driven code proposal")
+            .to_string();
+        let rationale = event
+            .payload
+            .get("rationale")
+            .and_then(|v| v.as_str())
+            .or(candidate.summary.as_deref())
+            .unwrap_or("Distilled from repeated failures/corrections")
+            .to_string();
+        let target_files = event
+            .payload
+            .get("target_files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| entry.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let diff = event
+            .payload
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let fingerprint = proposal_fingerprint(&title, &rationale, &target_files, &diff);
+
+        if let Ok(rejected) = self
+            .store
+            .list_learning_code_proposals(&event.user_id, Some("rejected"), 64)
+            .await
+        {
+            for prior in rejected {
+                let prior_fp = prior
+                    .metadata
+                    .get("fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        proposal_fingerprint(
+                            &prior.title,
+                            &prior.rationale,
+                            &prior.target_files,
+                            &prior.diff,
+                        )
+                    });
+                if prior_fp != fingerprint {
+                    continue;
+                }
+                let age_hours = (Utc::now() - prior.updated_at).num_hours().abs();
+                if age_hours <= PROPOSAL_SUPPRESSION_WINDOW_HOURS {
+                    return Err(format!(
+                        "similar proposal was rejected {}h ago (fingerprint={}); cooldown active",
+                        age_hours, fingerprint
+                    ));
+                }
+            }
+        }
+
+        let evidence = event
+            .payload
+            .get("evidence")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "event_payload": event.payload }));
+
         let proposal = DbLearningCodeProposal {
             id: Uuid::new_v4(),
             learning_event_id: Some(event.id),
             user_id: event.user_id.clone(),
             status: "proposed".to_string(),
-            title: event
-                .payload
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Learning-driven code proposal")
-                .to_string(),
-            rationale: event
-                .payload
-                .get("rationale")
-                .and_then(|v| v.as_str())
-                .or(candidate.summary.as_deref())
-                .unwrap_or("Distilled from repeated failures/corrections")
-                .to_string(),
-            target_files: event
-                .payload
-                .get("target_files")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|entry| entry.as_str().map(str::to_string))
-                .collect(),
-            diff: event
-                .payload
-                .get("diff")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
+            title: title.clone(),
+            rationale: rationale.clone(),
+            target_files: target_files.clone(),
+            diff: diff.clone(),
             validation_results: event
                 .payload
                 .get("validation_results")
@@ -1289,6 +1386,17 @@ impl LearningOrchestrator {
             metadata: serde_json::json!({
                 "candidate_id": candidate.id,
                 "source": event.source,
+                "fingerprint": fingerprint,
+                "package": {
+                    "problem_statement": title,
+                    "evidence": evidence,
+                    "candidate_rationale": rationale,
+                    "target_files": target_files,
+                    "unified_diff": diff,
+                    "validation_results": event.payload.get("validation_results").cloned().unwrap_or_else(|| serde_json::json!({"status": "not_run"})),
+                    "rollback_note": event.payload.get("rollback_note").cloned().unwrap_or(serde_json::Value::Null),
+                    "confidence": candidate.confidence,
+                },
             }),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1318,20 +1426,31 @@ impl LearningOrchestrator {
 
         let decision_lower = decision.to_ascii_lowercase();
         if decision_lower == "reject" {
-            let mut metadata = serde_json::json!({"review": {"decision": "reject"}});
-            if let Some(note) = note
-                && let Some(obj) = metadata.as_object_mut()
-            {
-                obj.insert("note".to_string(), serde_json::json!(note));
+            let mut metadata = existing.metadata.clone();
+            if !metadata.is_object() {
+                metadata = serde_json::json!({});
+            }
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "review".to_string(),
+                    serde_json::json!({
+                        "decision": "reject",
+                        "at": Utc::now().to_rfc3339(),
+                        "note": note,
+                    }),
+                );
+                if let Some(fingerprint) = obj.get("fingerprint").cloned() {
+                    obj.insert(
+                        "anti_learning".to_string(),
+                        serde_json::json!({
+                            "fingerprint": fingerprint,
+                            "suppressed_until": (Utc::now() + chrono::Duration::hours(PROPOSAL_SUPPRESSION_WINDOW_HOURS)).to_rfc3339(),
+                        }),
+                    );
+                }
             }
             self.store
-                .update_learning_code_proposal(
-                    proposal_id,
-                    "rejected",
-                    None,
-                    None,
-                    Some(&metadata),
-                )
+                .update_learning_code_proposal(proposal_id, "rejected", None, None, Some(&metadata))
                 .await
                 .map_err(|e| e.to_string())?;
             let _ = self
@@ -1346,11 +1465,44 @@ impl LearningOrchestrator {
                 .await;
         } else {
             let settings = self.load_settings_for_user(user_id).await;
-            let mut metadata = serde_json::json!({"review": {"decision": "approve"}});
-            if let Some(note) = note
-                && let Some(obj) = metadata.as_object_mut()
-            {
-                obj.insert("note".to_string(), serde_json::json!(note));
+            let mut metadata = existing.metadata.clone();
+            if !metadata.is_object() {
+                metadata = serde_json::json!({});
+            }
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "review".to_string(),
+                    serde_json::json!({
+                        "decision": "approve",
+                        "at": Utc::now().to_rfc3339(),
+                        "note": note,
+                    }),
+                );
+            }
+
+            match self.write_proposal_bundle(&existing).await {
+                Ok(bundle_dir) => {
+                    if let Some(obj) = metadata.as_object_mut() {
+                        obj.insert(
+                            "bundle".to_string(),
+                            serde_json::json!({
+                                "status": "written",
+                                "path": bundle_dir.to_string_lossy(),
+                            }),
+                        );
+                    }
+                }
+                Err(err) => {
+                    if let Some(obj) = metadata.as_object_mut() {
+                        obj.insert(
+                            "bundle".to_string(),
+                            serde_json::json!({
+                                "status": "failed",
+                                "error": err,
+                            }),
+                        );
+                    }
+                }
             }
 
             let mut final_status = "approved".to_string();
@@ -1397,6 +1549,68 @@ impl LearningOrchestrator {
             .get_learning_code_proposal(user_id, proposal_id)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn write_proposal_bundle(
+        &self,
+        proposal: &DbLearningCodeProposal,
+    ) -> Result<PathBuf, String> {
+        let repo_root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let bundle_dir = repo_root
+            .join(".thinclaw")
+            .join("learning-proposals")
+            .join(proposal.id.to_string());
+        tokio::fs::create_dir_all(&bundle_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let package = serde_json::json!({
+            "proposal_id": proposal.id,
+            "problem_statement": proposal.title,
+            "evidence": proposal.metadata.get("package").and_then(|v| v.get("evidence")).cloned().unwrap_or(serde_json::json!({})),
+            "candidate_rationale": proposal.rationale,
+            "target_files": proposal.target_files,
+            "unified_diff": proposal.diff,
+            "validation_results": proposal.validation_results,
+            "rollback_note": proposal.rollback_note,
+            "confidence": proposal.confidence,
+            "status": proposal.status,
+            "created_at": proposal.created_at,
+            "updated_at": proposal.updated_at,
+        });
+
+        let package_path = bundle_dir.join("proposal.json");
+        let diff_path = bundle_dir.join("proposal.diff");
+        let summary_path = bundle_dir.join("README.md");
+
+        let package_text = serde_json::to_string_pretty(&package).map_err(|e| e.to_string())?;
+        tokio::fs::write(&package_path, package_text)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::write(&diff_path, &proposal.diff)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let summary = format!(
+            "# Learning Proposal {}\n\n- Status: {}\n- Title: {}\n- Confidence: {}\n- Files: {}\n",
+            proposal.id,
+            proposal.status,
+            proposal.title,
+            proposal
+                .confidence
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".to_string()),
+            if proposal.target_files.is_empty() {
+                "-".to_string()
+            } else {
+                proposal.target_files.join(", ")
+            }
+        );
+        tokio::fs::write(summary_path, summary)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(bundle_dir)
     }
 
     async fn publish_proposal_in_scratch(
@@ -1516,9 +1730,7 @@ impl LearningOrchestrator {
         if mode == "branch_pr_draft" {
             let pr_body = format!(
                 "Problem:\n{}\n\nRationale:\n{}\n\nGenerated by ThinClaw learning proposal {}.",
-                proposal.title,
-                proposal.rationale,
-                proposal.id
+                proposal.title, proposal.rationale, proposal.id
             );
             let pr_title = format!("[learning] {}", proposal.title);
             let pr_output = run_cmd(
@@ -1565,6 +1777,21 @@ fn stable_json_hash(value: &serde_json::Value) -> u64 {
     hasher.finish()
 }
 
+fn proposal_fingerprint(
+    title: &str,
+    rationale: &str,
+    target_files: &[String],
+    diff: &str,
+) -> String {
+    let canonical = serde_json::json!({
+        "title": title.trim(),
+        "rationale": rationale.trim(),
+        "target_files": target_files,
+        "diff": diff.trim(),
+    });
+    format!("{:016x}", stable_json_hash(&canonical))
+}
+
 fn classify_event(event: &DbLearningEvent) -> ImprovementClass {
     let et = event.event_type.to_ascii_lowercase();
     if et.contains("code") || event.payload.get("diff").is_some() {
@@ -1599,13 +1826,11 @@ fn validate_prompt_content(content: &str) -> Result<(), String> {
         return Err("prompt content must include markdown headings".to_string());
     }
     let lowered = trimmed.to_ascii_lowercase();
-    let suspicious_markers = [
-        "role: user",
-        "role: assistant",
-        "tool_result",
-        "<tool_call",
-    ];
-    if suspicious_markers.iter().any(|marker| lowered.contains(marker)) {
+    let suspicious_markers = ["role: user", "role: assistant", "tool_result", "<tool_call"];
+    if suspicious_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
         return Err("prompt content appears to include transcript/tool residue".to_string());
     }
     Ok(())
@@ -1654,5 +1879,21 @@ mod tests {
             created_at: Utc::now(),
         };
         assert_eq!(classify_event(&event), ImprovementClass::Code);
+    }
+
+    #[test]
+    fn proposal_fingerprint_is_stable_for_identical_input() {
+        let files = vec!["src/lib.rs".to_string(), "src/main.rs".to_string()];
+        let first = proposal_fingerprint("Fix bug", "rationale", &files, "--- a\n+++ b");
+        let second = proposal_fingerprint("Fix bug", "rationale", &files, "--- a\n+++ b");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn proposal_fingerprint_changes_when_diff_changes() {
+        let files = vec!["src/lib.rs".to_string()];
+        let first = proposal_fingerprint("Fix bug", "rationale", &files, "--- a\n+++ b");
+        let second = proposal_fingerprint("Fix bug", "rationale", &files, "--- a\n+++ c");
+        assert_ne!(first, second);
     }
 }
