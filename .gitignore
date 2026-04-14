@@ -47,7 +47,7 @@ docs-audit/
 *.sqlite
 *.sqlite3
 data/
-db/
+/db/
 
 # Log Files
 *.log

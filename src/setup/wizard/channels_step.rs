@@ -198,12 +198,14 @@ impl SetupWizard {
         println!();
 
         print_info("Native channels");
+        #[allow(unused_mut)]
         let mut native_options: Vec<(&str, bool)> = vec![
             ("Signal", self.settings.channels.signal_enabled),
             ("Discord", self.settings.channels.discord_enabled),
             ("Slack", self.settings.channels.slack_enabled),
             ("Gmail", self.settings.channels.gmail_enabled),
         ];
+        #[allow(unused_mut)]
         let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail"];
         #[cfg(target_os = "macos")]
         {
