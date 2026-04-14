@@ -40,6 +40,121 @@ const experimentsState = {
 let currentResearchSubtab = 'overview';
 
 const RESEARCH_SUBTABS = ['overview', 'opportunities', 'projects', 'runners', 'campaigns', 'gpu-clouds'];
+const PRESENTATION_SETTING_KEYS = new Set([
+  'agent.cli_skin',
+  'webchat_skin',
+  'webchat_theme',
+  'webchat_show_branding',
+]);
+const SKINNED_TOOL_NAMES = ['shell', 'browser', 'memory', 'search_files', 'todo', 'subagent'];
+const WEBCHAT_BOOTSTRAP = readWebchatBootstrap();
+let currentResolvedSkin = WEBCHAT_BOOTSTRAP.resolvedSkin;
+let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'thinclaw';
+const AVAILABLE_SKINS = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins : [];
+
+function readWebchatBootstrap() {
+  const el = document.getElementById('webchat-bootstrap');
+  if (!el) return fallbackWebchatBootstrap();
+  try {
+    const parsed = JSON.parse(el.textContent || '{}');
+    if (!parsed || typeof parsed !== 'object') return fallbackWebchatBootstrap();
+    return {
+      theme: parsed.theme || 'system',
+      agentName: parsed.agentName || 'thinclaw',
+      showBranding: parsed.showBranding !== false,
+      availableSkins: Array.isArray(parsed.availableSkins) ? parsed.availableSkins : [],
+      resolvedSkin: parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin,
+    };
+  } catch (_err) {
+    return fallbackWebchatBootstrap();
+  }
+}
+
+function fallbackWebchatBootstrap() {
+  return {
+    theme: 'system',
+    agentName: 'thinclaw',
+    showBranding: true,
+    availableSkins: [],
+    resolvedSkin: {
+      name: 'cockpit',
+      tagline: 'Humanist Cockpit for operators who like a calm command deck.',
+      promptSymbol: '›',
+      toolEmojis: {},
+      chromeStyle: 'avionics',
+      surfacePattern: 'grid',
+      messageShape: 'rounded',
+      elevation: 'medium',
+      cssVars: {},
+    },
+  };
+}
+
+function resolvedSkinMeta() {
+  return currentResolvedSkin || fallbackWebchatBootstrap().resolvedSkin;
+}
+
+function currentToolEmoji(name) {
+  const toolEmojis = resolvedSkinMeta().toolEmojis || {};
+  return toolEmojis[name] || '';
+}
+
+function toolKindForName(name) {
+  return SKINNED_TOOL_NAMES.includes(String(name || '')) ? String(name) : 'default';
+}
+
+function toolDisplayName(name) {
+  const label = String(name || 'tool');
+  const emoji = currentToolEmoji(label);
+  return emoji ? (emoji + ' ' + label) : label;
+}
+
+function toolIconMarkup(name, state) {
+  const emoji = currentToolEmoji(name);
+  if (emoji) {
+    return '<span class="activity-tool-emoji">' + escapeHtml(emoji) + '</span>';
+  }
+  if (state === 'success') {
+    return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>';
+  }
+  if (state === 'fail') {
+    return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  }
+  return '<div class="spinner"></div>';
+}
+
+function personalityCopy(key, data) {
+  if (key === 'waitingThread') return 'Command bay waiting for a thread...';
+  if (key === 'assistantEmpty') return 'Activity deck is clear. Select a conversation or start a new one.';
+  if (key === 'threadEmpty') return 'Command bay is open. Send the first turn.';
+  if (key === 'thinkingFallback') return 'Holding the line...';
+  if (key === 'activitySummary') {
+    const count = Number(data?.count || 0);
+    const duration = data?.duration || '0.0s';
+    return 'Tool pass · ' + count + ' tool' + (count === 1 ? '' : 's') + ' · ' + duration;
+  }
+  return '';
+}
+
+function applySkinPresentation() {
+  const skin = resolvedSkinMeta();
+  const tagline = skin.tagline || 'Secure AI Assistant';
+  const authTagline = document.querySelector('.auth-tagline');
+  if (authTagline) authTagline.textContent = tagline;
+  const brandMeta = document.getElementById('web-brand-chip-meta');
+  if (brandMeta) brandMeta.textContent = skin.name + ' · ' + skin.promptSymbol;
+  const promptChip = document.getElementById('chat-prompt-chip');
+  if (promptChip) promptChip.textContent = skin.promptSymbol || '›';
+  const branding = document.getElementById('webchat-branding');
+  if (branding) branding.textContent = 'Powered by ThinClaw · ' + skin.name;
+  document.documentElement.setAttribute('data-skin-name', skin.name || 'cockpit');
+  document.documentElement.setAttribute('data-chrome-style', skin.chromeStyle || 'avionics');
+  document.documentElement.setAttribute('data-surface-pattern', skin.surfacePattern || 'grid');
+  document.documentElement.setAttribute('data-message-shape', skin.messageShape || 'rounded');
+  document.documentElement.setAttribute('data-elevation', skin.elevation || 'medium');
+}
+
+applySkinPresentation();
 
 const RESEARCH_GPU_CLOUDS = [
   {
@@ -117,13 +232,13 @@ const RESEARCH_GPU_CLOUDS = [
 let _activeGroup = null;
 let _activeToolCards = {};
 let _activityThinking = null;
+let _liveTurnCard = null;
 
 // --- Temporal Subagent State ---
 let threadsCache = { assistantThread: null, threads: [] };
 const threadMetaById = new Map();
 const subagentSessions = new Map();
 let selectedSubsessionKey = null;
-let subsessionPanelDismissed = false;
 
 function readStoredSubagentSessions() {
   try {
@@ -401,7 +516,8 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+    upsertAssistantMessage(data.content, { timestamp: new Date().toISOString() });
+    settleLiveTurnCard();
     setStatus('');
     enableChatInput();
     // Refresh thread list so new titles appear after first message
@@ -436,7 +552,7 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    appendToLastAssistant(data.content);
+    appendToLastAssistant(data.content, new Date().toISOString());
   });
 
   eventSource.addEventListener('subagent_spawned', (e) => {
@@ -464,6 +580,7 @@ function connectSSE() {
     // the response SSE event is empty or lost.
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
+      settleLiveTurnCard();
       enableChatInput();
     }
   });
@@ -523,7 +640,8 @@ function connectSSE() {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
-      addMessage('system', 'Error: ' + data.message);
+      settleLiveTurnCard();
+      addStandaloneMessage('system', 'Error: ' + data.message, { timestamp: new Date().toISOString() });
       enableChatInput();
     }
   });
@@ -754,48 +872,19 @@ function getThreadSubsessions(threadId) {
   return sessions;
 }
 
-function findNewestRunningSubsession(threadId) {
-  return getThreadSubsessions(threadId).find((session) => session.status === 'running') || null;
-}
-
 function syncSelectedSubsessionForCurrentThread() {
-  if (!selectedSubsessionKey) {
-    if (subsessionPanelDismissed) return;
-    const running = currentThreadId ? findNewestRunningSubsession(currentThreadId) : null;
-    if (running) selectedSubsessionKey = running.key;
-    return;
-  }
+  if (!selectedSubsessionKey) return;
 
   const session = subagentSessions.get(selectedSubsessionKey);
   if (!session || session.threadId !== currentThreadId) {
-    if (subsessionPanelDismissed) {
-      selectedSubsessionKey = null;
-      return;
-    }
-    const running = currentThreadId ? findNewestRunningSubsession(currentThreadId) : null;
-    selectedSubsessionKey = running ? running.key : null;
+    selectedSubsessionKey = null;
   }
 }
 
 function openSubsession(threadId, agentId) {
-  subsessionPanelDismissed = false;
-  selectedSubsessionKey = makeSubsessionKey(threadId, agentId);
+  const key = makeSubsessionKey(threadId, agentId);
+  selectedSubsessionKey = selectedSubsessionKey === key ? null : key;
   renderThreadSidebar();
-  renderSubsessionPanel();
-}
-
-function closeSubsessionPanel() {
-  subsessionPanelDismissed = true;
-  selectedSubsessionKey = null;
-  renderThreadSidebar();
-  renderSubsessionPanel();
-}
-
-function getThreadLabel(threadId) {
-  if (threadId === assistantThreadId) return 'Assistant';
-  const thread = threadMetaById.get(threadId);
-  if (!thread) return String(threadId || '');
-  return thread.title || String(thread.id || '').slice(0, 8);
 }
 
 function rebuildThreadMetaIndex() {
@@ -818,11 +907,45 @@ function renderSubsessionTree(container, threadId) {
   }
 }
 
+function renderSubsessionInlineDetail(session) {
+  if (!session) return '';
+  const timeline = getVisibleSubsessionEvents(session).map((event) => {
+    return (
+      '<div class="subsession-timeline-item ' + escapeHtml(event.status) + ' ' + escapeHtml(event.type.replace('subagent_', '')) + '">' +
+        '<span class="subsession-timeline-dot"></span>' +
+        '<div class="subsession-timeline-head">' +
+          '<span class="subsession-timeline-title">' + escapeHtml(event.title) + '</span>' +
+          '<span class="subsession-timeline-time">' + escapeHtml(formatTimeShort(event.timestamp)) + '</span>' +
+        '</div>' +
+        '<div class="subsession-timeline-body">' + escapeHtml(event.body || '').replace(/\n/g, '<br>') + '</div>' +
+      '</div>'
+    );
+  }).join('');
+  const iterationsValue = firstDefined(session.iterations, '-');
+  return (
+    '<div class="subsession-row-detail">' +
+      '<div class="subsession-inline-grid">' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Task</span><span class="subsession-inline-value">' + escapeHtml(session.task || 'Delegated task') + '</span></div>' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Status</span><span class="subsession-inline-value">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span></div>' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Iterations</span><span class="subsession-inline-value">' + escapeHtml(String(iterationsValue === null ? '-' : iterationsValue)) + '</span></div>' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Duration</span><span class="subsession-inline-value">' + escapeHtml(formatDurationMs(session.durationMs)) + '</span></div>' +
+      '</div>' +
+      (session.response
+        ? '<div class="subsession-response"><span class="subsession-response-label">Final handoff</span>' + renderMarkdown(session.response) + '</div>'
+        : '') +
+      (timeline
+        ? '<div class="subsession-inline-section"><div class="subsession-inline-kicker">Timeline</div><div class="subsession-timeline">' + timeline + '</div></div>'
+        : '') +
+    '</div>'
+  );
+}
+
 function createSubsessionRow(session) {
   const row = document.createElement('button');
   row.type = 'button';
-  const isCollapsed = session.status !== 'running' && session.collapsed !== false;
-  row.className = 'subsession-row ' + session.status + (isCollapsed ? ' collapsed' : '') + (selectedSubsessionKey === session.key ? ' active' : '');
+  const isActive = selectedSubsessionKey === session.key;
+  const isCollapsed = !isActive && session.status !== 'running' && session.collapsed !== false;
+  row.className = 'subsession-row ' + session.status + (isCollapsed ? ' collapsed' : '') + (isActive ? ' active' : '');
   row.addEventListener('click', (e) => {
     e.stopPropagation();
     openSubsession(session.threadId, session.agentId);
@@ -848,7 +971,8 @@ function createSubsessionRow(session) {
     '<div class="subsession-row-footer">' +
       '<span class="subsession-row-summary">' + escapeHtml(session.category || 'subagent') + '</span>' +
       '<span class="subsession-row-time">' + escapeHtml(formatTimeShort(session.updatedAt)) + '</span>' +
-    '</div>';
+    '</div>' +
+    (isActive ? renderSubsessionInlineDetail(session) : '');
   return row;
 }
 
@@ -938,84 +1062,11 @@ function getVisibleSubsessionEvents(session) {
   return reduced;
 }
 
-function renderSubsessionPanelEmpty(title, description) {
-  const panel = document.getElementById('subsession-panel');
-  if (!panel) return;
-  panel.classList.remove('hidden');
-  panel.innerHTML =
-    '<div class="subsession-panel-empty">' +
-      '<div class="subsession-panel-kicker">Temporal Subsession</div>' +
-      '<h3>' + escapeHtml(title) + '</h3>' +
-      '<p>' + escapeHtml(description) + '</p>' +
-    '</div>';
-}
-
 function renderSubsessionPanel() {
   const panel = document.getElementById('subsession-panel');
   if (!panel) return;
-
-  const currentSessions = currentThreadId ? getThreadSubsessions(currentThreadId) : [];
-  if (currentSessions.length === 0 || (subsessionPanelDismissed && !selectedSubsessionKey)) {
-    panel.classList.add('hidden');
-    panel.innerHTML =
-      '<div class="subsession-panel-empty">' +
-        '<div class="subsession-panel-kicker">Temporal Subsession</div>' +
-        '<h3>Agent transcript</h3>' +
-        '<p>Select a running or completed subagent session to inspect what it worked on without interrupting the main thread.</p>' +
-      '</div>';
-    return;
-  }
-
-  const session = selectedSubsessionKey ? subagentSessions.get(selectedSubsessionKey) : null;
-  if (!session || session.threadId !== currentThreadId) {
-    renderSubsessionPanelEmpty('Subsession ready', 'Choose a child session from the sidebar to inspect its timeline, progress, and final handoff.');
-    return;
-  }
-
-  const timeline = getVisibleSubsessionEvents(session).map((event) => {
-    return (
-      '<div class="subsession-timeline-item ' + escapeHtml(event.status) + ' ' + escapeHtml(event.type.replace('subagent_', '')) + '">' +
-        '<span class="subsession-timeline-dot"></span>' +
-        '<div class="subsession-timeline-head">' +
-          '<span class="subsession-timeline-title">' + escapeHtml(event.title) + '</span>' +
-          '<span class="subsession-timeline-time">' + escapeHtml(formatTimeShort(event.timestamp)) + '</span>' +
-        '</div>' +
-        '<div class="subsession-timeline-body">' + escapeHtml(event.body || '').replace(/\n/g, '<br>') + '</div>' +
-      '</div>'
-    );
-  }).join('');
-  const iterationsValue = firstDefined(session.iterations, '-');
-
-  panel.classList.remove('hidden');
-  panel.innerHTML =
-    '<div class="subsession-panel-shell">' +
-      '<div class="subsession-panel-header">' +
-        '<div>' +
-          '<div class="subsession-panel-kicker">' + escapeHtml(getSubsessionStatusLabel(session.status)) + ' subagent session</div>' +
-          '<h3>' + escapeHtml(getSubsessionDisplayName(session)) + '</h3>' +
-          '<p class="subsession-panel-meta">' + escapeHtml(getThreadLabel(session.threadId)) + ' \u00b7 ' + escapeHtml(session.category || 'subagent') + '</p>' +
-        '</div>' +
-        '<button type="button" class="subsession-close-btn" aria-label="Close subsession panel" onclick="closeSubsessionPanel()">&times;</button>' +
-      '</div>' +
-      '<div class="subsession-panel-body">' +
-        '<div class="subsession-summary-card">' +
-          '<div class="subsession-panel-kicker">Mission</div>' +
-          '<div class="subsession-summary-grid">' +
-            '<div class="subsession-summary-item"><span class="subsession-summary-label">Task</span><span class="subsession-summary-value">' + escapeHtml(session.task || 'Delegated task') + '</span></div>' +
-            '<div class="subsession-summary-item"><span class="subsession-summary-label">Status</span><span class="subsession-summary-value">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span></div>' +
-            '<div class="subsession-summary-item"><span class="subsession-summary-label">Iterations</span><span class="subsession-summary-value">' + escapeHtml(String(iterationsValue === null ? '-' : iterationsValue)) + '</span></div>' +
-            '<div class="subsession-summary-item"><span class="subsession-summary-label">Duration</span><span class="subsession-summary-value">' + escapeHtml(formatDurationMs(session.durationMs)) + '</span></div>' +
-          '</div>' +
-          (session.response
-            ? '<div class="subsession-response"><span class="subsession-response-label">Final handoff</span>' + renderMarkdown(session.response) + '</div>'
-            : '') +
-        '</div>' +
-        '<div class="subsession-timeline-card">' +
-          '<h4 class="subsession-section-title">Timeline</h4>' +
-          '<div class="subsession-timeline">' + timeline + '</div>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
+  panel.classList.add('hidden');
+  panel.innerHTML = '';
 }
 
 function refreshSubsessionUi() {
@@ -1039,11 +1090,9 @@ function handleSubagentLifecycleEvent(eventType, payload) {
   session.iterations = firstDefined(payload.iterations, session.iterations);
   session.durationMs = firstDefined(payload.duration_ms, session.durationMs);
   if (eventType === 'subagent_spawned' && threadId === currentThreadId) {
-    subsessionPanelDismissed = false;
     selectedSubsessionKey = session.key;
-  } else if (eventType === 'subagent_completed' && selectedSubsessionKey === session.key && threadId === currentThreadId) {
-    selectedSubsessionKey = null;
-    subsessionPanelDismissed = true;
+  } else if (eventType === 'subagent_completed' && threadId === currentThreadId && !selectedSubsessionKey) {
+    selectedSubsessionKey = session.key;
   }
   refreshSubsessionUi();
 }
@@ -1080,18 +1129,242 @@ function consumeLegacySubagentStatus(data) {
 
 // --- Chat ---
 
+function chatMessagesContainer() {
+  return document.getElementById('chat-messages');
+}
+
+function clearChatEmptyState() {
+  chatMessagesContainer().querySelectorAll('.chat-empty-state').forEach((node) => node.remove());
+}
+
+function formatMessageTimestamp(timestamp) {
+  if (!timestamp) return '';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function messageRoleLabel(role) {
+  if (role === 'user') return 'You';
+  if (role === 'assistant') return currentAgentName || 'Assistant';
+  return 'Status';
+}
+
+function messageRoleGlyph(role) {
+  if (role === 'assistant') return resolvedSkinMeta().promptSymbol || '›';
+  if (role === 'user') return '↗';
+  return '•';
+}
+
+function createTurnCard(options) {
+  const card = document.createElement('section');
+  card.className = 'turn-card';
+  if (options && options.live) card.classList.add('live');
+  const stack = document.createElement('div');
+  stack.className = 'turn-card-stack';
+  card.appendChild(stack);
+  return card;
+}
+
+function turnCardStack(card) {
+  return card.querySelector('.turn-card-stack') || card;
+}
+
+function appendTurnCard(card, options) {
+  clearChatEmptyState();
+  const container = chatMessagesContainer();
+  if (options && options.prepend) {
+    container.insertBefore(card, container.firstChild);
+  } else {
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+  }
+  return card;
+}
+
+function settleLiveTurnCard() {
+  if (_liveTurnCard && _liveTurnCard.isConnected) {
+    _liveTurnCard.classList.remove('live');
+    _liveTurnCard.classList.add('settled');
+  }
+  _liveTurnCard = null;
+}
+
+function ensureLiveTurnCard() {
+  if (_liveTurnCard && _liveTurnCard.isConnected) return _liveTurnCard;
+  const card = createTurnCard({ live: true });
+  appendTurnCard(card);
+  _liveTurnCard = card;
+  return card;
+}
+
+function startLiveTurn(userContent, timestamp) {
+  settleLiveTurnCard();
+  const card = createTurnCard({ live: true });
+  appendMessageToTurn(card, 'user', userContent, { timestamp: timestamp });
+  appendTurnCard(card);
+  _liveTurnCard = card;
+  return card;
+}
+
+function createMessageElement(role, content, options) {
+  const message = document.createElement('article');
+  message.className = 'message ' + role;
+  message.setAttribute('data-role', role);
+
+  const shell = document.createElement('div');
+  shell.className = 'message-shell';
+
+  const head = document.createElement('div');
+  head.className = 'message-head';
+
+  const rolePill = document.createElement('div');
+  rolePill.className = 'message-role-pill';
+
+  const roleGlyph = document.createElement('span');
+  roleGlyph.className = 'message-role-glyph';
+  roleGlyph.textContent = messageRoleGlyph(role);
+
+  const kicker = document.createElement('span');
+  kicker.className = 'message-kicker';
+  kicker.textContent = messageRoleLabel(role);
+
+  rolePill.appendChild(roleGlyph);
+  rolePill.appendChild(kicker);
+
+  const headRight = document.createElement('div');
+  headRight.className = 'message-head-right';
+
+  const timestampText = formatMessageTimestamp(options && options.timestamp);
+  if (timestampText) {
+    const time = document.createElement('time');
+    time.className = 'message-timestamp';
+    time.textContent = timestampText;
+    headRight.appendChild(time);
+    message.setAttribute('data-timestamp', options.timestamp);
+  }
+
+  if (role !== 'system') {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'message-action-btn';
+    action.textContent = 'Copy';
+    action.addEventListener('click', () => copyMessageContent(message, action));
+    headRight.appendChild(action);
+  }
+
+  head.appendChild(rolePill);
+  head.appendChild(headRight);
+
+  const body = document.createElement('div');
+  body.className = 'message-body';
+
+  shell.appendChild(head);
+  shell.appendChild(body);
+  message.appendChild(shell);
+
+  updateMessageElement(message, content, options || {});
+  return message;
+}
+
+function updateMessageElement(message, content, options) {
+  const role = message.getAttribute('data-role') || 'assistant';
+  message.setAttribute('data-raw', content);
+
+  if (options && options.timestamp) {
+    message.setAttribute('data-timestamp', options.timestamp);
+    const time = message.querySelector('.message-timestamp');
+    const text = formatMessageTimestamp(options.timestamp);
+    if (time) {
+      time.textContent = text;
+    } else if (text) {
+      const headRight = message.querySelector('.message-head-right');
+      if (headRight) {
+        const nextTime = document.createElement('time');
+        nextTime.className = 'message-timestamp';
+        nextTime.textContent = text;
+        headRight.insertBefore(nextTime, headRight.firstChild);
+      }
+    }
+  }
+
+  const body = message.querySelector('.message-body');
+  if (!body) return message;
+  if (role === 'user') {
+    body.textContent = content;
+  } else {
+    body.innerHTML = renderMarkdown(content);
+  }
+  return message;
+}
+
+function appendMessageToTurn(card, role, content, options) {
+  const stack = turnCardStack(card);
+  const message = createMessageElement(role, content, options || {});
+  stack.appendChild(message);
+  return message;
+}
+
+function addStandaloneMessage(role, content, options) {
+  clearChatEmptyState();
+  const container = chatMessagesContainer();
+  const message = createMessageElement(role, content, options || {});
+  container.appendChild(message);
+  container.scrollTop = container.scrollHeight;
+  return message;
+}
+
+function upsertAssistantMessage(content, options) {
+  const card = ensureLiveTurnCard();
+  const stack = turnCardStack(card);
+  let message = stack.querySelector('.message.assistant');
+  if (!message) {
+    message = createMessageElement('assistant', content, options || {});
+    stack.appendChild(message);
+  } else {
+    updateMessageElement(message, content, options || {});
+  }
+  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  return message;
+}
+
+function appendToLastAssistant(chunk, timestamp) {
+  const card = ensureLiveTurnCard();
+  const stack = turnCardStack(card);
+  let message = stack.querySelector('.message.assistant');
+  if (!message) {
+    message = createMessageElement('assistant', chunk, { timestamp: timestamp });
+    stack.appendChild(message);
+  } else {
+    const raw = (message.getAttribute('data-raw') || '') + chunk;
+    updateMessageElement(message, raw, { timestamp: message.getAttribute('data-timestamp') || timestamp });
+  }
+  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+}
+
+function createTurnCardFromHistory(turn) {
+  const card = createTurnCard({ live: false });
+  appendMessageToTurn(card, 'user', turn.user_input, { timestamp: turn.started_at });
+  if (turn.response) {
+    appendMessageToTurn(card, 'assistant', turn.response, { timestamp: turn.completed_at || turn.started_at });
+  } else {
+    card.classList.add('incomplete');
+  }
+  return card;
+}
+
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
-    setStatus('Waiting for thread to load...');
+    setStatus(personalityCopy('waitingThread'));
     return;
   }
   const content = input.value.trim();
   if (!content) return;
 
-  addMessage('user', content);
+  startLiveTurn(content, new Date().toISOString());
   input.value = '';
   autoResizeTextarea(input);
   sendBtn.disabled = true;
@@ -1101,7 +1374,8 @@ function sendMessage() {
     method: 'POST',
     body: { content, thread_id: currentThreadId || undefined },
   }).catch((err) => {
-    addMessage('system', 'Failed to send: ' + err.message);
+    settleLiveTurnCard();
+    addStandaloneMessage('system', 'Failed to send: ' + err.message, { timestamp: new Date().toISOString() });
     setStatus('');
     enableChatInput();
   });
@@ -1122,7 +1396,7 @@ function sendApprovalAction(requestId, action) {
     method: 'POST',
     body: { request_id: requestId, action: action, thread_id: currentThreadId },
   }).catch((err) => {
-    addMessage('system', 'Failed to send approval: ' + err.message);
+    addStandaloneMessage('system', 'Failed to send approval: ' + err.message, { timestamp: new Date().toISOString() });
   });
 
   // Disable buttons and show confirmation on the card
@@ -1185,32 +1459,13 @@ function copyCodeBlock(btn) {
   });
 }
 
-function addMessage(role, content) {
-  const container = document.getElementById('chat-messages');
-  const div = document.createElement('div');
-  div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
-  }
-  container.appendChild(div);
-  container.scrollTop = container.scrollHeight;
-}
-
-function appendToLastAssistant(chunk) {
-  const container = document.getElementById('chat-messages');
-  const messages = container.querySelectorAll('.message.assistant');
-  if (messages.length > 0) {
-    const last = messages[messages.length - 1];
-    const raw = (last.getAttribute('data-raw') || '') + chunk;
-    last.setAttribute('data-raw', raw);
-    last.innerHTML = renderMarkdown(raw);
-    container.scrollTop = container.scrollHeight;
-  } else {
-    addMessage('assistant', chunk);
-  }
+function copyMessageContent(message, button) {
+  const text = message.getAttribute('data-raw') || message.textContent || '';
+  navigator.clipboard.writeText(text).then(() => {
+    const original = button.textContent;
+    button.textContent = 'Copied!';
+    setTimeout(() => { button.textContent = original; }, 1500);
+  });
 }
 
 function setStatus(text) {
@@ -1226,11 +1481,11 @@ function setStatus(text) {
 
 function getOrCreateActivityGroup() {
   if (_activeGroup) return _activeGroup;
-  const container = document.getElementById('chat-messages');
+  const stack = turnCardStack(ensureLiveTurnCard());
   const group = document.createElement('div');
   group.className = 'activity-group';
-  container.appendChild(group);
-  container.scrollTop = container.scrollHeight;
+  stack.appendChild(group);
+  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
   _activeGroup = group;
   _activeToolCards = {};
   return group;
@@ -1241,7 +1496,7 @@ function showActivityThinking(message) {
   if (_activityThinking) {
     // Already exists — just update text and un-hide
     _activityThinking.style.display = '';
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message || personalityCopy('thinkingFallback');
   } else {
     _activityThinking = document.createElement('div');
     _activityThinking.className = 'activity-thinking';
@@ -1253,10 +1508,9 @@ function showActivityThinking(message) {
       + '</span>'
       + '<span class="activity-thinking-text"></span>';
     group.appendChild(_activityThinking);
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message || personalityCopy('thinkingFallback');
   }
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
 }
 
 function removeActivityThinking() {
@@ -1274,6 +1528,7 @@ function addToolCard(name) {
   const card = document.createElement('div');
   card.className = 'activity-tool-card';
   card.setAttribute('data-tool-name', name);
+  card.setAttribute('data-tool-kind', toolKindForName(name));
   card.setAttribute('data-status', 'running');
 
   const header = document.createElement('div');
@@ -1281,11 +1536,11 @@ function addToolCard(name) {
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
-  icon.innerHTML = '<div class="spinner"></div>';
+  icon.innerHTML = toolIconMarkup(name, 'running');
 
   const toolName = document.createElement('span');
   toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
+  toolName.textContent = toolDisplayName(name);
 
   const duration = document.createElement('span');
   duration.className = 'activity-tool-duration';
@@ -1349,9 +1604,7 @@ function completeToolCard(name, success) {
   const elapsed = (Date.now() - entry.startTime) / 1000;
   entry.finalDuration = elapsed;
   entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  entry.icon.innerHTML = success
-    ? '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>'
-    : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  entry.icon.innerHTML = toolIconMarkup(name, success ? 'success' : 'fail');
   entry.card.setAttribute('data-status', success ? 'success' : 'fail');
 }
 
@@ -1425,12 +1678,10 @@ function finalizeActivityGroup() {
 
   // Build summary line
   const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
   const summary = document.createElement('div');
   summary.className = 'activity-summary';
-  summary.innerHTML = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m9 18 6-6-6-6"/></svg>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
-    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m9 18 6-6-6-6"/></svg></span>'
+    + '<span class="activity-summary-text">' + escapeHtml(personalityCopy('activitySummary', { count: toolCount, duration: durationStr })) + '</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
@@ -1449,7 +1700,7 @@ function finalizeActivityGroup() {
 }
 
 function showApproval(data) {
-  const container = document.getElementById('chat-messages');
+  const container = turnCardStack(ensureLiveTurnCard());
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
@@ -1673,7 +1924,7 @@ function submitAuthToken(extensionName, tokenValue) {
   }).then((result) => {
     if (result.success) {
       removeAuthCard(extensionName);
-      addMessage('system', result.message);
+      addStandaloneMessage('system', result.message, { timestamp: new Date().toISOString() });
     } else {
       showAuthCardError(extensionName, result.message);
     }
@@ -1723,17 +1974,18 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
+      _activeGroup = null;
+      _activeToolCards = {};
+      _activityThinking = null;
+      _liveTurnCard = null;
       if (!data.turns || data.turns.length === 0) {
         const emptyMessage = currentThreadId === assistantThreadId
-          ? 'This assistant thread is empty. Select a conversation on the left or start a new one.'
-          : 'No messages in this thread yet.';
+          ? personalityCopy('assistantEmpty')
+          : personalityCopy('threadEmpty');
         showChatEmptyState(emptyMessage);
       } else {
         for (const turn of data.turns) {
-          addMessage('user', turn.user_input);
-          if (turn.response) {
-            addMessage('assistant', turn.response);
-          }
+          container.appendChild(createTurnCardFromHistory(turn));
         }
       }
     } else {
@@ -1741,12 +1993,7 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
-        fragment.appendChild(userDiv);
-        if (turn.response) {
-          const assistantDiv = createMessageElement('assistant', turn.response);
-          fragment.appendChild(assistantDiv);
-        }
+        fragment.appendChild(createTurnCardFromHistory(turn));
       }
       container.insertBefore(fragment, container.firstChild);
       // Restore scroll position so the user doesn't jump
@@ -1763,29 +2010,18 @@ function loadHistory(before) {
   });
 }
 
-// Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
-  const div = document.createElement('div');
-  div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
-  }
-  return div;
-}
-
 function removeScrollSpinner() {
   const spinner = document.getElementById('scroll-load-spinner');
   if (spinner) spinner.remove();
 }
 
 function showChatEmptyState(message) {
-  const container = document.getElementById('chat-messages');
+  settleLiveTurnCard();
+  const container = chatMessagesContainer();
   const empty = document.createElement('div');
   empty.className = 'empty-state chat-empty-state';
-  empty.textContent = message;
+  empty.innerHTML = '<div class="chat-empty-state-glyph">' + escapeHtml(resolvedSkinMeta().promptSymbol || '›') + '</div>'
+    + '<div class="chat-empty-state-copy">' + escapeHtml(message) + '</div>';
   container.appendChild(empty);
 }
 
@@ -1843,7 +2079,6 @@ function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
-  subsessionPanelDismissed = false;
   hasMore = false;
   oldestTimestamp = null;
   syncSelectedSubsessionForCurrentThread();
@@ -1856,7 +2091,6 @@ function switchToAssistant() {
 function switchThread(threadId) {
   finalizeActivityGroup();
   currentThreadId = threadId;
-  subsessionPanelDismissed = false;
   hasMore = false;
   oldestTimestamp = null;
   syncSelectedSubsessionForCurrentThread();
@@ -1869,8 +2103,11 @@ function switchThread(threadId) {
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
-    subsessionPanelDismissed = false;
     document.getElementById('chat-messages').innerHTML = '';
+    _activeGroup = null;
+    _activeToolCards = {};
+    _activityThinking = null;
+    _liveTurnCard = null;
     setStatus('');
     syncSelectedSubsessionForCurrentThread();
     renderThreadSidebar();
@@ -3224,7 +3461,7 @@ function openJobDetail(jobId) {
   apiFetch('/api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
-    addMessage('system', 'Failed to load job: ' + err.message);
+    addStandaloneMessage('system', 'Failed to load job: ' + err.message, { timestamp: new Date().toISOString() });
     closeJobDetail();
   });
 }
@@ -3586,22 +3823,21 @@ function appendActivityEvent(terminal, eventType, data) {
         + '<span class="activity-content">' + escapeHtml(data.content || '') + '</span>';
       break;
     case 'tool_use':
-      el.innerHTML = '<details class="activity-tool-block"><summary>'
-        + '<span class="activity-tool-icon"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span> '
-        + escapeHtml(data.tool_name || 'tool')
+      el.innerHTML = '<details class="activity-tool-block" data-tool-kind="' + escapeHtml(toolKindForName(data.tool_name)) + '"><summary>'
+        + '<span class="activity-tool-icon">' + toolIconMarkup(data.tool_name || 'tool', 'running') + '</span> '
+        + escapeHtml(toolDisplayName(data.tool_name || 'tool'))
         + '</summary><pre class="activity-tool-input">'
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
     case 'tool_result': {
       const trSuccess = data.success !== false;
-      const trIcon = trSuccess ? '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
       const trOutput = data.output || data.error || '';
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
-      el.innerHTML = '<details class="' + trClass + '"><summary>'
-        + '<span class="activity-tool-icon">' + trIcon + '</span> '
-        + escapeHtml(data.tool_name || 'result')
+      el.innerHTML = '<details class="' + trClass + '" data-tool-kind="' + escapeHtml(toolKindForName(data.tool_name)) + '"><summary>'
+        + '<span class="activity-tool-icon">' + toolIconMarkup(data.tool_name || 'result', trSuccess ? 'success' : 'fail') + '</span> '
+        + escapeHtml(toolDisplayName(data.tool_name || 'result'))
         + '</summary><pre class="activity-tool-output">'
         + escapeHtml(trOutput)
         + '</pre></details>';
@@ -7383,6 +7619,15 @@ function formatDate(isoString) {
 // Only keys listed here get rendered with nice labels — everything else
 // falls into an "Other" section as raw key/value.
 const SETTINGS_SCHEMA = {
+  'Presentation': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/><path d="M8 5v14"/></svg>',
+    fields: [
+      { key: 'agent.cli_skin', label: 'CLI skin', type: 'select', dynamicOptions: 'skins', desc: 'Shared ThinClaw skin used by the CLI and, by default, the WebUI.' },
+      { key: 'webchat_skin', label: 'WebUI skin', type: 'select', dynamicOptions: 'skins', desc: 'Override the WebUI skin, or leave it following the active CLI skin.', nullable: true, followLabel: 'Follow agent skin' },
+      { key: 'webchat_theme', label: 'WebUI theme', type: 'select', options: [{ value: 'system', label: 'System' }, { value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }], desc: 'Overall light/dark polarity for the WebUI.' },
+      { key: 'webchat_show_branding', label: 'Bottom branding pill', type: 'bool', desc: 'Show the ThinClaw branding pill in the lower-right corner.' },
+    ],
+  },
   'Notifications': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
     fields: [
@@ -7643,11 +7888,17 @@ function mergeProviderEntries(vaultProviders, configProviders) {
     const vault = vaultMap.get(provider.slug) || {};
     return {
       ...provider,
-      auth_kind: vault.auth_kind || (['ollama', 'llama_cpp'].includes(provider.slug) ? 'local' : 'api_key'),
+      auth_kind: provider.auth_kind || vault.auth_kind || (['ollama', 'llama_cpp'].includes(provider.slug) ? 'local' : 'api_key'),
+      auth_mode: provider.auth_mode || vault.auth_mode || (['ollama', 'llama_cpp'].includes(provider.slug) ? 'local' : 'api_key'),
       env_key_name: vault.env_key_name || provider.env_key_name || '',
       default_model: provider.default_model || vault.default_model || '',
       display_name: provider.display_name || vault.display_name || provider.slug,
       has_key: !!(provider.has_key || vault.has_key),
+      credential_ready: provider.credential_ready != null ? !!provider.credential_ready : !!(provider.has_key || vault.has_key),
+      oauth_supported: provider.oauth_supported != null ? !!provider.oauth_supported : !!vault.oauth_supported,
+      oauth_available: provider.oauth_available != null ? !!provider.oauth_available : !!vault.oauth_available,
+      oauth_source_label: provider.oauth_source_label || vault.oauth_source_label || '',
+      oauth_source_location: provider.oauth_source_location || vault.oauth_source_location || '',
       primary_model: provider.primary_model || '',
       cheap_model: provider.cheap_model || '',
     };
@@ -7682,10 +7933,59 @@ function renderProvidersSection(providers, config) {
   return html;
 }
 
+function providerSelectedAuthMode(provider) {
+  if (!provider || provider.auth_kind === 'local') return 'local';
+  if (provider.oauth_supported && provider.auth_mode === 'oauth_sync') return 'oauth_sync';
+  return 'api_key';
+}
+
+function renderProviderAuthModeControl(provider) {
+  if (provider.auth_kind === 'local' || !provider.oauth_supported) return '';
+  const authMode = providerSelectedAuthMode(provider);
+  let html = '<div class="provider-auth-mode-row">';
+  html += '<label class="routing-field-label tight" for="provider-auth-mode-' + escapeHtml(provider.slug) + '">Auth source</label>';
+  html += '<select id="provider-auth-mode-' + escapeHtml(provider.slug) + '" class="routing-input provider-auth-mode" data-provider="' + escapeHtml(provider.slug) + '">';
+  html += '<option value="api_key"' + (authMode === 'api_key' ? ' selected' : '') + '>API key</option>';
+  html += '<option value="oauth_sync"' + (authMode === 'oauth_sync' ? ' selected' : '') + '>' + escapeHtml(provider.oauth_source_label || 'External auth sync') + '</option>';
+  html += '</select>';
+  html += '</div>';
+  return html;
+}
+
+function renderProviderApiKeyControls(provider) {
+  let html = '<div class="provider-credentials-api' + (providerSelectedAuthMode(provider) !== 'api_key' ? ' is-hidden' : '') + '">';
+  if (provider.has_key) {
+    html += '<span class="vault-key-status">API key stored</span>';
+    html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove</button>';
+  } else {
+    html += '<input type="password" id="vault-key-' + escapeHtml(provider.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(provider.env_key_name || 'API key') + '">';
+    html += '<button class="btn-vault-save inline" data-slug="' + escapeHtml(provider.slug) + '">Save</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderProviderOauthControls(provider) {
+  const authMode = providerSelectedAuthMode(provider);
+  let html = '<div class="provider-credentials-oauth' + (authMode !== 'oauth_sync' ? ' is-hidden' : '') + '">';
+  if (provider.oauth_available) {
+    html += '<div class="provider-editor-inline-note">Using ' + escapeHtml(provider.oauth_source_label || 'external auth sync') + ' from ' + escapeHtml(provider.oauth_source_location || 'the detected source') + '.</div>';
+  } else {
+    html += '<div class="provider-editor-inline-note">No ' + escapeHtml(provider.oauth_source_label || 'external auth source') + ' detected right now. You can keep this selection, but the provider cannot activate until the source appears.</div>';
+  }
+  if (provider.has_key) {
+    html += '<div class="provider-editor-inline-note">A saved API key is still stored and can be re-used by switching this provider back to API key mode.</div>';
+    html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove saved API key</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function renderProviderEditorCard(provider) {
   const status = providerStatusMeta(provider);
   const primaryOwner = !!provider.primary;
   const cheapOwner = !!provider.preferred_cheap;
+  const authMode = providerSelectedAuthMode(provider);
   let html = '<article class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive ui-panel--focusable provider-editor-card'
     + (provider.enabled ? ' enabled' : ' disabled')
     + (primaryOwner ? ' primary-owner' : '')
@@ -7694,11 +7994,16 @@ function renderProviderEditorCard(provider) {
     + '" data-enabled="' + (provider.enabled ? 'true' : 'false')
     + '" data-primary-owner="' + (primaryOwner ? 'true' : 'false')
     + '" data-cheap-owner="' + (cheapOwner ? 'true' : 'false')
+    + '" data-auth-mode="' + escapeHtml(authMode)
+    + '" data-has-key="' + (provider.has_key ? 'true' : 'false')
+    + '" data-credential-ready="' + (providerCredentialReady(provider) ? 'true' : 'false')
+    + '" data-oauth-supported="' + (provider.oauth_supported ? 'true' : 'false')
+    + '" data-oauth-available="' + (provider.oauth_available ? 'true' : 'false')
     + '" tabindex="0" role="button" aria-pressed="' + (provider.enabled ? 'true' : 'false') + '" draggable="true">';
   html += '<div class="provider-editor-head">';
   html += '<div class="provider-editor-title-row"><strong>' + escapeHtml(provider.display_name) + '</strong><span class="provider-activation-state">' + (provider.enabled ? 'Active' : 'Inactive') + '</span></div>';
   html += '<div class="provider-editor-meta-row">';
-  html += '<span class="provider-status-chip ' + escapeHtml(status.className) + '">' + escapeHtml(status.label) + '</span>';
+  html += '<span class="provider-status-chip ' + escapeHtml(status.className) + '" title="' + escapeHtml(status.note || '') + '">' + escapeHtml(status.label) + '</span>';
   html += renderProviderRolePill('primary', primaryOwner);
   html += renderProviderRolePill('cheap', cheapOwner);
   if (provider.discovery_supported) {
@@ -7713,16 +8018,16 @@ function renderProviderEditorCard(provider) {
   html += renderProviderSlotEditor(provider, 'primary');
   html += renderProviderSlotEditor(provider, 'cheap');
   html += '</div>';
+  html += renderProviderAuthModeControl(provider);
   // --- Credentials: always shown, fixed height ---
   html += '<div class="provider-editor-credentials">';
   if (provider.auth_kind === 'local') {
     html += '<div class="provider-editor-inline-note">Uses local connection settings.</div>';
-  } else if (provider.has_key) {
-    html += '<span class="vault-key-status">Credentials configured</span>';
-    html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove</button>';
   } else {
-    html += '<input type="password" id="vault-key-' + escapeHtml(provider.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(provider.env_key_name || 'API key') + '">';
-    html += '<button class="btn-vault-save inline" data-slug="' + escapeHtml(provider.slug) + '">Save</button>';
+    html += renderProviderApiKeyControls(provider);
+    if (provider.oauth_supported) {
+      html += renderProviderOauthControls(provider);
+    }
   }
   html += '</div>';
   html += '</article>';
@@ -7759,6 +8064,23 @@ function providerStatusMeta(provider) {
           : 'Configured locally.',
     };
   }
+  const authMode = providerSelectedAuthMode(provider);
+  if (authMode === 'oauth_sync') {
+    if (provider.oauth_available) {
+      return {
+        label: 'external auth ready',
+        className: 'ready',
+        note: 'Using ' + (provider.oauth_source_label || 'external auth sync') + ' from '
+          + (provider.oauth_source_location || 'the detected source') + '.',
+      };
+    }
+    return {
+      label: 'waiting for auth',
+      className: 'missing',
+      note: 'No ' + (provider.oauth_source_label || 'external auth source') + ' is available right now. '
+        + 'Sign in there or switch this provider back to API key mode.',
+    };
+  }
   if (provider.has_key) {
     return {
       label: 'credentials ready',
@@ -7773,8 +8095,93 @@ function providerStatusMeta(provider) {
       ? 'Custom OpenAI-compatible endpoints can work with or without a stored key.'
       : provider.slug === 'bedrock'
         ? 'Prefer a native Bedrock API key. A legacy proxy URL can still be used from Connection Settings if needed.'
-        : 'Add credentials here to make this provider available immediately.',
+      : 'Add credentials here to make this provider available immediately.',
   };
+}
+
+function providerCredentialReady(provider) {
+  if (!provider) return false;
+  if (provider.auth_kind === 'local') return true;
+  if (!provider.auth_required) return true;
+  if (providerSelectedAuthMode(provider) === 'oauth_sync') return !!provider.oauth_available;
+  return !!provider.has_key;
+}
+
+function providerRowState(row) {
+  if (!row) return null;
+  const slug = getProviderCardSlug(row);
+  const source = getProviderEntry(slug) || {};
+  const provider = {
+    ...source,
+    slug,
+    display_name: source.display_name || slug,
+    auth_kind: source.auth_kind || (['ollama', 'llama_cpp'].includes(slug) ? 'local' : 'api_key'),
+    auth_required: !!source.auth_required,
+    auth_mode: row.dataset.authMode || providerSelectedAuthMode(source),
+    has_key: row.dataset.hasKey === 'true',
+    oauth_supported: row.dataset.oauthSupported === 'true',
+    oauth_available: row.dataset.oauthAvailable === 'true',
+    oauth_source_label: source.oauth_source_label || '',
+    oauth_source_location: source.oauth_source_location || '',
+    enabled: row.dataset.enabled === 'true',
+    primary: row.dataset.primaryOwner === 'true',
+    preferred_cheap: row.dataset.cheapOwner === 'true',
+  };
+  provider.credential_ready = providerCredentialReady(provider);
+  return provider;
+}
+
+function setProviderCardEnabledState(row, enabled) {
+  if (!row) return;
+  row.dataset.enabled = enabled ? 'true' : 'false';
+  row.classList.toggle('enabled', enabled);
+  row.classList.toggle('disabled', !enabled);
+  row.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  const stateNode = row.querySelector('.provider-activation-state');
+  if (stateNode) stateNode.textContent = enabled ? 'Active' : 'Inactive';
+}
+
+function refreshProviderCardPresentation(row) {
+  const provider = providerRowState(row);
+  if (!provider) return;
+  row.dataset.authMode = providerSelectedAuthMode(provider);
+  row.dataset.credentialReady = provider.credential_ready ? 'true' : 'false';
+
+  const status = providerStatusMeta(provider);
+  const chip = row.querySelector('.provider-status-chip');
+  if (chip) {
+    chip.className = 'provider-status-chip ' + status.className;
+    chip.textContent = status.label;
+    chip.title = status.note || '';
+  }
+
+  const apiControls = row.querySelector('.provider-credentials-api');
+  if (apiControls) {
+    apiControls.classList.toggle('is-hidden', providerSelectedAuthMode(provider) !== 'api_key');
+  }
+  const oauthControls = row.querySelector('.provider-credentials-oauth');
+  if (oauthControls) {
+    oauthControls.classList.toggle('is-hidden', providerSelectedAuthMode(provider) !== 'oauth_sync');
+  }
+}
+
+function syncProviderCardAuthMode(row, authMode) {
+  if (!row) return;
+  const nextMode = authMode === 'oauth_sync' && row.dataset.oauthSupported === 'true'
+    ? 'oauth_sync'
+    : 'api_key';
+  row.dataset.authMode = nextMode;
+  refreshProviderCardPresentation(row);
+  if (row.dataset.enabled === 'true' && !canProviderBeActivated(row)) {
+    setProviderCardEnabledState(row, false);
+    reconcileProviderRoleAssignments('');
+    const provider = providerRowState(row);
+    showToast(
+      (provider?.display_name || 'This provider') + ' was deactivated until its selected auth source is ready.',
+      'info',
+    );
+  }
+  updateAliasSummaries();
 }
 
 function getProviderCards() {
@@ -7786,18 +8193,25 @@ function getProviderCardSlug(row) {
 }
 
 function canProviderBeActivated(row) {
-  const slug = getProviderCardSlug(row);
-  const provider = getProviderEntry(slug);
+  const provider = providerRowState(row);
   if (!provider) return true;
-  if (provider.auth_kind === 'local') return true;
-  if (!provider.auth_required) return true;
-  return !!provider.has_key;
+  return providerCredentialReady(provider);
 }
 
 function promptProviderCredentialsRequired(row) {
-  const slug = getProviderCardSlug(row);
-  const provider = getProviderEntry(slug);
+  const provider = providerRowState(row);
+  const slug = provider?.slug || getProviderCardSlug(row);
   const displayName = provider?.display_name || slug || 'This provider';
+  if (provider && providerSelectedAuthMode(provider) === 'oauth_sync') {
+    showToast(
+      'No ' + (provider.oauth_source_label || 'external auth') + ' is available for '
+        + displayName + '. Sign in there or switch back to API key mode first.',
+      'error',
+    );
+    const select = row?.querySelector('.provider-auth-mode');
+    if (select) select.focus();
+    return;
+  }
   showToast('Set an API key for ' + displayName + ' before activating it.', 'error');
   const input = row?.querySelector('.vault-key-input');
   if (input) input.focus();
@@ -8194,6 +8608,13 @@ function attachProvidersEvents() {
     if (event.target.matches('#routing-tool-phase-synthesis')) {
       updateRoutingModePresentation();
     }
+    if (event.target.matches('.provider-auth-mode')) {
+      syncProviderCardAuthMode(
+        event.target.closest('.provider-editor-card'),
+        event.target.value,
+      );
+      return;
+    }
     if (event.target.matches('.routing-target-kind, .routing-target-provider')) {
       refreshTargetPicker(event.target.closest('.routing-target-picker'));
     }
@@ -8332,12 +8753,7 @@ function toggleProviderCardEnabled(row) {
     promptProviderCredentialsRequired(row);
     return;
   }
-  row.dataset.enabled = nextEnabled ? 'true' : 'false';
-  row.classList.toggle('enabled', nextEnabled);
-  row.classList.toggle('disabled', !nextEnabled);
-  row.setAttribute('aria-pressed', nextEnabled ? 'true' : 'false');
-  const stateNode = row.querySelector('.provider-activation-state');
-  if (stateNode) stateNode.textContent = nextEnabled ? 'Active' : 'Inactive';
+  setProviderCardEnabledState(row, nextEnabled);
   reconcileProviderRoleAssignments(nextEnabled ? getProviderCardSlug(row) : '');
   updateAliasSummaries();
   saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
@@ -8379,27 +8795,34 @@ function removeProviderKey(slug, displayName) {
 function collectProvidersRoutingConfig() {
   const providers = [];
   document.querySelectorAll('[data-provider-row]').forEach(row => {
-    const slug = row.getAttribute('data-provider-row');
-    const source = (providerRoutingConfig.providers || []).find(p => p.slug === slug) || {};
+    const provider = providerRowState(row);
+    if (!provider) return;
+    const slug = provider.slug;
     const enabled = row.dataset.enabled === 'true';
     const primaryModelValue = collectModelChoice(row.querySelector('.routing-model-choice[data-role="primary"]'));
     const cheapModelValue = collectModelChoice(row.querySelector('.routing-model-choice[data-role="cheap"]'));
     providers.push({
       slug,
-      display_name: source.display_name || slug,
-      api_style: source.api_style || 'openai_compatible',
-      default_model: source.default_model || '',
-      env_key_name: source.env_key_name || '',
-      has_key: !!source.has_key,
-      auth_required: !!source.auth_required,
+      display_name: provider.display_name || slug,
+      api_style: provider.api_style || 'openai_compatible',
+      default_model: provider.default_model || '',
+      env_key_name: provider.env_key_name || '',
+      has_key: !!provider.has_key,
+      credential_ready: !!provider.credential_ready,
+      auth_required: !!provider.auth_required,
+      auth_mode: providerSelectedAuthMode(provider),
+      oauth_supported: !!provider.oauth_supported,
+      oauth_available: !!provider.oauth_available,
+      oauth_source_label: provider.oauth_source_label || '',
+      oauth_source_location: provider.oauth_source_location || '',
       enabled,
       primary: enabled && row.dataset.primaryOwner === 'true',
       preferred_cheap: enabled && row.dataset.cheapOwner === 'true',
-      discovery_supported: !!source.discovery_supported,
+      discovery_supported: !!provider.discovery_supported,
       primary_model: primaryModelValue,
       cheap_model: cheapModelValue,
-      suggested_primary_model: source.suggested_primary_model || source.default_model || '',
-      suggested_cheap_model: source.suggested_cheap_model || source.primary_model || source.default_model || '',
+      suggested_primary_model: provider.suggested_primary_model || provider.default_model || '',
+      suggested_cheap_model: provider.suggested_cheap_model || provider.primary_model || provider.default_model || '',
     });
   });
 
@@ -8814,21 +9237,20 @@ function getLiveProviderEntries() {
   const rows = Array.from(document.querySelectorAll('[data-provider-row]'));
   if (!rows.length) return getProviderEntries();
   return rows.map((row) => {
-    const slug = row.getAttribute('data-provider-row');
-    const source = getProviderEntry(slug) || {};
+    const provider = providerRowState(row);
+    if (!provider) return null;
     return {
-      slug,
-      display_name: source.display_name || slug,
+      ...provider,
       enabled: row.dataset.enabled === 'true',
       primary: row.dataset.primaryOwner === 'true',
       preferred_cheap: row.dataset.cheapOwner === 'true',
-      primary_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="primary"]')) || source.primary_model || '',
-      cheap_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="cheap"]')) || source.cheap_model || '',
-      suggested_primary_model: source.suggested_primary_model,
-      suggested_cheap_model: source.suggested_cheap_model,
-      default_model: source.default_model,
+      primary_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="primary"]')) || provider.primary_model || '',
+      cheap_model: collectModelChoice(row.querySelector('.routing-model-choice[data-role="cheap"]')) || provider.cheap_model || '',
+      suggested_primary_model: provider.suggested_primary_model,
+      suggested_cheap_model: provider.suggested_cheap_model,
+      default_model: provider.default_model,
     };
-  });
+  }).filter(Boolean);
 }
 
 function modelChoiceHint(providerSlug, role) {
@@ -9748,7 +10170,7 @@ function renderSettings() {
 
   // --- Subtabs ---
   const subtabGroups = {
-    'General': ['Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
+    'General': ['Presentation', 'Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
     'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
     'Advanced': [],
   };
@@ -9979,19 +10401,22 @@ function renderSettingField(field) {
   } else if (field.type === 'select') {
     const select = document.createElement('select');
     select.className = 'setting-input';
-    
-    // Add options
-    for (const opt of field.options || []) {
+
+    const options = resolveSettingOptions(field, currentValue);
+    for (const opt of options) {
       const option = document.createElement('option');
       option.value = opt.value;
       option.textContent = opt.label;
       select.appendChild(option);
     }
-    
-    // Force lowercase for matching in case of typed differences
-    const cValStr = currentValue != null ? String(currentValue).toLowerCase() : '';
-    select.value = cValStr;
-    
+
+    const currentValueString = currentValue != null ? String(currentValue) : '';
+    select.value = currentValueString;
+    if (select.value !== currentValueString && currentValueString) {
+      const matchingOption = Array.from(select.options).find((option) => option.value.toLowerCase() === currentValueString.toLowerCase());
+      if (matchingOption) select.value = matchingOption.value;
+    }
+
     select.addEventListener('change', () => {
       const val = select.value === '' && field.nullable ? null : select.value;
       saveSetting(field.key, val);
@@ -10021,6 +10446,32 @@ function renderSettingField(field) {
   return row;
 }
 
+function resolveSettingOptions(field, currentValue) {
+  if (field.dynamicOptions === 'skins') {
+    return buildSkinSettingOptions(field, currentValue);
+  }
+  return field.options || [];
+}
+
+function buildSkinSettingOptions(field, currentValue) {
+  const skinNames = new Set(AVAILABLE_SKINS);
+  if (currentValue != null && currentValue !== '') skinNames.add(String(currentValue));
+  const resolvedName = resolvedSkinMeta().name;
+  if (resolvedName) skinNames.add(String(resolvedName));
+  const cliSkinValue = settingsCache['agent.cli_skin']?.value;
+  if (cliSkinValue) skinNames.add(String(cliSkinValue));
+
+  const options = Array.from(skinNames)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .map((skinName) => ({ value: skinName, label: skinName }));
+
+  if (field.nullable) {
+    options.unshift({ value: '', label: field.followLabel || 'Not set' });
+  }
+  return options;
+}
+
 function saveSetting(key, value) {
   if (SENSITIVE_KEYS.has(key)) {
     showToast('This setting is managed via the secrets store, not the Settings UI.', 'error');
@@ -10035,8 +10486,12 @@ function saveSetting(key, value) {
       .then((res) => {
         if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         delete settingsCache[key];
+        if (key === 'agent.name') currentAgentName = 'thinclaw';
         if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
         showToast('Reset ' + key + ' to default', 'success');
+        if (PRESENTATION_SETTING_KEYS.has(key)) {
+          window.setTimeout(() => window.location.reload(), 180);
+        }
       })
       .catch((err) => showToast('Failed: ' + err.message, 'error'));
   } else {
@@ -10048,8 +10503,12 @@ function saveSetting(key, value) {
     }).then((res) => {
       if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
       settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
+      if (key === 'agent.name') currentAgentName = String(value || 'thinclaw');
       if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
       showToast('Saved ' + key, 'success');
+      if (PRESENTATION_SETTING_KEYS.has(key)) {
+        window.setTimeout(() => window.location.reload(), 180);
+      }
     }).catch((err) => showToast('Failed: ' + err.message, 'error'));
   }
 }

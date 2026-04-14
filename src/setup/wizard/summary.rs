@@ -193,25 +193,30 @@ impl SetupWizard {
             println!("  Claude Code: enabled (model: {})", model);
         }
 
-        if self.settings.webchat_theme != "system"
+        if self.settings.webchat_skin.is_some()
+            || self.settings.webchat_theme != "system"
             || self.settings.webchat_accent_color.is_some()
             || !self.settings.webchat_show_branding
         {
-            let accent = self
+            let skin_mode = self
                 .settings
-                .webchat_accent_color
+                .webchat_skin
                 .as_deref()
-                .unwrap_or("default");
-            println!(
-                "  Web UI: theme={}, accent={}, branding={}",
+                .unwrap_or("follow CLI skin");
+            let mut summary = format!(
+                "  Web UI: skin={}, theme={}, branding={}",
+                skin_mode,
                 self.settings.webchat_theme,
-                accent,
                 if self.settings.webchat_show_branding {
                     "shown"
                 } else {
                     "hidden"
                 }
             );
+            if let Some(accent) = self.settings.webchat_accent_color.as_deref() {
+                summary.push_str(&format!(", accent override={}", accent));
+            }
+            println!("{}", summary);
         }
 
         if self.settings.observability_backend != "none" {

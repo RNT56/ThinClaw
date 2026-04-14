@@ -462,6 +462,7 @@ impl AppBuilder {
             &self.config.agent.browser_backend,
             self.config.agent.cloud_browser_provider.as_deref(),
         );
+        tools.register_vision_tool(Arc::clone(llm));
         tools.register_moa_tool(
             Arc::clone(llm),
             cheap_llm.cloned(),
@@ -888,6 +889,47 @@ impl AppBuilder {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
             tracing::info!("Registered screen capture tool (enabled via user toggle)");
+        }
+
+        // Hermes-parity runtime tools.
+        tools.register_todo_tool(crate::tools::builtin::new_shared_todo_store());
+
+        if self.config.agent.allow_local_tools {
+            let process_registry: crate::tools::builtin::SharedProcessRegistry =
+                Arc::new(tokio::sync::RwLock::new(Default::default()));
+            crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
+            tools.register_process_tool(process_registry);
+
+            let mode = self.config.agent.workspace_mode.as_str();
+            let root = self.config.agent.workspace_root.clone();
+
+            match mode {
+                "sandboxed" => {
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("Library")
+                            .join("Application Support")
+                            .join("OpenClaw")
+                            .join("agent_workspace")
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    tools.register_search_files_tool(Some(dir));
+                }
+                "project" => {
+                    let dir = root.unwrap_or_else(|| {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    tools.register_search_files_tool(Some(dir));
+                }
+                _ => {
+                    tools.register_execute_code_tool(None, false);
+                    tools.register_search_files_tool(None);
+                }
+            }
         }
 
         // Register TTS tool (always available — uses OpenAI TTS API)

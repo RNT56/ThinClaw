@@ -17,7 +17,9 @@ use super::{
 };
 use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
-use crate::settings::{CredentialSelectionStrategy, ProvidersSettings, RoutingMode};
+use crate::settings::{
+    CredentialSelectionStrategy, ProviderCredentialMode, ProvidersSettings, RoutingMode,
+};
 
 /// Create an LLM provider based on configuration.
 pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -35,6 +37,16 @@ pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
 
 fn credential_entry_id(provider_slug: &str, index: usize) -> String {
     format!("{provider_slug}:credential:{}", index + 1)
+}
+
+fn provider_prefers_external_oauth_sync(
+    providers_settings: Option<&ProvidersSettings>,
+    provider_slug: &str,
+) -> bool {
+    providers_settings
+        .and_then(|settings| settings.provider_credential_modes.get(provider_slug))
+        .copied()
+        == Some(ProviderCredentialMode::ExternalOAuthSync)
 }
 
 fn resolved_secret_credentials(
@@ -391,7 +403,15 @@ fn create_provider_for_catalog_entry_with_api_key(
 fn resolve_catalog_api_keys(
     provider_slug: &str,
     env_key_name: &str,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<Vec<String>, LlmError> {
+    if provider_prefers_external_oauth_sync(providers_settings, provider_slug)
+        && let Some(value) = crate::config::helpers::synced_oauth_env(env_key_name)
+        && !value.trim().is_empty()
+    {
+        return Ok(vec![value]);
+    }
+
     fn append_from_env(target: &mut Vec<String>, env_name: &str) -> Result<(), LlmError> {
         if let Some(value) =
             crate::config::helpers::optional_env(env_name).map_err(|e| LlmError::RequestFailed {
@@ -442,6 +462,7 @@ fn resolve_catalog_api_keys(
 fn create_provider_variants_for_catalog_entry(
     provider_slug: &str,
     model: &str,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<Vec<ProviderLeaseEntry>, LlmError> {
     let endpoint =
         crate::config::provider_catalog::endpoint_for(provider_slug).ok_or_else(|| {
@@ -450,7 +471,8 @@ fn create_provider_variants_for_catalog_entry(
                 reason: format!("Unknown provider '{}' in catalog", provider_slug),
             }
         })?;
-    let api_keys = resolve_catalog_api_keys(provider_slug, endpoint.env_key_name)?;
+    let api_keys =
+        resolve_catalog_api_keys(provider_slug, endpoint.env_key_name, providers_settings)?;
     if api_keys.is_empty() {
         return Ok(vec![ProviderLeaseEntry::new(
             create_provider_for_catalog_entry(provider_slug, model)?,
@@ -501,10 +523,11 @@ pub async fn probe_provider_model(provider_slug: &str, model: &str) -> Result<()
 fn create_cheap_model_provider(
     cheap_model_spec: &str,
     config: &LlmConfig,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     if let Some((provider, model)) = cheap_model_spec.split_once('/') {
         let entries = if crate::config::provider_catalog::endpoint_for(provider).is_some() {
-            create_provider_variants_for_catalog_entry(provider, model)?
+            create_provider_variants_for_catalog_entry(provider, model, providers_settings)?
         } else {
             create_provider_variants_for_non_catalog_slug(provider, model, config)?
         };
@@ -743,7 +766,7 @@ pub fn build_provider_chain(
             }
         }
 
-        append_fallbacks(&mut all_entries, &fallbacks, config);
+        append_fallbacks(&mut all_entries, &fallbacks, config, providers_settings);
     }
 
     let llm: Arc<dyn LlmProvider> =
@@ -771,7 +794,7 @@ pub fn build_provider_chain(
         .or_else(|| providers_settings.and_then(|ps| ps.cheap_model.clone()));
 
     let cheap_llm: Option<Arc<dyn LlmProvider>> = if let Some(ref spec) = cheap_model_spec {
-        match create_cheap_model_provider(spec, config) {
+        match create_cheap_model_provider(spec, config, providers_settings) {
             Ok(p) => {
                 tracing::info!("Smart routing cheap model: {}", spec);
                 Some(p)
@@ -1048,7 +1071,11 @@ fn create_primary_providers(
 
         if let Some(model) = model {
             if crate::config::provider_catalog::endpoint_for(primary_slug).is_some() {
-                return create_provider_variants_for_catalog_entry(primary_slug, &model);
+                return create_provider_variants_for_catalog_entry(
+                    primary_slug,
+                    &model,
+                    providers_settings,
+                );
             }
             return create_provider_variants_for_non_catalog_slug(primary_slug, &model, config);
         }
@@ -1107,10 +1134,11 @@ fn append_fallbacks(
     all_providers: &mut Vec<ProviderLeaseEntry>,
     fallbacks: &[(String, String)],
     config: &LlmConfig,
+    providers_settings: Option<&ProvidersSettings>,
 ) {
     for (provider_slug, model) in fallbacks {
         let provider = if crate::config::provider_catalog::endpoint_for(provider_slug).is_some() {
-            create_provider_variants_for_catalog_entry(provider_slug, model)
+            create_provider_variants_for_catalog_entry(provider_slug, model, providers_settings)
         } else {
             create_provider_variants_for_non_catalog_slug(provider_slug, model, config)
         };

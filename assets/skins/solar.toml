@@ -18,3 +18,11 @@ ascii_art = [
   '              SOLAR ARCHIVE',
 ]
 tool_emojis = { shell = "☀️", browser = "🔎", memory = "📚", search_files = "🧾", todo = "🪶", subagent = "🦅" }
+
+[web]
+aura_primary = "#D97706"
+aura_secondary = "#A16207"
+chrome_style = "archive"
+surface_pattern = "paper"
+message_shape = "rounded"
+elevation = "high"

@@ -1671,9 +1671,12 @@ impl IdentityRegistryStore for PgBackend {
 
         let row = client
             .query_opt(
-                &format!(
-                    "SELECT {PG_ACTOR_COLUMNS} FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id WHERE e.channel = $1 AND e.external_user_id = $2"
-                ),
+                "SELECT a.actor_id, a.principal_id, a.display_name, a.status, \
+                 a.preferred_delivery_channel, a.preferred_delivery_external_user_id, \
+                 a.last_active_direct_channel, a.last_active_direct_external_user_id, \
+                 a.created_at, a.updated_at \
+                 FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id \
+                 WHERE e.channel = $1 AND e.external_user_id = $2",
                 &[&channel, &external_user_id],
             )
             .await

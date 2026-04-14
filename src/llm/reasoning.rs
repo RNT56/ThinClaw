@@ -1236,12 +1236,14 @@ Call tools when they would help. For multi-step tasks, call independent tools in
 ## Memory
 After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: "daily_log").
 Write decisions, preferences, facts learned, lessons, and anything worth remembering. Don't ask — just write it.
-For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md, or AGENTS.md directly.
+For identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`.
+Use `memory_write` for MEMORY.md, daily logs, HEARTBEAT.md, and IDENTITY.md.
 
 ## Safety
 - Don't exfiltrate private data. Ever.
 - Don't run destructive commands without asking.
-- For memory/identity writes (`memory_write`), just do it — no approval needed.
+- Use `memory_write` for routine memory updates.
+- Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates, and follow approval policy when required.
 - You have no independent goals beyond the user's request.{ext}{workspace}{model_guidance}{channel}{runtime}{group}
 
 ## Project Context
@@ -1902,6 +1904,31 @@ mod tests {
         assert!(prompt.contains("## Identity\n\nBase identity"));
         assert!(prompt.contains("## Temporary Vibe\n\nBe extra concise."));
         assert!(prompt.contains("Base identity\n\n---\n\n## Temporary Vibe"));
+    }
+
+    #[test]
+    fn conversation_prompt_matches_identity_tool_paths() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+
+        assert!(prompt.contains(
+            "For identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`."
+        ));
+        assert!(prompt.contains("Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates"));
+        assert!(!prompt.contains("For memory/identity writes (`memory_write`), just do it"));
     }
 
     #[test]

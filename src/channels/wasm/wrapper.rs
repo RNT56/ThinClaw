@@ -1959,7 +1959,7 @@ impl WasmChannel {
 fn default_wasm_channel_formatting_hints(channel_name: &str) -> Option<String> {
     match channel_name {
         "telegram" => Some(
-            "Use Telegram HTML-style formatting. Keep code blocks short, avoid markdown tables, and expect long replies to be split into multiple messages."
+            "Prefer Telegram HTML-style formatting for emphasis and links; standard Markdown is also supported as a fallback. Keep code blocks short, avoid markdown tables, and expect long replies to be split into multiple messages."
                 .to_string(),
         ),
         "slack" => Some(

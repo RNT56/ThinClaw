@@ -441,8 +441,9 @@ mod tests {
 
         let tool = SearchFilesTool::new();
         let suggestions = tool.suggest_similar_paths("confg.toml", dir.path()).await;
-        // Should suggest config.toml since "confg" is close to "config"
-        // Actually since we use substring match on the extension, it should find .toml files
-        assert!(!suggestions.is_empty() || true); // fuzzy match may not catch this
+        // Suggestions are heuristic. If any are returned, they should include the closest match.
+        assert!(
+            suggestions.is_empty() || suggestions.iter().any(|path| path.ends_with("config.toml"))
+        );
     }
 }

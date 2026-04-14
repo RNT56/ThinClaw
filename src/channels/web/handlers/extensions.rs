@@ -39,7 +39,7 @@ pub(crate) async fn extensions_list_handler(
                     if has_paired {
                         "active".to_string()
                     } else {
-                        "active".to_string()
+                        "pairing".to_string()
                     }
                 } else if ext.active {
                     "active".to_string()

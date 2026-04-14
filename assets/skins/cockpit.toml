@@ -18,3 +18,11 @@ ascii_art = [
   '           HUMANIST FLIGHT DECK ONLINE',
 ]
 tool_emojis = { shell = "🛠", browser = "🛰", memory = "🧠", search_files = "🗂", todo = "📋", subagent = "🧭" }
+
+[web]
+aura_primary = "#6AA6FF"
+aura_secondary = "#52607D"
+chrome_style = "avionics"
+surface_pattern = "grid"
+message_shape = "angular"
+elevation = "medium"

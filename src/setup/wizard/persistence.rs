@@ -222,6 +222,9 @@ impl SetupWizard {
         }
 
         // Web UI env vars
+        if let Some(ref skin) = self.settings.webchat_skin {
+            env_vars.push(("WEBCHAT_SKIN", skin.clone()));
+        }
         if self.settings.webchat_theme != "system" {
             env_vars.push(("WEBCHAT_THEME", self.settings.webchat_theme.clone()));
         }

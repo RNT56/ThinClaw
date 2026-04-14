@@ -1,6 +1,7 @@
 //! Presentation wizard steps: Web UI theming and observability.
 
-use crate::setup::prompts::{confirm, optional_input, print_info, print_success, select_one};
+use crate::branding::skin::CliSkin;
+use crate::setup::prompts::{confirm, print_info, print_success, select_one};
 
 use super::{SetupError, SetupWizard};
 
@@ -21,6 +22,16 @@ impl SetupWizard {
 
         println!();
 
+        let mut skin_options = vec!["Follow CLI skin".to_string()];
+        skin_options.extend(CliSkin::available_names());
+        let skin_refs: Vec<&str> = skin_options.iter().map(String::as_str).collect();
+        let skin_idx = select_one("Web UI skin", &skin_refs).map_err(SetupError::Io)?;
+        self.settings.webchat_skin = if skin_idx == 0 {
+            None
+        } else {
+            Some(skin_options[skin_idx].clone())
+        };
+
         // Theme selection
         let theme_options: &[&str] = &["System (follow OS preference)", "Light", "Dark"];
         let theme_idx = select_one("Theme", theme_options).map_err(SetupError::Io)?;
@@ -31,32 +42,20 @@ impl SetupWizard {
         };
         self.settings.webchat_theme = theme.to_string();
 
-        // Accent color
-        let accent = optional_input(
-            "Accent color (hex, e.g. #22c55e)",
-            Some("leave blank for default"),
-        )
-        .map_err(SetupError::Io)?;
-        if let Some(ref color) = accent
-            && !color.is_empty()
-        {
-            self.settings.webchat_accent_color = Some(color.clone());
-        }
-
         // Branding badge
         let show_branding =
             confirm("Show \"Powered by ThinClaw\" badge?", true).map_err(SetupError::Io)?;
         self.settings.webchat_show_branding = show_branding;
 
-        let accent_display = self
+        let skin_display = self
             .settings
-            .webchat_accent_color
+            .webchat_skin
             .as_deref()
-            .unwrap_or("default");
+            .unwrap_or("follow CLI skin");
         print_success(&format!(
-            "Web UI cockpit configured (theme: {}, accent: {}, branding: {})",
+            "Web UI cockpit configured (skin: {}, theme: {}, branding: {})",
+            skin_display,
             theme,
-            accent_display,
             if show_branding { "shown" } else { "hidden" }
         ));
 

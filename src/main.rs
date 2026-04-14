@@ -2,6 +2,7 @@
 
 mod main_helpers;
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -41,11 +42,15 @@ use thinclaw::setup::{SetupConfig, SetupWizard};
 use main_helpers::*;
 
 /// Initialize tracing for simple CLI commands (warn level, no fancy layers).
-fn init_cli_tracing() {
+fn init_cli_tracing(debug: bool) {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            if debug {
+                EnvFilter::new("debug")
+            } else {
+                EnvFilter::new("warn")
+            }
+        }))
         .init();
 }
 
@@ -76,98 +81,98 @@ async fn main() -> anyhow::Result<()> {
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return run_tool_command(tool_cmd.clone()).await;
         }
         Some(Command::Config(config_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Registry(registry_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return run_mcp_command(mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return run_memory_command(mem_cmd).await;
         }
         Some(Command::Pairing(pairing_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return run_pairing_command(pairing_cmd.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e));
         }
         #[cfg(feature = "repl")]
         Some(Command::Service(service_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::cli::run_service_command(service_cmd);
         }
         Some(Command::Doctor) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_status_command().await;
         }
         Some(Command::Reset(reset_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_reset_command(reset_cmd.clone()).await;
         }
         Some(Command::Cron(cron_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
         Some(Command::Experiments(experiments_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_experiments_command(experiments_cmd.clone()).await;
         }
         Some(Command::Gateway(gw_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_gateway_command(gw_cmd.clone()).await;
         }
         Some(Command::Identity(identity_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_identity_command(identity_cmd.clone()).await;
         }
         Some(Command::Channels(ch_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_channels_command(ch_cmd.clone()).await;
         }
         Some(Command::Message(msg_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_message_command(msg_cmd.clone()).await;
         }
         Some(Command::Models(model_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_model_command(model_cmd.clone()).await;
         }
         Some(Command::Completion(completion)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return completion.run();
         }
         #[cfg(feature = "docker-sandbox")]
@@ -215,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(Command::Agents(agent_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             // In standalone CLI mode, create a fresh router.
@@ -225,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(Command::Sessions(session_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             // In standalone CLI mode, create a fresh session manager.
@@ -235,17 +240,17 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(Command::Logs(log_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_log_command(log_cmd.clone()).await;
         }
         Some(Command::Browser(browser_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::cli::run_browser_command(browser_cmd.clone()).await;
         }
         Some(Command::Trajectory(trajectory_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return run_trajectory_command(trajectory_cmd.clone()).await;
         }
         Some(Command::ExperimentRunner {
@@ -254,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
             token,
             workspace_root,
         }) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::experiments::runner::run_remote_runner(
                 gateway_url,
                 *lease_id,
@@ -264,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
             .await;
         }
         Some(Command::Update(update_cmd)) => {
-            init_cli_tracing();
+            init_cli_tracing(cli.debug);
             return thinclaw::cli::run_update_command(update_cmd.clone()).await;
         }
         None | Some(Command::Run) => {
@@ -306,13 +311,28 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
+    #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
+    let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
+        cli.should_run_agent(),
+        cli.debug,
+        cli.message.is_some(),
+        config.channels.cli.enabled,
+        std::env::var_os("RUST_LOG").is_some(),
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
+        Some(QuietStartupSpinner::start())
+    } else {
+        None
+    };
+
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
     let log_level_handle =
-        thinclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+        thinclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster), cli.debug);
 
     tracing::info!("Starting ThinClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
@@ -754,6 +774,44 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Register lifecycle hooks.
+    let send_message_channels = Arc::clone(&channels);
+    let email_channel = if config.channels.apple_mail.is_some() {
+        Some("apple_mail".to_string())
+    } else if config.channels.gmail.is_some() {
+        Some("gmail".to_string())
+    } else {
+        None
+    };
+    components.tools.register_send_message_tool(Some(Arc::new(
+        move |platform, recipient, text, thread_id| {
+            let channels = Arc::clone(&send_message_channels);
+            let email_channel = email_channel.clone();
+            Box::pin(async move {
+                let channel_name = match platform.as_str() {
+                    "email" => email_channel
+                        .as_deref()
+                        .ok_or_else(|| "No email channel is configured.".to_string())?,
+                    other => other,
+                };
+
+                channels
+                    .broadcast(
+                        channel_name,
+                        &recipient,
+                        thinclaw::channels::OutgoingResponse {
+                            content: text,
+                            thread_id,
+                            metadata: serde_json::Value::Null,
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                Ok(uuid::Uuid::new_v4().to_string())
+            })
+        },
+    )));
+
     let active_tool_names = components.tools.list().await;
 
     let hook_bootstrap = bootstrap_hooks(
@@ -903,6 +961,10 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "repl")]
     if config.channels.cli.enabled && cli.message.is_none() {
+        if let Some(mut spinner) = quiet_startup_spinner.take() {
+            spinner.stop();
+        }
+
         let boot_tool_count = components.tools.count();
         let boot_llm_model = components.llm.active_model_name();
         let boot_cheap_model = components.cheap_llm.as_ref().map(|c| c.active_model_name());
@@ -963,6 +1025,8 @@ async fn main() -> anyhow::Result<()> {
         thinclaw::boot_screen::print_boot_screen(&boot_info);
     }
 
+    drop(quiet_startup_spinner);
+
     // ── Run the agent ──────────────────────────────────────────────────
 
     // Wire up channel runtime for hot-activation of WASM channels.
@@ -1015,6 +1079,35 @@ async fn main() -> anyhow::Result<()> {
 
     // Clone the SSE sender for the routine engine before the extension manager consumes it.
     let routine_sse_sender = sse_sender.clone();
+
+    if let Some(ref runtime) = components.wasm_tool_runtime {
+        let mut loader = thinclaw::tools::wasm::WasmToolLoader::new(
+            Arc::clone(runtime),
+            Arc::clone(&components.tools),
+        );
+        if let Some(ref secrets) = components.secrets_store {
+            loader = loader.with_secrets_store(Arc::clone(secrets));
+        }
+        let tool_watcher = thinclaw::tools::wasm::ToolWatcher::new(
+            config.wasm.tools_dir.clone(),
+            Arc::new(loader),
+            Arc::clone(&components.tools),
+        );
+        tool_watcher.seed_from_sources().await;
+        tool_watcher.start().await;
+        tracing::info!(
+            "WASM tool hot-reload watcher started (new/modified/deleted tools auto-detected)"
+        );
+    }
+
+    if let Some(ref skill_registry) = components.skill_registry {
+        let skill_watcher = thinclaw::skills::SkillWatcher::new(Arc::clone(skill_registry));
+        skill_watcher.seed_from_registry().await;
+        skill_watcher.start().await;
+        tracing::info!(
+            "Skill hot-reload watcher started (new/modified/deleted SKILL.md files auto-detected)"
+        );
+    }
 
     // ── SIGHUP hot-reload handler (Unix only) ──────────────────────────
     #[cfg(unix)]
@@ -1172,6 +1265,13 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref sender) = routine_sse_sender {
             executor = executor.with_sse_tx(sender.clone());
+        }
+        if let Some(ref workspace) = components.workspace {
+            executor = executor.with_workspace(Arc::clone(workspace));
+        }
+        if let Some(ref skill_registry) = components.skill_registry {
+            executor =
+                executor.with_skill_registry(Arc::clone(skill_registry), config.skills.clone());
         }
         executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
 

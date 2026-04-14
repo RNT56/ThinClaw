@@ -1,6 +1,6 @@
 //! Experiments API — optional research automation with local and remote runners.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -39,6 +39,51 @@ const STALE_LEASE_GRACE_MINUTES: i64 = 10;
 const DEFAULT_EXPERIMENT_USER_ID: &str = "default";
 const RESEARCH_SUBAGENT_CHANNEL: &str = "tauri";
 const RESEARCH_SUBAGENT_THREAD_ID: &str = "agent:research";
+const RESEARCH_SHARED_TOOL_DENYLIST: &[&str] = &[
+    "send_message",
+    "tool_search",
+    "tool_install",
+    "tool_auth",
+    "tool_activate",
+    "tool_list",
+    "tool_remove",
+    "skill_install",
+    "skill_remove",
+    "skill_reload",
+    "skill_manage",
+    "prompt_manage",
+    "memory_write",
+    "memory_delete",
+    "tts",
+    "apple_mail",
+    "create_agent",
+    "list_agents",
+    "update_agent",
+    "remove_agent",
+    "message_agent",
+    "create_job",
+    "list_jobs",
+    "job_status",
+    "cancel_job",
+    "job_events",
+    "job_prompt",
+    "routine_create",
+    "routine_list",
+    "routine_update",
+    "routine_delete",
+    "routine_history",
+];
+const RESEARCH_READ_ONLY_TOOL_DENYLIST: &[&str] = &[
+    "write_file",
+    "apply_patch",
+    "shell",
+    "execute_code",
+    "process",
+    "build_software",
+    "canvas",
+    "homeassistant",
+];
+const RESEARCH_MUTATOR_TOOL_DENYLIST: &[&str] = &["canvas", "homeassistant"];
 
 static RESEARCH_SUBAGENT_EXECUTOR: OnceLock<Arc<SubagentExecutor>> = OnceLock::new();
 static RESEARCH_SECRETS_STORE: OnceLock<Arc<dyn SecretsStore + Send + Sync>> = OnceLock::new();
@@ -3163,12 +3208,12 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
     role_name: &str,
     task: String,
     system_prompt: String,
-    allowed_tools: Vec<String>,
     channel_metadata: serde_json::Value,
 ) -> ApiResult<T> {
     let executor = research_subagent_executor().ok_or_else(|| {
         ApiError::Unavailable("Research subagent executor is not available.".to_string())
     })?;
+    let (allowed_tools, allowed_skills) = research_subagent_capabilities(role_name).await?;
     let result = executor
         .spawn(
             SubagentSpawnRequest {
@@ -3177,7 +3222,7 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
                 system_prompt: Some(system_prompt),
                 model: None,
                 allowed_tools: Some(allowed_tools),
-                allowed_skills: None,
+                allowed_skills,
                 principal_id: Some(DEFAULT_EXPERIMENT_USER_ID.to_string()),
                 actor_id: Some(DEFAULT_EXPERIMENT_USER_ID.to_string()),
                 agent_workspace_id: None,
@@ -3200,6 +3245,40 @@ async fn spawn_research_subagent<T: DeserializeOwned>(
         ));
     }
     parse_json_response(&result.response)
+}
+
+async fn research_subagent_capabilities(
+    role_name: &str,
+) -> ApiResult<(Vec<String>, Option<Vec<String>>)> {
+    let executor = research_subagent_executor().ok_or_else(|| {
+        ApiError::Unavailable("Research subagent executor is not available.".to_string())
+    })?;
+
+    let mut denylist: HashSet<&'static str> =
+        RESEARCH_SHARED_TOOL_DENYLIST.iter().copied().collect();
+    match role_name {
+        "planner" | "reviewer" => {
+            denylist.extend(RESEARCH_READ_ONLY_TOOL_DENYLIST.iter().copied());
+        }
+        "mutator" => {
+            denylist.extend(RESEARCH_MUTATOR_TOOL_DENYLIST.iter().copied());
+        }
+        _ => {}
+    }
+
+    let mut allowed_tools = executor.autonomous_tool_names().await;
+    allowed_tools.retain(|tool_name| !denylist.contains(tool_name.as_str()));
+    allowed_tools.sort();
+    allowed_tools.dedup();
+
+    let allowed_skills = executor.available_skill_names().await;
+    let allowed_skills = if allowed_skills.is_empty() {
+        None
+    } else {
+        Some(allowed_skills)
+    };
+
+    Ok((allowed_tools, allowed_skills))
 }
 
 fn recent_trial_context(trials: &[ExperimentTrial]) -> String {
@@ -3263,11 +3342,6 @@ async fn run_planner_subagent(
         "planner",
         task,
         system_prompt,
-        vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep".to_string(),
-        ],
         research_channel_metadata(campaign, trial_id, "planner", &[]),
     )
     .await
@@ -3317,13 +3391,6 @@ async fn run_mutator_subagent(
         "mutator",
         task,
         system_prompt,
-        vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep".to_string(),
-            "write_file".to_string(),
-            "apply_patch".to_string(),
-        ],
         research_channel_metadata(campaign, trial_id, "mutator", &planner.target_ids),
     )
     .await
@@ -3363,11 +3430,6 @@ async fn run_reviewer_subagent(
         "reviewer",
         task,
         system_prompt,
-        vec![
-            "read_file".to_string(),
-            "list_dir".to_string(),
-            "grep".to_string(),
-        ],
         research_channel_metadata(campaign, trial_id, "reviewer", &planner.target_ids),
     )
     .await

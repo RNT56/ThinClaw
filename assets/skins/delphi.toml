@@ -19,3 +19,11 @@ ascii_art = [
   '           `-.________.-`',
 ]
 tool_emojis = { shell = "🔥", browser = "🔮", memory = "🌿", search_files = "📖", todo = "🏛️", subagent = "🪄" }
+
+[web]
+aura_primary = "#9B6EF3"
+aura_secondary = "#5B3E96"
+chrome_style = "oracle"
+surface_pattern = "haze"
+message_shape = "rounded"
+elevation = "high"

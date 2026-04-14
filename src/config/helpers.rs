@@ -1,6 +1,6 @@
 use crate::error::ConfigError;
 
-use super::{BRIDGE_VARS, INJECTED_VARS};
+use super::{BRIDGE_VARS, INJECTED_VARS, SYNCED_OAUTH_VARS};
 
 /// Crate-wide mutex for tests that mutate process environment variables.
 ///
@@ -62,6 +62,20 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     }
 
     Ok(None)
+}
+
+/// Read a token from the explicit external-auth sync overlay.
+///
+/// Unlike `optional_env()`, this never falls back to real env vars because the
+/// caller is specifically asking for a synced external credential.
+pub(crate) fn synced_oauth_env(key: &str) -> Option<String> {
+    if let Ok(guard) = SYNCED_OAUTH_VARS.read()
+        && let Some(val) = guard.get(key)
+        && !val.is_empty()
+    {
+        return Some(val.clone());
+    }
+    None
 }
 
 pub(crate) fn parse_optional_env<T>(key: &str, default: T) -> Result<T, ConfigError>

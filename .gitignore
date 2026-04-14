@@ -25,9 +25,16 @@ thinclaw_upgrade.md
 branding.md
 tls_unification_plan.md
 server_decomposition_plan.md
+database_divergence_plan.md
 agent_skill_system_audit.md
 agent_flows_architecture.md
+Agent_flow.md
+audit.md
 AGENTS.md
+
+# Stale rewrite/audit planning directories (fully implemented)
+rewrite-docs/
+docs-audit/
 
 # OS System Files
 .DS_Store

@@ -50,6 +50,7 @@ pub mod app;
 #[cfg(feature = "repl")]
 pub mod boot_screen;
 pub mod bootstrap;
+pub mod branding;
 pub mod channels;
 pub mod cli;
 pub mod config;

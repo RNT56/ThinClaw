@@ -14,6 +14,32 @@ use super::helpers::{
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
+    fn set_provider_credential_mode(
+        &mut self,
+        provider_slug: &str,
+        mode: crate::settings::ProviderCredentialMode,
+    ) {
+        if mode == crate::settings::ProviderCredentialMode::ApiKey {
+            self.settings
+                .providers
+                .provider_credential_modes
+                .remove(provider_slug);
+        } else {
+            self.settings
+                .providers
+                .provider_credential_modes
+                .insert(provider_slug.to_string(), mode);
+        }
+
+        self.settings.providers.oauth_sync_enabled = self
+            .settings
+            .providers
+            .provider_credential_modes
+            .values()
+            .any(|entry| *entry == crate::settings::ProviderCredentialMode::ExternalOAuthSync)
+            || !self.settings.providers.oauth_sync_sources.is_empty();
+    }
+
     fn sync_primary_provider_settings(&mut self, provider_slug: &str) {
         self.settings.providers.primary = Some(provider_slug.to_string());
         if !self
@@ -67,6 +93,46 @@ impl SetupWizard {
                 "llama_cpp" => "llama.cpp".to_string(),
                 other => other.to_string(),
             })
+    }
+
+    fn offer_external_auth_sync(
+        &mut self,
+        provider_slug: &str,
+        display_name: &str,
+    ) -> Result<bool, SetupError> {
+        let Some(kind) = crate::llm::credential_sync::provider_oauth_source_kind(provider_slug)
+        else {
+            return Ok(false);
+        };
+        if !crate::llm::credential_sync::oauth_source_available(kind) {
+            return Ok(false);
+        }
+
+        let source_label = crate::llm::credential_sync::oauth_source_label(kind);
+        let source_location = crate::llm::credential_sync::oauth_source_location_hint(kind);
+        print_info(&format!(
+            "Detected {} for {} ({})",
+            source_label, display_name, source_location
+        ));
+
+        if confirm(
+            &format!("Use detected {} instead of an API key?", source_label),
+            false,
+        )
+        .map_err(SetupError::Io)?
+        {
+            self.set_provider_credential_mode(
+                provider_slug,
+                crate::settings::ProviderCredentialMode::ExternalOAuthSync,
+            );
+            print_success(&format!(
+                "{} configured to use external auth sync",
+                display_name
+            ));
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn suggested_cheap_model_for_provider(
@@ -950,6 +1016,10 @@ impl SetupWizard {
                         tracing::warn!("Failed to persist env key to secrets: {}", e);
                     }
                 }
+                self.set_provider_credential_mode(
+                    backend,
+                    crate::settings::ProviderCredentialMode::ApiKey,
+                );
                 self.llm_api_key = Some(SecretString::from(existing));
                 if let Some(primary_slug) = self.primary_provider_slug().map(str::to_string) {
                     self.ensure_provider_slot_defaults(&primary_slug);
@@ -957,6 +1027,10 @@ impl SetupWizard {
                 print_success(&format!("{display_name} configured (from env)"));
                 return Ok(());
             }
+        }
+
+        if self.offer_external_auth_sync(backend, display_name)? {
+            return Ok(());
         }
 
         println!();
@@ -983,6 +1057,7 @@ impl SetupWizard {
         }
 
         // Cache key in memory for model fetching later in the wizard
+        self.set_provider_credential_mode(backend, crate::settings::ProviderCredentialMode::ApiKey);
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
         if let Some(primary_slug) = self.primary_provider_slug().map(str::to_string) {
             self.ensure_provider_slot_defaults(&primary_slug);
@@ -1010,6 +1085,10 @@ impl SetupWizard {
                         tracing::warn!("Failed to persist env key to secrets: {}", e);
                     }
                 }
+                self.set_provider_credential_mode(
+                    provider_slug,
+                    crate::settings::ProviderCredentialMode::ApiKey,
+                );
                 if !self
                     .settings
                     .providers
@@ -1026,6 +1105,23 @@ impl SetupWizard {
                 print_success(&format!("{display_name} configured"));
                 return Ok(());
             }
+        }
+
+        if self.offer_external_auth_sync(provider_slug, display_name)? {
+            if !self
+                .settings
+                .providers
+                .enabled
+                .iter()
+                .any(|slug| slug == provider_slug)
+            {
+                self.settings
+                    .providers
+                    .enabled
+                    .push(provider_slug.to_string());
+            }
+            self.ensure_provider_slot_defaults(provider_slug);
+            return Ok(());
         }
 
         println!();
@@ -1047,6 +1143,10 @@ impl SetupWizard {
                 "Secrets aren't available. Set {env_var} in your environment."
             ));
         }
+        self.set_provider_credential_mode(
+            provider_slug,
+            crate::settings::ProviderCredentialMode::ApiKey,
+        );
 
         if !self
             .settings

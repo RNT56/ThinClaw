@@ -23,6 +23,7 @@ pub mod quarantine;
 pub mod registry;
 pub mod remote_source;
 pub mod selector;
+pub mod watcher;
 pub mod well_known_source;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
@@ -31,6 +32,7 @@ pub use quarantine::QuarantineManager;
 pub use registry::SkillRegistry;
 pub use remote_source::{RemoteSkill, RemoteSkillHub, RemoteSkillSource};
 pub use selector::prefilter_skills;
+pub use watcher::{SkillWatcher, SkillWatcherConfig};
 pub use well_known_source::WellKnownSkillSource;
 
 use std::path::PathBuf;

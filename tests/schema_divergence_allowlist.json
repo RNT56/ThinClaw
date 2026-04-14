@@ -1,0 +1,31 @@
+{
+  "ignore_tables": [
+    "_migrations",
+    "refinery_schema_history",
+    "conversation_messages_fts",
+    "conversation_messages_fts_config",
+    "conversation_messages_fts_data",
+    "conversation_messages_fts_docsize",
+    "conversation_messages_fts_idx",
+    "memory_chunks_fts",
+    "memory_chunks_fts_config",
+    "memory_chunks_fts_data",
+    "memory_chunks_fts_docsize",
+    "memory_chunks_fts_idx",
+    "memory_documents_summary",
+    "chunks_pending_embedding",
+    "idx_memory_chunks_embedding_shadow",
+    "libsql_vector_meta_shadow",
+    "active_leak_patterns",
+    "recent_leak_events",
+    "wasm_tools_with_capabilities"
+  ],
+  "ignore_columns": [
+    "memory_chunks.content_tsv",
+    "memory_chunks.embedding",
+    "memory_chunks._rowid",
+    "memory_chunks.embedding_blob",
+    "memory_chunks.embedding_dim"
+  ],
+  "allowed_exact": []
+}

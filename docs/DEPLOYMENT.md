@@ -38,6 +38,20 @@ thinclaw onboard
 thinclaw run --no-onboard
 ```
 
+Startup logging defaults to a quiet operator experience: `thinclaw` and `thinclaw run` both show warnings and errors, not the full initialization trace. For a verbose startup session, use either:
+
+```bash
+thinclaw --debug --no-onboard
+thinclaw --debug run --no-onboard
+```
+
+If the runtime is already up and you want to inspect logs without restarting, use the logs CLI:
+
+```bash
+thinclaw logs tail
+thinclaw logs tail -l error
+```
+
 Then open:
 
 ```text
@@ -102,6 +116,8 @@ The service path runs:
 ```bash
 thinclaw run --no-onboard
 ```
+
+If you are diagnosing a service startup problem, prefer your service manager's journal first, then run the same command manually with `--debug` for a verbose foreground boot.
 
 Useful commands:
 
@@ -199,6 +215,8 @@ Check:
 - you did not override `GATEWAY_PORT`
 - the gateway is enabled for the current deployment
 
+For deeper startup diagnostics, run `thinclaw --debug --no-onboard` or `thinclaw --debug run --no-onboard` in the foreground.
+
 ### The host is reachable locally but not from another machine
 
 Check:
@@ -223,3 +241,10 @@ When there is a disagreement:
 - setup behavior is owned by [../src/setup/README.md](../src/setup/README.md) and the wizard code
 - deployment defaults are owned by the config/runtime code and this guide
 - broad overview docs should be updated to match those canonicals
+
+## Logging Expectations
+
+- `thinclaw` and `thinclaw run` share the same default startup behavior and only show warnings and errors
+- `thinclaw --debug` and `thinclaw --debug run` enable verbose terminal logs for troubleshooting
+- `RUST_LOG=...` remains available for custom filtering and overrides the default terminal behavior
+- after startup, prefer `thinclaw logs ...` or the gateway log viewer when you want to inspect runtime events without restarting

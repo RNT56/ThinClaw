@@ -64,6 +64,15 @@ thinclaw run --no-onboard
 # http://127.0.0.1:3000
 ```
 
+By default, `thinclaw` and `thinclaw run` use the same startup path and keep terminal output quiet, only surfacing warnings and errors during startup. If you want the full initialization log stream for troubleshooting, start it with either:
+
+```bash
+thinclaw --debug --no-onboard
+thinclaw --debug run --no-onboard
+```
+
+If you need more targeted filtering, `RUST_LOG=...` still works and takes precedence.
+
 For a deeper setup path, including service mode, remote access, and provider guidance, use the docs hub at [docs/README.md](docs/README.md).
 
 The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, and saved follow-up notes so operators can pause setup without losing context.
@@ -135,11 +144,12 @@ Code-backed local default: the gateway listens on port `3000` unless you configu
 
 ## Terminal Skins
 
-Local terminal clients use the active CLI skin for palette, prompt symbol, tool labels, boot art, and human-readable command presentation.
+Local terminal clients use the active CLI skin for palette, prompt symbol, tool labels, boot art, and human-readable command presentation. The WebUI now follows the active CLI skin by default and can optionally override it with a dedicated WebUI skin.
 
 - Built-in skins: `cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`
 - Runtime switching in local clients: `/skin`, `/skin list`, `/skin reset`
 - Persistent default: `AGENT_CLI_SKIN=<name>`
+- WebUI follow/override: `WEBCHAT_SKIN=<name>` or leave unset to follow `AGENT_CLI_SKIN`
 - Custom skins: drop `name.toml` files into `~/.thinclaw/skins/`
 
 Skin TOML files now support:
@@ -149,6 +159,11 @@ Skin TOML files now support:
 - ASCII banner art: `ascii_art`
 - optional skin subtitle: `tagline`
 - tool label embellishments: `tool_emojis`
+- optional WebUI aura colors: `[web].aura_primary`, `[web].aura_secondary`
+
+Legacy compatibility note:
+
+- `WEBCHAT_ACCENT_COLOR` still works, but it only retints accent surfaces in the WebUI and does not replace the shared skin identity, tagline, prompt symbol, or tool iconography
 
 ## Security And Trust
 

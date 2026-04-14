@@ -45,34 +45,28 @@ pub(crate) fn render_index_html(webchat: &crate::config::WebChatConfig) -> Strin
         ),
     );
 
-    let inline_css = render_webchat_inline_css(webchat);
-    if !inline_css.is_empty() {
+    let runtime_css = webchat.runtime_css();
+    if !runtime_css.is_empty() {
         html = html.replace(
             "</head>",
-            &format!("  <style id=\"webchat-runtime-theme\">{inline_css}</style>\n</head>"),
+            &format!("  <style id=\"webchat-runtime-theme\">{runtime_css}</style>\n</head>"),
         );
     }
 
-    html
+    let payload = webchat.bootstrap_payload();
+    let payload_json = escape_json_for_html(
+        &serde_json::to_string(&payload).expect("webchat bootstrap payload serializes"),
+    );
+    html.replace(
+        "<script src=\"/app.js\"></script>",
+        &format!(
+            "<script id=\"webchat-bootstrap\" type=\"application/json\">{payload_json}</script>\n  <script src=\"/app.js\"></script>"
+        ),
+    )
 }
 
-pub(crate) fn render_webchat_inline_css(webchat: &crate::config::WebChatConfig) -> String {
-    let Some(accent) = webchat
-        .accent_color
-        .as_deref()
-        .filter(|value| is_safe_hex_color(value))
-    else {
-        return String::new();
-    };
-
-    format!(":root {{ --accent: {accent}; --accent-hover: {accent}; }}")
-}
-
-pub(crate) fn is_safe_hex_color(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    matches!(bytes.len(), 4 | 7 | 9)
-        && bytes.first() == Some(&b'#')
-        && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+fn escape_json_for_html(value: &str) -> String {
+    value.replace("</", "<\\/")
 }
 
 pub(crate) async fn css_handler() -> impl IntoResponse {
@@ -113,4 +107,23 @@ pub(crate) async fn apple_touch_icon_handler() -> impl IntoResponse {
         ],
         include_bytes!("static/apple-touch-icon.png").as_slice(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_index_html_includes_bootstrap_payload() {
+        let html = render_index_html(&crate::config::WebChatConfig::default());
+        assert!(html.contains("webchat-bootstrap"));
+        assert!(html.contains("availableSkins"));
+        assert!(html.contains("resolvedSkin"));
+    }
+
+    #[test]
+    fn escape_json_for_html_escapes_script_closers() {
+        let escaped = escape_json_for_html("{\"x\":\"</script>\"}");
+        assert!(escaped.contains("<\\/script>"));
+    }
 }

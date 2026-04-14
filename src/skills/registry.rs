@@ -107,6 +107,19 @@ impl SkillRegistry {
         self
     }
 
+    /// Return the configured directories that participate in discovery.
+    pub fn discovery_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(dir) = self.workspace_dir.as_ref() {
+            dirs.push(dir.clone());
+        }
+        dirs.push(self.user_dir.clone());
+        if let Some(dir) = self.installed_dir.as_ref() {
+            dirs.push(dir.clone());
+        }
+        dirs
+    }
+
     /// Discover and load skills from all configured directories.
     ///
     /// Discovery order (earlier wins on name collision):

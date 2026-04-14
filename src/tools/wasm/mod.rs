@@ -84,6 +84,7 @@ mod loader;
 mod rate_limiter;
 mod runtime;
 mod storage;
+mod watcher;
 mod wrapper;
 
 // Core types
@@ -126,6 +127,7 @@ pub use loader::{
     DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_dev_tools, discover_tools,
     load_dev_tools, resolve_wasm_target_dir, wasm_artifact_path,
 };
+pub use watcher::{ToolWatcher, ToolWatcherConfig};
 
 // Capabilities schema (for parsing *.capabilities.json files)
 pub use capabilities_schema::{

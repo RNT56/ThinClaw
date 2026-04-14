@@ -37,14 +37,15 @@ use crate::agent::learning::{
 use crate::agent::routine::RunStatus;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
+use crate::config::SkillsConfig;
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::identity::ResolvedIdentity;
-use crate::llm::{
-    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
-};
+use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
+use crate::skills::{LoadedSkill, SkillRegistry, prefilter_skills};
 use crate::tools::ToolRegistry;
+use crate::workspace::Workspace;
 
 /// Maximum tool iterations for a sub-agent (less than the main agent).
 const SUBAGENT_MAX_ITERATIONS: usize = 30;
@@ -359,6 +360,12 @@ pub struct SubagentExecutor {
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Optional shared cost tracker for sub-agent LLM calls.
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Optional workspace for loading identity/system prompt context.
+    workspace: Option<Arc<Workspace>>,
+    /// Optional skill registry for skill discovery in sub-agents.
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+    /// Optional skills config for deterministic skill prefiltering.
+    skills_config: Option<SkillsConfig>,
 }
 
 impl SubagentExecutor {
@@ -385,6 +392,9 @@ impl SubagentExecutor {
             store: None,
             sse_tx: None,
             cost_tracker: None,
+            workspace: None,
+            skill_registry: None,
+            skills_config: None,
         };
         (executor, result_rx)
     }
@@ -408,6 +418,51 @@ impl SubagentExecutor {
     ) -> Self {
         self.cost_tracker = Some(tracker);
         self
+    }
+
+    /// Set the workspace so sub-agents can inherit identity/system prompt files.
+    pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
+    /// Set the skill registry/config so sub-agents can discover skills.
+    pub fn with_skill_registry(
+        mut self,
+        skill_registry: Arc<RwLock<SkillRegistry>>,
+        skills_config: SkillsConfig,
+    ) -> Self {
+        self.skill_registry = Some(skill_registry);
+        self.skills_config = Some(skills_config);
+        self
+    }
+
+    /// Return the current autonomous tool names available to sub-agents.
+    pub async fn autonomous_tool_names(&self) -> Vec<String> {
+        let mut names = self
+            .tools
+            .tool_definitions_for_autonomous()
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// Return the currently loaded skill names available to sub-agents.
+    pub async fn available_skill_names(&self) -> Vec<String> {
+        let Some(skill_registry) = self.skill_registry.as_ref() else {
+            return Vec::new();
+        };
+        let guard = skill_registry.read().await;
+        let mut names = guard
+            .skills()
+            .iter()
+            .map(|skill| skill.manifest.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     /// Spawn a sub-agent.
@@ -512,6 +567,9 @@ impl SubagentExecutor {
         let agent_workspace_id = request.agent_workspace_id;
         let parent_user_id = parent_user_id.to_string();
         let parent_identity = parent_identity.cloned();
+        let workspace = self.workspace.clone();
+        let skill_registry = self.skill_registry.clone();
+        let skills_config = self.skills_config.clone();
 
         // For the result injection message
         let parent_thread_id = parent_thread_id
@@ -582,6 +640,9 @@ impl SubagentExecutor {
                     principal_id.as_deref(),
                     actor_id.as_deref(),
                     agent_workspace_id,
+                    workspace,
+                    skill_registry,
+                    skills_config,
                     &id.to_string(),
                     activity_tx,
                     cost_tracker_for_task.clone(),
@@ -988,6 +1049,9 @@ async fn run_subagent_loop(
     principal_id: Option<&str>,
     actor_id: Option<&str>,
     agent_workspace_id: Option<Uuid>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+    skills_config: Option<SkillsConfig>,
     agent_id: &str,
     activity_tx: watch::Sender<Instant>,
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
@@ -1032,14 +1096,25 @@ async fn run_subagent_loop(
         }
     }
 
-    // Build tool definitions (filtered if needed)
-    let tool_defs: Vec<ToolDefinition> = tools
-        .tool_definitions_for_capabilities(allowed_tools, allowed_skills)
-        .await;
-
+    let combined_system_prompt = build_subagent_system_prompt(
+        system_prompt,
+        task,
+        channel_name,
+        &job_ctx.metadata,
+        principal_id,
+        actor_id,
+        agent_workspace_id,
+        workspace,
+        skill_registry,
+        skills_config,
+        allowed_skills,
+        &safety,
+        agent_id,
+    )
+    .await;
     let model_name = llm.active_model_name();
     let mut reasoning = Reasoning::new(llm, safety.clone())
-        .with_system_prompt(system_prompt.to_string())
+        .with_system_prompt(combined_system_prompt)
         .with_model_name(model_name);
     // Wire cost tracker so sub-agent LLM calls appear in the Cost Dashboard
     if let Some(ref tracker) = cost_tracker {
@@ -1074,7 +1149,9 @@ async fn run_subagent_loop(
             available_tools: if force_text {
                 vec![]
             } else {
-                tool_defs.clone()
+                tools
+                    .tool_definitions_for_capabilities(allowed_tools, allowed_skills)
+                    .await
             },
             job_description: None,
             current_state: None,
@@ -1289,6 +1366,193 @@ async fn run_subagent_loop(
         name: "subagent".to_string(),
         reason: format!("Exceeded maximum iterations ({})", max_iterations),
     }))
+}
+
+async fn build_subagent_system_prompt(
+    base_system_prompt: &str,
+    task: &str,
+    channel_name: &str,
+    channel_metadata: &serde_json::Value,
+    principal_id: &str,
+    actor_id: &str,
+    agent_workspace_id: Option<Uuid>,
+    workspace: Option<Arc<Workspace>>,
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+    skills_config: Option<SkillsConfig>,
+    allowed_skills: Option<&[String]>,
+    safety: &SafetyLayer,
+    agent_id: &str,
+) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(workspace_prompt) = build_subagent_workspace_prompt(
+        workspace,
+        channel_name,
+        channel_metadata,
+        principal_id,
+        actor_id,
+        agent_workspace_id,
+        safety,
+        agent_id,
+    )
+    .await
+    {
+        sections.push(workspace_prompt);
+    }
+
+    sections.push(format!("## Sub-agent Mission\n\n{base_system_prompt}"));
+
+    if let Some(skill_context) =
+        build_subagent_skill_context(skill_registry, skills_config, task, allowed_skills).await
+    {
+        sections.push(format!("## Skills\n{skill_context}"));
+    }
+
+    sections.join("\n\n")
+}
+
+async fn build_subagent_workspace_prompt(
+    workspace: Option<Arc<Workspace>>,
+    channel_name: &str,
+    channel_metadata: &serde_json::Value,
+    principal_id: &str,
+    actor_id: &str,
+    agent_workspace_id: Option<Uuid>,
+    safety: &SafetyLayer,
+    agent_id: &str,
+) -> Option<String> {
+    let base_workspace = workspace?;
+    let effective_workspace = if let Some(workspace_id) = agent_workspace_id {
+        Arc::new(base_workspace.as_ref().clone().with_agent(workspace_id))
+    } else {
+        base_workspace
+    };
+
+    let conversation_kind = match channel_metadata
+        .get("conversation_kind")
+        .and_then(|value| value.as_str())
+    {
+        Some("group" | "channel" | "supergroup") => ConversationKind::Group,
+        _ => ConversationKind::Direct,
+    };
+    let thread_key = channel_metadata
+        .get("thread_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or(agent_id);
+    let external_key = format!("subagent:{channel_name}:{thread_key}:{actor_id}");
+    let identity = ResolvedIdentity {
+        principal_id: principal_id.to_string(),
+        actor_id: actor_id.to_string(),
+        conversation_scope_id: scope_id_from_key(&external_key),
+        conversation_kind,
+        raw_sender_id: actor_id.to_string(),
+        stable_external_conversation_key: external_key,
+    };
+
+    match effective_workspace
+        .system_prompt_for_identity(
+            Some(&identity),
+            channel_name,
+            safety.redact_pii_in_prompts(),
+        )
+        .await
+    {
+        Ok(prompt) if !prompt.is_empty() => Some(prompt),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(error = %error, "Could not load sub-agent workspace prompt");
+            None
+        }
+    }
+}
+
+async fn build_subagent_skill_context(
+    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+    skills_config: Option<SkillsConfig>,
+    task: &str,
+    allowed_skills: Option<&[String]>,
+) -> Option<String> {
+    let skill_registry = skill_registry?;
+    let guard = skill_registry.read().await;
+    let allowed_names = allowed_skills.map(|skills| {
+        skills
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let available_skills: Vec<LoadedSkill> = guard
+        .skills()
+        .iter()
+        .filter(|skill| {
+            allowed_names
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(skill.manifest.name.as_str()))
+        })
+        .cloned()
+        .collect();
+    if available_skills.is_empty() {
+        return None;
+    }
+
+    let config = skills_config.unwrap_or_default();
+    let active_skills = prefilter_skills(
+        task,
+        &available_skills,
+        config.max_active_skills,
+        config.max_context_tokens,
+    )
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+
+    let mut sections = Vec::new();
+    if !active_skills.is_empty() {
+        let mut active_lines = vec!["### Active Skills".to_string()];
+        for skill in &active_skills {
+            active_lines.push(format!(
+                "- **{}** (v{}, {}): {}",
+                skill.name(),
+                skill.version(),
+                skill.trust,
+                skill.manifest.description,
+            ));
+        }
+        active_lines.push(
+            "\nUse `skill_read` with the skill name to load full instructions before using a skill."
+                .to_string(),
+        );
+        sections.push(active_lines.join("\n"));
+    }
+
+    let active_names = active_skills
+        .iter()
+        .map(|skill| skill.name())
+        .collect::<std::collections::HashSet<_>>();
+    let inactive = available_skills
+        .iter()
+        .filter(|skill| !active_names.contains(skill.name()))
+        .collect::<Vec<_>>();
+
+    if !inactive.is_empty() {
+        let mut available_lines = vec!["### Available Skills".to_string()];
+        for skill in inactive {
+            available_lines.push(format!(
+                "- **{}**: {}",
+                skill.name(),
+                skill.manifest.description
+            ));
+        }
+        available_lines.push(
+            "\nIf a task would benefit from one of these skills, use `skill_read` to load its full instructions first.".to_string(),
+        );
+        sections.push(available_lines.join("\n"));
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n"))
+    }
 }
 
 fn llm_metadata_from_json(value: &serde_json::Value) -> HashMap<String, String> {

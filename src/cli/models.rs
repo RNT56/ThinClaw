@@ -667,6 +667,8 @@ async fn build_verification_request(
         return match endpoint.api_style {
             crate::config::provider_catalog::ApiStyle::Anthropic => {
                 let api_key = resolve_provider_secret(
+                    slug,
+                    providers_settings,
                     endpoint.env_key_name,
                     endpoint.secret_name,
                     context.secrets_store.as_ref(),
@@ -681,6 +683,8 @@ async fn build_verification_request(
             crate::config::provider_catalog::ApiStyle::OpenAi
             | crate::config::provider_catalog::ApiStyle::OpenAiCompatible => {
                 let api_key = resolve_provider_secret(
+                    slug,
+                    providers_settings,
                     endpoint.env_key_name,
                     endpoint.secret_name,
                     context.secrets_store.as_ref(),
@@ -709,6 +713,8 @@ async fn build_verification_request(
             "anthropic.claude-3-sonnet-20240229-v1:0",
         );
         if let Some(api_key) = resolve_provider_secret(
+            "bedrock",
+            providers_settings,
             "BEDROCK_API_KEY",
             "llm_bedrock_api_key",
             context.secrets_store.as_ref(),
@@ -732,6 +738,8 @@ async fn build_verification_request(
                 .flatten()
         }) {
             let auth_header = resolve_provider_secret(
+                "bedrock",
+                providers_settings,
                 "BEDROCK_PROXY_API_KEY",
                 "llm_bedrock_proxy_api_key",
                 context.secrets_store.as_ref(),
@@ -804,10 +812,23 @@ fn bedrock_region(settings: &crate::settings::Settings) -> String {
 }
 
 async fn resolve_provider_secret(
+    slug: &str,
+    providers_settings: &crate::settings::ProvidersSettings,
     env_key: &str,
     secret_name: &str,
     secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
 ) -> Option<String> {
+    if providers_settings
+        .provider_credential_modes
+        .get(slug)
+        .copied()
+        == Some(crate::settings::ProviderCredentialMode::ExternalOAuthSync)
+        && let Some(value) = crate::config::helpers::synced_oauth_env(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
     crate::config::resolve_provider_secret_value("default", env_key, secret_name, secrets).await
 }
 

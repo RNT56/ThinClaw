@@ -183,6 +183,14 @@ pub struct MediaPipeline {
 impl MediaPipeline {
     /// Create a new pipeline with default extractors.
     pub fn new() -> Self {
+        #[cfg(not(feature = "document-extraction"))]
+        let extractors: Vec<Box<dyn MediaExtractor>> = vec![
+            Box::new(super::image::ImageExtractor::new()),
+            Box::new(super::pdf::PdfExtractor::new()),
+            Box::new(super::audio::AudioExtractor::new()),
+        ];
+
+        #[cfg(feature = "document-extraction")]
         let mut extractors: Vec<Box<dyn MediaExtractor>> = vec![
             Box::new(super::image::ImageExtractor::new()),
             Box::new(super::pdf::PdfExtractor::new()),

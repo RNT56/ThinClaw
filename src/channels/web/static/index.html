@@ -37,9 +37,13 @@
 
   <!-- Main App (hidden until authenticated) -->
   <div id="app">
-    <!-- Tab Bar -->
-    <div class="tab-bar">
-      <button class="active" data-tab="chat"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
+      <!-- Tab Bar -->
+      <div class="tab-bar">
+        <div class="web-brand-chip" id="web-brand-chip">
+          <span class="web-brand-chip-title">ThinClaw</span>
+          <span class="web-brand-chip-meta" id="web-brand-chip-meta">cockpit · ›</span>
+        </div>
+        <button class="active" data-tab="chat"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
       <button data-tab="memory"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/></svg> Memory</button>
       <button data-tab="jobs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 12-8.373 8.373a1 1 0 1 1-1.414-1.414L13.586 10.586"/><path d="m18.293 14.707 1.414-1.414a1 1 0 0 0 0-1.414l-7.586-7.586a1 1 0 0 0-1.414 0l-1.414 1.414a1 1 0 0 0 0 1.414l7.586 7.586a1 1 0 0 0 1.414 0z"/></svg> Jobs</button>
       <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
@@ -90,6 +94,7 @@
             <div class="chat-messages" id="chat-messages"></div>
             <div class="chat-status" id="chat-status"></div>
             <div class="chat-input">
+              <div class="chat-prompt-chip" id="chat-prompt-chip">›</div>
               <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
               <button id="send-btn" onclick="sendMessage()">Send</button>
             </div>

@@ -56,13 +56,21 @@ pub enum CredentialSelectionStrategy {
     Random,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthCredentialSourceKind {
     #[default]
     ClaudeCode,
     OpenAiCodex,
     JsonFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCredentialMode {
+    #[default]
+    ApiKey,
+    ExternalOAuthSync,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -147,6 +155,13 @@ pub struct ProvidersSettings {
     /// Additional or overridden external OAuth credential sources to watch.
     #[serde(default)]
     pub oauth_sync_sources: Vec<OAuthCredentialSourceConfig>,
+
+    /// Per-provider credential mode.
+    ///
+    /// Most providers use API keys. A small subset can also opt into
+    /// external auth-file sync (for example Codex or Claude Code auth).
+    #[serde(default)]
+    pub provider_credential_modes: HashMap<String, ProviderCredentialMode>,
 
     /// Master toggle for the smart routing system.
     /// When false, all requests go to the primary model even if cheap_model is set.
@@ -239,9 +254,10 @@ impl Default for ProvidersSettings {
             provider_models: HashMap::new(),
             credential_max_concurrent: default_provider_credential_max_concurrent(),
             credential_selection_strategy: CredentialSelectionStrategy::FillFirst,
-            oauth_sync_enabled: true,
+            oauth_sync_enabled: false,
             oauth_sync_poll_interval_secs: default_oauth_sync_poll_interval_secs(),
             oauth_sync_sources: Vec::new(),
+            provider_credential_modes: HashMap::new(),
             smart_routing_enabled: true,
             routing_mode: RoutingMode::PrimaryOnly,
             smart_routing_cascade: true,
@@ -660,6 +676,11 @@ pub struct Settings {
     /// WebChat theme preference: "light", "dark", or "system".
     #[serde(default = "default_webchat_theme")]
     pub webchat_theme: String,
+
+    /// Optional explicit Web UI skin override. When unset, the Web UI follows
+    /// `agent.cli_skin`.
+    #[serde(default)]
+    pub webchat_skin: Option<String>,
 
     /// Custom accent color for the web UI (hex, e.g. "#22c55e").
     #[serde(default)]

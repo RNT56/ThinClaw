@@ -76,6 +76,15 @@ pub use self::webchat::{WebChatConfig, WebChatTheme};
 static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Thread-safe overlay for explicitly enabled external auth sync sources.
+///
+/// This intentionally lives outside `optional_env()` so synced Codex/Claude
+/// auth cannot silently shadow stored provider API keys. Provider resolution
+/// consults this overlay only when the user explicitly selected
+/// `external_oauth_sync` for that provider.
+static SYNCED_OAUTH_VARS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
 /// IC-007: Thread-safe overlay for bridge-injected configuration.
 ///
 /// The Tauri bridge (`thinclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
@@ -142,6 +151,10 @@ pub fn clear_bridge_vars() {
 #[cfg(test)]
 pub(crate) fn clear_injected_vars_for_tests() {
     match INJECTED_VARS.write() {
+        Ok(mut guard) => guard.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
+    }
+    match SYNCED_OAUTH_VARS.write() {
         Ok(mut guard) => guard.clear(),
         Err(poisoned) => poisoned.into_inner().clear(),
     }
@@ -436,6 +449,29 @@ fn update_injected_vars(new_vars: HashMap<String, String>) {
             let mut guard = poisoned.into_inner();
             *guard = new_vars;
         }
+    }
+}
+
+/// Replace the synced external-auth overlay atomically.
+pub fn replace_synced_oauth_vars(new_vars: HashMap<String, String>) -> usize {
+    let count = new_vars.len();
+    match SYNCED_OAUTH_VARS.write() {
+        Ok(mut guard) => {
+            *guard = new_vars;
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = new_vars;
+        }
+    }
+    count
+}
+
+/// Clear all synced external-auth values.
+pub fn clear_synced_oauth_vars() {
+    match SYNCED_OAUTH_VARS.write() {
+        Ok(mut guard) => guard.clear(),
+        Err(poisoned) => poisoned.into_inner().clear(),
     }
 }
 

@@ -4,6 +4,7 @@
 //! database state, removes the local `~/.thinclaw` runtime directory, and
 //! deletes ThinClaw-managed keychain entries so onboarding can start cleanly.
 
+#[cfg(feature = "postgres")]
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ pub struct ResetCommand {
     pub yes: bool,
 }
 
+#[cfg(feature = "libsql")]
 const SQLITE_RESET_TABLES: &[&str] = &[
     "job_actions",
     "job_events",
@@ -54,6 +56,7 @@ const SQLITE_RESET_TABLES: &[&str] = &[
     "agent_workspaces",
 ];
 
+#[cfg(feature = "postgres")]
 const POSTGRES_RESET_TABLES: &[&str] = &[
     "conversation_messages",
     "conversations",

@@ -7,16 +7,17 @@ use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config as PoolConfig, Runtime};
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(feature = "libsql")]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 #[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 
 use crate::secrets::SecretsCrypto;
 use crate::settings::KeySource;
-use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
-};
+use crate::setup::prompts::{confirm, input, print_error, print_info, print_success, select_one};
+#[cfg(feature = "libsql")]
+use crate::setup::prompts::{optional_input, secret_input};
 
 use super::{SetupError, SetupWizard};
 

@@ -17,8 +17,20 @@ pub(crate) struct ProviderInfo {
     pub(crate) default_model: String,
     pub(crate) default_context_size: u32,
     pub(crate) has_key: bool,
+    #[serde(default)]
+    pub(crate) credential_ready: bool,
     pub(crate) env_key_name: String,
     pub(crate) auth_kind: String,
+    #[serde(default)]
+    pub(crate) auth_mode: String,
+    #[serde(default)]
+    pub(crate) oauth_supported: bool,
+    #[serde(default)]
+    pub(crate) oauth_available: bool,
+    #[serde(default)]
+    pub(crate) oauth_source_label: Option<String>,
+    #[serde(default)]
+    pub(crate) oauth_source_location: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -36,7 +48,19 @@ pub(crate) struct ProviderConfigEntry {
     #[serde(default)]
     pub(crate) has_key: bool,
     #[serde(default)]
+    pub(crate) credential_ready: bool,
+    #[serde(default)]
     pub(crate) auth_required: bool,
+    #[serde(default)]
+    pub(crate) auth_mode: String,
+    #[serde(default)]
+    pub(crate) oauth_supported: bool,
+    #[serde(default)]
+    pub(crate) oauth_available: bool,
+    #[serde(default)]
+    pub(crate) oauth_source_label: Option<String>,
+    #[serde(default)]
+    pub(crate) oauth_source_location: Option<String>,
     #[serde(default)]
     pub(crate) enabled: bool,
     #[serde(default)]
@@ -183,6 +207,44 @@ pub(crate) struct RouteSimulateScore {
     pub(crate) composite: f64,
 }
 
+struct ProviderOauthUiState {
+    supported: bool,
+    available: bool,
+    source_label: Option<String>,
+    source_location: Option<String>,
+}
+
+fn provider_auth_mode(
+    providers_settings: &crate::settings::ProvidersSettings,
+    slug: &str,
+) -> crate::settings::ProviderCredentialMode {
+    providers_settings
+        .provider_credential_modes
+        .get(slug)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn provider_oauth_ui_state(slug: &str) -> ProviderOauthUiState {
+    if let Some(kind) = crate::llm::credential_sync::provider_oauth_source_kind(slug) {
+        return ProviderOauthUiState {
+            supported: true,
+            available: crate::llm::credential_sync::oauth_source_available(kind),
+            source_label: Some(crate::llm::credential_sync::oauth_source_label(kind).to_string()),
+            source_location: Some(crate::llm::credential_sync::oauth_source_location_hint(
+                kind,
+            )),
+        };
+    }
+
+    ProviderOauthUiState {
+        supported: false,
+        available: false,
+        source_label: None,
+        source_location: None,
+    }
+}
+
 pub(crate) async fn providers_list_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<ProvidersListResponse>, StatusCode> {
@@ -205,6 +267,7 @@ pub(crate) async fn providers_list_handler(
         } else {
             false
         };
+        let oauth = provider_oauth_ui_state(slug);
 
         let api_style_str = match endpoint.api_style {
             crate::config::provider_catalog::ApiStyle::OpenAi => "openai",
@@ -220,8 +283,18 @@ pub(crate) async fn providers_list_handler(
             default_model: endpoint.default_model.to_string(),
             default_context_size: endpoint.default_context_size,
             has_key: has_env || has_secret,
+            credential_ready: has_env || has_secret,
             env_key_name: endpoint.env_key_name.to_string(),
-            auth_kind: "api_key".to_string(),
+            auth_kind: if oauth.supported {
+                "api_key_or_external_oauth_sync".to_string()
+            } else {
+                "api_key".to_string()
+            },
+            auth_mode: "api_key".to_string(),
+            oauth_supported: oauth.supported,
+            oauth_available: oauth.available,
+            oauth_source_label: oauth.source_label,
+            oauth_source_location: oauth.source_location,
         });
     }
 
@@ -237,8 +310,14 @@ pub(crate) async fn providers_list_handler(
         default_model: "default".to_string(),
         default_context_size: 128_000,
         has_key: compat_has_key,
+        credential_ready: compat_has_key,
         env_key_name: "LLM_API_KEY".to_string(),
         auth_kind: "api_key".to_string(),
+        auth_mode: "api_key".to_string(),
+        oauth_supported: false,
+        oauth_available: false,
+        oauth_source_label: None,
+        oauth_source_location: None,
     });
 
     let bedrock_has_key = crate::config::helpers::optional_env("BEDROCK_API_KEY")
@@ -262,8 +341,14 @@ pub(crate) async fn providers_list_handler(
         default_model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
         default_context_size: 200_000,
         has_key: bedrock_has_key,
+        credential_ready: bedrock_has_key,
         env_key_name: "BEDROCK_API_KEY".to_string(),
         auth_kind: "api_key".to_string(),
+        auth_mode: "api_key".to_string(),
+        oauth_supported: false,
+        oauth_available: false,
+        oauth_source_label: None,
+        oauth_source_location: None,
     });
 
     providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
@@ -339,6 +424,8 @@ pub(crate) async fn build_routing_provider_entries(
             .flatten()
             .is_some();
         let has_secret = secret_exists(secrets, user_id, endpoint.secret_name).await;
+        let auth_mode = provider_auth_mode(providers_settings, slug);
+        let oauth = provider_oauth_ui_state(slug);
         let primary_model = provider_primary_model_for_slug(
             settings,
             providers_settings,
@@ -364,7 +451,23 @@ pub(crate) async fn build_routing_provider_entries(
             default_model: endpoint.default_model.to_string(),
             env_key_name: endpoint.env_key_name.to_string(),
             has_key: has_env || has_secret,
+            credential_ready: if auth_mode
+                == crate::settings::ProviderCredentialMode::ExternalOAuthSync
+            {
+                oauth.available
+            } else {
+                has_env || has_secret
+            },
             auth_required: true,
+            auth_mode: match auth_mode {
+                crate::settings::ProviderCredentialMode::ApiKey => "api_key",
+                crate::settings::ProviderCredentialMode::ExternalOAuthSync => "oauth_sync",
+            }
+            .to_string(),
+            oauth_supported: oauth.supported,
+            oauth_available: oauth.available,
+            oauth_source_label: oauth.source_label,
+            oauth_source_location: oauth.source_location,
             enabled: providers_settings
                 .enabled
                 .iter()
@@ -395,6 +498,7 @@ pub(crate) async fn build_routing_provider_entries(
         settings,
         true,
         false,
+        false,
     ));
 
     providers.push(synthetic_provider_entry(
@@ -419,6 +523,7 @@ pub(crate) async fn build_routing_provider_entries(
                 .flatten()
                 .is_some()
             || secret_exists(secrets, user_id, "llm_compatible_api_key").await,
+        false,
         false,
     ));
 
@@ -445,6 +550,7 @@ pub(crate) async fn build_routing_provider_entries(
                 .is_some()
             || secret_exists(secrets, user_id, "llm_bedrock_proxy_api_key").await,
         false,
+        false,
     ));
 
     providers.push(synthetic_provider_entry(
@@ -456,6 +562,7 @@ pub(crate) async fn build_routing_provider_entries(
         providers_settings,
         settings,
         true,
+        false,
         false,
     ));
 
@@ -473,6 +580,7 @@ fn synthetic_provider_entry(
     settings: &crate::settings::Settings,
     has_key: bool,
     auth_required: bool,
+    oauth_supported: bool,
 ) -> ProviderConfigEntry {
     ProviderConfigEntry {
         slug: slug.to_string(),
@@ -481,7 +589,13 @@ fn synthetic_provider_entry(
         default_model: default_model.to_string(),
         env_key_name: env_key_name.to_string(),
         has_key,
+        credential_ready: has_key,
         auth_required,
+        auth_mode: "api_key".to_string(),
+        oauth_supported,
+        oauth_available: false,
+        oauth_source_label: None,
+        oauth_source_location: None,
         enabled: providers_settings
             .enabled
             .iter()
@@ -752,6 +866,8 @@ async fn discover_provider_models(
             crate::config::provider_catalog::ApiStyle::Anthropic => {
                 let api_key = resolve_provider_secret(
                     user_id,
+                    slug,
+                    settings,
                     endpoint.env_key_name,
                     endpoint.secret_name,
                     secrets,
@@ -776,6 +892,8 @@ async fn discover_provider_models(
             | crate::config::provider_catalog::ApiStyle::OpenAiCompatible => {
                 let api_key = resolve_provider_secret(
                     user_id,
+                    slug,
+                    settings,
                     endpoint.env_key_name,
                     endpoint.secret_name,
                     secrets,
@@ -820,10 +938,16 @@ async fn discover_provider_models(
                         .flatten()
                 })
                 .ok_or_else(|| "Set a compatible base URL before discovering models".to_string())?;
-            let auth =
-                resolve_provider_secret(user_id, "LLM_API_KEY", "llm_compatible_api_key", secrets)
-                    .await
-                    .map(|key| format!("Bearer {key}"));
+            let auth = resolve_provider_secret(
+                user_id,
+                slug,
+                settings,
+                "LLM_API_KEY",
+                "llm_compatible_api_key",
+                secrets,
+            )
+            .await
+            .map(|key| format!("Bearer {key}"));
             Ok(discovery
                 .discover_openai_compatible(&base_url, auth.as_deref())
                 .await)
@@ -853,10 +977,20 @@ async fn discover_provider_models(
 
 async fn resolve_provider_secret(
     user_id: &str,
+    slug: &str,
+    settings: &crate::settings::Settings,
     env_key: &str,
     secret_name: &str,
     secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
 ) -> Option<String> {
+    if provider_auth_mode(&settings.providers, slug)
+        == crate::settings::ProviderCredentialMode::ExternalOAuthSync
+        && let Some(value) = crate::config::helpers::synced_oauth_env(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
     crate::config::resolve_provider_secret_value(user_id, env_key, secret_name, secrets).await
 }
 
@@ -875,8 +1009,15 @@ async fn resolve_bedrock_discovery_target(
         })
         .unwrap_or_else(|| "us-east-1".to_string());
 
-    if let Some(api_key) =
-        resolve_provider_secret(user_id, "BEDROCK_API_KEY", "llm_bedrock_api_key", secrets).await
+    if let Some(api_key) = resolve_provider_secret(
+        user_id,
+        "bedrock",
+        settings,
+        "BEDROCK_API_KEY",
+        "llm_bedrock_api_key",
+        secrets,
+    )
+    .await
     {
         return Ok((
             crate::llm::discovery::bedrock_mantle_base_url(&region),
@@ -891,6 +1032,8 @@ async fn resolve_bedrock_discovery_target(
     }) {
         let auth = resolve_provider_secret(
             user_id,
+            "bedrock",
+            settings,
             "BEDROCK_PROXY_API_KEY",
             "llm_bedrock_proxy_api_key",
             secrets,
@@ -1391,12 +1534,26 @@ pub(crate) async fn providers_config_set_handler(
         .filter(|provider| provider.enabled)
         .map(|provider| provider.slug.clone())
         .collect();
+    settings.providers.provider_credential_modes.clear();
     let previous_provider_models = settings.providers.provider_models.clone();
     let previous_allowed_models = settings.providers.allowed_models.clone();
     settings.providers.allowed_models.clear();
     settings.providers.provider_models.clear();
 
     for provider in &body.providers {
+        let auth_mode = match provider.auth_mode.as_str() {
+            "oauth_sync" => crate::settings::ProviderCredentialMode::ExternalOAuthSync,
+            _ => crate::settings::ProviderCredentialMode::ApiKey,
+        };
+        if provider.oauth_supported
+            && auth_mode == crate::settings::ProviderCredentialMode::ExternalOAuthSync
+        {
+            settings
+                .providers
+                .provider_credential_modes
+                .insert(provider.slug.clone(), auth_mode);
+        }
+
         let previous_slots = previous_provider_models.get(&provider.slug);
         let (primary_model, cheap_model, should_persist_slots) = resolve_saved_provider_models(
             provider,
@@ -1484,6 +1641,14 @@ pub(crate) async fn providers_config_set_handler(
                         .flatten()
                 });
     }
+
+    let explicit_provider_oauth = settings
+        .providers
+        .provider_credential_modes
+        .values()
+        .any(|mode| *mode == crate::settings::ProviderCredentialMode::ExternalOAuthSync);
+    settings.providers.oauth_sync_enabled =
+        explicit_provider_oauth || !settings.providers.oauth_sync_sources.is_empty();
 
     let diagnostics = crate::llm::validate_providers_settings(&settings.providers);
     for diagnostic in &diagnostics {

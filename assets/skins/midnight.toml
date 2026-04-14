@@ -20,3 +20,11 @@ ascii_art = [
   '              `-.___.__.-`',
 ]
 tool_emojis = { shell = "🌙", browser = "🔭", memory = "🧠", search_files = "🗃", todo = "🕯", subagent = "🦉" }
+
+[web]
+aura_primary = "#7C63D4"
+aura_secondary = "#43537A"
+chrome_style = "observatory"
+surface_pattern = "stars"
+message_shape = "cut"
+elevation = "low"

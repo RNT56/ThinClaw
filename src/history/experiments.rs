@@ -1,7 +1,7 @@
 #[cfg(feature = "postgres")]
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 #[cfg(feature = "postgres")]
 use uuid::Uuid;
 
@@ -281,6 +281,14 @@ impl Store {
         campaign: &ExperimentCampaign,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let queue_position = campaign.queue_position as i32;
+        let consecutive_non_improving_trials = campaign.consecutive_non_improving_trials as i32;
+        let max_trials_override = campaign.max_trials_override.map(|value| value as i32);
+        let total_cost_usd = decimal_from_f64(campaign.total_cost_usd, "total_cost_usd")?;
+        let total_llm_cost_usd =
+            decimal_from_f64(campaign.total_llm_cost_usd, "total_llm_cost_usd")?;
+        let total_runner_cost_usd =
+            decimal_from_f64(campaign.total_runner_cost_usd, "total_runner_cost_usd")?;
         conn.execute(
             r#"
             INSERT INTO experiment_campaigns (
@@ -319,18 +327,18 @@ impl Store {
                 &(campaign.failure_count as i32),
                 &campaign.pause_reason,
                 &campaign.queue_state.as_str(),
-                &(campaign.queue_position as i64),
+                &queue_position,
                 &campaign.active_trial_id,
                 &(campaign.total_runtime_ms as i64),
-                &campaign.total_cost_usd,
-                &(campaign.consecutive_non_improving_trials as i64),
-                &campaign.max_trials_override,
+                &total_cost_usd,
+                &consecutive_non_improving_trials,
+                &max_trials_override,
                 &campaign.gateway_url,
                 &campaign.metadata,
                 &campaign.created_at,
                 &campaign.updated_at,
-                &campaign.total_llm_cost_usd,
-                &campaign.total_runner_cost_usd,
+                &total_llm_cost_usd,
+                &total_runner_cost_usd,
             ],
         )
         .await?;
@@ -366,6 +374,14 @@ impl Store {
         campaign: &ExperimentCampaign,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let queue_position = campaign.queue_position as i32;
+        let consecutive_non_improving_trials = campaign.consecutive_non_improving_trials as i32;
+        let max_trials_override = campaign.max_trials_override.map(|value| value as i32);
+        let total_cost_usd = decimal_from_f64(campaign.total_cost_usd, "total_cost_usd")?;
+        let total_llm_cost_usd =
+            decimal_from_f64(campaign.total_llm_cost_usd, "total_llm_cost_usd")?;
+        let total_runner_cost_usd =
+            decimal_from_f64(campaign.total_runner_cost_usd, "total_runner_cost_usd")?;
         conn.execute(
             r#"
             UPDATE experiment_campaigns SET
@@ -414,17 +430,17 @@ impl Store {
                 &(campaign.failure_count as i32),
                 &campaign.pause_reason,
                 &campaign.queue_state.as_str(),
-                &(campaign.queue_position as i64),
+                &queue_position,
                 &campaign.active_trial_id,
                 &(campaign.total_runtime_ms as i64),
-                &campaign.total_cost_usd,
-                &(campaign.consecutive_non_improving_trials as i64),
-                &campaign.max_trials_override,
+                &total_cost_usd,
+                &consecutive_non_improving_trials,
+                &max_trials_override,
                 &campaign.gateway_url,
                 &campaign.metadata,
                 &campaign.updated_at,
-                &campaign.total_llm_cost_usd,
-                &campaign.total_runner_cost_usd,
+                &total_llm_cost_usd,
+                &total_runner_cost_usd,
             ],
         )
         .await?;
@@ -436,6 +452,10 @@ impl Store {
         trial: &ExperimentTrial,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let attributed_cost_usd =
+            optional_decimal_from_f64(trial.attributed_cost_usd, "attributed_cost_usd")?;
+        let llm_cost_usd = optional_decimal_from_f64(trial.llm_cost_usd, "llm_cost_usd")?;
+        let runner_cost_usd = optional_decimal_from_f64(trial.runner_cost_usd, "runner_cost_usd")?;
         conn.execute(
             r#"
             INSERT INTO experiment_trials (
@@ -471,7 +491,7 @@ impl Store {
                 &trial.log_preview_path,
                 &trial.artifact_manifest_json,
                 &trial.runtime_ms.map(|value| value as i64),
-                &trial.attributed_cost_usd,
+                &attributed_cost_usd,
                 &trial.hypothesis,
                 &trial.mutation_summary,
                 &trial.reviewer_decision,
@@ -481,8 +501,8 @@ impl Store {
                 &trial.completed_at,
                 &trial.created_at,
                 &trial.updated_at,
-                &trial.llm_cost_usd,
-                &trial.runner_cost_usd,
+                &llm_cost_usd,
+                &runner_cost_usd,
             ],
         )
         .await?;
@@ -519,6 +539,10 @@ impl Store {
         trial: &ExperimentTrial,
     ) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let attributed_cost_usd =
+            optional_decimal_from_f64(trial.attributed_cost_usd, "attributed_cost_usd")?;
+        let llm_cost_usd = optional_decimal_from_f64(trial.llm_cost_usd, "llm_cost_usd")?;
+        let runner_cost_usd = optional_decimal_from_f64(trial.runner_cost_usd, "runner_cost_usd")?;
         conn.execute(
             r#"
             UPDATE experiment_trials SET
@@ -563,7 +587,7 @@ impl Store {
                 &trial.log_preview_path,
                 &trial.artifact_manifest_json,
                 &trial.runtime_ms.map(|value| value as i64),
-                &trial.attributed_cost_usd,
+                &attributed_cost_usd,
                 &trial.hypothesis,
                 &trial.mutation_summary,
                 &trial.reviewer_decision,
@@ -572,8 +596,8 @@ impl Store {
                 &trial.started_at,
                 &trial.completed_at,
                 &trial.updated_at,
-                &trial.llm_cost_usd,
-                &trial.runner_cost_usd,
+                &llm_cost_usd,
+                &runner_cost_usd,
             ],
         )
         .await?;
@@ -1058,7 +1082,7 @@ fn row_to_experiment_campaign(
             .try_get::<_, String>("queue_state")?
             .parse()
             .map_err(DatabaseError::Serialization)?,
-        queue_position: row.try_get::<_, i64>("queue_position")? as u32,
+        queue_position: row.try_get::<_, i32>("queue_position")? as u32,
         active_trial_id: row.try_get("active_trial_id")?,
         total_runtime_ms: row.try_get::<_, i64>("total_runtime_ms")? as u64,
         total_cost_usd: row
@@ -1074,10 +1098,10 @@ fn row_to_experiment_campaign(
             .and_then(|value| value.to_string().parse::<f64>().ok())
             .unwrap_or(0.0),
         consecutive_non_improving_trials: row
-            .try_get::<_, i64>("consecutive_non_improving_trials")?
+            .try_get::<_, i32>("consecutive_non_improving_trials")?
             as u32,
         max_trials_override: row
-            .try_get::<_, Option<i64>>("max_trials_override")?
+            .try_get::<_, Option<i32>>("max_trials_override")?
             .map(|value| value as u32),
         gateway_url: row.try_get("gateway_url")?,
         metadata: row.try_get("metadata")?,
@@ -1105,9 +1129,15 @@ fn row_to_experiment_trial(row: &tokio_postgres::Row) -> Result<ExperimentTrial,
         runtime_ms: row
             .try_get::<_, Option<i64>>("runtime_ms")?
             .map(|value| value as u64),
-        attributed_cost_usd: row.try_get("attributed_cost_usd")?,
-        llm_cost_usd: row.try_get("llm_cost_usd")?,
-        runner_cost_usd: row.try_get("runner_cost_usd")?,
+        attributed_cost_usd: row
+            .try_get::<_, Option<Decimal>>("attributed_cost_usd")?
+            .and_then(|value| value.to_string().parse::<f64>().ok()),
+        llm_cost_usd: row
+            .try_get::<_, Option<Decimal>>("llm_cost_usd")?
+            .and_then(|value| value.to_string().parse::<f64>().ok()),
+        runner_cost_usd: row
+            .try_get::<_, Option<Decimal>>("runner_cost_usd")?
+            .and_then(|value| value.to_string().parse::<f64>().ok()),
         hypothesis: row.try_get("hypothesis")?,
         mutation_summary: row.try_get("mutation_summary")?,
         reviewer_decision: row.try_get("reviewer_decision")?,
@@ -1229,6 +1259,22 @@ fn from_json_value<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
 ) -> Result<T, DatabaseError> {
     serde_json::from_value(value).map_err(|e| DatabaseError::Serialization(e.to_string()))
+}
+
+#[cfg(feature = "postgres")]
+fn decimal_from_f64(value: f64, field: &str) -> Result<Decimal, DatabaseError> {
+    Decimal::from_f64(value)
+        .ok_or_else(|| DatabaseError::Serialization(format!("invalid decimal in {field}: {value}")))
+}
+
+#[cfg(feature = "postgres")]
+fn optional_decimal_from_f64(
+    value: Option<f64>,
+    field: &str,
+) -> Result<Option<Decimal>, DatabaseError> {
+    value
+        .map(|inner| decimal_from_f64(inner, field))
+        .transpose()
 }
 
 #[cfg(feature = "postgres")]

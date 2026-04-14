@@ -1,32 +1,34 @@
-//! Markdown → Telegram HTML conversion for host-side streaming.
+//! Telegram message rendering for host-side streaming.
 //!
 //! This is a port of the WASM-side `markdown_to_telegram_html()` function
 //! from `channels-src/telegram/src/lib.rs`. By having this on the host side,
 //! the `send_draft()` streaming path can format messages identically to the
 //! WASM `on_respond()` path, instead of sending raw markdown.
 //!
-//! The conversion handles standard LLM-emitted Markdown and converts it
-//! to the subset of HTML that Telegram supports:
-//! `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<a href>`, `<blockquote>`.
+//! Rendering supports two paths:
+//! - raw Telegram HTML, sanitized to an allowlist of supported tags
+//! - standard LLM-emitted Markdown, converted to Telegram HTML as a fallback
 
 /// Sentinel used to protect unmatched `**` from the `*` handler.
 const SENTINEL_STAR: &str = "\u{FFFE}\u{FFFE}";
 /// Sentinel for unmatched `__`.
 const SENTINEL_UNDER: &str = "\u{FFFF}\u{FFFF}";
 
-/// Convert standard Markdown (as emitted by LLMs) to Telegram-safe HTML.
+/// Render agent output into Telegram-safe HTML.
 ///
-/// Handles:
-/// - `**bold**` / `__bold__`  → `<b>bold</b>`
-/// - `*italic*` / `_italic_` → `<i>italic</i>`
-/// - `` `inline code` ``     → `<code>inline code</code>`
-/// - ` ```lang\ncode``` `    → `<pre><code class="language-lang">code</code></pre>`
-/// - `# Heading`             → `<b>Heading</b>`
-/// - `[text](url)`           → `<a href="url">text</a>`
-/// - `~~strikethrough~~`     → `<s>strikethrough</s>`
-/// - `> blockquote`          → `<blockquote>text</blockquote>`
-/// - HTML special chars      → escaped (`<`, `>`, `&`)
-pub fn markdown_to_telegram_html(md: &str) -> String {
+/// If the message already contains supported Telegram HTML tags, those tags
+/// are sanitized and preserved directly. Otherwise, standard Markdown is
+/// converted into Telegram HTML.
+pub fn markdown_to_telegram_html(input: &str) -> String {
+    if contains_supported_html(input) {
+        sanitize_telegram_html(input)
+    } else {
+        render_markdown_to_telegram_html(input)
+    }
+}
+
+/// Convert standard Markdown (as emitted by LLMs) to Telegram-safe HTML.
+fn render_markdown_to_telegram_html(md: &str) -> String {
     let mut out = String::with_capacity(md.len() + md.len() / 4);
     let lines: Vec<&str> = md.lines().collect();
     let mut i = 0;
@@ -99,11 +101,332 @@ pub fn markdown_to_telegram_html(md: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone)]
+struct ParsedTelegramTag {
+    name: String,
+    rendered: String,
+    is_closing: bool,
+}
+
+/// Return true if the input already contains at least one supported Telegram
+/// HTML tag and should therefore be handled via the HTML sanitizer path.
+fn contains_supported_html(input: &str) -> bool {
+    let mut i = 0;
+    while let Some(rel) = input[i..].find('<') {
+        let start = i + rel;
+        if parse_supported_tag(input, start).is_some() {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
+}
+
+/// Sanitize raw Telegram HTML, preserving only an allowlist of tags and attrs.
+fn sanitize_telegram_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + input.len() / 8);
+    let mut i = 0;
+    let mut open_tags: Vec<String> = Vec::new();
+
+    while i < input.len() {
+        let Some(rel) = input[i..].find('<') else {
+            out.push_str(&escape_html(&input[i..]));
+            break;
+        };
+        let start = i + rel;
+        out.push_str(&escape_html(&input[i..start]));
+
+        if let Some((end, tag)) = parse_supported_tag(input, start) {
+            if tag.is_closing {
+                if open_tags.last().is_some_and(|name| name == &tag.name) {
+                    out.push_str(&tag.rendered);
+                    open_tags.pop();
+                } else {
+                    out.push_str(&escape_html(&input[start..end]));
+                }
+            } else {
+                out.push_str(&tag.rendered);
+                open_tags.push(tag.name);
+            }
+            i = end;
+            continue;
+        }
+
+        if let Some(end) = find_tag_end(input, start) {
+            out.push_str(&escape_html(&input[start..end]));
+            i = end;
+        } else {
+            out.push_str("&lt;");
+            i = start + 1;
+        }
+    }
+
+    while let Some(tag) = open_tags.pop() {
+        out.push_str("</");
+        out.push_str(&tag);
+        out.push('>');
+    }
+
+    out
+}
+
+fn parse_supported_tag(input: &str, start: usize) -> Option<(usize, ParsedTelegramTag)> {
+    let end = find_tag_end(input, start)?;
+    let raw = input.get(start + 1..end - 1)?.trim();
+    if raw.is_empty() || raw.starts_with('!') || raw.starts_with('?') {
+        return None;
+    }
+
+    let (is_closing, raw) = if let Some(rest) = raw.strip_prefix('/') {
+        (true, rest.trim_start())
+    } else {
+        (false, raw)
+    };
+
+    if raw.is_empty() {
+        return None;
+    }
+
+    if raw.ends_with('/') {
+        return None;
+    }
+    let name_end = raw
+        .find(|c: char| c.is_ascii_whitespace())
+        .unwrap_or(raw.len());
+    let name_raw = &raw[..name_end];
+    let attrs_raw = raw[name_end..].trim();
+    let name = canonical_tag_name(name_raw)?;
+
+    if is_closing {
+        if !attrs_raw.is_empty() {
+            return None;
+        }
+        return Some((
+            end,
+            ParsedTelegramTag {
+                name: name.to_string(),
+                rendered: format!("</{name}>"),
+                is_closing: true,
+            },
+        ));
+    }
+
+    let rendered = render_open_tag(name, attrs_raw)?;
+    Some((
+        end,
+        ParsedTelegramTag {
+            name: name.to_string(),
+            rendered,
+            is_closing: false,
+        },
+    ))
+}
+
+fn find_tag_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut i = start + 1;
+    let mut quote: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn canonical_tag_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "b" | "strong" => Some("b"),
+        "i" | "em" => Some("i"),
+        "u" | "ins" => Some("u"),
+        "s" | "strike" | "del" => Some("s"),
+        "code" => Some("code"),
+        "pre" => Some("pre"),
+        "a" => Some("a"),
+        "blockquote" => Some("blockquote"),
+        _ => None,
+    }
+}
+
+fn render_open_tag(name: &str, attrs_raw: &str) -> Option<String> {
+    match name {
+        "b" | "i" | "u" | "s" | "pre" => {
+            if attrs_raw.is_empty() {
+                Some(format!("<{name}>"))
+            } else {
+                None
+            }
+        }
+        "code" => {
+            let attrs = parse_attributes(attrs_raw)?;
+            if attrs.is_empty() {
+                return Some("<code>".to_string());
+            }
+            if attrs.len() != 1 {
+                return None;
+            }
+            let (attr_name, attr_value) = &attrs[0];
+            if attr_name != "class" {
+                return None;
+            }
+            let class = attr_value.as_deref()?;
+            if !is_safe_code_class(class) {
+                return None;
+            }
+            Some(format!("<code class=\"{}\">", escape_html_attribute(class)))
+        }
+        "a" => {
+            let attrs = parse_attributes(attrs_raw)?;
+            if attrs.len() != 1 {
+                return None;
+            }
+            let (attr_name, attr_value) = &attrs[0];
+            if attr_name != "href" {
+                return None;
+            }
+            let href = sanitize_href(attr_value.as_deref()?)?;
+            Some(format!("<a href=\"{href}\">"))
+        }
+        "blockquote" => {
+            let attrs = parse_attributes(attrs_raw)?;
+            if attrs.is_empty() {
+                return Some("<blockquote>".to_string());
+            }
+            if attrs.len() != 1 {
+                return None;
+            }
+            let (attr_name, attr_value) = &attrs[0];
+            if attr_name != "expandable" {
+                return None;
+            }
+            if attr_value.is_none()
+                || attr_value
+                    .as_deref()
+                    .is_some_and(|value| value.is_empty() || value.eq_ignore_ascii_case("true"))
+            {
+                return Some("<blockquote expandable>".to_string());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_attributes(attrs: &str) -> Option<Vec<(String, Option<String>)>> {
+    let mut out = Vec::new();
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+
+        let name_start = i;
+        while i < bytes.len() && is_attr_name_char(bytes[i]) {
+            i += 1;
+        }
+        if name_start == i {
+            return None;
+        }
+        let name = attrs[name_start..i].to_ascii_lowercase();
+
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+
+        let value = if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return None;
+            }
+
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                let quote = bytes[i];
+                i += 1;
+                let value_start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                let value = attrs[value_start..i].to_string();
+                i += 1;
+                Some(value)
+            } else {
+                let value_start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                Some(attrs[value_start..i].to_string())
+            }
+        } else {
+            None
+        };
+
+        out.push((name, value));
+    }
+
+    Some(out)
+}
+
+fn is_attr_name_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
+}
+
+fn is_safe_code_class(class: &str) -> bool {
+    let Some(lang) = class.strip_prefix("language-") else {
+        return false;
+    };
+    !lang.is_empty()
+        && lang
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+'))
+}
+
+fn sanitize_href(href: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.chars().any(char::is_control) {
+        return None;
+    }
+
+    let lower = href.to_ascii_lowercase();
+    if lower.starts_with("javascript:")
+        || lower.starts_with("vbscript:")
+        || lower.starts_with("data:")
+    {
+        return None;
+    }
+
+    Some(escape_html_attribute(href))
+}
+
 /// Escape HTML special characters for Telegram.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+fn escape_html_attribute(s: &str) -> String {
+    escape_html(s).replace('"', "&quot;").replace('\'', "&#39;")
 }
 
 /// Apply inline Markdown formatting to an already-HTML-escaped string.
@@ -303,5 +626,50 @@ mod tests {
             markdown_to_telegram_html("Just plain text"),
             "Just plain text"
         );
+    }
+
+    #[test]
+    fn test_raw_html_passthrough() {
+        assert_eq!(
+            markdown_to_telegram_html("Hello <b>world</b>!"),
+            "Hello <b>world</b>!"
+        );
+    }
+
+    #[test]
+    fn test_raw_html_alias_tags_are_canonicalized() {
+        assert_eq!(
+            markdown_to_telegram_html("<strong>Hello</strong>"),
+            "<b>Hello</b>"
+        );
+    }
+
+    #[test]
+    fn test_raw_html_invalid_tags_are_escaped() {
+        assert_eq!(
+            markdown_to_telegram_html("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn test_raw_html_link_attrs_are_sanitized() {
+        assert_eq!(
+            markdown_to_telegram_html("<a href=\"https://example.com?a=1&b=2\">Example</a>"),
+            "<a href=\"https://example.com?a=1&amp;b=2\">Example</a>"
+        );
+    }
+
+    #[test]
+    fn test_raw_html_rejects_unsafe_links() {
+        assert_eq!(
+            markdown_to_telegram_html("<a href=\"javascript:alert(1)\">bad</a>"),
+            "&lt;a href=\"javascript:alert(1)\"&gt;bad&lt;/a&gt;"
+        );
+    }
+
+    #[test]
+    fn test_raw_html_auto_closes_open_tags() {
+        assert_eq!(markdown_to_telegram_html("<b>Hello"), "<b>Hello</b>");
     }
 }

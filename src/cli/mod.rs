@@ -86,6 +86,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    /// Enable verbose terminal logs for debugging
+    #[arg(long, global = true)]
+    pub debug: bool,
+
     /// Run in interactive CLI mode only (disable other channels)
     #[arg(long, global = true)]
     pub cli_only: bool,
@@ -294,5 +298,19 @@ mod tests {
             cmd.get_version().unwrap_or("unknown"),
             env!("CARGO_PKG_VERSION")
         );
+    }
+
+    #[test]
+    fn test_debug_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["thinclaw"]).expect("parse default cli");
+        assert!(!cli.debug);
+    }
+
+    #[test]
+    fn test_debug_flag_parses_globally() {
+        let cli = Cli::try_parse_from(["thinclaw", "--debug", "status"])
+            .expect("parse cli with global debug flag");
+        assert!(cli.debug);
+        assert!(matches!(cli.command, Some(Command::Status)));
     }
 }

@@ -45,31 +45,59 @@ fn cap_chars(text: &str, max: usize) -> String {
 
 /// Extract essential operational instructions from AGENTS.md content.
 ///
-/// Keeps only the critical sections (Session Startup, Red Lines, memory
-/// write guidance, group chat rules). Everything else can be read on
-/// demand via `memory_read AGENTS.md`.
+/// Keeps only the operationally critical sections (startup, memory policy,
+/// safety boundaries, external-action rules, group-chat behavior, tool-use
+/// notes, and heartbeat conduct). Everything else can be read on demand via
+/// `memory_read AGENTS.md`.
 fn extract_essential_instructions(agents_content: &str) -> String {
     let mut essential = Vec::new();
     let mut in_keep_section = false;
 
     // Section headers to KEEP in the system prompt (critical operational rules)
     let keep_keywords = [
+        "First Run",
         "Session Startup",
-        "Red Lines",
-        "Write It Down",
-        "Mental Notes",
         "Memory",
         "MEMORY.md",
+        "Write It Down",
+        "Mental Notes",
+        "Red Lines",
+        "Protected Repo Boundary Policy",
+        "Feature Parity Update Policy",
+        "External vs Internal",
         "Group Chats",
         "Know When to Speak",
+        "Tools",
+        "Platform Formatting",
+        "Heartbeats",
+        "Be Proactive",
     ];
 
     for line in agents_content.lines() {
         let trimmed = line.trim();
 
-        // Detect section headers (## or ###)
-        if trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+        // Detect top-level section headers.
+        if trimmed.starts_with("## ") {
             // Strip markdown heading markers + emoji for clean matching
+            let header_text = trimmed
+                .trim_start_matches('#')
+                .trim()
+                .trim_start_matches(|c: char| !c.is_alphabetic())
+                .trim();
+            in_keep_section = keep_keywords.iter().any(|h| header_text.contains(h));
+            if in_keep_section {
+                essential.push(line.to_string());
+            }
+            continue;
+        }
+
+        // Keep nested headings if we're inside an already-kept top-level section.
+        // If we're not, still allow known critical subsection headings through.
+        if trimmed.starts_with("### ") {
+            if in_keep_section {
+                essential.push(line.to_string());
+                continue;
+            }
             let header_text = trimmed
                 .trim_start_matches('#')
                 .trim()
@@ -1422,7 +1450,11 @@ impl Workspace {
                  **Respond when:** directly mentioned, you can add genuine value, correcting misinformation.\n\
                  **Stay silent (NO_REPLY) when:** casual banter, question already answered, nothing to add, it would interrupt the vibe.\n\n\
                  ## Tools\n\
-                 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes in `TOOLS.md`.\n\n\
+                 Your capabilities come from built-in tools, extensions (WASM/MCP), and skills.\n\
+                 Skills shape how you work; they do not own every tool.\n\
+                 When a relevant skill is available, load it with `skill_read` before relying on it.\n\
+                 Use `tool_search` / `tool_activate` when you need to discover or enable integrations.\n\
+                 Keep local environment-specific notes in `TOOLS.md`.\n\n\
                  **📝 Platform Formatting:**\n\
                  - **Discord/WhatsApp:** No markdown tables! Use bullet lists instead\n\
                  - **Discord links:** Wrap multiple links in `<>` to suppress embeds\n\
@@ -1753,6 +1785,55 @@ mod tests {
         assert_eq!(normalize_directory("foo/bar"), "foo/bar");
         assert_eq!(normalize_directory("/"), "");
         assert_eq!(normalize_directory(""), "");
+    }
+
+    #[test]
+    fn extract_essential_instructions_includes_expanded_operational_sections() {
+        let agents = r#"
+## Session Startup
+Read SOUL.md first.
+
+## External vs Internal
+Ask first before external actions.
+
+## Tools
+Use SKILL.md for tool guidance.
+
+## 💓 Heartbeats - Be Proactive!
+Do proactive maintenance.
+
+## Make It Yours
+Experiment freely.
+"#;
+
+        let essential = extract_essential_instructions(agents);
+        assert!(essential.contains("## Session Startup"));
+        assert!(essential.contains("## External vs Internal"));
+        assert!(essential.contains("## Tools"));
+        assert!(essential.contains("## 💓 Heartbeats - Be Proactive!"));
+        assert!(!essential.contains("## Make It Yours"));
+        assert!(essential.contains("Full instructions: `memory_read AGENTS.md`"));
+    }
+
+    #[test]
+    fn extract_essential_instructions_keeps_nested_policy_under_red_lines() {
+        let agents = r#"
+## Red Lines
+- Don't exfiltrate private data.
+
+### Protected Repo Boundary Policy (ThinClaw self-improvement + upgrade work)
+- Treat ThinClaw-main as a protected codebase by default.
+- Full autonomy does not override boundary rules.
+
+## Group Chats
+Know when to stay silent.
+"#;
+
+        let essential = extract_essential_instructions(agents);
+        assert!(essential.contains("## Red Lines"));
+        assert!(essential.contains("### Protected Repo Boundary Policy"));
+        assert!(essential.contains("Treat ThinClaw-main as a protected codebase by default."));
+        assert!(essential.contains("## Group Chats"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Operators
 
 - [DEPLOYMENT.md](DEPLOYMENT.md)
+- Deployment note: `thinclaw` and `thinclaw run` are quiet by default; use `thinclaw --debug` or `thinclaw --debug run` for verbose startup logs
 - [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md)
 - [../channels-docs/README.md](../channels-docs/README.md)

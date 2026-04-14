@@ -1,8 +1,8 @@
 use secrecy::SecretString;
 
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_optional_env, synced_oauth_env};
 use crate::error::ConfigError;
-use crate::settings::Settings;
+use crate::settings::{ProviderCredentialMode, Settings};
 
 /// Which LLM backend to use.
 ///
@@ -326,7 +326,12 @@ impl LlmConfig {
         //   3. Hardcoded default
 
         let openai = if backend == LlmBackend::OpenAi {
-            let api_keys = resolve_secret_credentials("OPENAI_API_KEY", "OPENAI_API_KEYS")?;
+            let api_keys = resolve_provider_credentials(
+                settings,
+                "openai",
+                "OPENAI_API_KEY",
+                "OPENAI_API_KEYS",
+            )?;
             let api_key = api_keys.first().cloned();
             let model = optional_env("OPENAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -343,7 +348,12 @@ impl LlmConfig {
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_keys = resolve_secret_credentials("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEYS")?;
+            let api_keys = resolve_provider_credentials(
+                settings,
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_API_KEYS",
+            )?;
             let api_key = api_keys.first().cloned();
             let model = optional_env("ANTHROPIC_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -596,6 +606,27 @@ fn resolve_secret_credentials(
     multi_env: &str,
 ) -> Result<Vec<SecretString>, ConfigError> {
     resolve_secret_credentials_with_aliases(&[single_env], &[multi_env])
+}
+
+fn resolve_provider_credentials(
+    settings: &Settings,
+    provider_slug: &str,
+    single_env: &str,
+    multi_env: &str,
+) -> Result<Vec<SecretString>, ConfigError> {
+    if settings
+        .providers
+        .provider_credential_modes
+        .get(provider_slug)
+        .copied()
+        == Some(ProviderCredentialMode::ExternalOAuthSync)
+        && let Some(value) = synced_oauth_env(single_env)
+        && !value.trim().is_empty()
+    {
+        return Ok(vec![SecretString::from(value)]);
+    }
+
+    resolve_secret_credentials(single_env, multi_env)
 }
 
 fn resolve_secret_credentials_with_aliases(

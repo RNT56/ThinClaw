@@ -1987,6 +1987,7 @@ impl LinkedConversationRecall {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn conversation_stable_key(channel: &str, thread_id: Option<&str>, fallback: Uuid) -> String {
     match thread_id {
         Some(thread_id) if !thread_id.is_empty() => format!("{channel}:{thread_id}"),
@@ -1994,6 +1995,7 @@ fn conversation_stable_key(channel: &str, thread_id: Option<&str>, fallback: Uui
     }
 }
 
+#[cfg(feature = "postgres")]
 fn conversation_handoff_from_metadata(
     metadata: &serde_json::Value,
 ) -> Option<ConversationHandoffMetadata> {
@@ -2967,6 +2969,8 @@ impl Store {
         } else {
             proposal.id
         };
+        let target_files = serde_json::to_value(&proposal.target_files)
+            .map_err(|e| DatabaseError::Serialization(format!("serialize target_files: {e}")))?;
         conn.execute(
             r#"
             INSERT INTO learning_code_proposals (
@@ -2984,7 +2988,7 @@ impl Store {
                 &proposal.status,
                 &proposal.title,
                 &proposal.rationale,
-                &proposal.target_files,
+                &target_files,
                 &proposal.diff,
                 &proposal.validation_results,
                 &proposal.rollback_note,
@@ -3572,7 +3576,7 @@ impl Store {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "postgres"))]
 fn parse_migration_version(file_name: &str) -> Option<u32> {
     let stem = file_name.strip_suffix(".sql")?;
     let (version_part, _rest) = stem.split_once("__")?;

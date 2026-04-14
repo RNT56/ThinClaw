@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,8 +6,11 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use crate::config::{ClaudeCodeConfig, merge_injected_vars};
-use crate::settings::{OAuthCredentialSourceConfig, OAuthCredentialSourceKind, ProvidersSettings};
+use crate::config::{ClaudeCodeConfig, clear_synced_oauth_vars, replace_synced_oauth_vars};
+use crate::settings::{
+    OAuthCredentialSourceConfig, OAuthCredentialSourceKind, ProviderCredentialMode,
+    ProvidersSettings,
+};
 
 use super::runtime_manager::LlmRuntimeManager;
 
@@ -43,12 +46,9 @@ impl Drop for OAuthCredentialSyncHandle {
 
 impl OAuthCredentialSyncHandle {
     pub fn start(runtime: Arc<LlmRuntimeManager>, providers: &ProvidersSettings) -> Option<Self> {
-        if !providers.oauth_sync_enabled {
-            return None;
-        }
-
         let sources = resolved_sources(providers);
         if sources.is_empty() {
+            clear_synced_oauth_vars();
             return None;
         }
 
@@ -63,15 +63,16 @@ impl OAuthCredentialSyncHandle {
             loop {
                 tokio::time::sleep(poll_interval).await;
 
-                let changed = collect_source_updates(&sources, &mut fingerprints);
-                if changed.is_empty() {
+                let (snapshot, next_fingerprints) = snapshot_source_state(&sources);
+                if next_fingerprints == fingerprints {
                     continue;
                 }
 
-                let changed_count = merge_injected_vars(changed);
+                fingerprints = next_fingerprints;
+                let synced_count = replace_synced_oauth_vars(snapshot);
                 tracing::info!(
-                    changed_count,
-                    "External OAuth credential sync updated overlay values; reloading LLM runtime"
+                    synced_count,
+                    "External OAuth credential sync updated provider auth overlay; reloading LLM runtime"
                 );
 
                 if let Err(error) = runtime.reload().await {
@@ -85,40 +86,131 @@ impl OAuthCredentialSyncHandle {
 }
 
 pub fn prime_runtime_oauth_credentials(providers: &ProvidersSettings) -> usize {
-    if !providers.oauth_sync_enabled {
+    let sources = resolved_sources(providers);
+    if sources.is_empty() {
+        clear_synced_oauth_vars();
         return 0;
     }
-    let sources = resolved_sources(providers);
-    let mut fingerprints = HashMap::new();
-    let changed = collect_source_updates(&sources, &mut fingerprints);
-    merge_injected_vars(changed)
+
+    let (snapshot, _) = snapshot_source_state(&sources);
+    replace_synced_oauth_vars(snapshot)
+}
+
+pub fn provider_oauth_source_kind(slug: &str) -> Option<OAuthCredentialSourceKind> {
+    match slug {
+        "anthropic" => Some(OAuthCredentialSourceKind::ClaudeCode),
+        "openai" => Some(OAuthCredentialSourceKind::OpenAiCodex),
+        _ => None,
+    }
+}
+
+pub fn oauth_source_label(kind: OAuthCredentialSourceKind) -> &'static str {
+    match kind {
+        OAuthCredentialSourceKind::ClaudeCode => "Claude Code auth",
+        OAuthCredentialSourceKind::OpenAiCodex => "Codex auth",
+        OAuthCredentialSourceKind::JsonFile => "Custom JSON auth",
+    }
+}
+
+pub fn oauth_source_location_hint(kind: OAuthCredentialSourceKind) -> String {
+    match kind {
+        OAuthCredentialSourceKind::ClaudeCode => {
+            if cfg!(target_os = "macos") {
+                "macOS Keychain service 'Claude Code-credentials'".to_string()
+            } else {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("~"))
+                    .join(".claude")
+                    .join(".credentials.json")
+                    .display()
+                    .to_string()
+            }
+        }
+        OAuthCredentialSourceKind::OpenAiCodex => default_codex_auth_path()
+            .unwrap_or_else(|| PathBuf::from("~/.codex/auth.json"))
+            .display()
+            .to_string(),
+        OAuthCredentialSourceKind::JsonFile => "Configured JSON file".to_string(),
+    }
+}
+
+pub fn oauth_source_available(kind: OAuthCredentialSourceKind) -> bool {
+    match kind {
+        OAuthCredentialSourceKind::ClaudeCode => ClaudeCodeConfig::extract_oauth_token()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        OAuthCredentialSourceKind::OpenAiCodex => default_codex_auth_path()
+            .map(|path| path.is_file())
+            .unwrap_or(false),
+        OAuthCredentialSourceKind::JsonFile => false,
+    }
 }
 
 fn resolved_sources(providers: &ProvidersSettings) -> Vec<ResolvedOAuthSource> {
-    let mut sources = vec![
-        ResolvedOAuthSource {
-            source_id: "claude_code".to_string(),
-            label: "Claude Code".to_string(),
-            env_key: "ANTHROPIC_API_KEY".to_string(),
-            kind: OAuthCredentialSourceKind::ClaudeCode,
-            path: None,
-            json_pointer: None,
-        },
-        ResolvedOAuthSource {
-            source_id: "openai_codex".to_string(),
-            label: "OpenAI Codex".to_string(),
-            env_key: "OPENAI_API_KEY".to_string(),
-            kind: OAuthCredentialSourceKind::OpenAiCodex,
-            path: default_codex_auth_path(),
-            json_pointer: None,
-        },
-    ];
+    let mut sources = Vec::new();
+    let include_legacy_builtins =
+        providers.oauth_sync_enabled && providers.provider_credential_modes.is_empty();
+    let selected_builtin_kinds = explicitly_selected_builtin_sources(providers);
 
-    for (idx, source) in providers.oauth_sync_sources.iter().enumerate() {
-        sources.push(resolve_custom_source(source, idx));
+    for kind in [
+        OAuthCredentialSourceKind::ClaudeCode,
+        OAuthCredentialSourceKind::OpenAiCodex,
+    ] {
+        if include_legacy_builtins || selected_builtin_kinds.contains(&kind) {
+            sources.push(builtin_source(kind));
+        }
+    }
+
+    if providers.oauth_sync_enabled {
+        for (idx, source) in providers.oauth_sync_sources.iter().enumerate() {
+            sources.push(resolve_custom_source(source, idx));
+        }
     }
 
     sources
+}
+
+fn explicitly_selected_builtin_sources(
+    providers: &ProvidersSettings,
+) -> HashSet<OAuthCredentialSourceKind> {
+    providers
+        .provider_credential_modes
+        .iter()
+        .filter_map(|(slug, mode)| {
+            (*mode == ProviderCredentialMode::ExternalOAuthSync)
+                .then(|| provider_oauth_source_kind(slug))
+                .flatten()
+        })
+        .collect()
+}
+
+fn builtin_source(kind: OAuthCredentialSourceKind) -> ResolvedOAuthSource {
+    match kind {
+        OAuthCredentialSourceKind::ClaudeCode => ResolvedOAuthSource {
+            source_id: "claude_code".to_string(),
+            label: oauth_source_label(kind).to_string(),
+            env_key: "ANTHROPIC_API_KEY".to_string(),
+            kind,
+            path: None,
+            json_pointer: None,
+        },
+        OAuthCredentialSourceKind::OpenAiCodex => ResolvedOAuthSource {
+            source_id: "openai_codex".to_string(),
+            label: oauth_source_label(kind).to_string(),
+            env_key: "OPENAI_API_KEY".to_string(),
+            kind,
+            path: default_codex_auth_path(),
+            json_pointer: None,
+        },
+        OAuthCredentialSourceKind::JsonFile => ResolvedOAuthSource {
+            source_id: "custom_json".to_string(),
+            label: oauth_source_label(kind).to_string(),
+            env_key: "LLM_API_KEY".to_string(),
+            kind,
+            path: None,
+            json_pointer: None,
+        },
+    }
 }
 
 fn resolve_custom_source(
@@ -155,30 +247,20 @@ fn default_codex_auth_path() -> Option<PathBuf> {
 }
 
 fn current_fingerprints(sources: &[ResolvedOAuthSource]) -> HashMap<String, String> {
-    let mut fingerprints = HashMap::new();
-    for source in sources {
-        if let Ok(Some(token)) = load_source_token(source) {
-            fingerprints.insert(source.source_id.clone(), fingerprint(&token));
-        }
-    }
-    fingerprints
+    snapshot_source_state(sources).1
 }
 
-fn collect_source_updates(
+fn snapshot_source_state(
     sources: &[ResolvedOAuthSource],
-    fingerprints: &mut HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut changed = HashMap::new();
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut values = HashMap::new();
+    let mut fingerprints = HashMap::new();
 
     for source in sources {
         match load_source_token(source) {
             Ok(Some(token)) => {
-                let next = fingerprint(&token);
-                let previous = fingerprints.get(&source.source_id);
-                if previous != Some(&next) {
-                    fingerprints.insert(source.source_id.clone(), next);
-                    changed.insert(source.env_key.clone(), token);
-                }
+                fingerprints.insert(source.source_id.clone(), fingerprint(&token));
+                values.insert(source.env_key.clone(), token);
             }
             Ok(None) => {}
             Err(error) => {
@@ -192,7 +274,7 @@ fn collect_source_updates(
         }
     }
 
-    changed
+    (values, fingerprints)
 }
 
 fn load_source_token(source: &ResolvedOAuthSource) -> Result<Option<String>, String> {
@@ -272,8 +354,9 @@ fn fingerprint(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::clear_injected_vars_for_tests;
-    use crate::config::helpers::optional_env;
+    use crate::config::{
+        clear_injected_vars_for_tests, helpers::synced_oauth_env, replace_synced_oauth_vars,
+    };
 
     #[test]
     fn extract_token_recursively_prefers_common_access_token_keys() {
@@ -306,55 +389,63 @@ mod tests {
     }
 
     #[test]
-    fn collect_source_updates_only_emits_changed_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let auth_path = dir.path().join("auth.json");
-        std::fs::write(&auth_path, r#"{"access_token":"tok-1"}"#).unwrap();
+    fn resolved_sources_only_includes_selected_builtin_modes() {
+        let mut providers = ProvidersSettings::default();
+        providers.provider_credential_modes.insert(
+            "openai".to_string(),
+            ProviderCredentialMode::ExternalOAuthSync,
+        );
 
-        let source = ResolvedOAuthSource {
-            source_id: "codex".to_string(),
-            label: "Codex".to_string(),
-            env_key: "OPENAI_API_KEY".to_string(),
-            kind: OAuthCredentialSourceKind::OpenAiCodex,
-            path: Some(auth_path.clone()),
-            json_pointer: None,
-        };
-
-        let mut fingerprints = HashMap::new();
-        let first = collect_source_updates(std::slice::from_ref(&source), &mut fingerprints);
-        assert_eq!(first.get("OPENAI_API_KEY"), Some(&"tok-1".to_string()));
-
-        let second = collect_source_updates(std::slice::from_ref(&source), &mut fingerprints);
-        assert!(second.is_empty());
-
-        std::fs::write(&auth_path, r#"{"access_token":"tok-2"}"#).unwrap();
-        let third = collect_source_updates(std::slice::from_ref(&source), &mut fingerprints);
-        assert_eq!(third.get("OPENAI_API_KEY"), Some(&"tok-2".to_string()));
+        let sources = resolved_sources(&providers);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].env_key, "OPENAI_API_KEY");
     }
 
     #[test]
-    fn prime_runtime_oauth_credentials_merges_custom_source_into_overlay() {
+    fn resolved_sources_respects_legacy_global_toggle() {
+        let providers = ProvidersSettings {
+            oauth_sync_enabled: true,
+            ..ProvidersSettings::default()
+        };
+
+        let sources = resolved_sources(&providers);
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn prime_runtime_oauth_credentials_replaces_overlay() {
         clear_injected_vars_for_tests();
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("custom-auth.json");
         std::fs::write(&auth_path, r#"{"credentials":{"token":"custom-token"}}"#).unwrap();
 
+        replace_synced_oauth_vars(HashMap::from([(
+            "THINCLAW_STALE_SYNC".to_string(),
+            "stale-token".to_string(),
+        )]));
+
+        let mut provider_credential_modes = HashMap::new();
+        provider_credential_modes.insert("openai".to_string(), ProviderCredentialMode::ApiKey);
+
         let providers = ProvidersSettings {
+            oauth_sync_enabled: true,
             oauth_sync_sources: vec![OAuthCredentialSourceConfig {
                 kind: OAuthCredentialSourceKind::JsonFile,
                 path: Some(auth_path),
                 env_key: Some("THINCLAW_TEST_OAUTH_SYNC".to_string()),
                 json_pointer: Some("/credentials/token".to_string()),
             }],
+            provider_credential_modes,
             ..ProvidersSettings::default()
         };
 
         let count = prime_runtime_oauth_credentials(&providers);
-        assert!(count >= 1);
+        assert_eq!(count, 1);
         assert_eq!(
-            optional_env("THINCLAW_TEST_OAUTH_SYNC").unwrap(),
+            synced_oauth_env("THINCLAW_TEST_OAUTH_SYNC"),
             Some("custom-token".to_string())
         );
+        assert_eq!(synced_oauth_env("THINCLAW_STALE_SYNC"), None);
 
         clear_injected_vars_for_tests();
     }

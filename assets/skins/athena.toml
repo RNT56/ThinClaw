@@ -18,3 +18,11 @@ ascii_art = [
   '         |__|/______\|__|',
 ]
 tool_emojis = { shell = "⚒️", browser = "🦉", memory = "📜", search_files = "🏺", todo = "🧵", subagent = "🛡️" }
+
+[web]
+aura_primary = "#C9A24B"
+aura_secondary = "#315B86"
+chrome_style = "marble"
+surface_pattern = "marble"
+message_shape = "sculpted"
+elevation = "medium"

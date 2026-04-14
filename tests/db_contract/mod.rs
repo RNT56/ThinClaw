@@ -1,0 +1,13 @@
+mod agent_registry;
+mod conversations;
+mod coverage_ledger;
+mod experiments;
+mod fixtures;
+mod identity;
+mod jobs;
+mod routines;
+mod sandbox;
+mod settings;
+mod support;
+mod tool_failures;
+mod workspace;

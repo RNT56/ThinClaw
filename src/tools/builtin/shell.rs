@@ -1022,6 +1022,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_external_scanner_blocks_before_smart_approval() {
         let _env_guard = lock_env();

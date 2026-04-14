@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
@@ -174,7 +175,10 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
-pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
+pub fn init_tracing(
+    log_broadcaster: Arc<LogBroadcaster>,
+    debug_terminal_logs: bool,
+) -> Arc<LogLevelHandle> {
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "thinclaw=info,tower_http=warn".to_string());
 
@@ -203,17 +207,32 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
         base_filter,
     ));
 
+    let terminal_filter =
+        default_terminal_log_level(debug_terminal_logs, std::env::var_os("RUST_LOG").is_some());
+
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
+                .with_writer(crate::tracing_fmt::TruncatingStderr::default())
+                .with_filter(terminal_filter),
         )
         .with(WebLogLayer::new(log_broadcaster))
         .init();
 
     handle
+}
+
+fn default_terminal_log_level(
+    debug_terminal_logs: bool,
+    has_rust_log_override: bool,
+) -> LevelFilter {
+    if debug_terminal_logs || has_rust_log_override {
+        LevelFilter::TRACE
+    } else {
+        LevelFilter::WARN
+    }
 }
 
 /// Visitor that extracts the `message` field and all extra key-value
@@ -450,6 +469,21 @@ mod tests {
         let broadcaster = LogBroadcaster::new();
         // Verify the leak detector is initialized with default patterns
         assert!(broadcaster.leak_detector.pattern_count() > 0);
+    }
+
+    #[test]
+    fn test_default_terminal_log_level_is_warn_without_debug_or_env_override() {
+        assert_eq!(default_terminal_log_level(false, false), LevelFilter::WARN);
+    }
+
+    #[test]
+    fn test_default_terminal_log_level_respects_debug_flag() {
+        assert_eq!(default_terminal_log_level(true, false), LevelFilter::TRACE);
+    }
+
+    #[test]
+    fn test_default_terminal_log_level_respects_rust_log_override() {
+        assert_eq!(default_terminal_log_level(false, true), LevelFilter::TRACE);
     }
 
     #[test]

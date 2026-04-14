@@ -133,11 +133,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 
 ### Slack-Specific Features (since Feb 2025)
 
-| Feature | OpenClaw | ThinClaw | Notes |
-|---------|----------|----------|-------|
-| Streaming draft replies | ✅ | ✅ | End-to-end: StreamMode + DraftReplyState + `respond_with_tools_streaming` + agent loop integration |
-| Configurable stream modes | ✅ | ✅ | Hot-reload via `/api/settings` REST API (`telegram_stream_mode`); `ChannelManager` runtime delegation without restart |
-| Thread ownership | ✅ | ✅ | `SessionManager::set_thread_owner` + `AgentRouter::claim_thread` (first-responder wins) |
+Slack remains a supported WASM Events API channel with webhook ingestion, thread replies, DM/mention handling, and attachment parsing. However, the live draft-streaming/runtime stream-mode controls currently wired in ThinClaw are for **Telegram** and **Discord**, not Slack (`src/channels/wasm/wrapper.rs`, `src/channels/web/handlers/settings.rs`).
 
 ### Channel Features
 
@@ -280,9 +276,11 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | NVIDIA API | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Nvidia` — pre-configured OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | Perplexity | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Perplexity` — `sonar-pro` default model ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | MiniMax | ✅ | ✅ | P3 | Provider preset + catalog updated to the current `api.minimax.io/v1` OpenAI-compatible endpoint and M2-family defaults ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs), [`src/config/provider_catalog.rs`](src/config/provider_catalog.rs)) |
-| GLM-5 | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Glm` — Zhipu `glm-4-plus` default ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
+| GLM (Zhipu) | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Glm` — current default is `glm-4-plus`; parser accepts `glm5` / `glm-5` aliases but the shipped preset is not named `GLM-5` in code ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (server-mode integration) | ❌ | ✅ | P3 | ThinClaw exposes llama.cpp through a local `llama-server` / OpenAI-compatible endpoint today, while `src/llm/llama_cpp.rs` provides the abstraction layer and future native-hook scaffold rather than a fully wired FFI backend ([`src/llm/provider_factory.rs`](src/llm/provider_factory.rs), [`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs)) |
+
+ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together, Venice, Moonshot, DeepSeek, Cerebras, and Cohere** via OpenAI-compatible endpoints, in addition to the rows above ([`src/config/provider_catalog.rs`](src/config/provider_catalog.rs)).
 
 ### Model Features
 
@@ -1042,7 +1040,7 @@ These are intentional architectural choices, not gaps to be filled.
 
 ---
 
-## 20. Shipped Built-in Tools (80 total; some conditional or feature-gated)
+## 20. Shipped Built-in Tools (75 max; some conditional or feature-gated)
 
 > **Updated:** 2026-04-14
 
@@ -1136,14 +1134,11 @@ These are intentional architectural choices, not gaps to be filled.
 | `prompt_manage` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Manage system prompt overrides |
 | `skill_manage` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Manage skill lifecycle via learning |
 
-### 20.8 Messaging & Communication (5 tools)
+### 20.8 Messaging & Communication (2 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `send_message` | [`send_message.rs`](src/tools/builtin/send_message.rs) | Unified cross-platform messaging (Discord/Slack/Telegram/etc.) via gateway callback |
-| `slack_actions` | [`slack_actions.rs`](src/tools/builtin/slack_actions.rs) | Slack-specific API actions |
-| `discord_actions` | [`discord_actions.rs`](src/tools/builtin/discord_actions.rs) | Discord-specific API actions |
-| `telegram_actions` | [`telegram_actions.rs`](src/tools/builtin/telegram_actions.rs) | Telegram-specific API actions |
 | `apple_mail` | [`apple_mail.rs`](src/tools/builtin/apple_mail.rs) | Read/send Apple Mail via AppleScript |
 
 ### 20.9 LLM & Reasoning (5 tools)
@@ -1156,15 +1151,15 @@ These are intentional architectural choices, not gaps to be filled.
 | `consult_advisor` | [`advisor.rs`](src/tools/builtin/advisor.rs) | Advisor-executor consultation tool, registered conditionally when routing mode uses the advisor lane |
 | `agent_think` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Explicit reasoning scratchpad (implicit capability tool) |
 
-### 20.10 Hardware & Environment (5 tools)
+### 20.10 Hardware & Environment (3 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `device_info` | [`device_info.rs`](src/tools/builtin/device_info.rs) | System hardware/OS info |
-| `location` | [`location.rs`](src/tools/builtin/location.rs) | Device geolocation |
-| `camera_capture` | [`camera_capture.rs`](src/tools/builtin/camera_capture.rs) | Capture from camera/webcam |
 | `screen_capture` | [`screen_capture.rs`](src/tools/builtin/screen_capture.rs) | macOS/Linux screenshot capture |
 | `tts` | [`tts.rs`](src/tools/builtin/tts.rs) | Text-to-speech synthesis |
+
+Source-present but not currently registered as built-in runtime tools: `slack_actions`, `discord_actions`, `telegram_actions`, `location`, and `camera_capture` ([`src/tools/builtin/mod.rs`](src/tools/builtin/mod.rs), [`src/tools/registry.rs`](src/tools/registry.rs), [`src/app.rs`](src/app.rs), [`src/main.rs`](src/main.rs)).
 
 ### 20.11 UI & Interaction (4 tools)
 

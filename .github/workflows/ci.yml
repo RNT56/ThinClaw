@@ -72,6 +72,91 @@ jobs:
       - name: Compile tests (no run)
         run: cargo test --no-run ${{ matrix.cargo-args }}
 
+  db-contract-libsql:
+    name: DB Contract (libSQL)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Run libSQL contract tests
+        env:
+          DATABASE_BACKEND: libsql
+        run: cargo test --test db_contract --no-default-features --features libsql -- --nocapture
+
+  db-contract-postgres:
+    name: DB Contract (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: thinclaw
+          POSTGRES_PASSWORD: thinclaw
+          POSTGRES_DB: thinclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thinclaw -d thinclaw_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_BACKEND: postgres
+      DATABASE_URL: postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Enable pgvector extension
+        run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Run postgres contract tests
+        run: cargo test --test db_contract --no-default-features --features postgres -- --nocapture --test-threads=1
+
+  schema-divergence:
+    name: Schema Divergence
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: thinclaw
+          POSTGRES_PASSWORD: thinclaw
+          POSTGRES_DB: thinclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thinclaw -d thinclaw_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Enable pgvector extension
+        run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Run schema divergence test
+        run: cargo test --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1
+
   tests:
     name: Run Tests
     runs-on: ubuntu-latest
