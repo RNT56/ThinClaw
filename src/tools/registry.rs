@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::agent::learning::LearningOrchestrator;
+use crate::config::SafetyConfig;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -18,19 +19,19 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
-    ClarifyTool, CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool,
-    ExecuteCodeTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool,
+    AgentBrowserTool, AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool,
+    CanvasTool, ClarifyTool, CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool,
+    EmitUserMessageTool, ExecuteCodeTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool,
+    JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool,
     LearningProposalReviewTool, LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool,
-    LlmListModelsTool, LlmSelectTool, MoaTool, MemoryDeleteTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, ProcessTool,
-    PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool,
-    SendMessageTool, SessionSearchTool, SharedModelOverride, SharedProcessRegistry, ShellTool,
-    SharedTodoStore, SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool,
-    SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool,
-    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
-    UpdateAgentTool, VisionAnalyzeTool, WriteFileTool,
+    LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool,
+    PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
+    SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
+    SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
+    VisionAnalyzeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -383,6 +384,15 @@ impl ToolRegistry {
 
     /// Register all built-in tools.
     pub fn register_builtin_tools(&self) {
+        self.register_builtin_tools_with_browser_backend("chromium", None);
+    }
+
+    /// Register all built-in tools, selecting the browser backend explicitly.
+    pub fn register_builtin_tools_with_browser_backend(
+        &self,
+        browser_backend: &str,
+        cloud_browser_provider: Option<&str>,
+    ) {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
@@ -397,18 +407,32 @@ impl ToolRegistry {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("thinclaw")
             .join("browser-profile");
-        let browser_tool = if std::env::var("BROWSER_DOCKER").is_ok() {
+        let browser_tool: Arc<dyn Tool> = if browser_backend.eq_ignore_ascii_case("agent_browser")
+            || browser_backend.eq_ignore_ascii_case("agent-browser")
+        {
+            tracing::info!("Registering browser tool with agent-browser backend");
+            Arc::new(AgentBrowserTool::new())
+        } else if cloud_browser_provider.is_some() {
+            tracing::info!(
+                provider = cloud_browser_provider.unwrap_or("auto"),
+                "Registering browser tool with managed cloud-browser support"
+            );
+            Arc::new(BrowserTool::new_with_cloud(
+                browser_profile,
+                cloud_browser_provider.map(std::borrow::ToOwned::to_owned),
+            ))
+        } else if std::env::var("BROWSER_DOCKER").is_ok() {
             let docker_config = crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
             tracing::info!(
                 image = %docker_config.image,
                 port = docker_config.debug_port,
                 "Docker Chromium fallback enabled for browser tool"
             );
-            BrowserTool::new_with_docker(browser_profile, docker_config)
+            Arc::new(BrowserTool::new_with_docker(browser_profile, docker_config))
         } else {
-            BrowserTool::new(browser_profile)
+            Arc::new(BrowserTool::new(browser_profile))
         };
-        self.register_sync(Arc::new(browser_tool));
+        self.register_sync(browser_tool);
 
         // Agent control tools (thinking + user messaging)
         self.register_sync(Arc::new(AgentThinkTool));
@@ -472,7 +496,7 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
-        self.register_dev_tools_with_config(None, None);
+        self.register_dev_tools_with_safety(None, None, None);
     }
 
     /// Register development tools with optional workspace constraints.
@@ -486,6 +510,15 @@ impl ToolRegistry {
         base_dir: Option<PathBuf>,
         working_dir: Option<PathBuf>,
     ) {
+        self.register_dev_tools_with_safety(base_dir, working_dir, None);
+    }
+
+    pub fn register_dev_tools_with_safety(
+        &self,
+        base_dir: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+        safety: Option<&SafetyConfig>,
+    ) {
         // Shell tool — when base_dir is set, the shell gets sandbox restrictions too
         let mut shell = ShellTool::new();
         if let Some(ref wd) = working_dir {
@@ -493,6 +526,9 @@ impl ToolRegistry {
         }
         if let Some(ref bd) = base_dir {
             shell = shell.with_base_dir(bd.clone());
+        }
+        if let Some(safety) = safety {
+            shell = shell.with_safety_config(safety);
         }
         self.register_sync(Arc::new(shell));
 
@@ -532,12 +568,17 @@ impl ToolRegistry {
         &self,
         workspace: Arc<Workspace>,
         db: Option<Arc<dyn Database>>,
+        cheap_llm: Option<Arc<dyn LlmProvider>>,
         sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     ) {
         let mut memory_tool_count = 5;
         self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
         if let Some(db) = db {
-            self.register_sync(Arc::new(SessionSearchTool::new(db)));
+            let mut session_search = SessionSearchTool::new(db);
+            if let Some(cheap) = cheap_llm {
+                session_search = session_search.with_summarizer(cheap);
+            }
+            self.register_sync(Arc::new(session_search));
             memory_tool_count += 1;
         }
         self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
@@ -629,16 +670,21 @@ impl ToolRegistry {
         &self,
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
+        remote_hub: Option<Arc<crate::skills::remote_source::RemoteSkillHub>>,
+        quarantine: Arc<crate::skills::quarantine::QuarantineManager>,
     ) {
         self.register_sync(Arc::new(SkillReadTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillSearchTool::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
+            remote_hub.clone(),
         )));
         self.register_sync(Arc::new(SkillInstallTool::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
+            remote_hub,
+            quarantine,
         )));
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillReloadTool::new(registry)));
@@ -828,8 +874,17 @@ impl ToolRegistry {
         &self,
         primary: Arc<dyn LlmProvider>,
         cheap: Option<Arc<dyn LlmProvider>>,
+        reference_models: Vec<String>,
+        aggregator_model: Option<String>,
+        min_successful: usize,
     ) {
-        let tool = MoaTool::new(primary, cheap);
+        let tool = MoaTool::new(
+            primary,
+            cheap,
+            reference_models,
+            aggregator_model,
+            min_successful,
+        );
         if tool.is_viable() {
             self.register_sync(Arc::new(tool));
             tracing::info!("Registered Mixture-of-Agents tool");
@@ -879,10 +934,7 @@ impl ToolRegistry {
     ///
     /// Searches directories recursively for files matching a name pattern.
     /// Complements GrepTool (content search) with filename-based discovery.
-    pub fn register_search_files_tool(
-        &self,
-        base_dir: Option<std::path::PathBuf>,
-    ) {
+    pub fn register_search_files_tool(&self, base_dir: Option<std::path::PathBuf>) {
         let mut tool = SearchFilesTool::new();
         if let Some(dir) = base_dir {
             tool = tool.with_base_dir(dir);

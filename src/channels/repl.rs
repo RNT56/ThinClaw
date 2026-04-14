@@ -14,13 +14,16 @@
 //! - `/clear` - Clear the conversation
 //! - `/compact` - Compact the context
 //! - `/new` - Start a new thread
+//! - `/rollback` - Filesystem rollback command family
+//! - `/vibe` - Set, show, or clear a temporary session vibe
+//! - `/skin` - Runtime CLI skin command family
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use rustyline::completion::Completer;
@@ -40,6 +43,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::agent::truncate_for_preview;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::terminal_branding::{TerminalBranding, resolve_cli_skin_name};
+use crate::tui::skin::CliSkin;
 
 /// Max characters for tool result previews in the terminal.
 const CLI_TOOL_RESULT_MAX: usize = 200;
@@ -72,6 +77,9 @@ const SLASH_COMMANDS: &[&str] = &[
     "/suggest",
     "/thread",
     "/resume",
+    "/rollback",
+    "/vibe",
+    "/skin",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -143,25 +151,16 @@ impl ConditionalEventHandler for EscInterruptHandler {
 }
 
 /// Build a termimad skin with our color scheme.
-fn make_skin() -> MadSkin {
-    let mut skin = MadSkin::default();
-    skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
-    skin.bold.set_fg(termimad::crossterm::style::Color::White);
-    skin.italic.set_fg(termimad::crossterm::style::Color::Rgb {
-        r: 120,
-        g: 150,
-        b: 210,
-    });
-    skin.inline_code
-        .set_fg(termimad::crossterm::style::Color::Green);
-    skin.code_block
-        .set_fg(termimad::crossterm::style::Color::Green);
-    skin.code_block.left_margin = 2;
-    skin
+fn make_skin(skin: &CliSkin) -> MadSkin {
+    skin.to_termimad_skin()
 }
 
 /// Format JSON params as `key: value` lines for the approval card.
-fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
+fn format_json_params(
+    branding: &TerminalBranding,
+    params: &serde_json::Value,
+    indent: &str,
+) -> String {
     match params {
         serde_json::Value::Object(map) => {
             let mut lines = Vec::new();
@@ -179,7 +178,7 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
                         } else {
                             s
                         };
-                        format!("\x1b[32m\"{display}\"\x1b[0m")
+                        branding.good(format!("\"{display}\""))
                     }
                     other => {
                         let rendered = other.to_string();
@@ -196,7 +195,7 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
                         }
                     }
                 };
-                lines.push(format!("{indent}\x1b[36m{key}\x1b[0m: {val_str}"));
+                lines.push(format!("{indent}{}: {val_str}", branding.accent(key)));
             }
             lines.join("\n")
         }
@@ -215,7 +214,7 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
             };
             truncated
                 .lines()
-                .map(|l| format!("{indent}\x1b[90m{l}\x1b[0m"))
+                .map(|l| format!("{indent}{}", branding.muted(l)))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -228,6 +227,10 @@ pub struct ReplChannel {
     single_message: Option<String>,
     /// Debug mode flag (shared with input thread).
     debug_mode: Arc<AtomicBool>,
+    /// Active skin shared with the reader thread and responders.
+    skin: Arc<RwLock<CliSkin>>,
+    /// Default skin name used when the local client resets the skin.
+    default_skin_name: String,
     /// Whether we're currently streaming (chunks have been printed without a trailing newline).
     is_streaming: Arc<AtomicBool>,
     /// When true, the one-liner startup banner is suppressed (boot screen shown instead).
@@ -237,9 +240,12 @@ pub struct ReplChannel {
 impl ReplChannel {
     /// Create a new REPL channel.
     pub fn new() -> Self {
+        let default_skin_name = resolve_cli_skin_name();
         Self {
             single_message: None,
             debug_mode: Arc::new(AtomicBool::new(false)),
+            skin: Arc::new(RwLock::new(CliSkin::load(&default_skin_name))),
+            default_skin_name,
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
         }
@@ -247,9 +253,12 @@ impl ReplChannel {
 
     /// Create a REPL channel that sends a single message and exits.
     pub fn with_message(message: String) -> Self {
+        let default_skin_name = resolve_cli_skin_name();
         Self {
             single_message: Some(message),
             debug_mode: Arc::new(AtomicBool::new(false)),
+            skin: Arc::new(RwLock::new(CliSkin::load(&default_skin_name))),
+            default_skin_name,
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
         }
@@ -263,6 +272,13 @@ impl ReplChannel {
     fn is_debug(&self) -> bool {
         self.debug_mode.load(Ordering::Relaxed)
     }
+
+    fn current_skin(&self) -> CliSkin {
+        self.skin
+            .read()
+            .map(|skin| skin.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
 }
 
 impl Default for ReplChannel {
@@ -271,34 +287,98 @@ impl Default for ReplChannel {
     }
 }
 
-fn print_help() {
-    // Bold white for section headers, bold cyan for commands, dim gray for descriptions
-    let h = "\x1b[1m"; // bold (section headers)
-    let c = "\x1b[1;36m"; // bold cyan (commands)
-    let d = "\x1b[90m"; // dim gray (descriptions)
-    let r = "\x1b[0m"; // reset
+fn print_help(skin: &CliSkin) {
+    let branding = TerminalBranding::from_skin(skin.clone());
 
+    branding.print_banner(
+        "ThinClaw REPL",
+        Some("Interactive shell with skin-aware status, approvals, and markdown rendering."),
+    );
+    println!("  {}", branding.body_bold("Commands"));
+    println!(
+        "  {} {}",
+        branding.accent("/help"),
+        branding.muted("show this help")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/debug"),
+        branding.muted("toggle verbose output")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/quit /exit"),
+        branding.muted("exit the repl")
+    );
     println!();
-    println!("  {h}ThinClaw REPL{r}");
+    println!("  {}", branding.body_bold("Conversation"));
+    println!(
+        "  {} {}",
+        branding.accent("/undo"),
+        branding.muted("undo the last turn")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/redo"),
+        branding.muted("redo an undone turn")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/clear"),
+        branding.muted("clear conversation")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/compact"),
+        branding.muted("compact context window")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/new"),
+        branding.muted("new conversation thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/interrupt"),
+        branding.muted("stop current operation")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("esc"),
+        branding.muted("stop current operation")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/rollback"),
+        branding.muted("filesystem rollback command family")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/vibe"),
+        branding.muted("set, show, or clear a temporary session vibe")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/skin [name]"),
+        branding.muted("switch the local CLI skin or show the current skin")
+    );
     println!();
-    println!("  {h}Commands{r}");
-    println!("  {c}/help{r}              {d}show this help{r}");
-    println!("  {c}/debug{r}             {d}toggle verbose output{r}");
-    println!("  {c}/quit{r} {c}/exit{r}        {d}exit the repl{r}");
-    println!();
-    println!("  {h}Conversation{r}");
-    println!("  {c}/undo{r}              {d}undo the last turn{r}");
-    println!("  {c}/redo{r}              {d}redo an undone turn{r}");
-    println!("  {c}/clear{r}             {d}clear conversation{r}");
-    println!("  {c}/compact{r}           {d}compact context window{r}");
-    println!("  {c}/new{r}               {d}new conversation thread{r}");
-    println!("  {c}/interrupt{r}         {d}stop current operation{r}");
-    println!("  {c}esc{r}                {d}stop current operation{r}");
-    println!();
-    println!("  {h}Approval responses{r}");
-    println!("  {c}yes{r} ({c}y{r})            {d}approve tool execution{r}");
-    println!("  {c}no{r} ({c}n{r})             {d}deny tool execution{r}");
-    println!("  {c}always{r} ({c}a{r})         {d}approve for this session{r}");
+    println!("  {}", branding.body_bold("Approval responses"));
+    println!(
+        "  {} {}",
+        branding.good("yes (y)"),
+        branding.muted("approve tool execution")
+    );
+    println!(
+        "  {} {}",
+        branding.bad("no (n)"),
+        branding.muted("deny tool execution")
+    );
+    println!(
+        "  {} {}",
+        branding.warn("always (a)"),
+        branding.muted("approve for this session")
+    );
     println!();
 }
 
@@ -316,10 +396,16 @@ impl Channel for ReplChannel {
         "repl"
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        None
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
         let single_message = self.single_message.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
+        let skin = Arc::clone(&self.skin);
+        let default_skin_name = self.default_skin_name.clone();
         let suppress_banner = Arc::clone(&self.suppress_banner);
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
@@ -364,18 +450,38 @@ impl Channel for ReplChannel {
             let _ = rl.load_history(&hist_path);
 
             if !suppress_banner.load(Ordering::Relaxed) {
-                println!("\x1b[1mThinClaw\x1b[0m  /help for commands, /quit to exit");
-                println!();
+                let current_skin = skin
+                    .read()
+                    .map(|skin| skin.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+                TerminalBranding::from_skin(current_skin)
+                    .print_banner("ThinClaw REPL", Some("/help for commands, /quit to exit"));
             }
 
             loop {
+                let current_skin = skin
+                    .read()
+                    .map(|skin| skin.clone())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
                 let prompt = if debug_mode.load(Ordering::Relaxed) {
-                    "\x1b[33m[debug]\x1b[0m \x1b[1;36m\u{203A}\x1b[0m "
+                    format!(
+                        "{}[debug]{} {}{}{} ",
+                        current_skin.ansi_fg(current_skin.warn),
+                        current_skin.ansi_reset(),
+                        current_skin.ansi_fg(current_skin.accent),
+                        current_skin.prompt_symbol(),
+                        current_skin.ansi_reset()
+                    )
                 } else {
-                    "\x1b[1;36m\u{203A}\x1b[0m "
+                    format!(
+                        "{}{}{} ",
+                        current_skin.ansi_fg(current_skin.accent),
+                        current_skin.prompt_symbol(),
+                        current_skin.ansi_reset()
+                    )
                 };
 
-                match rl.readline(prompt) {
+                match rl.readline(&prompt) {
                     Ok(line) => {
                         let line = line.trim();
                         if line.is_empty() {
@@ -393,16 +499,63 @@ impl Channel for ReplChannel {
                                 break;
                             }
                             "/help" => {
-                                print_help();
+                                print_help(&current_skin);
                                 continue;
                             }
                             "/debug" => {
                                 let current = debug_mode.load(Ordering::Relaxed);
                                 debug_mode.store(!current, Ordering::Relaxed);
+                                let branding = TerminalBranding::from_skin(current_skin.clone());
                                 if !current {
-                                    println!("\x1b[90mdebug mode on\x1b[0m");
+                                    println!("{}", branding.muted("debug mode on"));
                                 } else {
-                                    println!("\x1b[90mdebug mode off\x1b[0m");
+                                    println!("{}", branding.muted("debug mode off"));
+                                }
+                                continue;
+                            }
+                            _ if line.starts_with("/skin") => {
+                                let arg = line.strip_prefix("/skin").map(str::trim).unwrap_or("");
+                                let mut guard = match skin.write() {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                let branding = TerminalBranding::from_skin(guard.clone());
+                                if arg.is_empty() || arg.eq_ignore_ascii_case("current") {
+                                    println!(
+                                        "{}",
+                                        branding.muted(format!("Current skin: {}", guard.name))
+                                    );
+                                    println!(
+                                        "{}",
+                                        branding.muted(format!(
+                                            "Available skins: {}",
+                                            CliSkin::available_names().join(", ")
+                                        ))
+                                    );
+                                } else if arg.eq_ignore_ascii_case("list") {
+                                    println!(
+                                        "{}",
+                                        branding.muted(format!(
+                                            "Available skins: {}",
+                                            CliSkin::available_names().join(", ")
+                                        ))
+                                    );
+                                } else {
+                                    let requested = if arg.eq_ignore_ascii_case("reset") {
+                                        default_skin_name.as_str()
+                                    } else {
+                                        arg
+                                    };
+                                    *guard = CliSkin::load(requested);
+                                    let branding = TerminalBranding::from_skin(guard.clone());
+                                    println!(
+                                        "{}",
+                                        branding.muted(format!(
+                                            "Skin switched to '{}' (prompt: {})",
+                                            guard.name,
+                                            guard.prompt_symbol()
+                                        ))
+                                    );
                                 }
                                 continue;
                             }
@@ -467,10 +620,11 @@ impl Channel for ReplChannel {
 
         // Dim separator line before the response
         let sep_width = width.min(80);
-        eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+        let branding = TerminalBranding::from_skin(self.current_skin());
+        eprintln!("{}", branding.separator(sep_width));
 
         // Render markdown
-        let skin = make_skin();
+        let skin = make_skin(&self.current_skin());
         let text = termimad::FmtText::from(&skin, &response.content, Some(width));
 
         print!("{text}");
@@ -484,25 +638,33 @@ impl Channel for ReplChannel {
         _metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         let debug = self.is_debug();
+        let skin = self.current_skin();
+        let branding = TerminalBranding::from_skin(skin.clone());
+        let muted = skin.ansi_fg(skin.muted);
+        let accent = skin.ansi_fg(skin.accent);
+        let warn = skin.ansi_fg(skin.warn);
+        let good = skin.ansi_fg(skin.good);
+        let bad = skin.ansi_fg(skin.bad);
+        let reset = skin.ansi_reset();
 
         match status {
             StatusUpdate::Thinking(msg) => {
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                eprintln!("  \x1b[90m\u{25CB} {display}\x1b[0m");
+                eprintln!("  {muted}\u{25CB} {display}{reset}");
             }
             StatusUpdate::ToolStarted { name, .. } => {
-                eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
+                eprintln!("  {warn}\u{25CB} {}{reset}", skin.tool_label(&name));
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {
                 if success {
-                    eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
+                    eprintln!("  {good}\u{25CF} {}{reset}", skin.tool_label(&name));
                 } else {
-                    eprintln!("  \x1b[31m\u{2717} {name} (failed)\x1b[0m");
+                    eprintln!("  {bad}\u{2717} {} (failed){reset}", skin.tool_label(&name));
                 }
             }
             StatusUpdate::ToolResult { name: _, preview } => {
                 let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
-                eprintln!("    \x1b[90m{display}\x1b[0m");
+                eprintln!("    {muted}{display}{reset}");
             }
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition
@@ -511,7 +673,7 @@ impl Channel for ReplChannel {
                         .map(|(w, _)| w as usize)
                         .unwrap_or(80);
                     let sep_width = width.min(80);
-                    eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+                    eprintln!("{}", branding.separator(sep_width));
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
@@ -522,13 +684,13 @@ impl Channel for ReplChannel {
                 browse_url,
             } => {
                 eprintln!(
-                    "  \x1b[36m[job]\x1b[0m {title} \x1b[90m({job_id})\x1b[0m \x1b[4m{browse_url}\x1b[0m"
+                    "  {accent}[job]{reset} {title} {muted}({job_id}){reset} \x1b[4m{browse_url}\x1b[0m"
                 );
             }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                    eprintln!("  \x1b[90m{display}\x1b[0m");
+                    eprintln!("  {muted}{display}{reset}");
                 }
             }
             StatusUpdate::ApprovalNeeded {
@@ -553,7 +715,8 @@ impl Channel for ReplChannel {
                 let top_label = format!(" {tool_name} requires approval ");
                 let top_fill = box_width.saturating_sub(top_label.len() + 1);
                 let top_border = format!(
-                    "\u{250C}\x1b[33m{top_label}\x1b[0m{}",
+                    "\u{250C}{}{}",
+                    branding.warn(top_label),
                     "\u{2500}".repeat(top_fill)
                 );
 
@@ -561,17 +724,18 @@ impl Channel for ReplChannel {
                 let bot_label = format!(" {short_id} ");
                 let bot_fill = box_width.saturating_sub(bot_label.len() + 2);
                 let bot_border = format!(
-                    "\u{2514}\u{2500}\x1b[90m{bot_label}\x1b[0m{}",
+                    "\u{2514}\u{2500}{}{}",
+                    branding.muted(bot_label),
                     "\u{2500}".repeat(bot_fill)
                 );
 
                 eprintln!();
                 eprintln!("  {top_border}");
-                eprintln!("  \u{2502} \x1b[90m{description}\x1b[0m");
+                eprintln!("  \u{2502} {}", branding.muted(description));
                 eprintln!("  \u{2502}");
 
                 // Params
-                let param_lines = format_json_params(&parameters, "  \u{2502}   ");
+                let param_lines = format_json_params(&branding, &parameters, "  \u{2502}   ");
                 // The format_json_params already includes the indent prefix
                 // but we need to handle the case where each line already starts with it
                 for line in param_lines.lines() {
@@ -580,7 +744,10 @@ impl Channel for ReplChannel {
 
                 eprintln!("  \u{2502}");
                 eprintln!(
-                    "  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[34malways\x1b[0m (a) / \x1b[31mno\x1b[0m (n)"
+                    "  \u{2502} {} / {} / {}",
+                    branding.good("yes (y)"),
+                    branding.warn("always (a)"),
+                    branding.bad("no (n)")
                 );
                 eprintln!("  {bot_border}");
                 eprintln!();
@@ -592,9 +759,12 @@ impl Channel for ReplChannel {
                 ..
             } => {
                 eprintln!();
-                eprintln!("\x1b[33m  Authentication required for {extension_name}\x1b[0m");
+                eprintln!(
+                    "  {}",
+                    branding.warn(format!("Authentication required for {extension_name}"))
+                );
                 if let Some(ref instr) = instructions {
-                    eprintln!("  {instr}");
+                    eprintln!("  {}", branding.body(instr));
                 }
                 if let Some(ref url) = setup_url {
                     eprintln!("  \x1b[4m{url}\x1b[0m");
@@ -607,14 +777,20 @@ impl Channel for ReplChannel {
                 message,
             } => {
                 if success {
-                    eprintln!("\x1b[32m  {extension_name}: {message}\x1b[0m");
+                    eprintln!(
+                        "  {}",
+                        branding.good(format!("{extension_name}: {message}"))
+                    );
                 } else {
-                    eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
+                    eprintln!("  {}", branding.bad(format!("{extension_name}: {message}")));
                 }
             }
             StatusUpdate::Error { message, code } => {
                 let code_str = code.as_deref().unwrap_or("error");
-                eprintln!("\x1b[31m  \u{2717} [{code_str}] {message}\x1b[0m");
+                eprintln!(
+                    "  {}",
+                    branding.bad(format!("\u{2717} [{code_str}] {message}"))
+                );
             }
             StatusUpdate::CanvasAction(ref action) => {
                 let summary = match action {
@@ -633,7 +809,10 @@ impl Channel for ReplChannel {
                         format!("notify [{level:?}] {message}")
                     }
                 };
-                eprintln!("  \x1b[35m\u{25A0} canvas:{summary}\x1b[0m");
+                eprintln!(
+                    "  {}",
+                    branding.accent(format!("\u{25A0} canvas:{summary}"))
+                );
             }
             StatusUpdate::AgentMessage {
                 content,
@@ -642,18 +821,18 @@ impl Channel for ReplChannel {
                 let width = crossterm::terminal::size()
                     .map(|(w, _)| w as usize)
                     .unwrap_or(80);
-                let (label, color) = match message_type.as_str() {
-                    "warning" => ("warning", "\x1b[33m"),
-                    "question" => ("question", "\x1b[36m"),
-                    "interim_result" => ("interim result", "\x1b[32m"),
-                    _ => ("note", "\x1b[34m"),
+                let title = match message_type.as_str() {
+                    "warning" => branding.warn("┌─ agent warning ─"),
+                    "question" => branding.accent("┌─ agent question ─"),
+                    "interim_result" => branding.good("┌─ agent interim result ─"),
+                    _ => branding.accent_soft("┌─ agent note ─"),
                 };
-                eprintln!("  {color}┌─ agent {label} ─\x1b[0m");
-                let skin = make_skin();
+                eprintln!("  {title}");
+                let skin = make_skin(&self.current_skin());
                 let text = termimad::FmtText::from(&skin, &content, Some(width));
                 eprint!("{text}");
                 eprintln!();
-                eprintln!("  \x1b[90m└────────────────────────────────\x1b[0m");
+                eprintln!("  {}", branding.muted("└────────────────────────────────"));
             }
             // Lifecycle events are informational for the frontend;
             // the REPL already shows a streaming indicator via is_streaming.
@@ -661,13 +840,13 @@ impl Channel for ReplChannel {
 
             // Sub-agent lifecycle events
             StatusUpdate::SubagentSpawned { name, task, .. } => {
-                eprintln!("  \x1b[36m┌─ sub-agent: {name}\x1b[0m");
-                eprintln!("  \x1b[90m│ task: {task}\x1b[0m");
-                eprintln!("  \x1b[90m└────────────────────────────────\x1b[0m");
+                eprintln!("  {}", branding.accent(format!("┌─ sub-agent: {name}")));
+                eprintln!("  {}", branding.muted(format!("│ task: {task}")));
+                eprintln!("  {}", branding.muted("└────────────────────────────────"));
             }
             StatusUpdate::SubagentProgress { message, .. } => {
                 let display = truncate_for_preview(&message, CLI_STATUS_MAX);
-                eprintln!("  \x1b[90m│ progress: {display}\x1b[0m");
+                eprintln!("  {}", branding.muted(format!("│ progress: {display}")));
             }
             StatusUpdate::SubagentCompleted {
                 name,
@@ -677,9 +856,15 @@ impl Channel for ReplChannel {
             } => {
                 let secs = duration_ms as f64 / 1000.0;
                 if success {
-                    eprintln!("  \x1b[32m└─ sub-agent '{name}' completed in {secs:.1}s\x1b[0m");
+                    eprintln!(
+                        "  {}",
+                        branding.good(format!("└─ sub-agent '{name}' completed in {secs:.1}s"))
+                    );
                 } else {
-                    eprintln!("  \x1b[31m└─ sub-agent '{name}' failed after {secs:.1}s\x1b[0m");
+                    eprintln!(
+                        "  {}",
+                        branding.bad(format!("└─ sub-agent '{name}' failed after {secs:.1}s"))
+                    );
                 }
             }
         }
@@ -691,12 +876,16 @@ impl Channel for ReplChannel {
         _user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let skin = make_skin();
+        let current_skin = self.current_skin();
+        let skin = make_skin(&current_skin);
         let width = crossterm::terminal::size()
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
 
-        eprintln!("\x1b[34m\u{25CF}\x1b[0m notification");
+        eprintln!(
+            "{}",
+            TerminalBranding::from_skin(current_skin).accent("\u{25CF} notification")
+        );
         let text = termimad::FmtText::from(&skin, &response.content, Some(width));
         eprint!("{text}");
         eprintln!();
@@ -709,5 +898,15 @@ impl Channel for ReplChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repl_formatting_hints_are_absent() {
+        assert_eq!(ReplChannel::new().formatting_hints(), None);
     }
 }

@@ -5,6 +5,12 @@ ThinClaw supports **20+ inference providers** out of the box. It defaults to
 a built-in provider catalog that auto-resolves base URLs, API keys, and model
 defaults for popular cloud providers.
 
+It also includes a few runtime conveniences that matter in real deployments:
+
+- watched OAuth auth-file sync for Claude Code, Codex, and compatible custom JSON token files
+- automatic live runtime reload when those watched credentials change
+- Anthropic-compatible prompt caching hints when the active provider supports them
+
 ## Provider Overview
 
 ### Native Backends

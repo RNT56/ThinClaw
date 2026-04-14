@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use clap::Subcommand;
 
+use crate::terminal_branding::TerminalBranding;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelCommand {
     /// List all configured and discovered models
@@ -193,6 +195,7 @@ fn known_models() -> Vec<ModelInfo> {
 
 /// Run a model CLI command.
 pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     match cmd {
         ModelCommand::List { provider, format } => {
             let mut models = known_models();
@@ -212,8 +215,10 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
             if format == "json" {
                 println!("{}", serde_json::to_string_pretty(&models)?);
             } else {
-                println!("Available Models");
-                println!("================\n");
+                branding.print_banner(
+                    "Available Models",
+                    Some("Configured and discovered model surfaces grouped by provider."),
+                );
 
                 let mut current_provider = String::new();
                 models.sort_by(|a, b| (&a.provider, &a.name).cmp(&(&b.provider, &b.name)));
@@ -221,7 +226,11 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                 for model in &models {
                     if model.provider != current_provider {
                         current_provider = model.provider.clone();
-                        println!("  {} Provider:", current_provider.to_uppercase());
+                        println!(
+                            "  {}",
+                            branding
+                                .accent(format!("{} provider:", current_provider.to_uppercase()))
+                        );
                     }
 
                     let ctx = model
@@ -239,45 +248,64 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                     .collect();
 
                     println!(
-                        "    {:40} {:>10}  [{}]",
-                        model.name,
-                        ctx,
-                        features.join(", ")
+                        "    {} {}  {}",
+                        branding.body(format!("{:40}", model.name)),
+                        branding.muted(format!("{:>10}", ctx)),
+                        branding.accent_soft(format!("[{}]", features.join(", ")))
                     );
                 }
 
-                println!("\n  {} model(s) found.", models.len());
+                println!(
+                    "\n  {}",
+                    branding.muted(format!("{} model(s) found.", models.len()))
+                );
             }
         }
 
         ModelCommand::Info { model } => {
             let models = known_models();
             if let Some(info) = models.iter().find(|m| m.name == model) {
-                println!("Model: {}", info.name);
-                println!("Provider: {}", info.provider);
+                branding.print_banner("Model Info", Some(&info.name));
+                println!("{}", branding.key_value("Model", &info.name));
+                println!("{}", branding.key_value("Provider", &info.provider));
                 if let Some(ctx) = info.context_window {
-                    println!("Context Window: {} tokens", ctx);
+                    println!("{}", branding.key_value("Context", format!("{ctx} tokens")));
                 }
                 if let Some(max) = info.max_output {
-                    println!("Max Output: {} tokens", max);
+                    println!(
+                        "{}",
+                        branding.key_value("Max output", format!("{max} tokens"))
+                    );
                 }
                 println!(
-                    "Vision: {}",
-                    if info.supports_vision { "yes" } else { "no" }
+                    "{}",
+                    branding.key_value("Vision", if info.supports_vision { "yes" } else { "no" })
                 );
-                println!("Tools: {}", if info.supports_tools { "yes" } else { "no" });
                 println!(
-                    "Streaming: {}",
-                    if info.supports_streaming { "yes" } else { "no" }
+                    "{}",
+                    branding.key_value("Tools", if info.supports_tools { "yes" } else { "no" })
+                );
+                println!(
+                    "{}",
+                    branding.key_value(
+                        "Streaming",
+                        if info.supports_streaming { "yes" } else { "no" }
+                    )
                 );
             } else {
-                println!("Model '{}' not found in known models.", model);
-                println!("It may still be available via OpenAI-compatible endpoints.");
+                println!(
+                    "{}",
+                    branding.warn(format!("Model '{}' not found in known models.", model))
+                );
+                println!(
+                    "{}",
+                    branding.muted("It may still be available via OpenAI-compatible endpoints.")
+                );
             }
         }
 
         ModelCommand::Test { model } => {
-            println!("Testing model: {}...", model);
+            branding.print_banner("Model Connectivity Test", Some(&model));
 
             let backend =
                 std::env::var("LLM_BACKEND").unwrap_or_else(|_| "openai_compatible".to_string());
@@ -292,8 +320,8 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                     .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             };
 
-            println!("  Backend: {}", backend);
-            println!("  Base URL: {}", base_url);
+            println!("{}", branding.key_value("Backend", &backend));
+            println!("{}", branding.key_value("Base URL", &base_url));
 
             let client = reqwest::Client::new();
             let api_key = std::env::var("OPENAI_API_KEY")
@@ -314,22 +342,22 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
             match response {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        println!("  ✅ Connection successful!");
+                        println!("  {}", branding.good("Connection successful."));
                         if let Ok(body) = resp.json::<serde_json::Value>().await
                             && let Some(content) = body["choices"][0]["message"]["content"].as_str()
                         {
-                            println!("  Response: {}", content.trim());
+                            println!("{}", branding.key_value("Response", content.trim()));
                         }
                     } else {
-                        println!("  ❌ HTTP {}", resp.status());
+                        println!("  {}", branding.bad(format!("HTTP {}", resp.status())));
                         if let Ok(body) = resp.text().await {
                             let preview: String = body.chars().take(200).collect();
-                            println!("  Error: {}", preview);
+                            println!("{}", branding.key_value("Error", preview));
                         }
                     }
                 }
                 Err(e) => {
-                    println!("  ❌ Connection failed: {}", e);
+                    println!("  {}", branding.bad(format!("Connection failed: {}", e)));
                 }
             }
         }
@@ -361,7 +389,10 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
             if format == "json" {
                 println!("{}", render_verify_results_json(&results)?);
             } else {
-                println!("{}", render_verify_results_text(&results, discovery_only));
+                println!(
+                    "{}",
+                    render_verify_results_text(&branding, &results, discovery_only)
+                );
             }
         }
     }
@@ -923,10 +954,16 @@ fn render_verify_results_json(results: &[ProviderVerifyResult]) -> anyhow::Resul
     Ok(serde_json::to_string_pretty(results)?)
 }
 
-fn render_verify_results_text(results: &[ProviderVerifyResult], discovery_only: bool) -> String {
+fn render_verify_results_text(
+    branding: &TerminalBranding,
+    results: &[ProviderVerifyResult],
+    discovery_only: bool,
+) -> String {
     let mut out = String::new();
-    out.push_str("Provider Verification\n");
-    out.push_str("===================\n\n");
+    out.push_str(&branding.body_bold("Provider Verification"));
+    out.push('\n');
+    out.push_str(&branding.separator(36));
+    out.push_str("\n\n");
     for result in results {
         let chat = if discovery_only {
             "-".to_string()
@@ -942,11 +979,21 @@ fn render_verify_results_text(results: &[ProviderVerifyResult], discovery_only: 
             .clone()
             .unwrap_or_else(|| "-".to_string());
         let error = result.error.clone().unwrap_or_default();
+        let status = if result.status.eq_ignore_ascii_case("ok") {
+            branding.good(&result.status)
+        } else {
+            branding.bad(&result.status)
+        };
+        let discovery = if result.discovery_ok {
+            branding.good("ok")
+        } else {
+            branding.bad("fail")
+        };
         out.push_str(&format!(
-            "{:12}  {:4}  discovery={} ({:>2})  chat={:4}  model={}{}\n",
-            result.provider,
-            result.status,
-            if result.discovery_ok { "ok" } else { "fail" },
+            "{}  {}  discovery={} ({:>2})  chat={:4}  model={}{}\n",
+            branding.body(format!("{:12}", result.provider)),
+            status,
+            discovery,
             result.discovered_count,
             chat,
             model,
@@ -1083,6 +1130,7 @@ mod tests {
     #[test]
     fn test_render_verify_results_text_mentions_chat_and_model() {
         let text = render_verify_results_text(
+            &TerminalBranding::current(),
             &[ProviderVerifyResult {
                 provider: "minimax".to_string(),
                 status: "pass".to_string(),

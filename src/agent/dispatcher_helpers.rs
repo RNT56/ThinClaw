@@ -319,6 +319,10 @@ mod tests {
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: true,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
             })),
             tools: Arc::new(ToolRegistry::new()),
             workspace: None,
@@ -364,6 +368,13 @@ mod tests {
                 workspace_mode: "unrestricted".to_string(),
                 workspace_root: None,
                 notify_channel: None,
+                model_guidance_enabled: true,
+                cli_skin: "cockpit".to_string(),
+                persona_seed: "default".to_string(),
+                checkpoints_enabled: true,
+                max_checkpoints: 50,
+                browser_backend: "chromium".to_string(),
+                cloud_browser_provider: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -582,6 +593,10 @@ mod tests {
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         });
 
         let job_ctx = JobContext::with_user("test", "chat", "test session");
@@ -611,6 +626,10 @@ mod tests {
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         });
         let job_ctx = JobContext::with_user("test", "chat", "test session");
 

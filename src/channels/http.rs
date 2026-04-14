@@ -307,6 +307,13 @@ impl Channel for HttpChannel {
         "http"
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "HTTP webhook responses are delivered as plain text bodies. Avoid platform-specific markdown or presentation-heavy formatting unless the caller explicitly asked for it."
+                .to_string(),
+        )
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         if self.state.webhook_secret.is_none() {
             return Err(ChannelError::StartupFailed {

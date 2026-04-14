@@ -11,6 +11,7 @@ pub mod bedrock;
 pub mod circuit_breaker;
 pub mod cost_tracker;
 pub mod costs;
+pub mod credential_sync;
 pub mod discovery;
 pub mod embeddings;
 pub mod extended_context;
@@ -19,6 +20,7 @@ pub mod gemini;
 pub mod llama_cpp;
 pub mod llm_hooks;
 pub mod llms_txt;
+pub mod model_guidance;
 pub mod pricing_sync;
 mod provider;
 pub(crate) mod provider_factory;
@@ -36,7 +38,10 @@ pub mod smart_routing;
 pub mod usage_tracking;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
-pub use failover::{CooldownConfig, FailoverProvider};
+pub use credential_sync::{OAuthCredentialSyncHandle, prime_runtime_oauth_credentials};
+pub use failover::{
+    CooldownConfig, FailoverProvider, LeaseConfig, LeaseSelectionStrategy, ProviderLeaseEntry,
+};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, StreamChunk, StreamChunkStream, ThinkingConfig, ToolCall, ToolCompletionRequest,
@@ -71,6 +76,7 @@ mod tests {
             openai_compatible: Some(crate::config::OpenAiCompatibleConfig {
                 base_url: "http://localhost:8080".to_string(),
                 api_key: None,
+                api_keys: Vec::new(),
                 model: "test-model".to_string(),
                 extra_headers: Vec::new(),
             }),

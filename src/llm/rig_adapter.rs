@@ -34,11 +34,22 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    prompt_caching: bool,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
     /// Create a new adapter wrapping the given rig-core model.
     pub fn new(model: M, model_name: impl Into<String>) -> Self {
+        Self::new_with_prompt_caching(model, model_name, false)
+    }
+
+    /// Create a new adapter and record whether the wrapped model enables
+    /// provider-side prompt caching.
+    pub fn new_with_prompt_caching(
+        model: M,
+        model_name: impl Into<String>,
+        prompt_caching: bool,
+    ) -> Self {
         let name = model_name.into();
         let (input_cost, output_cost) =
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
@@ -47,6 +58,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            prompt_caching,
         }
     }
 }
@@ -223,20 +235,26 @@ fn make_nullable(schema: &mut JsonValue) {
 
 /// Convert ThinClaw messages to rig-core format.
 ///
-/// Returns `(preamble, chat_history)` where preamble is extracted from
-/// any System message and chat_history contains the rest.
+/// Returns `(preamble, chat_history, cache_hint_requested)` where preamble is
+/// extracted from System messages, chat_history contains non-system messages,
+/// and `cache_hint_requested` indicates a provider metadata cache-control hint
+/// was found on at least one system message.
 ///
 /// When a user message carries image attachments, the message is converted
 /// to a multimodal `UserContent` with both image and text parts. This is
 /// provider-agnostic: rig-core handles the format conversion for OpenAI,
 /// Anthropic, Gemini, Ollama, etc.
-fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage>) {
+fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage>, bool) {
     let mut preamble: Option<String> = None;
     let mut history = Vec::new();
+    let mut cache_hint_requested = false;
 
     for msg in messages {
         match msg.role {
             crate::llm::Role::System => {
+                if has_anthropic_ephemeral_cache_hint(msg) {
+                    cache_hint_requested = true;
+                }
                 // Concatenate system messages into preamble
                 match preamble {
                     Some(ref mut p) => {
@@ -358,7 +376,17 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
         }
     }
 
-    (preamble, history)
+    (preamble, history, cache_hint_requested)
+}
+
+fn has_anthropic_ephemeral_cache_hint(message: &ChatMessage) -> bool {
+    message
+        .provider_metadata
+        .get("anthropic")
+        .and_then(|metadata| metadata.get("cache_control"))
+        .and_then(|cache| cache.get("type"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("ephemeral"))
 }
 
 /// Map a MIME type string to rig-core's `ImageMediaType`.
@@ -576,7 +604,13 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
+        if cache_hint_requested && !self.prompt_caching {
+            tracing::debug!(
+                model = %self.model_name,
+                "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
+            );
+        }
         let additional_params = thinking_config_to_params(&request.thinking);
 
         if additional_params.is_some() {
@@ -681,7 +715,13 @@ where
             );
         }
 
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
+        if cache_hint_requested && !self.prompt_caching {
+            tracing::debug!(
+                model = %self.model_name,
+                "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
+            );
+        }
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
         let additional_params = thinking_config_to_params(&request.thinking);
@@ -758,6 +798,10 @@ where
         self.active_model_name()
     }
 
+    fn supports_prompt_caching(&self) -> bool {
+        self.prompt_caching
+    }
+
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
         // rig-core models are baked at construction time.
         // Switching requires creating a new adapter.
@@ -779,7 +823,13 @@ where
     ) -> Result<StreamChunkStream, LlmError> {
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
+        if cache_hint_requested && !self.prompt_caching {
+            tracing::debug!(
+                model = %self.model_name,
+                "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
+            );
+        }
         let additional_params = thinking_config_to_params(&request.thinking);
 
         let rig_req = build_rig_request(
@@ -855,7 +905,13 @@ where
             );
         }
 
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
+        if cache_hint_requested && !self.prompt_caching {
+            tracing::debug!(
+                model = %self.model_name,
+                "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
+            );
+        }
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
         let additional_params = thinking_config_to_params(&request.thinking);
@@ -1087,9 +1143,10 @@ mod tests {
             ChatMessage::system("You are a helpful assistant."),
             ChatMessage::user("Hello"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
         assert_eq!(preamble, Some("You are a helpful assistant.".to_string()));
         assert_eq!(history.len(), 1);
+        assert!(!cache_hint_requested);
     }
 
     #[test]
@@ -1099,9 +1156,25 @@ mod tests {
             ChatMessage::system("System 2"),
             ChatMessage::user("Hi"),
         ];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
         assert_eq!(preamble, Some("System 1\nSystem 2".to_string()));
         assert_eq!(history.len(), 1);
+        assert!(!cache_hint_requested);
+    }
+
+    #[test]
+    fn test_convert_messages_detects_anthropic_cache_hint() {
+        let messages = vec![
+            ChatMessage::system("System 1").with_provider_metadata(
+                "anthropic",
+                serde_json::json!({"cache_control": {"type": "ephemeral"}}),
+            ),
+            ChatMessage::user("Hi"),
+        ];
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
+        assert_eq!(preamble, Some("System 1".to_string()));
+        assert_eq!(history.len(), 1);
+        assert!(cache_hint_requested);
     }
 
     #[test]
@@ -1111,9 +1184,10 @@ mod tests {
             "search",
             "result text",
         )];
-        let (preamble, history) = convert_messages(&messages);
+        let (preamble, history, cache_hint_requested) = convert_messages(&messages);
         assert!(preamble.is_none());
         assert_eq!(history.len(), 1);
+        assert!(!cache_hint_requested);
         // Tool results become User messages in rig-core
         match &history[0] {
             RigMessage::User { content } => match content.first() {
@@ -1136,7 +1210,7 @@ mod tests {
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history, _cache_hint_requested) = convert_messages(&messages);
         assert_eq!(history.len(), 1);
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1160,9 +1234,10 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history, _cache_hint_requested) = convert_messages(&messages);
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
@@ -1245,7 +1320,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history, _cache_hint_requested) = convert_messages(&messages);
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1274,7 +1349,7 @@ mod tests {
             arguments: serde_json::json!({"query": "test"}),
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history, _cache_hint_requested) = convert_messages(&messages);
 
         match &history[0] {
             RigMessage::Assistant { content, .. } => {
@@ -1310,10 +1385,11 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         };
         let messages = vec![assistant_msg, tool_result_msg];
-        let (_preamble, history) = convert_messages(&messages);
+        let (_preamble, history, _cache_hint_requested) = convert_messages(&messages);
 
         // Extract the generated call_id from the assistant tool call
         let assistant_call_id = match &history[0] {

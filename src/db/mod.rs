@@ -820,7 +820,9 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         link: &ExperimentTargetLink,
     ) -> Result<(), DatabaseError>;
-    async fn list_experiment_target_links(&self) -> Result<Vec<ExperimentTargetLink>, DatabaseError>;
+    async fn list_experiment_target_links(
+        &self,
+    ) -> Result<Vec<ExperimentTargetLink>, DatabaseError>;
     async fn delete_experiment_target_links_for_target(
         &self,
         target_id: Uuid,

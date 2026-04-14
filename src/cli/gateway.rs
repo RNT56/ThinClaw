@@ -7,6 +7,8 @@
 
 use clap::Subcommand;
 
+use crate::terminal_branding::TerminalBranding;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum GatewayCommand {
     /// Start the web gateway
@@ -38,9 +40,18 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
             port,
             host,
             foreground,
-        } => start_gateway(port, host, foreground).await,
-        GatewayCommand::Stop => stop_gateway().await,
-        GatewayCommand::Status => gateway_status().await,
+        } => {
+            TerminalBranding::current().print_banner("Gateway", Some("Start the web cockpit"));
+            start_gateway(port, host, foreground).await
+        }
+        GatewayCommand::Stop => {
+            TerminalBranding::current().print_banner("Gateway", Some("Stop the web cockpit"));
+            stop_gateway().await
+        }
+        GatewayCommand::Status => {
+            TerminalBranding::current().print_banner("Gateway", Some("Inspect the web cockpit"));
+            gateway_status().await
+        }
     }
 }
 
@@ -58,6 +69,7 @@ async fn start_gateway(
     host: Option<String>,
     foreground: bool,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let pid_path = pid_file_path();
 
     // Check if already running.
@@ -97,8 +109,14 @@ async fn start_gateway(
     });
 
     if foreground {
-        println!("🌐 Starting gateway on {}:{}...", gw_host, gw_port);
-        println!("   Press Ctrl+C to stop.");
+        println!(
+            "{}",
+            branding.accent(format!(
+                "Bringing gateway online at {}:{}...",
+                gw_host, gw_port
+            ))
+        );
+        println!("  {}", branding.muted("Press Ctrl+C to stop."));
         println!();
 
         // Set env vars so the agent picks them up.
@@ -119,9 +137,11 @@ async fn start_gateway(
         // The actual gateway runs as part of `thinclaw run`. In foreground mode,
         // we tell the user to use `thinclaw run` with gateway enabled.
         println!(
-            "Note: The gateway starts as part of the agent. Run:\n\n  \
-             GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
-            gw_host, gw_port
+            "{}",
+            branding.body(format!(
+                "Run with gateway enabled:\n\n  GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
+                gw_host, gw_port
+            ))
         );
 
         // Clean up PID file.
@@ -149,10 +169,13 @@ async fn start_gateway(
         std::fs::write(&pid_path, pid.to_string())?;
 
         println!(
-            "🌐 Gateway started on {}:{} (PID {})",
-            gw_host, gw_port, pid
+            "  {}",
+            branding.good(format!(
+                "Gateway online at {}:{} (PID {})",
+                gw_host, gw_port, pid
+            ))
         );
-        println!("   Stop with: thinclaw gateway stop");
+        println!("  {}", branding.muted("Stop with: thinclaw gateway stop"));
     }
 
     Ok(())
@@ -160,11 +183,12 @@ async fn start_gateway(
 
 /// Stop a running gateway.
 async fn stop_gateway() -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let pid_path = pid_file_path();
 
     if !pid_path.exists() {
-        println!("No gateway PID file found. The gateway may not be running.");
-        println!("   PID file: {}", pid_path.display());
+        println!("{}", branding.warn("No gateway PID file found."));
+        println!("{}", branding.key_value("PID file", pid_path.display()));
         return Ok(());
     }
 
@@ -180,11 +204,17 @@ async fn stop_gateway() -> anyhow::Result<()> {
         .status()?;
 
     if status.success() {
-        println!("✅ Sent SIGTERM to gateway (PID {})", pid);
+        println!(
+            "  {}",
+            branding.good(format!("Sent SIGTERM to gateway (PID {})", pid))
+        );
     } else {
         println!(
-            "⚠️  Failed to send signal to PID {} (process may have already exited)",
-            pid
+            "  {}",
+            branding.warn(format!(
+                "Failed to send signal to PID {} (process may have already exited)",
+                pid
+            ))
         );
     }
 
@@ -194,6 +224,7 @@ async fn stop_gateway() -> anyhow::Result<()> {
 
 /// Show gateway status.
 async fn gateway_status() -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let pid_path = pid_file_path();
 
     // Check PID file.
@@ -234,23 +265,31 @@ async fn gateway_status() -> anyhow::Result<()> {
         .map(|r| r.status().is_success())
         .unwrap_or(false);
 
-    println!("Gateway Status:");
-    println!("  Endpoint:  {}:{}", gw_host, gw_port);
+    println!(
+        "{}",
+        branding.key_value("Endpoint", format!("{}:{}", gw_host, gw_port))
+    );
 
     match pid_info {
         Some((pid, true)) => {
-            println!("  PID:       {} (running)", pid);
+            println!("{}", branding.key_value("PID", format!("{pid} (running)")));
         }
         Some((pid, false)) => {
-            println!("  PID:       {} (stale — process not found)", pid);
+            println!(
+                "{}",
+                branding.key_value("PID", format!("{pid} (stale, process not found)"))
+            );
         }
         None => {
-            println!("  PID:       not tracked");
+            println!("{}", branding.key_value("PID", "not tracked"));
         }
     }
 
     if health_ok {
-        println!("  Health:    ✅ reachable");
+        println!(
+            "{}",
+            branding.key_value("Health", branding.good("reachable"))
+        );
 
         // Try to get detailed status.
         if let Ok(resp) = client
@@ -262,14 +301,20 @@ async fn gateway_status() -> anyhow::Result<()> {
             if let Some(uptime) = json.get("uptime_secs").and_then(|v| v.as_u64()) {
                 let hours = uptime / 3600;
                 let mins = (uptime % 3600) / 60;
-                println!("  Uptime:    {}h {}m", hours, mins);
+                println!(
+                    "{}",
+                    branding.key_value("Uptime", format!("{hours}h {mins}m"))
+                );
             }
             if let Some(conns) = json.get("total_connections").and_then(|v| v.as_u64()) {
-                println!("  Clients:   {}", conns);
+                println!("{}", branding.key_value("Clients", conns));
             }
         }
     } else {
-        println!("  Health:    ❌ not reachable");
+        println!(
+            "{}",
+            branding.key_value("Health", branding.bad("not reachable"))
+        );
     }
 
     Ok(())

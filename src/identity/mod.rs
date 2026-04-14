@@ -6,6 +6,7 @@
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
+use crate::safety::pii_redactor;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -243,6 +244,11 @@ impl ResolvedIdentity {
             external_key: self.stable_external_conversation_key.clone(),
         }
     }
+
+    /// Display the active actor identifier in a prompt-safe way for a channel.
+    pub fn redacted_display(&self, channel: &str) -> String {
+        pii_redactor::redact_for_prompt(&self.actor_id, channel)
+    }
 }
 
 /// Derive a stable UUID for a conversation scope key.
@@ -418,5 +424,20 @@ mod tests {
             identity.stable_external_conversation_key,
             "signal:group:group-42"
         );
+    }
+
+    #[test]
+    fn redacted_display_hashes_non_discord_channels() {
+        let identity = ResolvedIdentity {
+            principal_id: "user-123".to_string(),
+            actor_id: "user-123".to_string(),
+            conversation_scope_id: Uuid::new_v4(),
+            conversation_kind: ConversationKind::Direct,
+            raw_sender_id: "user-123".to_string(),
+            stable_external_conversation_key: "principal:user-123".to_string(),
+        };
+
+        assert_ne!(identity.redacted_display("signal"), "user-123");
+        assert_eq!(identity.redacted_display("discord"), "user-123");
     }
 }

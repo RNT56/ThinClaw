@@ -869,7 +869,7 @@ mod tests {
             "demo",
             "tools-src/demo",
             Some(
-                "http://github.com/nearai/ironclaw/releases/latest/download/demo.wasm".to_string(),
+                "http://github.com/nearai/thinclaw/releases/latest/download/demo.wasm".to_string(),
             ),
             None,
         );
@@ -922,7 +922,7 @@ mod tests {
             "demo",
             "tools-src/demo",
             Some(
-                "https://github.com/nearai/ironclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
+                "https://github.com/nearai/thinclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
             ),
             None, // sha256 = null
         );
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn test_should_attempt_source_fallback_policy() {
         let download = RegistryError::DownloadFailed {
-            url: "https://github.com/nearai/ironclaw/releases/latest/download/demo.wasm"
+            url: "https://github.com/nearai/thinclaw/releases/latest/download/demo.wasm"
                 .to_string(),
             reason: "http status 404".to_string(),
         };
@@ -953,7 +953,7 @@ mod tests {
         assert!(!should_attempt_source_fallback(&already));
 
         let checksum = RegistryError::ChecksumMismatch {
-            url: "https://github.com/nearai/ironclaw/releases/latest/download/demo.wasm"
+            url: "https://github.com/nearai/thinclaw/releases/latest/download/demo.wasm"
                 .to_string(),
             expected_sha256: "deadbeef".to_string(),
             actual_sha256: "feedface".to_string(),

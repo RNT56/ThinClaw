@@ -916,6 +916,15 @@ impl Channel for GmailChannel {
         .await
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "- Gmail replies are email. Use clear headings, concise paragraphs, and direct prose.\n\
+- Avoid markdown tables; they do not render reliably in mail clients.\n\
+- Quote or summarize prior context explicitly when replying in a thread."
+                .to_string(),
+        )
+    }
+
     async fn health_check(&self) -> Result<(), ChannelError> {
         let running = *self.state.running.read().await;
         if running {

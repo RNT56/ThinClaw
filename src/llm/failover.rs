@@ -96,6 +96,152 @@ impl ProviderCooldown {
     }
 }
 
+/// Lease-selection strategy for concurrent provider usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseSelectionStrategy {
+    FillFirst,
+    RoundRobin,
+    LeastUsed,
+    Random,
+}
+
+/// Configuration for provider lease tracking.
+#[derive(Debug, Clone)]
+pub struct LeaseConfig {
+    /// Maximum number of concurrent requests that may be leased to a single
+    /// provider before failover prefers another available provider.
+    pub max_concurrent: usize,
+    /// Strategy used to order candidate providers when several are available.
+    pub selection_strategy: LeaseSelectionStrategy,
+}
+
+impl Default for LeaseConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 3,
+            selection_strategy: LeaseSelectionStrategy::FillFirst,
+        }
+    }
+}
+
+/// Concrete provider entry participating in failover leasing.
+///
+/// Multiple entries may point at the same upstream provider family/model but
+/// carry different credentials. The failover runtime leases these entries
+/// independently so parallel requests can spread across credentials instead of
+/// saturating a single shared provider bucket.
+#[derive(Clone)]
+pub struct ProviderLeaseEntry {
+    pub provider: Arc<dyn LlmProvider>,
+    pub lease_key: String,
+}
+
+impl ProviderLeaseEntry {
+    pub fn new(provider: Arc<dyn LlmProvider>, lease_key: impl Into<String>) -> Self {
+        Self {
+            provider,
+            lease_key: lease_key.into(),
+        }
+    }
+}
+
+struct LeaseTracker {
+    active: Vec<AtomicUsize>,
+    served: Vec<AtomicUsize>,
+    round_robin_cursor: AtomicUsize,
+    config: LeaseConfig,
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+impl LeaseTracker {
+    fn new(provider_count: usize, config: LeaseConfig) -> Self {
+        Self {
+            active: (0..provider_count).map(|_| AtomicUsize::new(0)).collect(),
+            served: (0..provider_count).map(|_| AtomicUsize::new(0)).collect(),
+            round_robin_cursor: AtomicUsize::new(0),
+            config,
+        }
+    }
+
+    fn order_candidates(&self, candidates: &[usize]) -> Vec<usize> {
+        let mut ordered = candidates.to_vec();
+        match self.config.selection_strategy {
+            LeaseSelectionStrategy::FillFirst => ordered,
+            LeaseSelectionStrategy::RoundRobin => {
+                if !ordered.is_empty() {
+                    let start = self.round_robin_cursor.fetch_add(1, Ordering::Relaxed);
+                    let len = ordered.len();
+                    ordered.rotate_left(start % len);
+                }
+                ordered
+            }
+            LeaseSelectionStrategy::LeastUsed => {
+                ordered.sort_by_key(|&idx| {
+                    (
+                        self.active[idx].load(Ordering::Relaxed),
+                        self.served[idx].load(Ordering::Relaxed),
+                        idx,
+                    )
+                });
+                ordered
+            }
+            LeaseSelectionStrategy::Random => {
+                if ordered.len() <= 1 {
+                    return ordered;
+                }
+                let mut seed = mix64(
+                    self.round_robin_cursor
+                        .fetch_add(1, Ordering::Relaxed)
+                        .wrapping_add(1) as u64,
+                );
+                for i in (1..ordered.len()).rev() {
+                    seed = mix64(seed.wrapping_add(i as u64));
+                    let j = (seed as usize) % (i + 1);
+                    ordered.swap(i, j);
+                }
+                ordered
+            }
+        }
+    }
+
+    fn try_acquire(&self, provider_idx: usize) -> Option<ProviderLease<'_>> {
+        loop {
+            let current = self.active[provider_idx].load(Ordering::Relaxed);
+            if current >= self.config.max_concurrent.max(1) {
+                return None;
+            }
+            if self.active[provider_idx]
+                .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.served[provider_idx].fetch_add(1, Ordering::Relaxed);
+                return Some(ProviderLease {
+                    tracker: self,
+                    provider_idx,
+                });
+            }
+        }
+    }
+}
+
+struct ProviderLease<'a> {
+    tracker: &'a LeaseTracker,
+    provider_idx: usize,
+}
+
+impl Drop for ProviderLease<'_> {
+    fn drop(&mut self) {
+        self.tracker.active[self.provider_idx].fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// An LLM provider that wraps multiple providers and tries each in sequence
 /// on transient failures.
 ///
@@ -107,6 +253,10 @@ impl ProviderCooldown {
 /// placed in cooldown and skipped, reducing latency.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
+    /// Stable lease bucket ID for each provider entry. When a provider family
+    /// is configured with multiple credentials, each entry receives a unique
+    /// lease key so concurrent requests balance across credentials.
+    lease_keys: Vec<String>,
     /// Index of the provider that last handled a request successfully.
     /// Used by `model_name()` and `cost_per_token()` so downstream cost
     /// tracking reflects the provider that actually served the request.
@@ -118,6 +268,10 @@ pub struct FailoverProvider {
     epoch: Instant,
     /// Cooldown configuration.
     cooldown_config: CooldownConfig,
+    /// Concurrent-request lease tracking shared across all callers of this
+    /// provider chain. This prevents one provider credential from being
+    /// hammered while others sit idle.
+    leases: LeaseTracker,
     /// Request-scoped provider index keyed by Tokio task ID.
     ///
     /// This allows `effective_model_name()` to report the provider that handled
@@ -131,7 +285,7 @@ impl FailoverProvider {
     ///
     /// Returns an error if `providers` is empty.
     pub fn new(providers: Vec<Arc<dyn LlmProvider>>) -> Result<Self, LlmError> {
-        Self::with_cooldown(providers, CooldownConfig::default())
+        Self::with_configs(providers, CooldownConfig::default(), LeaseConfig::default())
     }
 
     /// Create a new failover provider with explicit cooldown configuration.
@@ -141,21 +295,65 @@ impl FailoverProvider {
         providers: Vec<Arc<dyn LlmProvider>>,
         cooldown_config: CooldownConfig,
     ) -> Result<Self, LlmError> {
+        Self::with_configs(providers, cooldown_config, LeaseConfig::default())
+    }
+
+    /// Create a new failover provider with explicit cooldown and lease
+    /// configuration.
+    pub fn with_configs(
+        providers: Vec<Arc<dyn LlmProvider>>,
+        cooldown_config: CooldownConfig,
+        lease_config: LeaseConfig,
+    ) -> Result<Self, LlmError> {
+        let entries = providers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, provider)| ProviderLeaseEntry::new(provider, format!("provider:{idx}")))
+            .collect();
+        Self::with_entries(entries, cooldown_config, lease_config)
+    }
+
+    /// Create a new failover provider from explicit lease entries.
+    ///
+    /// Callers should use this when they want leases to operate at a finer
+    /// grain than "one slot per provider", for example one slot per API key.
+    pub fn with_entries(
+        entries: Vec<ProviderLeaseEntry>,
+        cooldown_config: CooldownConfig,
+        lease_config: LeaseConfig,
+    ) -> Result<Self, LlmError> {
+        if entries.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: "failover".to_string(),
+                reason: "FailoverProvider requires at least one provider".to_string(),
+            });
+        }
+
+        let mut providers = Vec::with_capacity(entries.len());
+        let mut lease_keys = Vec::with_capacity(entries.len());
+        for entry in entries {
+            providers.push(entry.provider);
+            lease_keys.push(entry.lease_key);
+        }
+
         if providers.is_empty() {
             return Err(LlmError::RequestFailed {
                 provider: "failover".to_string(),
                 reason: "FailoverProvider requires at least one provider".to_string(),
             });
         }
-        let cooldowns = (0..providers.len())
+        let provider_count = providers.len();
+        let cooldowns = (0..provider_count)
             .map(|_| ProviderCooldown::new())
             .collect();
         Ok(Self {
             providers,
+            lease_keys,
             last_used: AtomicUsize::new(0),
             cooldowns,
             epoch: Instant::now(),
             cooldown_config,
+            leases: LeaseTracker::new(provider_count, lease_config),
             provider_for_task: Mutex::new(HashMap::new()),
         })
     }
@@ -213,6 +411,7 @@ impl FailoverProvider {
         for &i in &cooled_down {
             tracing::info!(
                 provider = %self.providers[i].model_name(),
+                lease_key = %self.lease_keys[i],
                 "Skipping provider (in cooldown)"
             );
         }
@@ -232,6 +431,7 @@ impl FailoverProvider {
                 })?;
             tracing::info!(
                 provider = %self.providers[oldest].model_name(),
+                lease_key = %self.lease_keys[oldest],
                 "All providers in cooldown, trying oldest-cooled provider"
             );
             available.push(oldest);
@@ -239,7 +439,20 @@ impl FailoverProvider {
 
         let mut last_error: Option<LlmError> = None;
 
-        for (pos, &i) in available.iter().enumerate() {
+        let ordered = self.leases.order_candidates(&available);
+        let mut attempted_any = false;
+
+        for (pos, &i) in ordered.iter().enumerate() {
+            let Some(_lease) = self.leases.try_acquire(i) else {
+                tracing::info!(
+                    provider = %self.providers[i].model_name(),
+                    lease_key = %self.lease_keys[i],
+                    max_concurrent = self.leases.config.max_concurrent,
+                    "Skipping provider (lease capacity reached)"
+                );
+                continue;
+            };
+            attempted_any = true;
             let provider = &self.providers[i];
             let result = call(Arc::clone(provider)).await;
             match result {
@@ -259,6 +472,7 @@ impl FailoverProvider {
                         self.cooldowns[i].activate_cooldown(nanos);
                         tracing::warn!(
                             provider = %provider.model_name(),
+                            lease_key = %self.lease_keys[i],
                             threshold = self.cooldown_config.failure_threshold,
                             cooldown_secs = self.cooldown_config.cooldown_duration.as_secs(),
                             "Provider entered cooldown after repeated failures"
@@ -276,12 +490,14 @@ impl FailoverProvider {
                             ^ self.now_nanos();
                         (seed >> 50) % 20 // 0..20 ms
                     };
-                    if pos + 1 < available.len() {
-                        let next_i = available[pos + 1];
+                    if pos + 1 < ordered.len() {
+                        let next_i = ordered[pos + 1];
                         tracing::warn!(
                             provider = %provider.model_name(),
+                            lease_key = %self.lease_keys[i],
                             error = %err,
                             next_provider = %self.providers[next_i].model_name(),
+                            next_lease_key = %self.lease_keys[next_i],
                             jitter_ms = jitter_ms,
                             "Provider failed with retryable error, trying next provider"
                         );
@@ -290,6 +506,16 @@ impl FailoverProvider {
                     last_error = Some(err);
                 }
             }
+        }
+
+        if !attempted_any {
+            return Err(LlmError::RequestFailed {
+                provider: "failover".to_string(),
+                reason: format!(
+                    "All providers are at lease capacity (max_concurrent={})",
+                    self.leases.config.max_concurrent
+                ),
+            });
         }
 
         Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
@@ -1177,6 +1403,90 @@ mod tests {
         cd.activate_cooldown(0);
         assert!(cd.is_in_cooldown(0, 1000));
         assert_eq!(cd.cooldown_activated_nanos.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn lease_tracker_fill_first_uses_original_order() {
+        let tracker = LeaseTracker::new(
+            3,
+            LeaseConfig {
+                max_concurrent: 2,
+                selection_strategy: LeaseSelectionStrategy::FillFirst,
+            },
+        );
+        assert_eq!(tracker.order_candidates(&[2, 1, 0]), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn lease_tracker_round_robin_rotates_candidates() {
+        let tracker = LeaseTracker::new(
+            3,
+            LeaseConfig {
+                max_concurrent: 1,
+                selection_strategy: LeaseSelectionStrategy::RoundRobin,
+            },
+        );
+        assert_eq!(tracker.order_candidates(&[0, 1, 2]), vec![0, 1, 2]);
+        assert_eq!(tracker.order_candidates(&[0, 1, 2]), vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn lease_tracker_least_used_prefers_lower_active_and_served() {
+        let tracker = LeaseTracker::new(
+            3,
+            LeaseConfig {
+                max_concurrent: 3,
+                selection_strategy: LeaseSelectionStrategy::LeastUsed,
+            },
+        );
+        tracker.active[0].store(2, Ordering::Relaxed);
+        tracker.served[1].store(5, Ordering::Relaxed);
+        tracker.served[2].store(1, Ordering::Relaxed);
+        assert_eq!(tracker.order_candidates(&[0, 1, 2]), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn lease_tracker_random_returns_permutation_and_varies() {
+        let tracker = LeaseTracker::new(
+            4,
+            LeaseConfig {
+                max_concurrent: 2,
+                selection_strategy: LeaseSelectionStrategy::Random,
+            },
+        );
+        let first = tracker.order_candidates(&[0, 1, 2, 3]);
+        let second = tracker.order_candidates(&[0, 1, 2, 3]);
+
+        let mut first_sorted = first.clone();
+        first_sorted.sort_unstable();
+        assert_eq!(first_sorted, vec![0, 1, 2, 3]);
+
+        let mut second_sorted = second.clone();
+        second_sorted.sort_unstable();
+        assert_eq!(second_sorted, vec![0, 1, 2, 3]);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn lease_tracker_enforces_capacity_and_releases_on_drop() {
+        let tracker = LeaseTracker::new(
+            1,
+            LeaseConfig {
+                max_concurrent: 1,
+                selection_strategy: LeaseSelectionStrategy::FillFirst,
+            },
+        );
+        let lease = tracker.try_acquire(0).expect("first lease should succeed");
+        assert!(
+            tracker.try_acquire(0).is_none(),
+            "capacity should be exhausted"
+        );
+        drop(lease);
+        assert!(
+            tracker.try_acquire(0).is_some(),
+            "lease drop should free capacity"
+        );
     }
 
     // Test: set_model propagates to all providers and active_model_name reflects change.

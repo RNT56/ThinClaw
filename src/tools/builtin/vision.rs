@@ -115,9 +115,9 @@ impl Tool for VisionAnalyzeTool {
                 )));
             }
 
-            let metadata = tokio::fs::metadata(path).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("Cannot access file: {}", e))
-            })?;
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Cannot access file: {}", e)))?;
 
             if metadata.len() > MAX_IMAGE_SIZE {
                 return Err(ToolError::ExecutionFailed(format!(
@@ -127,9 +127,9 @@ impl Tool for VisionAnalyzeTool {
                 )));
             }
 
-            let bytes = tokio::fs::read(path).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to read image: {}", e))
-            })?;
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image: {}", e)))?;
 
             (bytes, path_str.to_string())
         } else if let Some(url) = image_url {
@@ -139,9 +139,10 @@ impl Tool for VisionAnalyzeTool {
                 .build()
                 .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;
 
-            let response = client.get(url).send().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to fetch image: {}", e))
-            })?;
+            let response =
+                client.get(url).send().await.map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to fetch image: {}", e))
+                })?;
 
             if !response.status().is_success() {
                 return Err(ToolError::ExecutionFailed(format!(

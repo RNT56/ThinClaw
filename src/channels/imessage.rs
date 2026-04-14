@@ -550,6 +550,14 @@ impl Channel for IMessageChannel {
         Ok(())
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "- iMessage renders plain text best. Avoid markdown-heavy formatting.\n\
+- Keep replies compact and conversational, with short paragraphs or simple bullets."
+                .to_string(),
+        )
+    }
+
     async fn broadcast(
         &self,
         user_id: &str,

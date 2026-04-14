@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::llm::cost_tracker::CostTracker;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -70,6 +70,42 @@ pub struct Worker {
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
     result: Result<String, Error>,
+}
+
+fn touch_worker_activity(activity_tx: &watch::Sender<std::time::Instant>) {
+    let _ = activity_tx.send(std::time::Instant::now());
+}
+
+struct WorkerActivityKeepalive {
+    cancel_tx: watch::Sender<bool>,
+    join_handle: tokio::task::JoinHandle<()>,
+}
+
+impl WorkerActivityKeepalive {
+    fn spawn(activity_tx: watch::Sender<std::time::Instant>, interval: Duration) -> Self {
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let join_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => break,
+                    _ = tokio::time::sleep(interval) => {
+                        touch_worker_activity(&activity_tx);
+                    }
+                }
+            }
+        });
+        Self {
+            cancel_tx,
+            join_handle,
+        }
+    }
+}
+
+impl Drop for WorkerActivityKeepalive {
+    fn drop(&mut self) {
+        let _ = self.cancel_tx.send(true);
+        self.join_handle.abort();
+    }
 }
 
 impl Worker {
@@ -236,12 +272,29 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             identity = identity_section
         )));
 
-        // Main execution loop with timeout
-        let result = tokio::time::timeout(self.timeout(), async {
-            self.execution_loop(&mut rx, &reasoning, &mut reason_ctx)
-                .await
-        })
-        .await;
+        // Main execution loop with a resettable inactivity timeout. This
+        // keeps legitimately active work alive, including long-running tools
+        // that emit periodic keepalives from inside the worker.
+        let (activity_tx, mut activity_rx) = watch::channel(std::time::Instant::now());
+        let execution = self.execution_loop(&mut rx, &reasoning, &mut reason_ctx, &activity_tx);
+        tokio::pin!(execution);
+        let inactivity_sleep = tokio::time::sleep(self.timeout());
+        tokio::pin!(inactivity_sleep);
+
+        let result = loop {
+            tokio::select! {
+                worker_result = &mut execution => break Ok(worker_result),
+                changed = activity_rx.changed() => {
+                    if changed.is_err() {
+                        continue;
+                    }
+                    inactivity_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + self.timeout());
+                }
+                _ = &mut inactivity_sleep => break Err(()),
+            }
+        };
 
         match result {
             Ok(Ok(())) => {
@@ -272,7 +325,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
                 self.mark_failed(&e.to_string()).await?;
             }
-            Err(_) => {
+            Err(()) => {
                 tracing::warn!("Worker for job {} timed out", self.job_id);
                 self.mark_stuck("Execution timeout").await?;
             }
@@ -292,7 +345,9 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         rx: &mut mpsc::Receiver<WorkerMessage>,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
+        activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
+        touch_worker_activity(activity_tx);
         const MAX_WORKER_ITERATIONS: usize = 500;
         let max_iterations = self
             .context_manager()
@@ -343,8 +398,10 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
+            touch_worker_activity(activity_tx);
             match reasoning.plan(reason_ctx).await {
                 Ok(p) => {
+                    touch_worker_activity(activity_tx);
                     tracing::info!(
                         "Created plan for job {}: {} actions, {:.0}% confidence",
                         self.job_id,
@@ -390,7 +447,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         // If we have a plan, execute it — but fall through to direct
         // selection if the plan didn't finish the job.
         if let Some(ref plan) = plan {
-            self.execute_plan(rx, reasoning, reason_ctx, plan).await?;
+            self.execute_plan(rx, reasoning, reason_ctx, plan, activity_tx)
+                .await?;
 
             // Check whether the job reached a terminal state.
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
@@ -435,6 +493,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                         return Ok(());
                     }
                     WorkerMessage::Ping => {
+                        touch_worker_activity(activity_tx);
                         tracing::trace!("Worker for job {} received ping", self.job_id);
                     }
                     WorkerMessage::Start => {}
@@ -450,6 +509,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             }
 
             iteration += 1;
+            touch_worker_activity(activity_tx);
             if iteration > max_iterations {
                 if is_heartbeat {
                     // ── Heartbeat-specific stuck handling ─────────────────
@@ -514,10 +574,12 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
+            touch_worker_activity(activity_tx);
 
             if selections.is_empty() {
                 // No tools from select_tools, ask LLM directly (may still return tool calls)
                 let respond_output = reasoning.respond_with_tools(reason_ctx).await?;
+                touch_worker_activity(activity_tx);
 
                 match respond_output.result {
                     RespondResult::Text(response) => {
@@ -601,7 +663,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                             })
                             .collect();
 
-                        let results = self.execute_tools_parallel(&selections).await;
+                        let results = self.execute_tools_parallel(&selections, activity_tx).await;
                         for (selection, result) in selections.iter().zip(results) {
                             self.process_tool_result(reason_ctx, selection, result.result)
                                 .await?;
@@ -619,7 +681,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 );
 
                 let result = self
-                    .execute_tool(&selection.tool_name, &selection.parameters)
+                    .execute_tool(&selection.tool_name, &selection.parameters, activity_tx)
                     .await;
 
                 self.process_tool_result(reason_ctx, selection, result)
@@ -632,7 +694,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                     selections.len()
                 );
 
-                let results = self.execute_tools_parallel(&selections).await;
+                let results = self.execute_tools_parallel(&selections, activity_tx).await;
 
                 // Process all results
                 for (selection, result) in selections.iter().zip(results) {
@@ -659,8 +721,13 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
     ///
     /// Each task is tagged with its original index so results are returned
     /// in the same order as `selections`, regardless of completion order.
-    async fn execute_tools_parallel(&self, selections: &[ToolSelection]) -> Vec<ToolExecResult> {
+    async fn execute_tools_parallel(
+        &self,
+        selections: &[ToolSelection],
+        activity_tx: &watch::Sender<std::time::Instant>,
+    ) -> Vec<ToolExecResult> {
         let count = selections.len();
+        touch_worker_activity(activity_tx);
 
         // Short-circuit for single tool: execute directly without JoinSet overhead
         if count <= 1 {
@@ -678,6 +745,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             return results;
         }
 
+        let keepalive =
+            WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
         let mut join_set = JoinSet::new();
 
         for (idx, selection) in selections.iter().enumerate() {
@@ -695,6 +764,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         let mut results: Vec<Option<ToolExecResult>> = (0..count).map(|_| None).collect();
         let mut panicked_reasons: Vec<Option<String>> = (0..count).map(|_| None).collect();
         while let Some(join_result) = join_set.join_next().await {
+            touch_worker_activity(activity_tx);
             match join_result {
                 Ok((idx, exec_result)) => results[idx] = Some(exec_result),
                 Err(e) => {
@@ -720,7 +790,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
         // Fill any panicked/missing slots with error results
         let mut panic_iter = panicked_reasons.into_iter().flatten();
-        results
+        let ordered = results
             .into_iter()
             .enumerate()
             .map(|(i, opt)| {
@@ -737,7 +807,10 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                     }
                 })
             })
-            .collect()
+            .collect();
+        drop(keepalive);
+        touch_worker_activity(activity_tx);
+        ordered
     }
 
     /// Inner tool execution logic that can be called from both single and parallel paths.
@@ -1136,6 +1209,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         plan: &ActionPlan,
+        activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         for (i, action) in plan.actions.iter().enumerate() {
             // Check for stop signal
@@ -1149,12 +1223,14 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                         return Ok(());
                     }
                     WorkerMessage::Ping => {
+                        touch_worker_activity(activity_tx);
                         tracing::trace!("Worker for job {} received ping", self.job_id);
                     }
                     WorkerMessage::Start => {}
                 }
             }
 
+            touch_worker_activity(activity_tx);
             tracing::debug!(
                 "Job {} executing planned action {}/{}: {} - {}",
                 self.job_id,
@@ -1166,7 +1242,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
             // Execute the planned tool
             let result = self
-                .execute_tool(&action.tool_name, &action.parameters)
+                .execute_tool(&action.tool_name, &action.parameters, activity_tx)
                 .await;
 
             // Create a synthetic ToolSelection for process_tool_result.
@@ -1184,6 +1260,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             let completed = self
                 .process_tool_result(reason_ctx, &selection, result)
                 .await?;
+            touch_worker_activity(activity_tx);
 
             if completed {
                 return Ok(());
@@ -1199,6 +1276,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         ));
 
         let response = reasoning.respond(reason_ctx).await?;
+        touch_worker_activity(activity_tx);
         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
         if crate::util::llm_signals_completion(&response) {
@@ -1221,8 +1299,15 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         &self,
         tool_name: &str,
         params: &serde_json::Value,
+        activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<String, Error> {
-        Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await
+        touch_worker_activity(activity_tx);
+        let keepalive =
+            WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
+        let result = Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await;
+        drop(keepalive);
+        touch_worker_activity(activity_tx);
+        result
     }
 
     /// Single finalization point for routine run records.
@@ -1636,6 +1721,10 @@ mod tests {
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
             })),
             tools: Arc::new(registry),
             store: None,
@@ -1755,7 +1844,10 @@ mod tests {
             .collect();
 
         let start = std::time::Instant::now();
-        let results = worker.execute_tools_parallel(&selections).await;
+        let (activity_tx, _) = watch::channel(std::time::Instant::now());
+        let results = worker
+            .execute_tools_parallel(&selections, &activity_tx)
+            .await;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 3);
@@ -1815,7 +1907,10 @@ mod tests {
             },
         ];
 
-        let results = worker.execute_tools_parallel(&selections).await;
+        let (activity_tx, _) = watch::channel(std::time::Instant::now());
+        let results = worker
+            .execute_tools_parallel(&selections, &activity_tx)
+            .await;
 
         // Results must be in same order as selections, not completion order.
         assert!(results[0].result.as_ref().unwrap().contains("done_tool_a"));
@@ -1836,7 +1931,10 @@ mod tests {
             tool_call_id: "call_x".into(),
         }];
 
-        let results = worker.execute_tools_parallel(&selections).await;
+        let (activity_tx, _) = watch::channel(std::time::Instant::now());
+        let results = worker
+            .execute_tools_parallel(&selections, &activity_tx)
+            .await;
         assert_eq!(results.len(), 1);
         assert!(
             results[0].result.is_err(),

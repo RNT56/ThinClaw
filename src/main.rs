@@ -24,7 +24,7 @@ use thinclaw::{
     cli::{
         Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
         run_mcp_command, run_pairing_command, run_reset_command, run_status_command,
-        run_tool_command,
+        run_tool_command, run_trajectory_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -243,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Browser(browser_cmd)) => {
             init_cli_tracing();
             return thinclaw::cli::run_browser_command(browser_cmd.clone()).await;
+        }
+        Some(Command::Trajectory(trajectory_cmd)) => {
+            init_cli_tracing();
+            return run_trajectory_command(trajectory_cmd.clone()).await;
         }
         Some(Command::ExperimentRunner {
             lease_id,
@@ -954,6 +958,7 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             },
+            cli_skin: config.agent.cli_skin.clone(),
         };
         thinclaw::boot_screen::print_boot_screen(&boot_info);
     }

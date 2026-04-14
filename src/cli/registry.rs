@@ -5,6 +5,7 @@ use clap::Subcommand;
 use crate::registry::catalog::RegistryCatalog;
 use crate::registry::installer::RegistryInstaller;
 use crate::registry::manifest::ManifestKind;
+use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum RegistryCommand {
@@ -106,6 +107,7 @@ fn cmd_list(
     tag: Option<&str>,
     verbose: bool,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let kind_filter = match kind {
         Some("tool" | "tools") => Some(ManifestKind::Tool),
         Some("channel" | "channels") => Some(ManifestKind::Channel),
@@ -116,20 +118,31 @@ fn cmd_list(
     let manifests = catalog.list(kind_filter, tag);
 
     if manifests.is_empty() {
-        println!("No extensions found matching the criteria.");
+        branding.print_banner("Registry", Some("Browse installable extensions"));
+        println!(
+            "{}",
+            branding.warn("No extensions found matching the criteria.")
+        );
         return Ok(());
     }
 
     // Print header
+    branding.print_banner("Registry", Some("Browse installable extensions"));
     if verbose {
         println!(
-            "{:<20} {:<8} {:<8} {:<10} DESCRIPTION",
-            "NAME", "KIND", "VERSION", "AUTH"
+            "{}",
+            branding.body_bold(format!(
+                "{:<20} {:<8} {:<8} {:<10} DESCRIPTION",
+                "NAME", "KIND", "VERSION", "AUTH"
+            ))
         );
-        println!("{}", "-".repeat(80));
+        println!("{}", branding.separator(80));
     } else {
-        println!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND");
-        println!("{}", "-".repeat(60));
+        println!(
+            "{}",
+            branding.body_bold(format!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND"))
+        );
+        println!("{}", branding.separator(60));
     }
 
     for m in &manifests {
@@ -148,24 +161,34 @@ fn cmd_list(
         }
     }
 
-    println!("\n{} extension(s) found.", manifests.len());
+    println!();
+    println!(
+        "{}",
+        branding.muted(format!("{} extension(s) found.", manifests.len()))
+    );
 
     // Show bundles hint
     let bundle_names = catalog.bundle_names();
     if !bundle_names.is_empty() {
-        println!("\nBundles available: {}", bundle_names.join(", "));
-        println!("Use `thinclaw registry info <bundle>` for details.");
+        println!();
+        println!("{}", branding.key_value("Bundles", bundle_names.join(", ")));
+        println!(
+            "{}",
+            branding.muted("Use `thinclaw registry info <bundle>` for details.")
+        );
     }
 
     Ok(())
 }
 
 fn cmd_info(catalog: &RegistryCatalog, name: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     // Check if it's a bundle
     if let Some(bundle) = catalog.get_bundle(name) {
-        println!("Bundle: {}", bundle.display_name);
+        branding.print_banner("Registry", Some("Inspect a bundle"));
+        println!("{}", branding.key_value("Bundle", &bundle.display_name));
         if let Some(desc) = &bundle.description {
-            println!("  {}", desc);
+            println!("{}", branding.body(desc));
         }
         println!("\nExtensions:");
         for ext_key in &bundle.extensions {
@@ -186,9 +209,16 @@ fn cmd_info(catalog: &RegistryCatalog, name: &str) -> anyhow::Result<()> {
         .get_strict(name)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    println!("{} ({})", manifest.display_name, manifest.kind);
-    println!("  Version: {}", manifest.version);
-    println!("  {}", manifest.description);
+    branding.print_banner("Registry", Some("Inspect an extension"));
+    println!(
+        "{}",
+        branding.key_value(
+            "Extension",
+            format!("{} ({})", manifest.display_name, manifest.kind)
+        )
+    );
+    println!("{}", branding.key_value("Version", &manifest.version));
+    println!("{}", branding.body(&manifest.description));
 
     if !manifest.keywords.is_empty() {
         println!("  Keywords: {}", manifest.keywords.join(", "));
@@ -244,6 +274,7 @@ async fn cmd_install(
     force: bool,
     prefer_build: bool,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let installer = RegistryInstaller::with_defaults(repo_root.to_path_buf());
 
     let (manifests, bundle) = catalog.resolve(name)?;
@@ -254,17 +285,23 @@ async fn cmd_install(
 
     if let Some(bundle_def) = bundle {
         // Bundle install
+        branding.print_banner("Registry", Some("Install a bundle"));
         println!(
-            "Installing bundle '{}' ({} extensions)...\n",
-            bundle_def.display_name,
-            manifests.len()
+            "{}",
+            branding.accent(format!(
+                "Installing bundle '{}' ({} extensions)...",
+                bundle_def.display_name,
+                manifests.len()
+            ))
         );
+        println!();
 
         let (outcomes, hints) = installer
             .install_bundle(&manifests, bundle_def, force, prefer_build)
             .await;
 
-        println!("\n--- Results ---");
+        println!();
+        println!("{}", branding.body_bold("Results"));
         for outcome in &outcomes {
             let caps_status = if outcome.has_capabilities { "+" } else { "-" };
             println!(
@@ -280,23 +317,29 @@ async fn cmd_install(
         }
 
         if !hints.is_empty() {
-            println!("\nAuth setup:");
+            println!();
+            println!("{}", branding.body_bold("Auth setup"));
             for hint in &hints {
                 println!("{}", hint);
             }
         }
 
+        println!();
         println!(
-            "\nInstalled {}/{} extensions.",
-            outcomes.len(),
-            manifests.len()
+            "{}",
+            branding.good(format!(
+                "Installed {}/{} extensions.",
+                outcomes.len(),
+                manifests.len()
+            ))
         );
     } else {
         // Single extension
         let manifest = manifests[0];
         let outcome = installer.install(manifest, force, prefer_build).await?;
 
-        println!("\nInstalled successfully:");
+        branding.print_banner("Registry", Some("Install an extension"));
+        println!("{}", branding.good("Installed successfully:"));
         println!("  Name: {}", outcome.name);
         println!("  Kind: {}", outcome.kind);
         println!("  WASM: {}", outcome.wasm_path.display());
@@ -319,6 +362,7 @@ async fn cmd_install(
 }
 
 fn cmd_search(catalog: &RegistryCatalog, query: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let query_lower = query.to_lowercase();
     let manifests = catalog.list(None, None);
 
@@ -334,22 +378,35 @@ fn cmd_search(catalog: &RegistryCatalog, query: &str) -> anyhow::Result<()> {
         .collect();
 
     if matches.is_empty() {
-        println!("No extensions matching '{}'.", query);
+        branding.print_banner("Registry", Some("Search the catalog"));
+        println!(
+            "{}",
+            branding.warn(format!("No extensions matching '{}'.", query))
+        );
         return Ok(());
     }
 
-    println!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND");
-    println!("{}", "-".repeat(60));
+    branding.print_banner("Registry", Some("Search the catalog"));
+    println!(
+        "{}",
+        branding.body_bold(format!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND"))
+    );
+    println!("{}", branding.separator(60));
 
     for m in &matches {
         println!("{:<20} {:<8} {}", m.name, m.kind, m.description);
     }
 
-    println!("\n{} result(s) for '{}'.", matches.len(), query);
+    println!();
+    println!(
+        "{}",
+        branding.muted(format!("{} result(s) for '{}'.", matches.len(), query))
+    );
     Ok(())
 }
 
 async fn cmd_remove(name: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
@@ -361,7 +418,11 @@ async fn cmd_remove(name: &str) -> anyhow::Result<()> {
     if wasm_path.exists() {
         tokio::fs::remove_file(&wasm_path).await?;
         let _ = tokio::fs::remove_file(&caps_path).await;
-        println!("Removed channel '{}'.", name);
+        branding.print_banner("Registry", Some("Remove an installed extension"));
+        println!(
+            "  {}",
+            branding.good(format!("Removed channel '{}'.", name))
+        );
         return Ok(());
     }
 
@@ -373,7 +434,8 @@ async fn cmd_remove(name: &str) -> anyhow::Result<()> {
     if tool_wasm.exists() {
         tokio::fs::remove_file(&tool_wasm).await?;
         let _ = tokio::fs::remove_file(&tool_caps).await;
-        println!("Removed tool '{}'.", name);
+        branding.print_banner("Registry", Some("Remove an installed extension"));
+        println!("  {}", branding.good(format!("Removed tool '{}'.", name)));
         return Ok(());
     }
 

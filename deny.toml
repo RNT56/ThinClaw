@@ -6,15 +6,12 @@
 unmaintained = "workspace"
 yanked = "deny"
 ignore = [
-    # Pre-existing advisories — tracked for upgrade in separate PRs
-    # wasmtime fd_renumber host panic — WASIp1, mitigated by fuel limits
-    "RUSTSEC-2025-0046",
-    # wasmtime shared linear memory unsoundness — no shared memory in our guests
-    "RUSTSEC-2025-0118",
-    # wasmtime guest-controlled resource exhaustion — mitigated by fuel/memory limits
-    "RUSTSEC-2026-0020",
-    # wasmtime wasi:http/types.fields panic — mitigated by fuel limits
-    "RUSTSEC-2026-0021",
+    # rand 0.8.x is still pulled in transitively by wasmtime-wasi, libsql,
+    # rig-core, and nostr-sdk. The reported unsoundness requires a custom
+    # logger re-entering rand::rng()/thread_rng() during reseeding; ThinClaw's
+    # tracing/logging layers do not call rand from logger implementations.
+    # Track for removal once those upstream crates move to rand >= 0.9.3.
+    "RUSTSEC-2026-0097",
 ]
 
 [licenses]

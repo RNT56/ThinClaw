@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "docker-sandbox")]
 use tracing_subscriber::EnvFilter;
 
 use thinclaw::channels::wasm::{
@@ -56,6 +57,7 @@ pub(crate) async fn run_memory_command(
     thinclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
 }
 
+#[cfg(feature = "docker-sandbox")]
 /// Run the Worker subcommand (inside Docker containers).
 pub(crate) async fn run_worker(
     job_id: uuid::Uuid,

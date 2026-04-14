@@ -9,12 +9,11 @@ use uuid::Uuid;
 use crate::error::DatabaseError;
 #[cfg(feature = "postgres")]
 use crate::experiments::{
-    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
-    ExperimentCampaignStatus, ExperimentLease, ExperimentLeaseStatus,
-    ExperimentMetricComparator, ExperimentMetricDefinition, ExperimentModelUsageRecord,
-    ExperimentPreset, ExperimentProject, ExperimentProjectStatus, ExperimentRunnerBackend,
-    ExperimentRunnerProfile, ExperimentRunnerStatus, ExperimentTarget, ExperimentTargetLink,
-    ExperimentTrial, ExperimentTrialStatus,
+    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign, ExperimentCampaignStatus,
+    ExperimentLease, ExperimentLeaseStatus, ExperimentMetricComparator, ExperimentMetricDefinition,
+    ExperimentModelUsageRecord, ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
+    ExperimentRunnerBackend, ExperimentRunnerProfile, ExperimentRunnerStatus, ExperimentTarget,
+    ExperimentTargetLink, ExperimentTrial, ExperimentTrialStatus,
 };
 
 #[cfg(feature = "postgres")]

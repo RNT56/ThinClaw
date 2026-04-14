@@ -2,6 +2,7 @@
   "type": "channel",
   "name": "whatsapp",
   "description": "WhatsApp Cloud API channel for receiving and responding to WhatsApp messages",
+  "formatting_hints": "Use WhatsApp-friendly plain text with light emphasis only. Avoid markdown tables, long fenced code blocks, and dense nested structure.",
   "setup": {
     "required_secrets": [
       {

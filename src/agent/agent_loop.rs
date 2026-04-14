@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
+use uuid::Uuid;
 
 use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
+use crate::agent::learning::{TrajectoryLogger, TrajectoryTurnRecord, hydrate_trajectory_record};
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
@@ -177,6 +179,7 @@ impl Agent {
             .unwrap_or_else(|| Arc::new(AgentRouter::new()));
 
         let subagent_executor = deps.subagent_executor.clone();
+        crate::agent::checkpoint::configure(config.checkpoints_enabled, config.max_checkpoints);
 
         Self {
             config,
@@ -879,7 +882,7 @@ impl Agent {
             // Increment received counter for this channel.
             self.channels.record_received(&message.channel).await;
 
-            match self.handle_message(&message).await {
+            match self.handle_message_external(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
                     // Suppress HEARTBEAT_OK responses from heartbeat messages
                     let is_heartbeat = message.channel == "heartbeat";
@@ -1493,7 +1496,79 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<String>, Error> {
-        self.handle_message(message).await
+        let trajectory_logger = TrajectoryLogger::new();
+        let identity = message.resolved_identity();
+        let (session, thread_id) = self
+            .session_manager
+            .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
+            .await;
+        let starting_turn_count = {
+            let sess = session.lock().await;
+            sess.threads
+                .get(&thread_id)
+                .map(|thread| thread.turns.len())
+                .unwrap_or(0)
+        };
+
+        let result = self.handle_message(message).await;
+
+        self.record_trajectory_turn(
+            message,
+            &trajectory_logger,
+            session,
+            thread_id,
+            starting_turn_count,
+        )
+        .await;
+
+        result
+    }
+
+    async fn record_trajectory_turn(
+        &self,
+        message: &IncomingMessage,
+        trajectory_logger: &TrajectoryLogger,
+        session: Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
+        thread_id: Uuid,
+        starting_turn_count: usize,
+    ) {
+        let (session_snapshot, thread_snapshot) = {
+            let sess = session.lock().await;
+            let thread = match sess.threads.get(&thread_id) {
+                Some(thread) => thread.clone(),
+                None => return,
+            };
+            (sess.clone(), thread)
+        };
+
+        if thread_snapshot.turns.len() <= starting_turn_count {
+            return;
+        }
+
+        let Some(turn) = thread_snapshot.turns.last() else {
+            return;
+        };
+
+        if turn.state != crate::agent::session::TurnState::Completed {
+            return;
+        }
+
+        let mut record = TrajectoryTurnRecord::from_turn(
+            &session_snapshot,
+            thread_id,
+            &thread_snapshot,
+            message,
+            turn,
+        );
+        hydrate_trajectory_record(&mut record, self.store()).await;
+
+        if let Err(err) = trajectory_logger.append_turn(&record).await {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Trajectory logging failed"
+            );
+        }
     }
 
     /// Inject a message into session history without triggering a turn.

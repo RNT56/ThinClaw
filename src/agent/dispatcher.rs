@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::vibe;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -194,7 +195,14 @@ impl Agent {
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
         let mut system_prompt = if let Some(ws) = effective_workspace.as_ref() {
-            match ws.system_prompt_for_context(is_group_chat).await {
+            match ws
+                .system_prompt_for_identity(
+                    Some(&identity),
+                    &message.channel,
+                    self.deps.safety.redact_pii_in_prompts(),
+                )
+                .await
+            {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -318,6 +326,11 @@ impl Agent {
         };
 
         let active_channel_names = self.channels.channel_names().await;
+        let active_channel_hint = self.channels.formatting_hints_for(&message.channel).await;
+        let active_vibe_overlay = {
+            let session_guard = session.lock().await;
+            session_guard.active_vibe.as_ref().map(vibe::format_overlay)
+        };
 
         // Capture the routed model name for cost tracking, thinking config, etc.
         // When smart routing selects the cheap model, this differs from
@@ -333,6 +346,7 @@ impl Agent {
                     .as_ref()
                     .map(|llm| llm.active_model_name()),
             )
+            .with_model_guidance_enabled(self.config.model_guidance_enabled)
             .with_group_chat(is_group_chat)
             .with_active_channels(active_channel_names)
             .with_workspace_mode(
@@ -342,6 +356,9 @@ impl Agent {
                     .as_ref()
                     .map(|p| p.display().to_string()),
             );
+        if let Some(hints) = active_channel_hint {
+            reasoning = reasoning.with_channel_formatting_hints(hints);
+        }
         if let Some(ref tracker) = self.deps.cost_tracker {
             reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
         }
@@ -351,6 +368,9 @@ impl Agent {
 
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
+        }
+        if let Some(overlay) = active_vibe_overlay {
+            reasoning = reasoning.with_vibe_overlay(overlay);
         }
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
@@ -690,8 +710,8 @@ impl Agent {
             if let Some(ref store) = self.deps.canvas_store {
                 let actions = store.drain_actions().await;
                 for action in actions {
-                    let values_json = serde_json::to_string(&action.values)
-                        .unwrap_or_else(|_| "{}".to_string());
+                    let values_json =
+                        serde_json::to_string(&action.values).unwrap_or_else(|_| "{}".to_string());
                     let msg = format!(
                         "[Canvas Interaction] The user interacted with canvas panel \"{}\": \
                          action=\"{}\", values={}",
@@ -2765,6 +2785,7 @@ mod tests {
     struct RecordingChannel {
         name: String,
         stream_mode: StreamMode,
+        formatting_hints: Option<String>,
         events: Arc<Mutex<Vec<RecordedChannelEvent>>>,
     }
 
@@ -2773,8 +2794,14 @@ mod tests {
             Self {
                 name: name.into(),
                 stream_mode,
+                formatting_hints: None,
                 events: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn with_formatting_hints(mut self, hints: impl Into<String>) -> Self {
+            self.formatting_hints = Some(hints.into());
+            self
         }
 
         async fn events(&self) -> Vec<RecordedChannelEvent> {
@@ -2839,6 +2866,10 @@ mod tests {
 
         fn stream_mode(&self) -> StreamMode {
             self.stream_mode
+        }
+
+        fn formatting_hints(&self) -> Option<String> {
+            self.formatting_hints.clone()
         }
 
         async fn health_check(&self) -> Result<(), ChannelError> {
@@ -3009,6 +3040,27 @@ mod tests {
         max_tool_iterations: usize,
     ) -> (Agent, RecordingChannel) {
         let recording_channel = RecordingChannel::new("test", stream_mode);
+        make_test_agent_with_channel(
+            primary_llm,
+            cheap_llm,
+            tools,
+            llm_runtime,
+            recording_channel,
+            thinking_enabled,
+            max_tool_iterations,
+        )
+        .await
+    }
+
+    async fn make_test_agent_with_channel(
+        primary_llm: Arc<dyn LlmProvider>,
+        cheap_llm: Option<Arc<dyn LlmProvider>>,
+        tools: Arc<ToolRegistry>,
+        llm_runtime: Option<Arc<crate::llm::runtime_manager::LlmRuntimeManager>>,
+        recording_channel: RecordingChannel,
+        thinking_enabled: bool,
+        max_tool_iterations: usize,
+    ) -> (Agent, RecordingChannel) {
         let channels = Arc::new(ChannelManager::new());
         channels.add(Box::new(recording_channel.clone())).await;
 
@@ -3019,6 +3071,10 @@ mod tests {
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
             })),
             tools,
             workspace: None,
@@ -3064,6 +3120,13 @@ mod tests {
                 workspace_mode: "unrestricted".to_string(),
                 workspace_root: None,
                 notify_channel: None,
+                model_guidance_enabled: true,
+                cli_skin: "cockpit".to_string(),
+                persona_seed: "default".to_string(),
+                checkpoints_enabled: true,
+                max_checkpoints: 50,
+                browser_backend: "chromium".to_string(),
+                cloud_browser_provider: None,
             },
             deps,
             channels,
@@ -3763,5 +3826,55 @@ mod tests {
                 std::mem::discriminant(&other)
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn run_agentic_loop_uses_channel_formatting_hints_from_channel_manager() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![ScriptedResponse::text(
+                "Plain text response",
+                FinishReason::Stop,
+            )],
+        ));
+        let tools = Arc::new(ToolRegistry::new());
+        let recording_channel = RecordingChannel::new("test", StreamMode::None)
+            .with_formatting_hints("- Test channel prefers plain text only.");
+        let (agent, _) = make_test_agent_with_channel(
+            primary.clone(),
+            None,
+            tools,
+            None,
+            recording_channel,
+            false,
+            10,
+        )
+        .await;
+        let (session, thread_id) = make_session_and_thread().await;
+        let message = IncomingMessage::new("test", "user-1", "hello");
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                session,
+                thread_id,
+                vec![ChatMessage::user("hello")],
+            )
+            .await
+            .expect("agentic loop should succeed");
+
+        match result {
+            super::AgenticLoopResult::Response(text) => assert_eq!(text, "Plain text response"),
+            other => panic!(
+                "expected text response, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        let requests = primary.requests().await;
+        assert!(requests.iter().any(|req| req.messages.iter().any(|msg| {
+            msg.content
+                .contains("Test channel prefers plain text only.")
+        })));
     }
 }

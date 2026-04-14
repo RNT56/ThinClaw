@@ -57,6 +57,20 @@ pub struct AgentConfig {
     /// Preferred notification channel for proactive agent messages (boot, bootstrap).
     /// Resolved from: NOTIFY_CHANNEL env var > settings.notifications.preferred_channel.
     pub notify_channel: Option<String>,
+    /// Whether to inject model-family-specific guidance into the system prompt.
+    pub model_guidance_enabled: bool,
+    /// Default CLI skin for local terminal clients.
+    pub cli_skin: String,
+    /// Persona seed to use for fresh workspace initialization.
+    pub persona_seed: String,
+    /// Whether filesystem checkpoint snapshots are enabled.
+    pub checkpoints_enabled: bool,
+    /// Maximum checkpoints retained in rollback listings.
+    pub max_checkpoints: usize,
+    /// Browser backend used by the browser tool.
+    pub browser_backend: String,
+    /// Optional managed cloud browser provider (browserbase/browser_use).
+    pub cloud_browser_provider: Option<String>,
 }
 
 impl AgentConfig {
@@ -126,6 +140,26 @@ impl AgentConfig {
             workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
             notify_channel: optional_env("NOTIFY_CHANNEL")?
                 .or_else(|| settings.notifications.preferred_channel.clone()),
+            model_guidance_enabled: parse_bool_env(
+                "AGENT_MODEL_GUIDANCE_ENABLED",
+                settings.agent.model_guidance_enabled,
+            )?,
+            cli_skin: optional_env("AGENT_CLI_SKIN")?
+                .unwrap_or_else(|| settings.agent.cli_skin.clone()),
+            persona_seed: optional_env("AGENT_PERSONA_SEED")?
+                .unwrap_or_else(|| settings.agent.persona_seed.clone()),
+            checkpoints_enabled: parse_bool_env(
+                "AGENT_CHECKPOINTS_ENABLED",
+                settings.agent.checkpoints_enabled,
+            )?,
+            max_checkpoints: parse_optional_env(
+                "AGENT_MAX_CHECKPOINTS",
+                settings.agent.max_checkpoints,
+            )?,
+            browser_backend: optional_env("AGENT_BROWSER_BACKEND")?
+                .unwrap_or_else(|| settings.agent.browser_backend.clone()),
+            cloud_browser_provider: optional_env("AGENT_CLOUD_BROWSER_PROVIDER")?
+                .or_else(|| settings.agent.cloud_browser_provider.clone()),
         })
     }
 

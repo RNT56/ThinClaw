@@ -86,6 +86,17 @@ For example:
 - Slack should be documented as a WASM channel package in ThinClaw.
 - Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
+## Formatting Guidance Ownership
+
+Channel-specific formatting behavior belongs to the channel layer, not to generic prompt assembly.
+
+- **Native channels** should expose platform guidance through `Channel::formatting_hints()`.
+- **WASM channels** should declare platform guidance in their `*.capabilities.json` via `formatting_hints`.
+- **Bundled WASM channels** may also ship a host-side fallback when a package omits explicit hints, but the package manifest remains the preferred source of truth.
+- **Prompt assembly** should consume resolved hints injected by the channel/runtime path. It should not reintroduce channel-name switches inside `src/llm/reasoning.rs`.
+
+Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
+
 ## Operator Docs
 
 Use these pages for operator setup:
@@ -104,5 +115,6 @@ If you are authoring a new channel:
 
 - build a **native channel** when you need persistent or local capabilities
 - build a **WASM channel** when you need stateless packaged delivery
+- define formatting/rendering guidance on the channel itself (`Channel::formatting_hints()` for native, `formatting_hints` in `*.capabilities.json` for WASM)
 
 See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for the implementation guide.

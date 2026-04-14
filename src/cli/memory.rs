@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use clap::Subcommand;
 
+use crate::terminal_branding::TerminalBranding;
 use crate::workspace::{EmbeddingProvider, SearchConfig, Workspace};
 
 /// Run a memory command using the Database trait (works with any backend).
@@ -105,15 +106,29 @@ pub async fn run_memory_command(
 }
 
 async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let config = SearchConfig::default().with_limit(limit.min(50));
     let results = workspace.search_with_config(query, config).await?;
 
     if results.is_empty() {
-        println!("No results found for: {}", query);
+        branding.print_banner("Memory", Some("Search workspace knowledge"));
+        println!(
+            "{}",
+            branding.warn(format!("No results found for: {}", query))
+        );
         return Ok(());
     }
 
-    println!("Found {} result(s) for \"{}\":\n", results.len(), query);
+    branding.print_banner("Memory", Some("Search workspace knowledge"));
+    println!(
+        "{}",
+        branding.muted(format!(
+            "Found {} result(s) for \"{}\":",
+            results.len(),
+            query
+        ))
+    );
+    println!();
 
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
@@ -149,6 +164,7 @@ async fn write(
     content: Option<String>,
     append: bool,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let content = match content {
         Some(c) => c,
         None => {
@@ -161,18 +177,22 @@ async fn write(
 
     if append {
         workspace.append(path, &content).await?;
-        println!("Appended to {}", path);
+        branding.print_banner("Memory", Some("Write workspace content"));
+        println!("  {}", branding.good(format!("Appended to {}", path)));
     } else {
         workspace.write(path, &content).await?;
-        println!("Wrote to {}", path);
+        branding.print_banner("Memory", Some("Write workspace content"));
+        println!("  {}", branding.good(format!("Wrote to {}", path)));
     }
 
     Ok(())
 }
 
 async fn tree(workspace: &Workspace, path: &str, max_depth: usize) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let root = if path.is_empty() { "." } else { path };
-    println!("{}/", root);
+    branding.print_banner("Memory", Some("Browse workspace structure"));
+    println!("{}", branding.body_bold(format!("{}/", root)));
     print_tree(workspace, path, "", max_depth, 0).await?;
     Ok(())
 }
@@ -215,6 +235,7 @@ async fn print_tree(
 }
 
 async fn status(workspace: &Workspace) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let all_paths = workspace.list_all().await?;
     let file_count = all_paths.len();
 
@@ -226,10 +247,10 @@ async fn status(workspace: &Workspace) -> anyhow::Result<()> {
         }
     }
 
-    println!("Workspace Status");
-    println!("  User:        {}", workspace.user_id());
-    println!("  Files:       {}", file_count);
-    println!("  Directories: {}", dirs.len());
+    branding.print_banner("Memory", Some("Inspect workspace health"));
+    println!("{}", branding.key_value("User", workspace.user_id()));
+    println!("{}", branding.key_value("Files", file_count));
+    println!("{}", branding.key_value("Directories", dirs.len()));
 
     // Check key files
     let key_files = [
@@ -240,10 +261,15 @@ async fn status(workspace: &Workspace) -> anyhow::Result<()> {
         "AGENTS.md",
         "USER.md",
     ];
-    println!("\n  Identity files:");
+    println!();
+    println!("{}", branding.body_bold("Identity files:"));
     for path in &key_files {
         let exists = workspace.exists(path).await.unwrap_or(false);
-        let marker = if exists { "+" } else { "-" };
+        let marker = if exists {
+            branding.good("+")
+        } else {
+            branding.warn("-")
+        };
         println!("    [{}] {}", marker, path);
     }
 

@@ -11,6 +11,7 @@
 //! - Local shell via `!` prefix
 
 mod rendering;
+pub mod skin;
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -24,6 +25,8 @@ use ratatui::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::channels::StatusUpdate;
+use crate::settings::Settings;
+use crate::tui::skin::CliSkin;
 
 /// A message in the chat history for rendering.
 #[derive(Debug, Clone)]
@@ -89,6 +92,10 @@ pub struct TuiApp {
     model: String,
     /// Active agent ID.
     agent_id: String,
+    /// Active CLI skin.
+    skin: CliSkin,
+    /// Default skin name captured at startup for reset handling.
+    default_skin_name: String,
     /// Connection status text.
     status_text: String,
     /// Currently streaming response.
@@ -152,6 +159,12 @@ impl TuiApp {
         outgoing_tx: mpsc::Sender<TuiEvent>,
         incoming_rx: mpsc::Receiver<TuiUpdate>,
     ) -> Self {
+        let settings = Settings::load();
+        let default_skin_name = std::env::var("AGENT_CLI_SKIN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| settings.agent.cli_skin.clone());
+        let skin = CliSkin::load(&default_skin_name);
         Self {
             messages: Vec::new(),
             input: String::new(),
@@ -161,6 +174,8 @@ impl TuiApp {
             scroll_offset: 0,
             model: "default".to_string(),
             agent_id: "main".to_string(),
+            skin,
+            default_skin_name,
             status_text: "Connected • ready".to_string(),
             active_stream: None,
             show_thinking: true,
@@ -441,7 +456,7 @@ impl TuiApp {
                     result: None,
                     is_error: false,
                 });
-                self.status_text = format!("Inspecting tool: {name}");
+                self.status_text = format!("Inspecting tool: {}", self.skin.tool_label(&name));
             }
             TuiUpdate::ToolResult {
                 name,
@@ -458,7 +473,7 @@ impl TuiApp {
                     *r = Some(result);
                     *e = is_error;
                 }
-                self.status_text = format!("Tool {name} finished");
+                self.status_text = format!("Tool {} finished", self.skin.tool_label(&name));
             }
             TuiUpdate::Response(text) => {
                 // Finalize the stream
@@ -509,7 +524,7 @@ impl TuiApp {
     async fn handle_slash_command(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
         let command = parts[0];
-        let _arg = parts.get(1).copied().unwrap_or("");
+        let arg = parts.get(1).copied().unwrap_or("").trim();
 
         match command {
             "/help" => {
@@ -556,8 +571,12 @@ impl TuiApp {
                     text: "Operation interrupted.".to_string(),
                 });
             }
+            "/skin" => {
+                self.handle_skin_command(arg);
+            }
             // Commands forwarded to the agent loop (they need agent-side handling)
-            "/undo" | "/redo" | "/compact" | "/model" | "/models" | "/agent" | "/agents" => {
+            "/undo" | "/redo" | "/compact" | "/model" | "/models" | "/agent" | "/agents"
+            | "/rollback" | "/vibe" => {
                 let _ = self
                     .outgoing_tx
                     .send(TuiEvent::UserMessage(cmd.to_string()))
@@ -627,6 +646,9 @@ impl TuiApp {
             "/models",
             "/agent",
             "/agents",
+            "/rollback",
+            "/vibe",
+            "/skin",
         ];
 
         let matches: Vec<&&str> = COMMANDS
@@ -638,6 +660,44 @@ impl TuiApp {
             self.input = format!("{} ", matches[0]);
             self.cursor_pos = self.input.chars().count();
         }
+    }
+
+    fn handle_skin_command(&mut self, arg: &str) {
+        if arg.is_empty() || arg.eq_ignore_ascii_case("current") {
+            self.messages.push(ChatMessage::System {
+                text: format!(
+                    "Current skin: {}\nAvailable skins: {}",
+                    self.skin.name,
+                    CliSkin::available_names().join(", ")
+                ),
+            });
+            self.scroll_offset = u16::MAX;
+            return;
+        }
+
+        if arg.eq_ignore_ascii_case("list") {
+            self.messages.push(ChatMessage::System {
+                text: format!("Available skins: {}", CliSkin::available_names().join(", ")),
+            });
+            self.scroll_offset = u16::MAX;
+            return;
+        }
+
+        let requested = if arg.eq_ignore_ascii_case("reset") {
+            self.default_skin_name.clone()
+        } else {
+            arg.to_string()
+        };
+        self.skin = CliSkin::load(&requested);
+        self.status_text = format!("Skin switched to {}", self.skin.name);
+        self.messages.push(ChatMessage::System {
+            text: format!(
+                "Skin switched to '{}'. Prompt symbol: {}",
+                self.skin.name,
+                self.skin.prompt_symbol()
+            ),
+        });
+        self.scroll_offset = u16::MAX;
     }
 
     // Rendering methods are in tui/rendering.rs
@@ -698,6 +758,9 @@ const HELP_TEXT: &str = "\
   /models        List available models
   /agent <name>  Switch agent
   /agents        List available agents
+  /rollback ...  Filesystem rollback command family
+  /vibe ...      Set, show, or clear a temporary session vibe
+  /skin [name]   Switch the local CLI skin, or show the current skin
 
   !<command>     Run a local shell command
 

@@ -4,6 +4,9 @@
 //! state: model, database, tool count, enabled features, active channels,
 //! and the gateway URL.
 
+use crate::terminal_branding::TerminalBranding;
+use crate::tui::skin::CliSkin;
+
 /// All displayable fields for the boot screen.
 pub struct BootInfo {
     pub version: String,
@@ -29,19 +32,21 @@ pub struct BootInfo {
     pub tunnel_url: Option<String>,
     /// Provider name for the managed tunnel (e.g., "ngrok").
     pub tunnel_provider: Option<String>,
+    /// Local CLI skin name to use for the boot palette.
+    pub cli_skin: String,
 }
 
 /// Print the boot screen to stdout.
 pub fn print_boot_screen(info: &BootInfo) {
-    // ANSI codes matching existing REPL palette
+    let skin = CliSkin::load(&info.cli_skin);
+    let branding = TerminalBranding::from_skin(skin.clone());
     let bold = "\x1b[1m";
-    let cyan = "\x1b[36m";
-    let dim = "\x1b[90m";
-    let yellow = "\x1b[33m";
-    let yellow_underline = "\x1b[33;4m";
-    let reset = "\x1b[0m";
+    let accent = skin.ansi_fg(skin.accent);
+    let muted = skin.ansi_fg(skin.muted);
+    let warn = skin.ansi_fg(skin.warn);
+    let reset = skin.ansi_reset();
 
-    let border = format!("  {dim}{}{reset}", "\u{2576}".repeat(58));
+    let border = format!("  {muted}{}{reset}", "\u{2576}".repeat(58));
     let mission = if info.db_connected {
         "Cockpit online. ThinClaw is ready for the next request."
     } else {
@@ -54,53 +59,55 @@ pub fn print_boot_screen(info: &BootInfo) {
     };
     let mut readiness_notes = Vec::new();
     readiness_notes.push(if info.db_connected {
-        format!("{cyan}database connected{reset}")
+        format!("{accent}database connected{reset}")
     } else {
-        format!("{yellow}database not connected{reset}")
+        format!("{warn}database not connected{reset}")
     });
     readiness_notes.push(match info.docker_status {
         crate::sandbox::detect::DockerStatus::Available => {
-            format!("{cyan}sandbox host ready{reset}")
+            format!("{accent}sandbox host ready{reset}")
         }
         crate::sandbox::detect::DockerStatus::NotInstalled => {
-            format!("{yellow}sandbox host missing docker{reset}")
+            format!("{warn}sandbox host missing docker{reset}")
         }
         crate::sandbox::detect::DockerStatus::NotRunning => {
-            format!("{yellow}sandbox host needs docker started{reset}")
+            format!("{warn}sandbox host needs docker started{reset}")
         }
         crate::sandbox::detect::DockerStatus::Disabled => "sandbox disabled".to_string(),
     });
     if info.heartbeat_enabled {
         readiness_notes.push(format!(
-            "{cyan}heartbeat every {}m{reset}",
+            "{accent}heartbeat every {}m{reset}",
             info.heartbeat_interval_secs / 60
         ));
     }
     if info.embeddings_enabled {
         readiness_notes.push(match info.embeddings_provider.as_deref() {
-            Some(provider) => format!("{cyan}embeddings via {provider}{reset}"),
-            None => format!("{cyan}embeddings enabled{reset}"),
+            Some(provider) => format!("{accent}embeddings via {provider}{reset}"),
+            None => format!("{accent}embeddings enabled{reset}"),
         });
     }
 
-    println!();
+    for line in branding.banner_lines(&format!("{} v{}", info.agent_name, info.version), None) {
+        println!("{line}");
+    }
     println!("{border}");
     println!();
     println!("  {bold}{}{reset} v{}", info.agent_name, info.version);
-    println!("  {dim}mission{reset}    {cyan}{mission}{reset}");
+    println!("  {muted}mission{reset}    {accent}{mission}{reset}");
     println!();
 
     println!("  {bold}Runtime{reset}");
     let model_display = if let Some(ref cheap) = info.cheap_model {
         format!(
-            "{cyan}{}{reset}  {dim}cheap{reset} {cyan}{}{reset}",
+            "{accent}{}{reset}  {muted}cheap{reset} {accent}{}{reset}",
             info.llm_model, cheap
         )
     } else {
-        format!("{cyan}{}{reset}", info.llm_model)
+        format!("{accent}{}{reset}", info.llm_model)
     };
     println!(
-        "    {dim}model{reset}     {model_display}  {dim}via {}{reset}",
+        "    {muted}model{reset}     {model_display}  {muted}via {}{reset}",
         info.llm_backend
     );
 
@@ -110,11 +117,11 @@ pub fn print_boot_screen(info: &BootInfo) {
         "none"
     };
     println!(
-        "    {dim}database{reset}  {cyan}{}{reset} {dim}({db_status}){reset}",
+        "    {muted}database{reset}  {accent}{}{reset} {muted}({db_status}){reset}",
         info.db_backend
     );
     println!(
-        "    {dim}tools{reset}     {cyan}{}{reset} {dim}registered{reset}",
+        "    {muted}tools{reset}     {accent}{}{reset} {muted}registered{reset}",
         info.tool_count
     );
     if info.routines_enabled || info.skills_enabled || info.claude_code_enabled {
@@ -129,14 +136,14 @@ pub fn print_boot_screen(info: &BootInfo) {
             feature_tags.push("skills");
         }
         println!(
-            "    {dim}features{reset}  {cyan}{}{reset}",
+            "    {muted}features{reset}  {accent}{}{reset}",
             feature_tags.join("  ")
         );
     }
 
     println!();
     println!("  {bold}Readiness{reset}");
-    println!("    {dim}status{reset}    {cyan}{readiness}{reset}");
+    println!("    {muted}status{reset}    {accent}{readiness}{reset}");
 
     let mut features = Vec::new();
     if info.embeddings_enabled {
@@ -155,10 +162,10 @@ pub fn print_boot_screen(info: &BootInfo) {
             features.push("sandbox".to_string());
         }
         crate::sandbox::detect::DockerStatus::NotInstalled => {
-            features.push(format!("{yellow}sandbox (docker not installed){reset}"));
+            features.push(format!("{warn}sandbox (docker not installed){reset}"));
         }
         crate::sandbox::detect::DockerStatus::NotRunning => {
-            features.push(format!("{yellow}sandbox (docker not running){reset}"));
+            features.push(format!("{warn}sandbox (docker not running){reset}"));
         }
         crate::sandbox::detect::DockerStatus::Disabled => {
             // Don't show sandbox when disabled
@@ -166,21 +173,21 @@ pub fn print_boot_screen(info: &BootInfo) {
     }
     if !features.is_empty() {
         println!(
-            "    {dim}capabilities{reset}  {cyan}{}{reset}",
+            "    {muted}capabilities{reset}  {accent}{}{reset}",
             features.join("  ")
         );
     }
     if !info.channels.is_empty() {
         println!(
-            "    {dim}channels{reset}  {cyan}{}{reset}",
+            "    {muted}channels{reset}  {accent}{}{reset}",
             info.channels.join("  ")
         );
     }
-    println!("    {dim}note{reset}      {mission}");
-    println!("    {dim}note{reset}      {readiness}");
+    println!("    {muted}note{reset}      {mission}");
+    println!("    {muted}note{reset}      {readiness}");
     if !readiness_notes.is_empty() {
         println!(
-            "    {dim}health{reset}     {cyan}{}{reset}",
+            "    {muted}health{reset}     {accent}{}{reset}",
             readiness_notes.join("  ")
         );
     }
@@ -188,19 +195,19 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
     println!("  {bold}Access{reset}");
     if let Some(ref url) = info.gateway_url {
-        println!("    {dim}gateway{reset}   {yellow_underline}{url}{reset}");
+        println!("    {muted}gateway{reset}   {warn}{url}{reset}");
     }
     if let Some(ref url) = info.tunnel_url {
         let provider_tag = info
             .tunnel_provider
             .as_deref()
-            .map(|p| format!(" {dim}({p}){reset}"))
+            .map(|p| format!(" {muted}({p}){reset}"))
             .unwrap_or_default();
-        println!("    {dim}tunnel{reset}    {yellow_underline}{url}{reset}{provider_tag}");
+        println!("    {muted}tunnel{reset}    {warn}{url}{reset}{provider_tag}");
     }
     if info.gateway_url.is_none() && info.tunnel_url.is_none() {
         println!(
-            "    {dim}direct cue{reset}  Connect a gateway or tunnel when you want remote access."
+            "    {muted}direct cue{reset}  Connect a gateway or tunnel when you want remote access."
         );
     }
 
@@ -208,7 +215,7 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!("{border}");
     println!();
     println!(
-        "  {bold}/help{reset} for commands  {dim}•{reset}  {bold}/quit{reset} to exit  {dim}•{reset}  send a message to begin"
+        "  {bold}/help{reset} for commands  {muted}•{reset}  {bold}/quit{reset} to exit  {muted}•{reset}  send a message to begin"
     );
     println!();
 }
@@ -246,6 +253,7 @@ mod tests {
             ],
             tunnel_url: Some("https://abc123.ngrok.io".to_string()),
             tunnel_provider: Some("ngrok".to_string()),
+            cli_skin: "cockpit".to_string(),
         };
         // Should not panic
         print_boot_screen(&info);
@@ -275,6 +283,7 @@ mod tests {
             channels: vec![],
             tunnel_url: None,
             tunnel_provider: None,
+            cli_skin: "cockpit".to_string(),
         };
         // Should not panic
         print_boot_screen(&info);
@@ -304,6 +313,7 @@ mod tests {
             channels: vec!["repl".to_string()],
             tunnel_url: None,
             tunnel_provider: None,
+            cli_skin: "cockpit".to_string(),
         };
         // Should not panic
         print_boot_screen(&info);

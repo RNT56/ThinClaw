@@ -6,6 +6,8 @@
 
 use clap::Subcommand;
 
+use crate::terminal_branding::TerminalBranding;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum ChannelCommand {
     /// List all configured channels and their status
@@ -92,6 +94,7 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
 
 /// List all channels.
 async fn list_channels(format: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_thinclaw_env();
 
@@ -144,8 +147,12 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{:<15}  {:<16}  DESCRIPTION", "CHANNEL", "STATUS");
-    println!("{}", "-".repeat(70));
+    branding.print_banner("Channels", Some("Inspect active message surfaces"));
+    println!(
+        "{}",
+        branding.body_bold(format!("{:<15}  {:<16}  DESCRIPTION", "CHANNEL", "STATUS"))
+    );
+    println!("{}", branding.separator(70));
 
     for ch in &channels {
         let icon = if ch["configured"].as_bool().unwrap_or(false) {
@@ -166,10 +173,14 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
         .iter()
         .filter(|c| c["configured"].as_bool().unwrap_or(false))
         .count();
+    println!();
     println!(
-        "\n{} channel(s) configured, {} not configured.",
-        configured_count,
-        channels.len() - configured_count
+        "{}",
+        branding.muted(format!(
+            "{} channel(s) configured, {} not configured.",
+            configured_count,
+            channels.len() - configured_count
+        ))
     );
 
     Ok(())
@@ -177,6 +188,7 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
 
 /// Show details for a specific channel.
 async fn channel_info(channel: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_thinclaw_env();
 
@@ -185,17 +197,21 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
     match known {
         Some(ch) => {
             let configured = std::env::var(ch.env_key).is_ok();
-            println!("Channel: {}", ch.name);
-            println!("Description: {}", ch.description);
+            branding.print_banner("Channels", Some("Inspect a configured surface"));
+            println!("{}", branding.key_value("Channel", ch.name));
+            println!("{}", branding.key_value("Description", ch.description));
             println!(
-                "Status: {}",
-                if configured {
-                    "✅ configured"
-                } else {
-                    "⬜ not configured"
-                }
+                "{}",
+                branding.key_value(
+                    "Status",
+                    if configured {
+                        branding.good("configured")
+                    } else {
+                        branding.warn("not configured")
+                    }
+                )
             );
-            println!("Config key: {}", ch.env_key);
+            println!("{}", branding.key_value("Config key", ch.env_key));
 
             // Show channel-specific details.
             match ch.name {
@@ -203,7 +219,10 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                     let host =
                         std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
                     let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3000".to_string());
-                    println!("Endpoint: http://{}:{}/", host, port);
+                    println!(
+                        "{}",
+                        branding.key_value("Endpoint", format!("http://{}:{}/", host, port))
+                    );
                 }
                 "signal" => {
                     if let Ok(url) = std::env::var("SIGNAL_HTTP_URL") {
@@ -221,15 +240,15 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                         } else {
                             url
                         };
-                        println!("HTTP URL: {}", redacted);
+                        println!("{}", branding.key_value("HTTP URL", redacted));
                     }
                 }
                 "telegram" => {
                     if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
-                        println!("Bot token: ••••••• (set)");
+                        println!("{}", branding.key_value("Bot token", "••••••• (set)"));
                     }
                     if let Ok(owner) = std::env::var("TELEGRAM_OWNER_ID") {
-                        println!("Owner ID: {}", owner);
+                        println!("{}", branding.key_value("Owner ID", owner));
                     }
                 }
                 _ => {}
@@ -245,9 +264,16 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
 
             if wasm_path.exists() {
                 let metadata = std::fs::metadata(&wasm_path)?;
-                println!("Channel: {} (WASM plugin)", channel);
-                println!("Path: {}", wasm_path.display());
-                println!("Size: {:.1} KB", metadata.len() as f64 / 1024.0);
+                branding.print_banner("Channels", Some("Inspect a WASM surface"));
+                println!(
+                    "{}",
+                    branding.key_value("Channel", format!("{} (WASM plugin)", channel))
+                );
+                println!("{}", branding.key_value("Path", wasm_path.display()));
+                println!(
+                    "{}",
+                    branding.key_value("Size", format!("{:.1} KB", metadata.len() as f64 / 1024.0))
+                );
             } else {
                 anyhow::bail!(
                     "Unknown channel '{}'. Use 'thinclaw channels list' to see available channels.",

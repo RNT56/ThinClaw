@@ -535,6 +535,9 @@ pub struct WasmChannel {
     /// Channel configuration returned by on_start.
     channel_config: RwLock<Option<ChannelConfig>>,
 
+    /// Optional platform formatting guidance exposed to prompt assembly.
+    formatting_hints: Option<String>,
+
     /// Message sender (for emitting messages to the stream).
     /// Wrapped in Arc for sharing with the polling task.
     message_tx: Arc<RwLock<Option<mpsc::Sender<IncomingMessage>>>>,
@@ -584,10 +587,13 @@ impl WasmChannel {
         prepared: Arc<PreparedChannelModule>,
         capabilities: ChannelCapabilities,
         config_json: String,
+        formatting_hints: Option<String>,
         pairing_store: Arc<PairingStore>,
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
+        let formatting_hints =
+            formatting_hints.or_else(|| default_wasm_channel_formatting_hints(&name));
 
         // Read stream mode from env for Telegram and Discord channels
         let stream_mode = if prepared.name == "telegram" {
@@ -609,6 +615,7 @@ impl WasmChannel {
             capabilities,
             config_json: RwLock::new(config_json),
             channel_config: RwLock::new(None),
+            formatting_hints,
             message_tx: Arc::new(RwLock::new(None)),
             pending_responses: RwLock::new(HashMap::new()),
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
@@ -1949,10 +1956,35 @@ impl WasmChannel {
     }
 }
 
+fn default_wasm_channel_formatting_hints(channel_name: &str) -> Option<String> {
+    match channel_name {
+        "telegram" => Some(
+            "Use Telegram HTML-style formatting. Keep code blocks short, avoid markdown tables, and expect long replies to be split into multiple messages."
+                .to_string(),
+        ),
+        "slack" => Some(
+            "Use Slack mrkdwn formatting, not GitHub-flavored markdown. Keep replies easy to skim and avoid relying on raw HTML.".to_string(),
+        ),
+        "whatsapp" => Some(
+            "Use WhatsApp-friendly plain text with light emphasis only. Avoid markdown tables, long fenced code blocks, and dense nested structure."
+                .to_string(),
+        ),
+        "discord" => Some(
+            "Discord supports markdown and fenced code blocks. Keep long answers readable with short sections and avoid overly wide tables."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl Channel for WasmChannel {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn formatting_hints(&self) -> Option<String> {
+        self.formatting_hints.clone()
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -2506,6 +2538,10 @@ impl Channel for SharedWasmChannel {
         self.inner.name()
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        self.inner.formatting_hints()
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         self.inner.start().await
     }
@@ -2908,7 +2944,9 @@ mod tests {
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
-    use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
+    use crate::channels::wasm::wrapper::{
+        HttpResponse, WasmChannel, default_wasm_channel_formatting_hints,
+    };
     use crate::pairing::PairingStore;
     use crate::tools::wasm::ResourceLimits;
 
@@ -2930,6 +2968,7 @@ mod tests {
             prepared,
             capabilities,
             "{}".to_string(),
+            None,
             Arc::new(PairingStore::new()),
         )
     }
@@ -2938,6 +2977,82 @@ mod tests {
     fn test_channel_name() {
         let channel = create_test_channel();
         assert_eq!(channel.name(), "test");
+    }
+
+    #[test]
+    fn test_channel_uses_explicit_formatting_hints() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "custom".to_string(),
+            description: "Custom channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+
+        let channel = WasmChannel::new(
+            runtime,
+            prepared,
+            ChannelCapabilities::for_channel("custom"),
+            "{}".to_string(),
+            Some("Use plain text only.".to_string()),
+            Arc::new(PairingStore::new()),
+        );
+
+        assert_eq!(
+            channel.formatting_hints().as_deref(),
+            Some("Use plain text only.")
+        );
+    }
+
+    #[test]
+    fn test_channel_falls_back_to_builtin_platform_hints() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "telegram".to_string(),
+            description: "Telegram channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+
+        let channel = WasmChannel::new(
+            runtime,
+            prepared,
+            ChannelCapabilities::for_channel("telegram"),
+            "{}".to_string(),
+            None,
+            Arc::new(PairingStore::new()),
+        );
+
+        let hints = channel
+            .formatting_hints()
+            .expect("telegram should have default hints");
+        assert!(hints.contains("Telegram"));
+        assert!(hints.contains("HTML"));
+    }
+
+    #[test]
+    fn test_builtin_platform_hint_mapping_covers_supported_wasm_channels() {
+        let telegram = default_wasm_channel_formatting_hints("telegram")
+            .expect("telegram fallback hints should exist");
+        assert!(telegram.contains("Telegram"));
+
+        let slack =
+            default_wasm_channel_formatting_hints("slack").expect("slack fallback should exist");
+        assert!(slack.contains("Slack"));
+
+        let whatsapp = default_wasm_channel_formatting_hints("whatsapp")
+            .expect("whatsapp fallback should exist");
+        assert!(whatsapp.contains("WhatsApp"));
+
+        let discord = default_wasm_channel_formatting_hints("discord")
+            .expect("discord fallback should exist");
+        assert!(discord.contains("Discord"));
+
+        assert!(default_wasm_channel_formatting_hints("custom").is_none());
     }
 
     #[test]
@@ -3108,6 +3223,7 @@ mod tests {
             prepared,
             capabilities,
             "{}".to_string(),
+            None,
             Arc::new(PairingStore::new()),
         );
 

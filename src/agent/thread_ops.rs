@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
+use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
@@ -320,18 +321,17 @@ impl Agent {
             })
         });
 
-        if let Some(job_id) = job_id {
-            if let Err(err) = store
+        if let Some(job_id) = job_id
+            && let Err(err) = store
                 .save_job_event(job_id, "learning_event", &payload)
                 .await
-            {
-                tracing::debug!(
-                    thread = %thread_id,
-                    job_id = %job_id,
-                    error = %err,
-                    "Best-effort learning event job write failed"
-                );
-            }
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                job_id = %job_id,
+                error = %err,
+                "Best-effort learning event job write failed"
+            );
         }
 
         let summary_payload = serde_json::json!({
@@ -394,6 +394,17 @@ impl Agent {
         } else {
             None
         };
+        let existing_runtime = match load_thread_runtime(&store, thread_id).await {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Failed to load thread runtime before snapshot; preserving defaults"
+                );
+                None
+            }
+        };
 
         if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
             let active_subagents = runtime.active_subagents.clone();
@@ -405,6 +416,9 @@ impl Agent {
                     .clone()
                     .unwrap_or(preserved_auto_approved),
                 active_subagents,
+                existing_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.last_context_pressure),
             );
         })
         .await
@@ -415,6 +429,94 @@ impl Agent {
                 "Failed to persist thread runtime snapshot"
             );
         }
+    }
+
+    async fn record_context_pressure_state(
+        &self,
+        thread_id: Uuid,
+        usage_percent: f64,
+    ) -> Option<ContextPressure> {
+        let current_pressure = self.context_monitor.check_pressure(usage_percent as f32);
+        let store = self.store().map(Arc::clone)?;
+
+        let previous_pressure = match load_thread_runtime(&store, thread_id).await {
+            Ok(Some(runtime)) => runtime.last_context_pressure,
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Failed to load thread runtime for context pressure tracking"
+                );
+                None
+            }
+        };
+
+        if previous_pressure == Some(current_pressure) {
+            return Some(current_pressure);
+        }
+
+        let persisted_pressure = if current_pressure == ContextPressure::None {
+            None
+        } else {
+            Some(current_pressure)
+        };
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            runtime.last_context_pressure = persisted_pressure;
+        })
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to persist context pressure state"
+            );
+        }
+
+        Some(current_pressure)
+    }
+
+    async fn sync_context_pressure_warning(
+        &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
+        usage_percent: f64,
+    ) {
+        let current_pressure = self.context_monitor.check_pressure(usage_percent as f32);
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+
+        let previous_pressure = match load_thread_runtime(&store, thread_id).await {
+            Ok(Some(runtime)) => runtime.last_context_pressure,
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Failed to load thread runtime for context pressure warning"
+                );
+                None
+            }
+        };
+
+        let warning_level = pressure_transition(previous_pressure, current_pressure);
+        if let Some(level) = warning_level
+            && let Some(status) = pressure_message(level)
+        {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(status),
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        let _ = self
+            .record_context_pressure_state(thread_id, usage_percent)
+            .await;
     }
 
     async fn resume_persisted_subagents(
@@ -773,6 +875,9 @@ impl Agent {
             return self.handle_job_or_command(intent, message, thread_id).await;
         }
 
+        // Reset the file checkpoint dedup bucket for this thread's new turn.
+        crate::agent::checkpoint::new_turn(thread_id.to_string());
+
         // Natural language goes through the agentic loop
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
@@ -985,6 +1090,7 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
+                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 let thread_snapshot = thread.clone();
                 let _ = self
                     .channels
@@ -1000,6 +1106,8 @@ impl Agent {
                     .await;
                 drop(sess);
                 let _ = thread_snapshot;
+                self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                    .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
 
@@ -1029,6 +1137,7 @@ impl Agent {
                 let description = pending.description.clone();
                 let parameters = pending.parameters.clone();
                 thread.await_approval(pending);
+                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 let thread_snapshot = thread.clone();
                 let _ = self
                     .channels
@@ -1040,6 +1149,8 @@ impl Agent {
                     .await;
                 drop(sess);
                 let _ = thread_snapshot;
+                self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                    .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
                 Ok(SubmissionResult::NeedApproval {
@@ -1051,6 +1162,7 @@ impl Agent {
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
+                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 let thread_snapshot = thread.clone();
                 // User message already persisted at turn start; nothing else to save
                 // Lifecycle end: error
@@ -1067,6 +1179,8 @@ impl Agent {
                     .await;
                 drop(sess);
                 let _ = thread_snapshot;
+                self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                    .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
                 Ok(SubmissionResult::error(e.to_string()))
@@ -1202,6 +1316,11 @@ impl Agent {
             let undo_count = mgr.undo_count();
             // Restore thread from checkpoint
             thread.restore_from_messages(messages);
+            let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+            drop(mgr);
+            drop(sess);
+            self.record_context_pressure_state(thread_id, usage_percent)
+                .await;
             Ok(SubmissionResult::ok_with_message(format!(
                 "Undone to turn {}. {} undo(s) remaining.",
                 turn_number, undo_count
@@ -1234,6 +1353,11 @@ impl Agent {
 
         if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
             thread.restore_from_messages(checkpoint.messages);
+            let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+            drop(mgr);
+            drop(sess);
+            self.record_context_pressure_state(thread_id, usage_percent)
+                .await;
             Ok(SubmissionResult::ok_with_message(format!(
                 "Redone to turn {}.",
                 checkpoint.turn_number
@@ -1298,6 +1422,7 @@ impl Agent {
             .await
         {
             Ok(result) => {
+                let usage_after = self.context_monitor.usage_percent(&thread.messages());
                 let mut msg = format!(
                     "Compacted: {} turns removed, {} → {} tokens (was {:.1}% full)",
                     result.turns_removed, result.tokens_before, result.tokens_after, usage
@@ -1305,6 +1430,9 @@ impl Agent {
                 if result.summary_written {
                     msg.push_str(", summary saved to workspace");
                 }
+                drop(sess);
+                self.record_context_pressure_state(thread_id, usage_after)
+                    .await;
                 Ok(SubmissionResult::ok_with_message(msg))
             }
             Err(e) => Ok(SubmissionResult::error(format!("Compaction failed: {}", e))),
@@ -1323,10 +1451,14 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
         thread.state = ThreadState::Idle;
+        let usage_percent = self.context_monitor.usage_percent(&thread.messages());
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
+        drop(sess);
+        self.record_context_pressure_state(thread_id, usage_percent)
+            .await;
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
@@ -1896,12 +2028,15 @@ impl Agent {
                 Ok(AgenticLoopResult::Response(response))
                 | Ok(AgenticLoopResult::Streamed(response)) => {
                     thread.complete_turn(&response);
+                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, message, &response)
                         .await;
                     drop(sess);
                     let _ = thread_snapshot;
+                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                        .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                     let _ = self
@@ -1926,6 +2061,7 @@ impl Agent {
                     let description = new_pending.description.clone();
                     let parameters = new_pending.parameters.clone();
                     thread.await_approval(new_pending);
+                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
                     let _ = self
                         .channels
@@ -1937,6 +2073,8 @@ impl Agent {
                         .await;
                     drop(sess);
                     let _ = thread_snapshot;
+                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                        .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                     Ok(SubmissionResult::NeedApproval {
@@ -1948,10 +2086,13 @@ impl Agent {
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
+                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
                     // User message already persisted at turn start
                     drop(sess);
                     let _ = thread_snapshot;
+                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                        .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                     Ok(SubmissionResult::error(e.to_string()))
@@ -1969,12 +2110,15 @@ impl Agent {
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
+                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
                     // User message already persisted at turn start; save rejection response
                     self.persist_assistant_response(thread_id, message, &rejection)
                         .await;
                     drop(sess);
                     let _ = thread_snapshot;
+                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                        .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
                 }

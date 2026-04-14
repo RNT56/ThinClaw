@@ -120,6 +120,39 @@ impl SubmissionParser {
                 args,
             };
         }
+        if lower == "/rollback" || lower.starts_with("/rollback ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "rollback".to_string(),
+                args,
+            };
+        }
+        if lower == "/vibe" || lower.starts_with("/vibe ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "vibe".to_string(),
+                args,
+            };
+        }
+        if lower == "/skin" || lower.starts_with("/skin ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "skin".to_string(),
+                args,
+            };
+        }
 
         if lower == "/quit" || lower == "/exit" || lower == "/shutdown" {
             return Submission::Quit;
@@ -258,7 +291,7 @@ pub enum Submission {
     /// foreground invocation.
     Restart,
 
-    /// System command (help, model, version, tools, ping, debug).
+    /// System command (help, model, version, tools, ping, debug, and routed slash commands).
     /// Bypasses thread-state checks and safety validation.
     SystemCommand {
         /// The command name (e.g. "help", "model", "version").
@@ -497,6 +530,36 @@ mod tests {
         assert!(
             matches!(submission, Submission::Resume { checkpoint_id } if checkpoint_id == uuid)
         );
+    }
+
+    #[test]
+    fn test_parser_rollback_system_command() {
+        let submission = SubmissionParser::parse("/rollback diff 2");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "rollback" && args == vec!["diff", "2"]
+        ));
+    }
+
+    #[test]
+    fn test_parser_vibe_system_command() {
+        let submission = SubmissionParser::parse("/vibe playful");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "vibe" && args == vec!["playful"]
+        ));
+    }
+
+    #[test]
+    fn test_parser_skin_system_command() {
+        let submission = SubmissionParser::parse("/skin midnight");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "skin" && args == vec!["midnight"]
+        ));
     }
 
     #[test]

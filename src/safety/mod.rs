@@ -16,9 +16,11 @@ pub mod key_rotation;
 mod leak_detector;
 pub mod media_url;
 pub mod osv_check;
+pub mod pii_redactor;
 mod policy;
 mod sanitizer;
 pub mod skill_path;
+pub mod smart_approve;
 mod validator;
 
 pub use credential_detect::params_contain_manual_credentials;
@@ -27,7 +29,11 @@ pub use leak_detector::{
     LeakSeverity,
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
-pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
+pub use sanitizer::{
+    ContextInjectionWarning, InjectionWarning, SanitizedOutput, Sanitizer,
+    sanitize_context_content, scan_context_content,
+};
+pub use smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 pub use validator::{ValidationError, ValidationErrorCode, ValidationResult, Validator};
 
 use crate::config::SafetyConfig;
@@ -166,6 +172,11 @@ impl SafetyLayer {
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
+
+    /// Whether prompt construction should redact user identifiers.
+    pub fn redact_pii_in_prompts(&self) -> bool {
+        self.config.redact_pii_in_prompts
+    }
 }
 
 /// Wrap external, untrusted content with a security notice for the LLM.
@@ -213,6 +224,10 @@ mod tests {
         let config = SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: true,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         };
         let safety = SafetyLayer::new(&config);
 
@@ -227,6 +242,10 @@ mod tests {
         let config = SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         };
         let safety = SafetyLayer::new(&config);
 

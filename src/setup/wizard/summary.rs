@@ -150,6 +150,7 @@ impl SetupWizard {
         }
 
         println!("  Agent: {}", self.settings.agent.name);
+        println!("  CLI Skin: {}", self.settings.agent.cli_skin);
 
         if let Some(ref tz) = self.settings.user_timezone {
             println!("  Timezone: {}", tz);
@@ -192,15 +193,24 @@ impl SetupWizard {
             println!("  Claude Code: enabled (model: {})", model);
         }
 
-        if self.settings.webchat_theme != "system" || self.settings.webchat_accent_color.is_some() {
+        if self.settings.webchat_theme != "system"
+            || self.settings.webchat_accent_color.is_some()
+            || !self.settings.webchat_show_branding
+        {
             let accent = self
                 .settings
                 .webchat_accent_color
                 .as_deref()
                 .unwrap_or("default");
             println!(
-                "  Web UI: theme={}, accent={}",
-                self.settings.webchat_theme, accent
+                "  Web UI: theme={}, accent={}, branding={}",
+                self.settings.webchat_theme,
+                accent,
+                if self.settings.webchat_show_branding {
+                    "shown"
+                } else {
+                    "hidden"
+                }
             );
         }
 

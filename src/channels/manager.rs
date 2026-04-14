@@ -360,6 +360,15 @@ impl ChannelManager {
         self.channels.read().await.keys().cloned().collect()
     }
 
+    /// Return formatting guidance from the active channel implementation.
+    pub async fn formatting_hints_for(&self, channel_name: &str) -> Option<String> {
+        self.channels
+            .read()
+            .await
+            .get(channel_name)
+            .and_then(|channel| channel.formatting_hints())
+    }
+
     /// Return live `ChannelStatusEntry` list for `openclaw_channel_status_list`.
     ///
     /// Combines channel names with real atomic counters and uptime.

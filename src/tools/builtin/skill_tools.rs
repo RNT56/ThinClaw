@@ -8,8 +8,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
+use crate::settings::SkillTapTrustLevel;
 use crate::skills::catalog::SkillCatalog;
+use crate::skills::quarantine::{QuarantineManager, SecurityFinding, SkillContent};
 use crate::skills::registry::SkillRegistry;
+use crate::skills::{RemoteSkillHub, SkillSource, SkillTrust};
 use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
@@ -38,6 +41,26 @@ fn ensure_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(),
     } else {
         Ok(())
     }
+}
+
+fn summarize_findings(findings: &[SecurityFinding]) -> String {
+    findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "{} ({:?}): {}",
+                finding.kind, finding.severity, finding.excerpt
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn findings_require_approval(
+    trust_level: SkillTapTrustLevel,
+    findings: &[SecurityFinding],
+) -> bool {
+    trust_level == SkillTapTrustLevel::Community && !findings.is_empty()
 }
 
 // ── skill_read ──────────────────────────────────────────────────────────
@@ -229,14 +252,20 @@ impl Tool for SkillListTool {
 pub struct SkillSearchTool {
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
+    remote_hub: Option<Arc<RemoteSkillHub>>,
 }
 
 impl SkillSearchTool {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
+        remote_hub: Option<Arc<RemoteSkillHub>>,
     ) -> Self {
-        Self { registry, catalog }
+        Self {
+            registry,
+            catalog,
+            remote_hub,
+        }
     }
 }
 
@@ -339,9 +368,51 @@ impl Tool for SkillSearchTool {
             })
             .collect();
 
+        let remote_json = if let Some(ref hub) = self.remote_hub {
+            hub.search(query)
+                .await
+                .into_iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "slug": entry.slug,
+                        "name": entry.name,
+                        "description": entry.description,
+                        "version": entry.version,
+                        "source": entry.source_adapter,
+                        "source_label": entry.source_label,
+                        "source_ref": entry.source_ref,
+                        "manifest_url": entry.manifest_url,
+                        "manifest_digest": entry.manifest_digest,
+                        "repo": entry.repo,
+                        "path": entry.path,
+                        "branch": entry.branch,
+                        "trust_level": format!("{:?}", entry.trust_level).to_lowercase(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let github_json: Vec<serde_json::Value> = remote_json
+            .iter()
+            .filter(|entry| entry.get("source").and_then(|v| v.as_str()) == Some("github_tap"))
+            .cloned()
+            .collect();
+        let well_known_json: Vec<serde_json::Value> = remote_json
+            .iter()
+            .filter(|entry| entry.get("source").and_then(|v| v.as_str()) == Some("well_known"))
+            .cloned()
+            .collect();
+
         let mut output = serde_json::json!({
             "catalog": catalog_json,
             "catalog_count": catalog_json.len(),
+            "remote": remote_json,
+            "remote_count": remote_json.len(),
+            "github": github_json,
+            "github_count": github_json.len(),
+            "well_known": well_known_json,
+            "well_known_count": well_known_json.len(),
             "installed": local_matches,
             "installed_count": local_matches.len(),
             "registry_url": self.catalog.registry_url(),
@@ -359,14 +430,82 @@ impl Tool for SkillSearchTool {
 pub struct SkillInstallTool {
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
+    remote_hub: Option<Arc<RemoteSkillHub>>,
+    quarantine: Arc<QuarantineManager>,
 }
 
 impl SkillInstallTool {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
+        remote_hub: Option<Arc<RemoteSkillHub>>,
+        quarantine: Arc<QuarantineManager>,
     ) -> Self {
-        Self { registry, catalog }
+        Self {
+            registry,
+            catalog,
+            remote_hub,
+            quarantine,
+        }
+    }
+
+    async fn resolve_external_content(
+        &self,
+        name: &str,
+        params: &serde_json::Value,
+    ) -> Result<Option<SkillContent>, ToolError> {
+        if params.get("content").and_then(|v| v.as_str()).is_some() {
+            return Ok(None);
+        }
+
+        if let Some(url) = params.get("url").and_then(|v| v.as_str()) {
+            let content = fetch_skill_content(url).await?;
+            return Ok(Some(SkillContent {
+                raw_content: content,
+                source_kind: "url".to_string(),
+                source_adapter: "url".to_string(),
+                source_ref: url.to_string(),
+                source_repo: None,
+                source_url: Some(url.to_string()),
+                manifest_url: Some(url.to_string()),
+                manifest_digest: None,
+                path: None,
+                branch: None,
+                commit_sha: None,
+                trust_level: SkillTapTrustLevel::Community,
+            }));
+        }
+
+        if let Some(ref hub) = self.remote_hub
+            && let Some(remote) = hub.resolve_skill(name).await
+        {
+            return hub
+                .download_skill(&remote)
+                .await
+                .map(Some)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
+        }
+
+        let download_url =
+            crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name);
+        let content = fetch_skill_content(&download_url).await?;
+        Ok(Some(SkillContent {
+            raw_content: content,
+            source_kind: "clawhub_catalog".to_string(),
+            source_adapter: "clawhub_catalog".to_string(),
+            source_ref: name.to_string(),
+            source_repo: None,
+            source_url: Some(download_url),
+            manifest_url: Some(crate::skills::catalog::skill_download_url(
+                self.catalog.registry_url(),
+                name,
+            )),
+            manifest_digest: None,
+            path: None,
+            branch: None,
+            commit_sha: None,
+            trust_level: SkillTapTrustLevel::Community,
+        }))
     }
 }
 
@@ -377,7 +516,7 @@ impl Tool for SkillInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install a skill from SKILL.md content, a URL, or by name from the ClawHub catalog. Set force=true to update an existing skill."
+        "Install a skill from SKILL.md content, a URL, a configured GitHub skill tap, or by name from the ClawHub catalog. Externally sourced skills are quarantined and scanned before install."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -400,6 +539,11 @@ impl Tool for SkillInstallTool {
                     "type": "boolean",
                     "description": "If true, removes the existing skill before installing the new version (update/upgrade)",
                     "default": false
+                },
+                "approve_risky": {
+                    "type": "boolean",
+                    "description": "Approve installation even when the quarantine scan finds risky patterns in a community skill.",
+                    "default": false
                 }
             },
             "required": ["name"]
@@ -418,18 +562,20 @@ impl Tool for SkillInstallTool {
             .get("force")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let approve_risky = params
+            .get("approve_risky")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
+        let external_content = self.resolve_external_content(name, &params).await?;
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
-            // Direct content provided
             raw.to_string()
-        } else if let Some(url) = params.get("url").and_then(|v| v.as_str()) {
-            // Fetch from explicit URL
-            fetch_skill_content(url).await?
+        } else if let Some(ref remote) = external_content {
+            remote.raw_content.clone()
         } else {
-            // Look up in catalog and fetch
-            let download_url =
-                crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name);
-            fetch_skill_content(&download_url).await?
+            return Err(ToolError::ExecutionFailed(
+                "No skill content available for installation".to_string(),
+            ));
         };
 
         // Parse to extract the name (cheap, in-memory).
@@ -467,15 +613,49 @@ impl Tool for SkillInstallTool {
             }
         }
 
-        // Perform async I/O (write to disk, validate round-trip) with no lock held.
-        let (skill_name, loaded_skill) =
-            crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+        let (skill_name, loaded_skill, findings) = if let Some(remote) = external_content {
+            let quarantined = self
+                .quarantine
+                .quarantine_skill(&skill_name_from_parse, &remote)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            let findings = self.quarantine.scan_quarantined(&quarantined);
+
+            if findings_require_approval(remote.trust_level, &findings) && !approve_risky {
+                self.quarantine.cleanup(&quarantined).await;
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' was quarantined with findings: {}. Re-run with approve_risky=true to install anyway.",
+                    skill_name_from_parse,
+                    summarize_findings(&findings)
+                )));
+            }
+
+            let installed_dir = self
+                .quarantine
+                .approve_and_install(&quarantined, &user_dir, &findings)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            self.quarantine.cleanup(&quarantined).await;
+
+            let source = SkillSource::User(installed_dir.clone());
+            let loaded = crate::skills::registry::SkillRegistry::load_skill_from_path(
+                &installed_dir,
+                SkillTrust::Installed,
+                source,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            (loaded.0, loaded.1, findings)
+        } else {
+            let loaded = crate::skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
                 &normalized,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            (loaded.0, loaded.1, Vec::new())
+        };
 
         // Commit the in-memory addition under a brief write lock.
         // On failure, clean up the orphaned disk files from prepare_install_to_disk.
@@ -507,6 +687,11 @@ impl Tool for SkillInstallTool {
             "name": installed_name,
             "status": action,
             "trust": "installed",
+            "findings": findings.iter().map(|finding| serde_json::json!({
+                "kind": finding.kind,
+                "severity": format!("{:?}", finding.severity).to_lowercase(),
+                "excerpt": finding.excerpt,
+            })).collect::<Vec<_>>(),
             "message": format!(
                 "Skill '{}' {} successfully. It will activate when matching keywords are detected.",
                 installed_name, action
@@ -975,6 +1160,12 @@ mod tests {
         Arc::new(SkillCatalog::with_url("http://127.0.0.1:1"))
     }
 
+    fn test_quarantine() -> Arc<QuarantineManager> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.keep();
+        Arc::new(QuarantineManager::new(path))
+    }
+
     #[test]
     fn test_skill_list_schema() {
         use crate::tools::tool::ApprovalRequirement;
@@ -991,7 +1182,7 @@ mod tests {
     #[test]
     fn test_skill_search_schema() {
         use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillSearchTool::new(test_registry(), test_catalog());
+        let tool = SkillSearchTool::new(test_registry(), test_catalog(), None);
         assert_eq!(tool.name(), "skill_search");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
@@ -1004,7 +1195,7 @@ mod tests {
     #[test]
     fn test_skill_install_schema() {
         use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillInstallTool::new(test_registry(), test_catalog());
+        let tool = SkillInstallTool::new(test_registry(), test_catalog(), None, test_quarantine());
         assert_eq!(tool.name(), "skill_install");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),

@@ -114,10 +114,26 @@ impl TodoStore {
     /// Get summary counts.
     fn summary(&self) -> serde_json::Value {
         let total = self.items.len();
-        let pending = self.items.iter().filter(|i| i.status == TodoStatus::Pending).count();
-        let in_progress = self.items.iter().filter(|i| i.status == TodoStatus::InProgress).count();
-        let completed = self.items.iter().filter(|i| i.status == TodoStatus::Completed).count();
-        let cancelled = self.items.iter().filter(|i| i.status == TodoStatus::Cancelled).count();
+        let pending = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::Pending)
+            .count();
+        let in_progress = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::InProgress)
+            .count();
+        let completed = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::Completed)
+            .count();
+        let cancelled = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::Cancelled)
+            .count();
 
         serde_json::json!({
             "total": total,

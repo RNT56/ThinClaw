@@ -66,7 +66,7 @@ thinclaw run --no-onboard
 
 For a deeper setup path, including service mode, remote access, and provider guidance, use the docs hub at [docs/README.md](docs/README.md).
 
-The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries and saved follow-up notes so operators can pause setup without losing context.
+The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, and saved follow-up notes so operators can pause setup without losing context.
 
 ## Why ThinClaw
 
@@ -112,8 +112,10 @@ You can run ThinClaw:
 ## Core Capabilities
 
 - Multi-surface operation through the CLI, gateway, channels, and background jobs
-- Humanist Cockpit onboarding with shared CLI/TUI readiness framing and saved follow-up notes
-- Hybrid delivery across native channels and packaged WASM channels
+- Humanist Cockpit onboarding with shared CLI/TUI readiness framing, shared skin palettes, and saved follow-up notes
+- Shared terminal skin system across boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands
+- Built-in ASCII-art skins plus user-defined TOML skins from `~/.thinclaw/skins/`
+- Hybrid delivery across native channels and packaged WASM channels, with platform formatting/rendering guidance owned by the channel layer instead of hard-coded in prompt assembly
 - Workspace-backed memory with search, citations, and identity files
 - Extension support through built-in tools, WASM tools, and MCP servers
 - Multi-provider LLM routing, failover, and cost controls
@@ -130,6 +132,23 @@ You can run ThinClaw:
 | Scrappy embedding | desktop app workflow | [Agent_flow.md](Agent_flow.md) |
 
 Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
+
+## Terminal Skins
+
+Local terminal clients use the active CLI skin for palette, prompt symbol, tool labels, boot art, and human-readable command presentation.
+
+- Built-in skins: `cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`
+- Runtime switching in local clients: `/skin`, `/skin list`, `/skin reset`
+- Persistent default: `AGENT_CLI_SKIN=<name>`
+- Custom skins: drop `name.toml` files into `~/.thinclaw/skins/`
+
+Skin TOML files now support:
+
+- core palette tokens: `accent`, `border`, `body`, `muted`, `good`, `warn`, `bad`, `header`
+- prompt symbol: `prompt_symbol`
+- ASCII banner art: `ascii_art`
+- optional skin subtitle: `tagline`
+- tool label embellishments: `tool_emojis`
 
 ## Security And Trust
 
@@ -160,7 +179,7 @@ Start here, then go deeper by topic:
 - [Agent_flow.md](Agent_flow.md): boot and runtime flow
 - [src/tools/README.md](src/tools/README.md): maintainer-facing tool architecture
 - [src/workspace/README.md](src/workspace/README.md): workspace and memory model
-- [FEATURE_PARITY.md](FEATURE_PARITY.md): engineering parity tracker
+- [FEATURE_PARITY.md](FEATURE_PARITY.md): parity tracker plus ThinClaw-first feature ledger
 
 ## Development
 

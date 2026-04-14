@@ -13,6 +13,8 @@ use std::sync::Arc;
 use clap::Subcommand;
 use uuid::Uuid;
 
+use crate::terminal_branding::TerminalBranding;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum CronCommand {
     /// List all routines
@@ -234,15 +236,19 @@ async fn list_routines(
     format: &str,
     actor_id: &str,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let routines = db
         .list_routines_for_actor(DEFAULT_USER_ID, actor_id)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if routines.is_empty() {
-        println!("No routines found.");
+        println!("{}", branding.warn("No routines found."));
         println!(
-            "Create one with: thinclaw cron add <name> --schedule '<cron>' --prompt '<prompt>'"
+            "{}",
+            branding.muted(
+                "Create one with: thinclaw cron add <name> --schedule '<cron>' --prompt '<prompt>'"
+            )
         );
         return Ok(());
     }
@@ -253,11 +259,15 @@ async fn list_routines(
     }
 
     // Table format
+    branding.print_banner("Routine Index", Some(&format!("Actor scope: {actor_id}")));
     println!(
-        "{:<36}  {:<20}  {:<8}  {:<15}  {:<6}  DESCRIPTION",
-        "ID", "NAME", "ENABLED", "TRIGGER", "RUNS"
+        "{}",
+        branding.accent(format!(
+            "{:<36}  {:<20}  {:<8}  {:<15}  {:<6}  DESCRIPTION",
+            "ID", "NAME", "ENABLED", "TRIGGER", "RUNS"
+        ))
     );
-    println!("{}", "-".repeat(120));
+    println!("{}", branding.separator(120));
 
     for r in &routines {
         let trigger_info = match &r.trigger {
@@ -324,7 +334,10 @@ async fn list_routines(
         );
     }
 
-    println!("\n{} routine(s) total.", routines.len());
+    println!(
+        "\n{}",
+        branding.muted(format!("{} routine(s) total.", routines.len()))
+    );
     Ok(())
 }
 
@@ -337,6 +350,7 @@ async fn add_routine(
     prompt: String,
     description: Option<String>,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     // Auto-normalize 5/6-field to 7-field
     let schedule = crate::agent::routine::normalize_cron_expr(&schedule);
     crate::agent::routine::next_cron_fire(&schedule)
@@ -372,9 +386,15 @@ async fn add_routine(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create routine: {}", e))?;
 
-    println!("✅ Created routine '{}' ({})", name, routine.id);
+    println!(
+        "{}",
+        branding.good(format!("Created routine '{}' ({})", name, routine.id))
+    );
     if let Some(next) = next_fire {
-        println!("   Next fire: {}", next.format("%Y-%m-%d %H:%M:%S UTC"));
+        println!(
+            "{}",
+            branding.key_value("Next fire", next.format("%Y-%m-%d %H:%M:%S UTC"))
+        );
     }
 
     Ok(())
@@ -393,6 +413,7 @@ async fn edit_routine(
     model: Option<String>,
     thinking_budget: Option<u32>,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let mut routine = resolve_routine(db, actor_id, id_or_name).await?;
     let mut changes = Vec::new();
 
@@ -457,7 +478,10 @@ async fn edit_routine(
     }
 
     if changes.is_empty() {
-        println!("No changes specified. Use --help to see available options.");
+        println!(
+            "{}",
+            branding.warn("No changes specified. Use --help to see available options.")
+        );
         return Ok(());
     }
 
@@ -467,9 +491,15 @@ async fn edit_routine(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to update routine: {}", e))?;
 
-    println!("✅ Updated routine '{}' ({}):", routine.name, routine.id);
+    println!(
+        "{}",
+        branding.good(format!(
+            "Updated routine '{}' ({})",
+            routine.name, routine.id
+        ))
+    );
     for change in &changes {
-        println!("   • {}", change);
+        println!("   {}", branding.muted(format!("• {}", change)));
     }
 
     Ok(())
@@ -481,6 +511,7 @@ async fn remove_routine(
     actor_id: &str,
     id_or_name: &str,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let deleted = db
@@ -489,9 +520,18 @@ async fn remove_routine(
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if deleted {
-        println!("✅ Deleted routine '{}' ({})", routine.name, routine.id);
+        println!(
+            "{}",
+            branding.good(format!(
+                "Deleted routine '{}' ({})",
+                routine.name, routine.id
+            ))
+        );
     } else {
-        println!("⚠️  Routine not found (may have been already deleted).");
+        println!(
+            "{}",
+            branding.warn("Routine not found (may have been already deleted).")
+        );
     }
 
     Ok(())
@@ -503,6 +543,7 @@ async fn trigger_routine(
     actor_id: &str,
     id_or_name: &str,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let prompt = match &routine.action {
@@ -520,26 +561,41 @@ async fn trigger_routine(
         }
     };
 
-    println!("🔄 Triggering routine '{}' ({})", routine.name, routine.id);
     println!(
-        "   Prompt: {}",
-        if prompt.len() > 60 {
-            let end = prompt
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i < 57)
-                .last()
-                .unwrap_or(0);
-            format!("{}…", &prompt[..end])
-        } else {
-            prompt
-        }
+        "{}",
+        branding.accent(format!(
+            "Triggering routine '{}' ({})",
+            routine.name, routine.id
+        ))
+    );
+    println!(
+        "{}",
+        branding.key_value(
+            "Prompt",
+            if prompt.len() > 60 {
+                let end = prompt
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i < 57)
+                    .last()
+                    .unwrap_or(0);
+                format!("{}…", &prompt[..end])
+            } else {
+                prompt
+            },
+        )
     );
     println!();
-    println!("Note: Manual trigger via CLI logs the intent. For live execution,");
     println!(
-        "use the gateway API: POST /api/routines/{}/trigger",
-        routine.id
+        "{}",
+        branding.muted("Note: Manual trigger via CLI logs the intent. For live execution,")
+    );
+    println!(
+        "{}",
+        branding.muted(format!(
+            "use the gateway API: POST /api/routines/{}/trigger",
+            routine.id
+        ))
     );
 
     Ok(())
@@ -552,6 +608,7 @@ async fn show_runs(
     id_or_name: &str,
     limit: i64,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let routine = resolve_routine(db, actor_id, id_or_name).await?;
 
     let runs = db
@@ -561,23 +618,27 @@ async fn show_runs(
 
     if runs.is_empty() {
         println!(
-            "No runs found for routine '{}' ({}).",
-            routine.name, routine.id
+            "{}",
+            branding.warn(format!(
+                "No runs found for routine '{}' ({}).",
+                routine.name, routine.id
+            ))
         );
         return Ok(());
     }
 
-    println!(
-        "Runs for '{}' ({}) — showing last {}:\n",
-        routine.name,
-        routine.id,
-        runs.len()
+    branding.print_banner(
+        "Routine Runs",
+        Some(&format!("{} ({})", routine.name, routine.id)),
     );
     println!(
-        "{:<36}  {:<10}  {:<20}  {:<10}  SUMMARY",
-        "RUN ID", "STATUS", "STARTED", "TOKENS"
+        "{}",
+        branding.accent(format!(
+            "{:<36}  {:<10}  {:<20}  {:<10}  SUMMARY",
+            "RUN ID", "STATUS", "STARTED", "TOKENS"
+        ))
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", branding.separator(110));
 
     for run in &runs {
         let summary = run
@@ -610,13 +671,17 @@ async fn show_runs(
 /// This runs offline — no DB connection needed.
 fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     use std::str::FromStr;
+    let branding = TerminalBranding::current();
 
     // Auto-normalize 5/6-field to 7-field so lint works with standard cron
     let normalized = crate::agent::routine::normalize_cron_expr(expression);
     if normalized != expression {
         println!(
-            "ℹ️  Auto-normalized: \"{}\" → \"{}\"",
-            expression, normalized
+            "{}",
+            branding.muted(format!(
+                "Auto-normalized: \"{}\" -> \"{}\"",
+                expression, normalized
+            ))
         );
     }
 
@@ -624,13 +689,19 @@ fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     let schedule = match cron::Schedule::from_str(&normalized) {
         Ok(s) => s,
         Err(e) => {
-            println!("❌ Invalid cron expression: \"{}\"", normalized);
-            println!("   Error: {}", e);
+            println!(
+                "{}",
+                branding.bad(format!("Invalid cron expression: \"{}\"", normalized))
+            );
+            println!("{}", branding.key_value("Error", e));
             return Err(anyhow::anyhow!("Invalid cron expression"));
         }
     };
 
-    println!("✅ Valid cron expression: \"{}\"", normalized);
+    println!(
+        "{}",
+        branding.good(format!("Valid cron expression: \"{}\"", normalized))
+    );
     println!();
 
     // Show next N fire times
@@ -638,7 +709,10 @@ fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
     let upcoming: Vec<_> = schedule.upcoming(chrono::Utc).take(count).collect();
 
     if upcoming.is_empty() {
-        println!("   No upcoming fire times (expression may never match).");
+        println!(
+            "{}",
+            branding.warn("No upcoming fire times (expression may never match).")
+        );
         return Ok(());
     }
 

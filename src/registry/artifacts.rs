@@ -255,62 +255,83 @@ mod tests {
 
     use super::*;
 
+    fn with_default_target_dir<T>(f: impl FnOnce() -> T) -> T {
+        let _env_guard = crate::config::helpers::lock_env();
+        // SAFETY: guarded by crate-wide ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("CARGO_TARGET_DIR");
+        }
+        f()
+    }
+
     #[test]
     fn test_resolve_target_dir_default() {
-        // When CARGO_TARGET_DIR is not set, should return <crate_dir>/target
-        let dir = Path::new("/some/crate");
-        let result = resolve_target_dir(dir);
-        assert!(result.ends_with("target"));
+        with_default_target_dir(|| {
+            // When CARGO_TARGET_DIR is not set, should return <crate_dir>/target
+            let dir = Path::new("/some/crate");
+            let result = resolve_target_dir(dir);
+            assert!(result.ends_with("target"));
+        });
     }
 
     #[test]
     fn test_find_wasm_artifact_not_found() {
-        let dir = TempDir::new().unwrap();
-        assert!(find_wasm_artifact(dir.path(), "nonexistent", "release").is_none());
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            assert!(find_wasm_artifact(dir.path(), "nonexistent", "release").is_none());
+        });
     }
 
     #[test]
     fn test_find_wasm_artifact_found() {
-        let dir = TempDir::new().unwrap();
-        let target_base = resolve_target_dir(dir.path());
-        let wasm_dir = target_base.join("wasm32-wasip2/release");
-        std::fs::create_dir_all(&wasm_dir).unwrap();
-        std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            let target_base = resolve_target_dir(dir.path());
+            let wasm_dir = target_base.join("wasm32-wasip2/release");
+            std::fs::create_dir_all(&wasm_dir).unwrap();
+            std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
 
-        let result = find_wasm_artifact(dir.path(), "my_tool", "release");
-        assert!(result.is_some());
-        assert!(result.unwrap().ends_with("my_tool.wasm"));
+            let result = find_wasm_artifact(dir.path(), "my_tool", "release");
+            assert!(result.is_some());
+            assert!(result.unwrap().ends_with("my_tool.wasm"));
+        });
     }
 
     #[test]
     fn test_find_wasm_artifact_hyphen_to_underscore() {
-        let dir = TempDir::new().unwrap();
-        let target_base = resolve_target_dir(dir.path());
-        let wasm_dir = target_base.join("wasm32-wasip1/release");
-        std::fs::create_dir_all(&wasm_dir).unwrap();
-        std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            let target_base = resolve_target_dir(dir.path());
+            let wasm_dir = target_base.join("wasm32-wasip1/release");
+            std::fs::create_dir_all(&wasm_dir).unwrap();
+            std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
 
-        // Search with hyphens, should find underscore version
-        let result = find_wasm_artifact(dir.path(), "my-tool", "release");
-        assert!(result.is_some());
+            // Search with hyphens, should find underscore version
+            let result = find_wasm_artifact(dir.path(), "my-tool", "release");
+            assert!(result.is_some());
+        });
     }
 
     #[test]
     fn test_find_any_wasm_artifact_found() {
-        let dir = TempDir::new().unwrap();
-        let target_base = resolve_target_dir(dir.path());
-        let wasm_dir = target_base.join("wasm32-wasip2/release");
-        std::fs::create_dir_all(&wasm_dir).unwrap();
-        std::fs::File::create(wasm_dir.join("something.wasm")).unwrap();
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            let target_base = resolve_target_dir(dir.path());
+            let wasm_dir = target_base.join("wasm32-wasip2/release");
+            std::fs::create_dir_all(&wasm_dir).unwrap();
+            std::fs::File::create(wasm_dir.join("something.wasm")).unwrap();
 
-        let result = find_any_wasm_artifact(dir.path(), "release");
-        assert!(result.is_some());
+            let result = find_any_wasm_artifact(dir.path(), "release");
+            assert!(result.is_some());
+        });
     }
 
     #[test]
     fn test_find_any_wasm_artifact_not_found() {
-        let dir = TempDir::new().unwrap();
-        assert!(find_any_wasm_artifact(dir.path(), "release").is_none());
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            assert!(find_any_wasm_artifact(dir.path(), "release").is_none());
+        });
     }
 
     #[tokio::test]

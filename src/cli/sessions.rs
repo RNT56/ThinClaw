@@ -11,6 +11,7 @@ use std::sync::Arc;
 use clap::Subcommand;
 
 use crate::agent::SessionManager;
+use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionCommand {
@@ -59,15 +60,20 @@ pub enum SessionCommand {
 
 /// Run a sessions CLI command against the given session manager.
 pub async fn run_sessions_command(cmd: SessionCommand, session_mgr: &Arc<SessionManager>) {
+    let branding = TerminalBranding::current();
     match cmd {
         SessionCommand::List { format } => list_sessions(session_mgr, &format).await,
         SessionCommand::Show { user_id, channel } => {
             show_session(session_mgr, &user_id, channel.as_deref()).await;
         }
         SessionCommand::Prune { idle_secs } => {
+            branding.print_banner("Sessions", Some("Prune idle conversations"));
             let duration = std::time::Duration::from_secs(idle_secs);
             let pruned = session_mgr.prune_stale_sessions(duration).await;
-            println!("Pruned {} stale session(s).", pruned);
+            println!(
+                "  {}",
+                branding.good(format!("Pruned {} stale session(s).", pruned))
+            );
         }
         SessionCommand::Export {
             user_id,
@@ -81,10 +87,12 @@ pub async fn run_sessions_command(cmd: SessionCommand, session_mgr: &Arc<Session
 }
 
 async fn list_sessions(session_mgr: &Arc<SessionManager>, format: &str) {
+    let branding = TerminalBranding::current();
     let summary = session_mgr.list_sessions().await;
 
     if summary.is_empty() {
-        println!("No active sessions.");
+        branding.print_banner("Sessions", Some("Inspect active conversations"));
+        println!("{}", branding.warn("No active sessions."));
         return;
     }
 
@@ -96,11 +104,15 @@ async fn list_sessions(session_mgr: &Arc<SessionManager>, format: &str) {
         return;
     }
 
+    branding.print_banner("Sessions", Some("Inspect active conversations"));
     println!(
-        "{:<20}  {:<14}  {:<10}  {:<20}  OWNER",
-        "USER", "CHANNEL", "THREADS", "LAST ACTIVE"
+        "{}",
+        branding.body_bold(format!(
+            "{:<20}  {:<14}  {:<10}  {:<20}  OWNER",
+            "USER", "CHANNEL", "THREADS", "LAST ACTIVE"
+        ))
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", branding.separator(80));
 
     for session in &summary {
         let user = session["user_id"].as_str().unwrap_or("?");
@@ -115,16 +127,22 @@ async fn list_sessions(session_mgr: &Arc<SessionManager>, format: &str) {
         );
     }
 
-    println!("\n{} session(s) active.", summary.len());
+    println!();
+    println!(
+        "{}",
+        branding.muted(format!("{} session(s) active.", summary.len()))
+    );
 }
 
 async fn show_session(session_mgr: &Arc<SessionManager>, user_id: &str, channel: Option<&str>) {
+    let branding = TerminalBranding::current();
     let detail = session_mgr
         .describe_session(user_id, channel.unwrap_or("cli"))
         .await;
 
     match detail {
         Some(info) => {
+            branding.print_banner("Sessions", Some("Inspect a single conversation"));
             println!(
                 "{}",
                 serde_json::to_string_pretty(&info).unwrap_or_default()
@@ -133,8 +151,11 @@ async fn show_session(session_mgr: &Arc<SessionManager>, user_id: &str, channel:
         None => {
             let ch = channel.unwrap_or("cli");
             eprintln!(
-                "No session found for user '{}' on channel '{}'.",
-                user_id, ch
+                "{}",
+                branding.bad(format!(
+                    "No session found for user '{}' on channel '{}'.",
+                    user_id, ch
+                ))
             );
         }
     }
@@ -147,14 +168,18 @@ async fn export_session(
     format: &str,
     output: Option<&str>,
 ) {
+    let branding = TerminalBranding::current();
     let detail = session_mgr.describe_session(user_id, channel).await;
 
     let info = match detail {
         Some(info) => info,
         Option::None => {
             eprintln!(
-                "No session found for user '{}' on channel '{}'.",
-                user_id, channel
+                "{}",
+                branding.bad(format!(
+                    "No session found for user '{}' on channel '{}'.",
+                    user_id, channel
+                ))
             );
             return;
         }
@@ -168,9 +193,16 @@ async fn export_session(
     match output {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &transcript) {
-                eprintln!("Failed to write to '{}': {}", path, e);
+                eprintln!(
+                    "{}",
+                    branding.bad(format!("Failed to write to '{}': {}", path, e))
+                );
             } else {
-                println!("Session exported to '{}'.", path);
+                branding.print_banner("Sessions", Some("Export a conversation"));
+                println!(
+                    "  {}",
+                    branding.good(format!("Session exported to '{}'.", path))
+                );
             }
         }
         Option::None => println!("{}", transcript),

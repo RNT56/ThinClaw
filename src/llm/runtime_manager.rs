@@ -2196,8 +2196,11 @@ mod tests {
         let request = CompletionRequest::new(vec![crate::llm::ChatMessage::user("hi")])
             .with_model("openai/gpt-5.4-mini");
 
-        let resolved =
-            RuntimeLlmProvider::resolved_completion_request(request, "test|openai|gpt-5.4-mini", "test");
+        let resolved = RuntimeLlmProvider::resolved_completion_request(
+            request,
+            "test|openai|gpt-5.4-mini",
+            "test",
+        );
 
         assert!(resolved.model.is_none());
     }

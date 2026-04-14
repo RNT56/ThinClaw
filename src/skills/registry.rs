@@ -389,6 +389,18 @@ impl SkillRegistry {
         load_and_validate_skill(&skill_path, SkillTrust::Installed, source).await
     }
 
+    /// Load and validate an already-written skill directory from disk.
+    ///
+    /// Used by the quarantine/install pipeline after it has copied a vetted
+    /// SKILL.md into the final install location.
+    pub async fn load_skill_from_path(
+        skill_dir: &Path,
+        trust: SkillTrust,
+        source: SkillSource,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        load_and_validate_skill(&skill_dir.join("SKILL.md"), trust, source).await
+    }
+
     /// Commit a prepared skill into the in-memory registry.
     ///
     /// This is a fast, synchronous operation that only adds to the Vec.

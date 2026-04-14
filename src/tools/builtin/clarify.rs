@@ -95,10 +95,8 @@ impl Tool for ClarifyTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let options: Option<Vec<ClarifyOption>> = params
-            .get("options")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
+        let options: Option<Vec<ClarifyOption>> =
+            params.get("options").and_then(|v| v.as_array()).map(|arr| {
                 arr.iter()
                     .filter_map(|item| {
                         let label = item.get("label")?.as_str()?;
@@ -177,7 +175,14 @@ mod tests {
             "What language do you prefer?"
         );
         assert!(result.result.get("options").unwrap().is_null());
-        assert!(result.result.get("allow_freeform").unwrap().as_bool().unwrap());
+        assert!(
+            result
+                .result
+                .get("allow_freeform")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -225,7 +230,12 @@ mod tests {
             .await
             .unwrap();
 
-        let freeform = result.result.get("allow_freeform").unwrap().as_bool().unwrap();
+        let freeform = result
+            .result
+            .get("allow_freeform")
+            .unwrap()
+            .as_bool()
+            .unwrap();
         assert!(!freeform);
 
         let formatted = result.result.get("formatted").unwrap().as_str().unwrap();
@@ -261,10 +271,7 @@ mod tests {
         let tool = ClarifyTool;
         let ctx = JobContext::default();
 
-        let err = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap_err();
+        let err = tool.execute(serde_json::json!({}), &ctx).await.unwrap_err();
 
         assert!(err.to_string().contains("question"));
     }

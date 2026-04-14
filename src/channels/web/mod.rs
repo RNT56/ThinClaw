@@ -16,10 +16,13 @@
 
 pub mod auth;
 pub(crate) mod handlers;
+pub mod identity_helpers;
 pub mod log_layer;
 pub mod openai_compat;
+pub mod rate_limiter;
 pub mod server;
 pub mod sse;
+pub mod static_files;
 pub mod types;
 pub mod ws;
 
@@ -146,9 +149,7 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
                         "components": components,
                     })),
                 ),
-                CanvasAction::Dismiss { panel_id } => {
-                    ("dismiss", panel_id.clone(), None)
-                }
+                CanvasAction::Dismiss { panel_id } => ("dismiss", panel_id.clone(), None),
                 CanvasAction::Notify {
                     message,
                     level,
@@ -493,6 +494,13 @@ impl GatewayChannel {
 impl Channel for GatewayChannel {
     fn name(&self) -> &str {
         "gateway"
+    }
+
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "Web chat supports markdown-style formatting and fenced code blocks. Prefer short sections and readable spacing for longer answers."
+                .to_string(),
+        )
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

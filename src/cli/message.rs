@@ -6,6 +6,8 @@
 
 use clap::Subcommand;
 
+use crate::terminal_branding::TerminalBranding;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum MessageCommand {
     /// Send a message to the agent via the gateway
@@ -41,6 +43,7 @@ async fn send_message(
     user_id: String,
     gateway_url: Option<String>,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let base_url = gateway_url.unwrap_or_else(|| {
         // Check env for gateway port
         let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3000".to_string());
@@ -68,7 +71,8 @@ async fn send_message(
         request = request.bearer_auth(token);
     }
 
-    println!("📤 Sending to {}...", url);
+    branding.print_banner("Message", Some("Inject a prompt through the gateway"));
+    println!("{}", branding.accent(format!("Sending to {}...", url)));
 
     let response = request.send().await.map_err(|e| {
         if e.is_connect() {
@@ -90,15 +94,15 @@ async fn send_message(
         // Try to parse as JSON for pretty output
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text) {
             if let Some(reply) = json.get("response").and_then(|v| v.as_str()) {
-                println!("💬 Response:\n{}", reply);
+                println!("{}", branding.good("Response received:"));
+                println!("{}", reply);
             } else {
-                println!(
-                    "✅ Sent. Response:\n{}",
-                    serde_json::to_string_pretty(&json)?
-                );
+                println!("{}", branding.good("Sent successfully. Response:"));
+                println!("{}", serde_json::to_string_pretty(&json)?);
             }
         } else {
-            println!("✅ Sent. Raw response:\n{}", body_text);
+            println!("{}", branding.good("Sent successfully. Raw response:"));
+            println!("{}", body_text);
         }
     } else {
         anyhow::bail!("Gateway returned HTTP {}: {}", status.as_u16(), body_text);

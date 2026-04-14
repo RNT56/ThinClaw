@@ -3,6 +3,8 @@
 //! Monitors the size of the conversation context and triggers
 //! compaction when approaching the limit.
 
+use serde::{Deserialize, Serialize};
+
 use crate::llm::ChatMessage;
 
 /// Default context window limit (conservative estimate).
@@ -13,6 +15,35 @@ const COMPACTION_THRESHOLD: f64 = 0.8;
 
 /// Approximate tokens per word (rough estimate for English).
 const TOKENS_PER_WORD: f64 = 1.3;
+
+/// Context pressure levels derived from approximate context usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ContextPressure {
+    /// Context is comfortably below warning thresholds.
+    #[default]
+    None,
+    /// Context is approaching the limit.
+    Warning,
+    /// Context is critically full.
+    Critical,
+}
+
+impl ContextPressure {
+    /// Convert a usage percentage into a pressure level.
+    pub fn from_usage_percent(usage_percent: f32) -> Self {
+        if !usage_percent.is_finite() {
+            return Self::None;
+        }
+
+        if usage_percent >= 95.0 {
+            Self::Critical
+        } else if usage_percent >= 85.0 {
+            Self::Warning
+        } else {
+            Self::None
+        }
+    }
+}
 
 /// Strategy for context compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +115,11 @@ impl ContextMonitor {
         (tokens as f64 / self.context_limit as f64) * 100.0
     }
 
+    /// Check the current pressure level from a usage percentage.
+    pub fn check_pressure(&self, usage_percent: f32) -> ContextPressure {
+        ContextPressure::from_usage_percent(usage_percent)
+    }
+
     /// Suggest a compaction strategy based on current context.
     pub fn suggest_compaction(&self, messages: &[ChatMessage]) -> Option<CompactionStrategy> {
         if !self.needs_compaction(messages) {
@@ -113,6 +149,36 @@ impl ContextMonitor {
     /// Get the current threshold in tokens.
     pub fn threshold(&self) -> usize {
         (self.context_limit as f64 * self.threshold_ratio) as usize
+    }
+}
+
+/// Get the warning message for a given pressure level.
+pub fn pressure_message(pressure: ContextPressure) -> Option<String> {
+    match pressure {
+        ContextPressure::None => None,
+        ContextPressure::Warning => Some(
+            "⚠ Context window 85% full — consider /compact or starting a /new thread".to_string(),
+        ),
+        ContextPressure::Critical => {
+            Some("🔴 Context window 95% full — auto-compaction imminent".to_string())
+        }
+    }
+}
+
+/// Return the pressure level that should trigger a warning when transitioning
+/// from the previous persisted level to the current one.
+pub fn pressure_transition(
+    previous: Option<ContextPressure>,
+    current: ContextPressure,
+) -> Option<ContextPressure> {
+    if current == ContextPressure::None {
+        return None;
+    }
+
+    if previous != Some(current) {
+        Some(current)
+    } else {
+        None
     }
 }
 
@@ -251,5 +317,47 @@ mod tests {
         assert!(breakdown.system_tokens > 0);
         assert!(breakdown.user_tokens > 0);
         assert!(breakdown.assistant_tokens > 0);
+    }
+
+    #[test]
+    fn test_pressure_thresholds() {
+        let monitor = ContextMonitor::new();
+        assert_eq!(monitor.check_pressure(84.9), ContextPressure::None);
+        assert_eq!(monitor.check_pressure(85.0), ContextPressure::Warning);
+        assert_eq!(monitor.check_pressure(94.9), ContextPressure::Warning);
+        assert_eq!(monitor.check_pressure(95.0), ContextPressure::Critical);
+        assert_eq!(monitor.check_pressure(f32::NAN), ContextPressure::None);
+    }
+
+    #[test]
+    fn test_pressure_message_and_transition() {
+        assert!(pressure_message(ContextPressure::None).is_none());
+        assert!(
+            pressure_message(ContextPressure::Warning)
+                .unwrap()
+                .contains("85% full")
+        );
+        assert!(
+            pressure_message(ContextPressure::Critical)
+                .unwrap()
+                .contains("95% full")
+        );
+
+        assert_eq!(
+            pressure_transition(None, ContextPressure::Warning),
+            Some(ContextPressure::Warning)
+        );
+        assert_eq!(
+            pressure_transition(Some(ContextPressure::Warning), ContextPressure::Warning),
+            None
+        );
+        assert_eq!(
+            pressure_transition(Some(ContextPressure::Critical), ContextPressure::Warning),
+            Some(ContextPressure::Warning)
+        );
+        assert_eq!(
+            pressure_transition(Some(ContextPressure::Critical), ContextPressure::None),
+            None
+        );
     }
 }

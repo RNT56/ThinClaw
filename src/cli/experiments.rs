@@ -8,12 +8,13 @@ use uuid::Uuid;
 use crate::api::experiments as experiments_api;
 use crate::db::Database;
 use crate::experiments::{
-    ExperimentAutonomyMode, ExperimentMetricComparator, ExperimentMetricDefinition, ExperimentPreset,
-    ExperimentRunnerBackend,
+    ExperimentAutonomyMode, ExperimentMetricComparator, ExperimentMetricDefinition,
+    ExperimentPreset, ExperimentRunnerBackend,
 };
 
 const DEFAULT_USER_ID: &str = "default";
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug, Clone)]
 pub enum ExperimentsCommand {
     /// Enable the experiments subsystem.
@@ -342,12 +343,12 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
         ExperimentsCommand::Projects(sub) => match sub {
             ExperimentProjectsCommand::List => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::list_projects(&db, DEFAULT_USER_ID).await?;
+                let response = experiments_api::list_projects(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.projects)?);
             }
             ExperimentProjectsCommand::Show { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let project = experiments_api::get_project(&db, DEFAULT_USER_ID, id).await?;
+                let project = experiments_api::get_project(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Create(args) => {
@@ -381,8 +382,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                         .map(parse_autonomy_mode)
                         .transpose()?,
                 };
-                let project =
-                    experiments_api::create_project(&db, DEFAULT_USER_ID, request).await?;
+                let project = experiments_api::create_project(db, DEFAULT_USER_ID, request).await?;
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Update { id, args } => {
@@ -427,24 +427,24 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                         .transpose()?,
                 };
                 let project =
-                    experiments_api::update_project(&db, DEFAULT_USER_ID, id, request).await?;
+                    experiments_api::update_project(db, DEFAULT_USER_ID, id, request).await?;
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Delete { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let deleted = experiments_api::delete_project(&db, DEFAULT_USER_ID, id).await?;
+                let deleted = experiments_api::delete_project(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::json!({ "deleted": deleted }));
             }
         },
         ExperimentsCommand::Runners(sub) => match sub {
             ExperimentRunnersCommand::List => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::list_runners(&db, DEFAULT_USER_ID).await?;
+                let response = experiments_api::list_runners(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.runners)?);
             }
             ExperimentRunnersCommand::Show { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let runner = experiments_api::get_runner(&db, DEFAULT_USER_ID, id).await?;
+                let runner = experiments_api::get_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Create(args) => {
@@ -465,7 +465,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                     secret_references: args.secret_reference,
                     cache_policy: parse_json_arg(args.cache_policy_json, serde_json::json!({}))?,
                 };
-                let runner = experiments_api::create_runner(&db, DEFAULT_USER_ID, request).await?;
+                let runner = experiments_api::create_runner(db, DEFAULT_USER_ID, request).await?;
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Update { id, args } => {
@@ -499,17 +499,17 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                         .transpose()?,
                 };
                 let runner =
-                    experiments_api::update_runner(&db, DEFAULT_USER_ID, id, request).await?;
+                    experiments_api::update_runner(db, DEFAULT_USER_ID, id, request).await?;
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Delete { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let deleted = experiments_api::delete_runner(&db, DEFAULT_USER_ID, id).await?;
+                let deleted = experiments_api::delete_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::json!({ "deleted": deleted }));
             }
             ExperimentRunnersCommand::Validate { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::validate_runner(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::validate_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
         },
@@ -521,7 +521,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
             } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
                 let response = experiments_api::start_campaign(
-                    &db,
+                    db,
                     DEFAULT_USER_ID,
                     project_id,
                     experiments_api::StartExperimentCampaignRequest {
@@ -535,32 +535,32 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
             }
             ExperimentCampaignsCommand::List => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::list_campaigns(&db, DEFAULT_USER_ID).await?;
+                let response = experiments_api::list_campaigns(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.campaigns)?);
             }
             ExperimentCampaignsCommand::Show { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::get_campaign(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::get_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Pause { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::pause_campaign(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::pause_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Resume { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::resume_campaign(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::resume_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Cancel { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::cancel_campaign(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::cancel_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Promote { id } => {
                 let db = db.as_ref().expect("experiments DB must be initialized");
-                let response = experiments_api::promote_campaign(&db, DEFAULT_USER_ID, id).await?;
+                let response = experiments_api::promote_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::ReissueLease { id, gateway } => {
@@ -827,7 +827,7 @@ async fn experiments_gateway_request(
         .build()?;
 
     let mut request = client.request(method, &url);
-    if let Some(token) = std::env::var("GATEWAY_AUTH_TOKEN").ok() {
+    if let Ok(token) = std::env::var("GATEWAY_AUTH_TOKEN") {
         request = request.bearer_auth(token);
     }
     if let Some(body) = body {

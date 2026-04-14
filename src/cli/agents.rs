@@ -10,6 +10,7 @@
 use clap::Subcommand;
 
 use crate::agent::{AgentRouter, AgentWorkspace};
+use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AgentCommand {
@@ -72,6 +73,7 @@ pub enum AgentCommand {
 
 /// Run an agents CLI command against the given router.
 pub async fn run_agents_command(cmd: AgentCommand, router: &AgentRouter) {
+    let branding = TerminalBranding::current();
     match cmd {
         AgentCommand::List { format } => list_agents(router, &format).await,
         AgentCommand::Add {
@@ -96,14 +98,16 @@ pub async fn run_agents_command(cmd: AgentCommand, router: &AgentRouter) {
                 model,
             };
             router.register_agent(ws).await;
-            println!("✅ Agent '{}' registered.", id);
+            branding.print_banner("Agents", Some("Manage routed workspaces"));
+            println!("  {}", branding.good(format!("Agent '{}' registered.", id)));
             if default {
-                println!("   ↳ Set as default agent.");
+                println!("  {}", branding.muted("Also set as the default agent."));
             }
         }
         AgentCommand::Remove { id } => {
             router.unregister_agent(&id).await;
-            println!("✅ Agent '{}' removed.", id);
+            branding.print_banner("Agents", Some("Manage routed workspaces"));
+            println!("  {}", branding.good(format!("Agent '{}' removed.", id)));
         }
         AgentCommand::Show { id } => show_agent(router, &id).await,
         AgentCommand::SetDefault { id } => {
@@ -111,19 +115,28 @@ pub async fn run_agents_command(cmd: AgentCommand, router: &AgentRouter) {
             if let Some(mut ws) = router.get_agent(&id).await {
                 ws.is_default = true;
                 router.register_agent(ws).await;
-                println!("✅ Agent '{}' set as default.", id);
+                branding.print_banner("Agents", Some("Manage routed workspaces"));
+                println!(
+                    "  {}",
+                    branding.good(format!("Agent '{}' set as default.", id))
+                );
             } else {
-                eprintln!("❌ Agent '{}' not found.", id);
+                eprintln!("  {}", branding.bad(format!("Agent '{}' not found.", id)));
             }
         }
     }
 }
 
 async fn list_agents(router: &AgentRouter, format: &str) {
+    let branding = TerminalBranding::current();
     let agents = router.list_agents().await;
 
     if agents.is_empty() {
-        println!("No agents registered. Use 'thinclaw agents add' to register one.");
+        branding.print_banner("Agents", Some("Manage routed workspaces"));
+        println!(
+            "{}",
+            branding.warn("No agents registered. Use `thinclaw agents add` to register one.")
+        );
         return;
     }
 
@@ -149,11 +162,15 @@ async fn list_agents(router: &AgentRouter, format: &str) {
         return;
     }
 
+    branding.print_banner("Agents", Some("Manage routed workspaces"));
     println!(
-        "{:<18}  {:<20}  {:<8}  {:<16}  MODEL",
-        "AGENT ID", "DISPLAY NAME", "DEFAULT", "CHANNELS"
+        "{}",
+        branding.body_bold(format!(
+            "{:<18}  {:<20}  {:<8}  {:<16}  MODEL",
+            "AGENT ID", "DISPLAY NAME", "DEFAULT", "CHANNELS"
+        ))
     );
-    println!("{}", "-".repeat(85));
+    println!("{}", branding.separator(85));
 
     for a in &agents {
         let channels_str = if a.bound_channels.is_empty() {
@@ -170,34 +187,52 @@ async fn list_agents(router: &AgentRouter, format: &str) {
         );
     }
 
-    println!("\n{} agent(s) registered.", agents.len());
+    println!();
+    println!(
+        "{}",
+        branding.muted(format!("{} agent(s) registered.", agents.len()))
+    );
 }
 
 async fn show_agent(router: &AgentRouter, id: &str) {
+    let branding = TerminalBranding::current();
     match router.get_agent(id).await {
         Some(a) => {
-            println!("Agent: {}", a.agent_id);
-            println!("Display Name: {}", a.display_name);
-            println!("Default: {}", if a.is_default { "yes" } else { "no" });
+            branding.print_banner("Agents", Some("Inspect a routed workspace"));
+            println!("{}", branding.key_value("Agent", &a.agent_id));
+            println!("{}", branding.key_value("Display Name", &a.display_name));
             println!(
-                "Model: {}",
-                a.model.as_deref().unwrap_or("(inherit from agent)")
+                "{}",
+                branding.key_value("Default", if a.is_default { "yes" } else { "no" })
             );
             println!(
-                "Bound Channels: {}",
-                if a.bound_channels.is_empty() {
-                    "(all)".to_string()
-                } else {
-                    a.bound_channels.join(", ")
-                }
+                "{}",
+                branding.key_value(
+                    "Model",
+                    a.model.as_deref().unwrap_or("(inherit from agent)")
+                )
             );
             println!(
-                "Trigger Keywords: {}",
-                if a.trigger_keywords.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    a.trigger_keywords.join(", ")
-                }
+                "{}",
+                branding.key_value(
+                    "Bound Channels",
+                    if a.bound_channels.is_empty() {
+                        "(all)".to_string()
+                    } else {
+                        a.bound_channels.join(", ")
+                    }
+                )
+            );
+            println!(
+                "{}",
+                branding.key_value(
+                    "Trigger Keywords",
+                    if a.trigger_keywords.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        a.trigger_keywords.join(", ")
+                    }
+                )
             );
             if let Some(ref prompt) = a.system_prompt {
                 let preview = if prompt.len() > 120 {
@@ -211,11 +246,11 @@ async fn show_agent(router: &AgentRouter, id: &str) {
                 } else {
                     prompt.clone()
                 };
-                println!("System Prompt: {}", preview);
+                println!("{}", branding.key_value("System Prompt", preview));
             }
         }
         None => {
-            eprintln!("❌ Agent '{}' not found.", id);
+            eprintln!("  {}", branding.bad(format!("Agent '{}' not found.", id)));
         }
     }
 }

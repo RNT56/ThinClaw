@@ -46,6 +46,41 @@ pub struct ProviderModelSlots {
     pub cheap: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSelectionStrategy {
+    #[default]
+    FillFirst,
+    RoundRobin,
+    LeastUsed,
+    Random,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthCredentialSourceKind {
+    #[default]
+    ClaudeCode,
+    OpenAiCodex,
+    JsonFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OAuthCredentialSourceConfig {
+    /// Which external credential format/provider to read.
+    #[serde(default)]
+    pub kind: OAuthCredentialSourceKind,
+    /// Optional path override for file-backed sources.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional env/overlay variable to update with the discovered token.
+    #[serde(default)]
+    pub env_key: Option<String>,
+    /// Optional JSON pointer override for JsonFile sources.
+    #[serde(default)]
+    pub json_pointer: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersSettings {
     /// Enabled cloud provider IDs (e.g., ["anthropic", "openai", "groq"]).
@@ -88,6 +123,30 @@ pub struct ProvidersSettings {
     /// Each enabled provider can expose one primary model and one cheap model.
     #[serde(default)]
     pub provider_models: HashMap<String, ProviderModelSlots>,
+
+    /// Maximum number of concurrent requests leased to a single routed
+    /// provider/credential before failover prefers another available option.
+    #[serde(default = "default_provider_credential_max_concurrent")]
+    pub credential_max_concurrent: usize,
+
+    /// How the runtime should pick among available provider credentials when
+    /// multiple are healthy and under the concurrency cap.
+    #[serde(default)]
+    pub credential_selection_strategy: CredentialSelectionStrategy,
+
+    /// Whether ThinClaw should watch external OAuth credential sources (for
+    /// example Claude Code or Codex auth files) and hot-reload the live
+    /// provider chain when those tokens change.
+    #[serde(default = "default_true")]
+    pub oauth_sync_enabled: bool,
+
+    /// Poll interval in seconds for watched external OAuth credential sources.
+    #[serde(default = "default_oauth_sync_poll_interval_secs")]
+    pub oauth_sync_poll_interval_secs: u64,
+
+    /// Additional or overridden external OAuth credential sources to watch.
+    #[serde(default)]
+    pub oauth_sync_sources: Vec<OAuthCredentialSourceConfig>,
 
     /// Master toggle for the smart routing system.
     /// When false, all requests go to the primary model even if cheap_model is set.
@@ -135,6 +194,21 @@ pub struct ProvidersSettings {
     #[serde(default)]
     pub policy_rules: Vec<crate::llm::routing_policy::RoutingRule>,
 
+    /// Default reference models for the Mixture-of-Agents tool.
+    /// Each entry should use "provider/model" format.
+    #[serde(default)]
+    pub moa_reference_models: Vec<String>,
+
+    /// Optional aggregator model override for the Mixture-of-Agents tool.
+    /// When unset, the current primary model is used to synthesize responses.
+    #[serde(default)]
+    pub moa_aggregator_model: Option<String>,
+
+    /// Minimum number of successful reference responses required before the
+    /// Mixture-of-Agents tool proceeds to aggregation.
+    #[serde(default = "default_moa_min_successful")]
+    pub moa_min_successful: usize,
+
     /// Maximum advisor consultations per agent turn (AdvisorExecutor mode).
     #[serde(default = "default_advisor_max_calls")]
     pub advisor_max_calls: u32,
@@ -148,6 +222,10 @@ fn default_advisor_max_calls() -> u32 {
     3
 }
 
+fn default_moa_min_successful() -> usize {
+    1
+}
+
 impl Default for ProvidersSettings {
     fn default() -> Self {
         Self {
@@ -159,6 +237,11 @@ impl Default for ProvidersSettings {
             primary_pool_order: Vec::new(),
             cheap_pool_order: Vec::new(),
             provider_models: HashMap::new(),
+            credential_max_concurrent: default_provider_credential_max_concurrent(),
+            credential_selection_strategy: CredentialSelectionStrategy::FillFirst,
+            oauth_sync_enabled: true,
+            oauth_sync_poll_interval_secs: default_oauth_sync_poll_interval_secs(),
+            oauth_sync_sources: Vec::new(),
             smart_routing_enabled: true,
             routing_mode: RoutingMode::PrimaryOnly,
             smart_routing_cascade: true,
@@ -167,10 +250,55 @@ impl Default for ProvidersSettings {
             allowed_models: HashMap::new(),
             fallback_chain: Vec::new(),
             policy_rules: Vec::new(),
+            moa_reference_models: Vec::new(),
+            moa_aggregator_model: None,
+            moa_min_successful: default_moa_min_successful(),
             advisor_max_calls: default_advisor_max_calls(),
             advisor_escalation_prompt: None,
         }
     }
+}
+
+fn default_provider_credential_max_concurrent() -> usize {
+    3
+}
+
+fn default_oauth_sync_poll_interval_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillTapTrustLevel {
+    Builtin,
+    Trusted,
+    #[default]
+    Community,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillTapConfig {
+    /// GitHub repository in owner/name form.
+    pub repo: String,
+    /// Directory inside the repository to scan for SKILL.md files.
+    #[serde(default)]
+    pub path: String,
+    /// Optional branch override. Defaults to the repository default branch.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Trust tier for skills discovered from this tap.
+    #[serde(default)]
+    pub trust_level: SkillTapTrustLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WellKnownSkillRegistryConfig {
+    /// Base URL for a site exposing `/.well-known/skills/index.json`, or the
+    /// full index URL itself.
+    pub url: String,
+    /// Trust tier applied to skills discovered from this registry.
+    #[serde(default)]
+    pub trust_level: SkillTapTrustLevel,
 }
 
 fn default_learning_auto_apply_classes() -> Vec<String> {
@@ -273,7 +401,7 @@ impl Default for LearningReflectionSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LearningProviderSettings {
     /// Whether this external memory provider is enabled.
     #[serde(default)]
@@ -281,15 +409,6 @@ pub struct LearningProviderSettings {
     /// Provider-specific config values (base_url, api_key_env, project_id, etc).
     #[serde(default)]
     pub config: HashMap<String, String>,
-}
-
-impl Default for LearningProviderSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            config: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -300,17 +419,11 @@ pub struct LearningProvidersSettings {
     pub zep: LearningProviderSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LearningPromptMutationSettings {
     /// Gate autonomous prompt mutation via prompt_manage.
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for LearningPromptMutationSettings {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,17 +445,11 @@ impl Default for LearningCodeProposalSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LearningExportSettings {
     /// Enables optional trajectory/export hooks.
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for LearningExportSettings {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,6 +634,14 @@ pub struct Settings {
     /// Whether the skills system is enabled.
     #[serde(default = "default_true")]
     pub skills_enabled: bool,
+
+    /// Extra GitHub taps used to discover skills outside the main ClawHub catalog.
+    #[serde(default)]
+    pub skill_taps: Vec<SkillTapConfig>,
+
+    /// Additional `/.well-known/skills` registries used for remote discovery.
+    #[serde(default)]
+    pub well_known_skill_registries: Vec<WellKnownSkillRegistryConfig>,
 
     // === Step 12: Claude Code ===
     /// Whether Claude Code sandbox is enabled.
@@ -1175,6 +1290,34 @@ pub struct AgentSettings {
     /// Set by the wizard based on autonomy level. Defaults to None (= "sandboxed").
     #[serde(default)]
     pub workspace_mode: Option<String>,
+
+    /// Whether model-family-specific prompt guidance is enabled.
+    #[serde(default = "default_true")]
+    pub model_guidance_enabled: bool,
+
+    /// Default CLI skin for local terminal clients.
+    #[serde(default = "default_cli_skin")]
+    pub cli_skin: String,
+
+    /// Persona seed to use when creating a fresh SOUL.md.
+    #[serde(default = "default_persona_seed")]
+    pub persona_seed: String,
+
+    /// Whether filesystem checkpoint snapshots are enabled.
+    #[serde(default = "default_true")]
+    pub checkpoints_enabled: bool,
+
+    /// Maximum checkpoints retained in rollback listings.
+    #[serde(default = "default_max_checkpoints")]
+    pub max_checkpoints: usize,
+
+    /// Browser automation backend used by the browser tool.
+    #[serde(default = "default_browser_backend")]
+    pub browser_backend: String,
+
+    /// Optional cloud browser provider used by the browser tool when present.
+    #[serde(default)]
+    pub cloud_browser_provider: Option<String>,
 }
 
 fn default_agent_name() -> String {
@@ -1221,6 +1364,22 @@ fn default_subagent_transparency_level() -> String {
     "balanced".to_string()
 }
 
+fn default_persona_seed() -> String {
+    "default".to_string()
+}
+
+fn default_max_checkpoints() -> usize {
+    50
+}
+
+fn default_browser_backend() -> String {
+    "chromium".to_string()
+}
+
+fn default_cli_skin() -> String {
+    "cockpit".to_string()
+}
+
 fn default_telegram_subagent_session_mode() -> String {
     "temp_topic".to_string()
 }
@@ -1256,6 +1415,13 @@ impl Default for AgentSettings {
             allow_local_tools: false,
             subagent_transparency_level: default_subagent_transparency_level(),
             workspace_mode: None,
+            model_guidance_enabled: true,
+            cli_skin: default_cli_skin(),
+            persona_seed: default_persona_seed(),
+            checkpoints_enabled: true,
+            max_checkpoints: default_max_checkpoints(),
+            browser_backend: default_browser_backend(),
+            cloud_browser_provider: None,
         }
     }
 }
@@ -1399,10 +1565,34 @@ pub struct SafetySettings {
     /// Whether injection check is enabled.
     #[serde(default = "default_true")]
     pub injection_check_enabled: bool,
+
+    /// Whether prompt construction should redact user identifiers.
+    #[serde(default = "default_true")]
+    pub redact_pii_in_prompts: bool,
+
+    /// Shell smart-approval mode for soft-flagged commands.
+    #[serde(default = "default_smart_approval_mode")]
+    pub smart_approval_mode: String,
+
+    /// External shell-scanner mode: "off", "fail_open", or "fail_closed".
+    #[serde(default = "default_external_scanner_mode")]
+    pub external_scanner_mode: String,
+
+    /// Optional absolute path to a first-party external shell scanner binary.
+    #[serde(default)]
+    pub external_scanner_path: Option<PathBuf>,
 }
 
 fn default_max_output_length() -> usize {
     100_000
+}
+
+fn default_smart_approval_mode() -> String {
+    "off".to_string()
+}
+
+fn default_external_scanner_mode() -> String {
+    "fail_open".to_string()
 }
 
 impl Default for SafetySettings {
@@ -1410,6 +1600,10 @@ impl Default for SafetySettings {
         Self {
             max_output_length: default_max_output_length(),
             injection_check_enabled: true,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: default_smart_approval_mode(),
+            external_scanner_mode: default_external_scanner_mode(),
+            external_scanner_path: None,
         }
     }
 }
@@ -2349,7 +2543,7 @@ mod tests {
         // Simulate prior partial run (steps 1-4 completed):
         let prior_run = Settings {
             database_backend: Some("postgres".to_string()),
-            database_url: Some("postgres://old-host/ironclaw".to_string()),
+            database_url: Some("postgres://old-host/thinclaw".to_string()),
             llm_backend: Some("anthropic".to_string()),
             selected_model: Some("claude-sonnet-4-5".to_string()),
             embeddings: EmbeddingsSettings {
@@ -2367,7 +2561,7 @@ mod tests {
         // Step 1 of the new wizard run: user enters a NEW database_url
         let step1_settings = Settings {
             database_backend: Some("postgres".to_string()),
-            database_url: Some("postgres://new-host/ironclaw".to_string()),
+            database_url: Some("postgres://new-host/thinclaw".to_string()),
             ..Settings::default()
         };
 
@@ -2381,7 +2575,7 @@ mod tests {
         // Step 1's fresh database_url wins over stale DB value
         assert_eq!(
             current.database_url,
-            Some("postgres://new-host/ironclaw".to_string()),
+            Some("postgres://new-host/thinclaw".to_string()),
             "Step 1 fresh choice must override stale DB value"
         );
 

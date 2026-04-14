@@ -2,6 +2,7 @@
   "type": "channel",
   "name": "discord",
   "description": "Discord Gateway/Webhook channel for handling slash commands, buttons, and messages",
+  "formatting_hints": "Discord supports markdown and fenced code blocks. Keep long answers readable with short sections and avoid overly wide tables.",
   "setup": {
     "required_secrets": [
       {

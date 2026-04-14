@@ -74,6 +74,7 @@ Both CLI and TUI presentations now use the same Humanist Cockpit language:
 - readiness is framed as launch readiness, not pass/fail setup
 - follow-up work is captured explicitly instead of being silently implied
 - the TUI shell is a presentation layer only; it still runs the same shared step plan and validation logic as CLI
+- the active CLI skin now drives palette treatment across setup prompts and the onboarding TUI shell, so runtime and onboarding no longer drift visually
 
 ### `--skip-auth`
 

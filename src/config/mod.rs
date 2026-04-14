@@ -439,6 +439,26 @@ fn update_injected_vars(new_vars: HashMap<String, String>) {
     }
 }
 
+/// Merge specific values into the injected secret overlay without replacing the
+/// rest of the runtime-secret map.
+///
+/// This is used by hot-reload paths such as external OAuth credential syncing,
+/// where a subset of provider credentials may update independently of the main
+/// secrets store.
+pub fn merge_injected_vars(vars: HashMap<String, String>) -> usize {
+    let count = vars.len();
+    match INJECTED_VARS.write() {
+        Ok(mut guard) => {
+            guard.extend(vars);
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.extend(vars);
+        }
+    }
+    count
+}
+
 /// Reload secrets from the store and update the overlay.
 ///
 /// This is the zero-downtime secret refresh API. When a user updates an API

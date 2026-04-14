@@ -103,6 +103,24 @@ impl SessionManager {
             .clone()
     }
 
+    /// Find the in-memory session that owns a thread ID.
+    pub async fn session_for_thread(&self, thread_id: Uuid) -> Option<Arc<Mutex<Session>>> {
+        let sessions = self.sessions.read().await;
+        let candidates: Vec<Arc<Mutex<Session>>> = sessions.values().cloned().collect();
+        drop(sessions);
+
+        for session in candidates {
+            let guard = session.lock().await;
+            let has_thread = guard.threads.contains_key(&thread_id);
+            drop(guard);
+            if has_thread {
+                return Some(session);
+            }
+        }
+
+        None
+    }
+
     /// Resolve the stable session scope for a principal-only legacy user ID.
     pub fn scope_id_for_user_id(user_id: &str) -> Uuid {
         scope_id_from_key(&format!("principal:{user_id}"))

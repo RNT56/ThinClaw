@@ -102,11 +102,7 @@ impl OutputBuffer {
             return (String::new(), self.total_written);
         }
 
-        let available_start = if self.total_written > self.capacity {
-            self.total_written - self.capacity
-        } else {
-            0
-        };
+        let available_start = self.total_written.saturating_sub(self.capacity);
 
         let effective_offset = offset.max(available_start);
         let content = self.read_all();
@@ -195,9 +191,7 @@ pub fn start_reaper(registry: SharedProcessRegistry) {
                 if let Some(ref mut child) = entry.child {
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            entry.status = ProcessStatus::Completed(
-                                status.code().unwrap_or(-1),
-                            );
+                            entry.status = ProcessStatus::Completed(status.code().unwrap_or(-1));
                         }
                         Ok(None) => {} // still running
                         Err(e) => {
@@ -453,20 +447,15 @@ impl Tool for ProcessTool {
                     {
                         let mut reg = self.registry.write().await;
                         let entry = reg.processes.get_mut(process_id).ok_or_else(|| {
-                            ToolError::InvalidParameters(format!(
-                                "Unknown process: {}",
-                                process_id
-                            ))
+                            ToolError::InvalidParameters(format!("Unknown process: {}", process_id))
                         })?;
 
                         // Try to collect exit status
-                        if entry.status == ProcessStatus::Running {
-                            if let Some(ref mut child) = entry.child {
-                                if let Ok(Some(status)) = child.try_wait() {
-                                    entry.status =
-                                        ProcessStatus::Completed(status.code().unwrap_or(-1));
-                                }
-                            }
+                        if entry.status == ProcessStatus::Running
+                            && let Some(ref mut child) = entry.child
+                            && let Ok(Some(status)) = child.try_wait()
+                        {
+                            entry.status = ProcessStatus::Completed(status.code().unwrap_or(-1));
                         }
 
                         if entry.status != ProcessStatus::Running {

@@ -854,6 +854,13 @@ impl Channel for SignalChannel {
         "signal"
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "Signal renders plain text only. Do not use markdown formatting. Keep messages concise."
+                .to_string(),
+        )
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
 
@@ -2719,6 +2726,18 @@ mod tests {
         let config = make_config();
         let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
+        Ok(())
+    }
+
+    #[test]
+    fn formatting_hints_describe_plain_text_only() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        assert_eq!(
+            ch.formatting_hints().as_deref(),
+            Some(
+                "Signal renders plain text only. Do not use markdown formatting. Keep messages concise."
+            )
+        );
         Ok(())
     }
 }

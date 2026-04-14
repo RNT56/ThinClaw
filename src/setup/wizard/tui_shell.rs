@@ -17,10 +17,13 @@ use super::{
     WizardPhaseId, WizardPlan,
 };
 use crate::setup::prompts::tui_prompt_session_active;
+use crate::terminal_branding::resolve_cli_skin_name;
+use crate::tui::skin::CliSkin;
 
 pub(super) struct OnboardingTuiShell {
     plan: WizardPlan,
     active_phase: Option<WizardPhaseId>,
+    skin: CliSkin,
 }
 
 impl OnboardingTuiShell {
@@ -28,6 +31,7 @@ impl OnboardingTuiShell {
         Self {
             plan,
             active_phase: None,
+            skin: CliSkin::load(&resolve_cli_skin_name()),
         }
     }
 
@@ -194,29 +198,26 @@ impl OnboardingTuiShell {
     fn render_header(&self, frame: &mut Frame, area: Rect, header: Option<(&str, &str)>) {
         let (title, subtitle) = header.unwrap_or(("ThinClaw Humanist Cockpit", ""));
         let mut text = vec![Line::from(vec![
-            Span::styled("ThinClaw ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(title, Style::default().fg(Color::White).bold()),
+            Span::styled("ThinClaw ", self.skin.accent_style()),
+            Span::styled(title, self.skin.title_style()),
         ])];
         if !subtitle.is_empty() {
-            text.push(Line::from(Span::styled(
-                subtitle,
-                Style::default().fg(Color::DarkGray),
-            )));
+            text.push(Line::from(Span::styled(subtitle, self.skin.muted_style())));
         }
         text.push(Line::from(vec![
             Span::styled(
                 "Enter",
-                Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
+                Style::default().fg(Color::Black).bg(self.skin.good).bold(),
             ),
             Span::raw(" continue "),
             Span::styled(
                 "Esc",
-                Style::default().fg(Color::Black).bg(Color::Yellow).bold(),
+                Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
             ),
             Span::raw(" leave "),
             Span::styled(
                 "Ctrl+C",
-                Style::default().fg(Color::Black).bg(Color::Red).bold(),
+                Style::default().fg(Color::Black).bg(self.skin.bad).bold(),
             ),
             Span::raw(" abort"),
         ]));
@@ -224,7 +225,7 @@ impl OnboardingTuiShell {
             Paragraph::new(text).alignment(Alignment::Left).block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(self.skin.border_soft_style()),
             ),
             area,
         );
@@ -241,25 +242,15 @@ impl OnboardingTuiShell {
                 });
                 let is_active = self.active_phase == Some(phase.id);
                 let (symbol, style, badge, badge_color) = if complete {
-                    (
-                        "✓",
-                        Style::default().fg(Color::Green).bold(),
-                        "ready",
-                        Color::Green,
-                    )
+                    ("✓", self.skin.good_style(), "ready", self.skin.good)
                 } else if is_active {
-                    (
-                        "▶",
-                        Style::default().fg(Color::Cyan).bold(),
-                        "live",
-                        Color::Cyan,
-                    )
+                    ("▶", self.skin.accent_style(), "live", self.skin.accent)
                 } else {
                     (
                         "•",
-                        Style::default().fg(Color::DarkGray),
+                        self.skin.muted_style(),
                         "queued",
-                        Color::DarkGray,
+                        self.skin.border_soft,
                     )
                 };
                 ListItem::new(vec![
@@ -272,10 +263,7 @@ impl OnboardingTuiShell {
                             Style::default().fg(Color::Black).bg(badge_color).bold(),
                         ),
                     ]),
-                    Line::from(Span::styled(
-                        phase.description,
-                        Style::default().fg(Color::Gray),
-                    )),
+                    Line::from(Span::styled(phase.description, self.skin.muted_style())),
                 ])
             })
             .collect();
@@ -285,7 +273,7 @@ impl OnboardingTuiShell {
                 Block::default()
                     .title(" Flight Plan ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(self.skin.border_style()),
             ),
             area,
         );
@@ -298,13 +286,13 @@ impl OnboardingTuiShell {
             .map(|(index, line)| {
                 if index == 0 {
                     Line::from(vec![
-                        Span::styled("◆ ", Style::default().fg(Color::Cyan).bold()),
-                        Span::styled(*line, Style::default().fg(Color::White).bold()),
+                        Span::styled("◆ ", self.skin.accent_style()),
+                        Span::styled(*line, self.skin.body_style().bold()),
                     ])
                 } else {
                     Line::from(vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(*line, Style::default().fg(Color::Gray)),
+                        Span::styled(*line, self.skin.muted_style()),
                     ])
                 }
             })
@@ -315,7 +303,7 @@ impl OnboardingTuiShell {
                 Block::default()
                     .title(" Mission Focus ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(self.skin.accent_style()),
             ),
             area,
         );
@@ -334,9 +322,9 @@ impl OnboardingTuiShell {
             .iter()
             .map(|item| {
                 let (color, level_label, symbol) = match item.level {
-                    ValidationLevel::Info => (Color::Cyan, "info", "i"),
-                    ValidationLevel::Warning => (Color::Yellow, "warn", "!"),
-                    ValidationLevel::Error => (Color::Red, "error", "x"),
+                    ValidationLevel::Info => (self.skin.accent, "info", "i"),
+                    ValidationLevel::Warning => (self.skin.warn, "warn", "!"),
+                    ValidationLevel::Error => (self.skin.bad, "error", "x"),
                 };
                 ListItem::new(vec![
                     Line::from(Span::styled(&item.title, Style::default().fg(color).bold())),
@@ -348,7 +336,7 @@ impl OnboardingTuiShell {
                         Span::raw(" "),
                         Span::styled(level_label, Style::default().fg(color).bold()),
                     ]),
-                    Line::from(Span::styled(&item.detail, Style::default().fg(Color::Gray))),
+                    Line::from(Span::styled(&item.detail, self.skin.muted_style())),
                 ])
             })
             .collect();
@@ -358,7 +346,7 @@ impl OnboardingTuiShell {
                 Block::default()
                     .title(" Watchlist ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(self.skin.border_style()),
             ),
             chunks[1],
         );
@@ -366,9 +354,9 @@ impl OnboardingTuiShell {
 
     fn render_readiness(&self, frame: &mut Frame, area: Rect, readiness: ReadinessSummary) {
         let accent = if readiness.needs_attention > 0 || readiness.followups > 0 {
-            Color::Yellow
+            self.skin.warn
         } else {
-            Color::Green
+            self.skin.good
         };
         let text = vec![
             Line::from(Span::styled(
@@ -378,35 +366,32 @@ impl OnboardingTuiShell {
             Line::from(vec![
                 Span::styled(
                     " ready ",
-                    Style::default().fg(Color::Black).bg(Color::Green).bold(),
+                    Style::default().fg(Color::Black).bg(self.skin.good).bold(),
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    readiness.ready_now.to_string(),
-                    Style::default().fg(Color::Green).bold(),
-                ),
+                Span::styled(readiness.ready_now.to_string(), self.skin.good_style()),
             ]),
             Line::from(vec![
                 Span::styled(
                     " attention ",
-                    Style::default().fg(Color::Black).bg(Color::Yellow).bold(),
+                    Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
                 ),
                 Span::raw(" "),
                 Span::styled(
                     readiness.needs_attention.to_string(),
-                    Style::default().fg(Color::Yellow).bold(),
+                    self.skin.warn_style(),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
                     " follow-ups ",
-                    Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(self.skin.accent)
+                        .bold(),
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    readiness.followups.to_string(),
-                    Style::default().fg(Color::Cyan).bold(),
-                ),
+                Span::styled(readiness.followups.to_string(), self.skin.accent_style()),
             ]),
         ];
         frame.render_widget(
@@ -414,7 +399,7 @@ impl OnboardingTuiShell {
                 Block::default()
                     .title(" Launch Readiness ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(self.skin.border_style()),
             ),
             area,
         );
@@ -425,17 +410,17 @@ impl OnboardingTuiShell {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     " Enter ",
-                    Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
+                    Style::default().fg(Color::Black).bg(self.skin.good).bold(),
                 ),
                 Span::raw(" continue "),
                 Span::styled(
                     " Esc ",
-                    Style::default().fg(Color::Black).bg(Color::Yellow).bold(),
+                    Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
                 ),
                 Span::raw(" leave "),
                 Span::styled(
                     " Ctrl+C ",
-                    Style::default().fg(Color::Black).bg(Color::Red).bold(),
+                    Style::default().fg(Color::Black).bg(self.skin.bad).bold(),
                 ),
                 Span::raw(" force quit"),
             ]))
@@ -443,7 +428,7 @@ impl OnboardingTuiShell {
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(self.skin.border_soft_style()),
             ),
             area,
         );

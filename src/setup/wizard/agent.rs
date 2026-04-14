@@ -27,6 +27,45 @@ impl SetupWizard {
             print_success(&format!("Keeping '{}'", current));
         }
 
+        println!();
+        print_info("Choose a persona seed for the first SOUL.md in a fresh workspace.");
+        print_info("This shapes the starting voice without locking you into it later.");
+        println!();
+
+        let current_seed = self.settings.agent.persona_seed.clone();
+        if current_seed != "default"
+            && confirm(
+                &format!("Keep current persona seed '{}'?", current_seed),
+                true,
+            )
+            .map_err(SetupError::Io)?
+        {
+            print_success(&format!("Keeping persona seed '{}'", current_seed));
+            return Ok(());
+        }
+
+        let options = [
+            "default       — Balanced, dependable, and humane",
+            "professional  — Polished, reliable, workplace-ready",
+            "creative_partner — Curious, imaginative, and exploratory",
+            "research_assistant — Methodical, evidence-driven, and careful",
+            "mentor        — Patient, explanatory, and encouraging",
+            "minimal       — Lean, unobtrusive, and flexible",
+        ];
+        let option_refs: Vec<&str> = options.to_vec();
+        let choice = select_one("Persona seed", &option_refs).map_err(SetupError::Io)?;
+        let chosen = match choice {
+            0 => "default",
+            1 => "professional",
+            2 => "creative_partner",
+            3 => "research_assistant",
+            4 => "mentor",
+            5 => "minimal",
+            _ => "default",
+        };
+        self.settings.agent.persona_seed = chosen.to_string();
+        print_success(&format!("Persona seed set to '{}'", chosen));
+
         Ok(())
     }
 

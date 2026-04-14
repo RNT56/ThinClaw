@@ -32,8 +32,7 @@ pub const USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY: &str =
     "thinclaw.usage_tracking.experiment_campaign_id";
 pub const USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY: &str =
     "thinclaw.usage_tracking.experiment_trial_id";
-pub const USAGE_TRACKING_EXPERIMENT_ROLE_KEY: &str =
-    "thinclaw.usage_tracking.experiment_role";
+pub const USAGE_TRACKING_EXPERIMENT_ROLE_KEY: &str = "thinclaw.usage_tracking.experiment_role";
 pub const USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY: &str =
     "thinclaw.usage_tracking.experiment_target_ids";
 
@@ -166,7 +165,10 @@ fn usage_record_metadata(metadata: &HashMap<String, String>) -> serde_json::Valu
     if let Some(agent_id) = metadata_agent_id(metadata) {
         payload.insert("agent_id".to_string(), serde_json::json!(agent_id));
     }
-    if let Some(owner) = metadata.get(USAGE_TRACKING_OWNER_KEY).filter(|value| !value.is_empty()) {
+    if let Some(owner) = metadata
+        .get(USAGE_TRACKING_OWNER_KEY)
+        .filter(|value| !value.is_empty())
+    {
         payload.insert("owner".to_string(), serde_json::json!(owner));
     }
     for (input_key, output_key) in [
@@ -174,7 +176,10 @@ fn usage_record_metadata(metadata: &HashMap<String, String>) -> serde_json::Valu
             USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY,
             "experiment_campaign_id",
         ),
-        (USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY, "experiment_trial_id"),
+        (
+            USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY,
+            "experiment_trial_id",
+        ),
         (USAGE_TRACKING_EXPERIMENT_ROLE_KEY, "experiment_role"),
         (
             USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY,
@@ -334,8 +339,16 @@ impl LlmProvider for UsageTrackingProvider {
                 Ok(response)
             }
             Err(error) => {
-                self.track_completion(&metadata, None, None, 0, 0, Some(started.elapsed().as_millis() as u64), false)
-                    .await;
+                self.track_completion(
+                    &metadata,
+                    None,
+                    None,
+                    0,
+                    0,
+                    Some(started.elapsed().as_millis() as u64),
+                    false,
+                )
+                .await;
                 Err(error)
             }
         }
@@ -363,8 +376,16 @@ impl LlmProvider for UsageTrackingProvider {
                 Ok(response)
             }
             Err(error) => {
-                self.track_completion(&metadata, None, None, 0, 0, Some(started.elapsed().as_millis() as u64), false)
-                    .await;
+                self.track_completion(
+                    &metadata,
+                    None,
+                    None,
+                    0,
+                    0,
+                    Some(started.elapsed().as_millis() as u64),
+                    false,
+                )
+                .await;
                 Err(error)
             }
         }
@@ -442,48 +463,49 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                            record_usage(
-                                &tracker,
-                                db.as_ref(),
-                                guard.as_ref(),
-                                &metadata,
-                                &fallback_model,
-                                provider_model.as_deref(),
-                                cost_usd,
-                                input_tokens,
-                                output_tokens,
-                                Some(started.elapsed().as_millis() as u64),
-                                true,
-                            ).await;
-                            yield Ok(StreamChunk::Done {
-                                provider_model,
-                                cost_usd,
-                                input_tokens,
-                                output_tokens,
-                                finish_reason,
-                            });
-                            }
-                            Err(error) => {
-                                record_usage(
-                                    &tracker,
-                                    db.as_ref(),
-                                    guard.as_ref(),
-                                    &metadata,
-                                    &fallback_model,
-                                    None,
-                                    None,
-                                    0,
-                                    0,
-                                    Some(started.elapsed().as_millis() as u64),
-                                    false,
-                                )
-                                .await;
-                                yield Err(error);
-                            }
-                            other => yield other,
-                        }
+                        record_usage(
+                            &tracker,
+                            db.as_ref(),
+                            guard.as_ref(),
+                            &metadata,
+                            &fallback_model,
+                            provider_model.as_deref(),
+                            cost_usd,
+                            input_tokens,
+                            output_tokens,
+                            Some(started.elapsed().as_millis() as u64),
+                            true,
+                        )
+                        .await;
+                        yield Ok(StreamChunk::Done {
+                            provider_model,
+                            cost_usd,
+                            input_tokens,
+                            output_tokens,
+                            finish_reason,
+                        });
                     }
-                };
+                    Err(error) => {
+                        record_usage(
+                            &tracker,
+                            db.as_ref(),
+                            guard.as_ref(),
+                            &metadata,
+                            &fallback_model,
+                            None,
+                            None,
+                            0,
+                            0,
+                            Some(started.elapsed().as_millis() as u64),
+                            false,
+                        )
+                        .await;
+                        yield Err(error);
+                    }
+                    other => yield other,
+                }
+            }
+        };
         Ok(Box::pin(wrapped))
     }
 
@@ -557,48 +579,49 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                            record_usage(
-                                &tracker,
-                                db.as_ref(),
-                                guard.as_ref(),
-                                &metadata,
-                                &fallback_model,
-                                provider_model.as_deref(),
-                                cost_usd,
-                                input_tokens,
-                                output_tokens,
-                                Some(started.elapsed().as_millis() as u64),
-                                true,
-                            ).await;
-                            yield Ok(StreamChunk::Done {
-                                provider_model,
-                                cost_usd,
-                                input_tokens,
-                                output_tokens,
-                                finish_reason,
-                            });
-                            }
-                            Err(error) => {
-                                record_usage(
-                                    &tracker,
-                                    db.as_ref(),
-                                    guard.as_ref(),
-                                    &metadata,
-                                    &fallback_model,
-                                    None,
-                                    None,
-                                    0,
-                                    0,
-                                    Some(started.elapsed().as_millis() as u64),
-                                    false,
-                                )
-                                .await;
-                                yield Err(error);
-                            }
-                            other => yield other,
-                        }
+                        record_usage(
+                            &tracker,
+                            db.as_ref(),
+                            guard.as_ref(),
+                            &metadata,
+                            &fallback_model,
+                            provider_model.as_deref(),
+                            cost_usd,
+                            input_tokens,
+                            output_tokens,
+                            Some(started.elapsed().as_millis() as u64),
+                            true,
+                        )
+                        .await;
+                        yield Ok(StreamChunk::Done {
+                            provider_model,
+                            cost_usd,
+                            input_tokens,
+                            output_tokens,
+                            finish_reason,
+                        });
                     }
-                };
+                    Err(error) => {
+                        record_usage(
+                            &tracker,
+                            db.as_ref(),
+                            guard.as_ref(),
+                            &metadata,
+                            &fallback_model,
+                            None,
+                            None,
+                            0,
+                            0,
+                            Some(started.elapsed().as_millis() as u64),
+                            false,
+                        )
+                        .await;
+                        yield Err(error);
+                    }
+                    other => yield other,
+                }
+            }
+        };
         Ok(Box::pin(wrapped))
     }
 

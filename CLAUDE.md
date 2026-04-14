@@ -76,6 +76,7 @@ For a deeper walkthrough, use `Agent_flow.md`.
 
 - The web gateway is the control plane. It is operator-facing infrastructure, not just another chat channel.
 - Channel delivery is hybrid. Some channels are native Rust modules; others are packaged WASM channel artifacts.
+- Channel-specific formatting/rendering guidance is owned by the channel layer, not prompt assembly. Native channels should override `Channel::formatting_hints()`, and packaged WASM channels should declare `formatting_hints` in their `*.capabilities.json` metadata. Do not add channel-name switches back into `src/llm/reasoning.rs`.
 - Extension flows are split. `tool`, `mcp`, and registry installs are related but not interchangeable surfaces.
 - The onboarding wizard is richer than older docs imply. Do not restate its steps casually; point readers to `src/setup/README.md` and the wizard code.
 - MCP servers are operator-trusted external processes or services, not sandboxed WASM extensions.
@@ -118,6 +119,7 @@ cargo build --release --features bundled-wasm
 
 - If you change onboarding, update `src/setup/README.md` and any user-facing setup references.
 - If you change delivery architecture, update `docs/CHANNEL_ARCHITECTURE.md` and the affected channel guides.
+- If you change channel formatting behavior, update the owning native channel or WASM channel manifest first, then update `docs/CHANNEL_ARCHITECTURE.md` if the operator-facing behavior changed.
 - If you change extension flows, update `docs/EXTENSION_SYSTEM.md`, `src/tools/README.md`, and any affected tool docs.
 - If you change security boundaries, update `src/NETWORK_SECURITY.md` and any top-level trust/safety wording.
 

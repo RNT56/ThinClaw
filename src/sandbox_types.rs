@@ -54,6 +54,12 @@ mod fallback {
     #[derive(Debug)]
     pub struct TokenStore;
 
+    impl Default for TokenStore {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl TokenStore {
         pub fn new() -> Self {
             Self

@@ -6,10 +6,15 @@
 
 use std::path::PathBuf;
 
+use crate::terminal_branding::TerminalBranding;
+
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("ThinClaw Doctor");
-    println!("===============\n");
+    let branding = TerminalBranding::current();
+    branding.print_banner(
+        "ThinClaw Doctor",
+        Some("Probe dependencies, validate configuration, and surface readiness gaps."),
+    );
 
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -19,6 +24,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "LLM configuration",
         check_llm_config().await,
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -26,6 +32,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "Database backend",
         check_database().await,
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -33,6 +40,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "Workspace directory",
         check_workspace_dir(),
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -42,6 +50,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "Docker",
         check_binary("docker", &["--version"]),
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -49,6 +58,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "cloudflared",
         check_binary("cloudflared", &["--version"]),
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -56,6 +66,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "ngrok",
         check_binary("ngrok", &["version"]),
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -63,6 +74,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     check(
         "tailscale",
         check_binary("tailscale", &["version"]),
+        &branding,
         &mut passed,
         &mut failed,
     );
@@ -70,10 +82,17 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Summary ───────────────────────────────────────────────
 
     println!();
-    println!("  {passed} passed, {failed} failed");
+    println!(
+        "  {}  {}",
+        branding.good(format!("{passed} passed")),
+        branding.bad(format!("{failed} failed"))
+    );
 
     if failed > 0 {
-        println!("\n  Some checks failed. This is normal if you don't use those features.");
+        println!(
+            "\n  {}",
+            branding.muted("Some checks failed. This is normal if you don't use those features.")
+        );
     }
 
     Ok(())
@@ -81,18 +100,39 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
 // ── Individual checks ───────────────────────────────────────
 
-fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32) {
+fn check(
+    name: &str,
+    result: CheckResult,
+    branding: &TerminalBranding,
+    passed: &mut u32,
+    failed: &mut u32,
+) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
-            println!("  [pass] {name}: {detail}");
+            println!(
+                "  {} {}: {}",
+                branding.good("[pass]"),
+                branding.body_bold(name),
+                branding.body(detail)
+            );
         }
         CheckResult::Fail(detail) => {
             *failed += 1;
-            println!("  [FAIL] {name}: {detail}");
+            println!(
+                "  {} {}: {}",
+                branding.bad("[FAIL]"),
+                branding.body_bold(name),
+                branding.body(detail)
+            );
         }
         CheckResult::Skip(reason) => {
-            println!("  [skip] {name}: {reason}");
+            println!(
+                "  {} {}: {}",
+                branding.warn("[skip]"),
+                branding.body_bold(name),
+                branding.muted(reason)
+            );
         }
     }
 }

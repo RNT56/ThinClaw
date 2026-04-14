@@ -65,8 +65,8 @@ pub struct OsvChecker {
 impl OsvChecker {
     /// Create a new checker, reading config from environment.
     pub fn new() -> Self {
-        let endpoint = std::env::var("OSV_ENDPOINT")
-            .unwrap_or_else(|_| DEFAULT_OSV_ENDPOINT.to_string());
+        let endpoint =
+            std::env::var("OSV_ENDPOINT").unwrap_or_else(|_| DEFAULT_OSV_ENDPOINT.to_string());
 
         let disabled = std::env::var("OSV_CHECK_DISABLED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -97,10 +97,7 @@ impl OsvChecker {
         let (ecosystem, package_name) = match infer_package(command, args) {
             Some(info) => info,
             None => {
-                tracing::debug!(
-                    command,
-                    "OSV check: could not infer package from command"
-                );
+                tracing::debug!(command, "OSV check: could not infer package from command");
                 return OsvCheckResult::Clean; // Can't check, fail-open
             }
         };
@@ -110,15 +107,15 @@ impl OsvChecker {
         // Check cache
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(&cache_key) {
-                if cached.cached_at.elapsed() < CACHE_TTL {
-                    tracing::debug!(
-                        package = %package_name,
-                        ecosystem = %ecosystem,
-                        "OSV check: cache hit"
-                    );
-                    return cached.result.clone();
-                }
+            if let Some(cached) = cache.get(&cache_key)
+                && cached.cached_at.elapsed() < CACHE_TTL
+            {
+                tracing::debug!(
+                    package = %package_name,
+                    ecosystem = %ecosystem,
+                    "OSV check: cache hit"
+                );
+                return cached.result.clone();
             }
         }
 
@@ -241,10 +238,7 @@ impl Default for OsvChecker {
 ///
 /// Returns `(ecosystem, package_name)` or None if we can't infer.
 fn infer_package(command: &str, args: &[String]) -> Option<(String, String)> {
-    let cmd_basename = command
-        .rsplit('/')
-        .next()
-        .unwrap_or(command);
+    let cmd_basename = command.rsplit('/').next().unwrap_or(command);
 
     match cmd_basename {
         "npx" | "npx.cmd" | "bunx" => {
@@ -296,6 +290,7 @@ fn strip_version(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_infer_npm_package() {
@@ -307,24 +302,24 @@ mod tests {
     fn test_infer_npm_scoped() {
         let result = infer_package(
             "npx",
-            &["-y".to_string(), "@modelcontextprotocol/server-fetch".to_string()],
+            &[
+                "-y".to_string(),
+                "@modelcontextprotocol/server-fetch".to_string(),
+            ],
         );
         assert_eq!(
             result,
-            Some(("npm".to_string(), "@modelcontextprotocol/server-fetch".to_string()))
+            Some((
+                "npm".to_string(),
+                "@modelcontextprotocol/server-fetch".to_string()
+            ))
         );
     }
 
     #[test]
     fn test_infer_npm_with_version() {
-        let result = infer_package(
-            "npx",
-            &["-y".to_string(), "@scope/pkg@1.2.3".to_string()],
-        );
-        assert_eq!(
-            result,
-            Some(("npm".to_string(), "@scope/pkg".to_string()))
-        );
+        let result = infer_package("npx", &["-y".to_string(), "@scope/pkg@1.2.3".to_string()]);
+        assert_eq!(result, Some(("npm".to_string(), "@scope/pkg".to_string())));
     }
 
     #[test]
@@ -367,15 +362,18 @@ mod tests {
         assert!(!OsvCheckResult::Clean.should_block());
         assert!(!OsvCheckResult::Disabled.should_block());
         assert!(!OsvCheckResult::CheckFailed("err".into()).should_block());
-        assert!(OsvCheckResult::MalwareFound(vec![MalwareAdvisory {
-            id: "MAL-2024-001".into(),
-            summary: "test".into(),
-        }])
-        .should_block());
+        assert!(
+            OsvCheckResult::MalwareFound(vec![MalwareAdvisory {
+                id: "MAL-2024-001".into(),
+                summary: "test".into(),
+            }])
+            .should_block()
+        );
     }
 
     #[test]
     fn test_checker_disabled() {
+        let _env_guard = lock_env();
         unsafe {
             std::env::set_var("OSV_CHECK_DISABLED", "true");
         }

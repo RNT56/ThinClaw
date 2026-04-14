@@ -1,0 +1,20 @@
+name = "olympus"
+tagline = "High-altitude command lines with cloudlight marble and thunder-gold accents."
+accent = "#7DD3FC"
+border = "#64748B"
+body = "#E2E8F0"
+muted = "#94A3B8"
+good = "#86EFAC"
+warn = "#FBBF24"
+bad = "#F87171"
+header = "#2563EB"
+prompt_symbol = "^^"
+ascii_art = [
+  '                 /\',
+  '            /\  /  \  /\',
+  '           /  \/_[]_\/  \',
+  '          / /\  /||\  /\ \',
+  '         /_/  \/_||_\/  \_\  OLYMPUS',
+  '               /__||__\',
+]
+tool_emojis = { shell = "⚡", browser = "☁️", memory = "🏔️", search_files = "🗺️", todo = "📌", subagent = "🪽" }

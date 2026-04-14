@@ -457,6 +457,10 @@ impl Channel for AppleMailChannel {
         NAME
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some("Email supports rich formatting. Use HTML-compatible structure with headings. Keep emails scannable.".to_string())
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
 
@@ -755,5 +759,22 @@ mod tests {
         let json = serde_json::to_string(&diag).unwrap();
         assert!(json.contains("\"db_exists\":true"));
         assert!(json.contains("5432"));
+    }
+
+    #[test]
+    fn formatting_hints_describe_rich_email_output() {
+        let config = AppleMailConfig::default();
+        let channel = AppleMailChannel {
+            config,
+            db_path: std::path::PathBuf::from("/tmp/Envelope Index"),
+            shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_rowid: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        };
+        assert_eq!(
+            channel.formatting_hints().as_deref(),
+            Some(
+                "Email supports rich formatting. Use HTML-compatible structure with headings. Keep emails scannable."
+            )
+        );
     }
 }

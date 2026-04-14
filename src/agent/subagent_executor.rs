@@ -56,6 +56,81 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_MAX_CONCURRENT: usize = 5;
 
 const SUBAGENT_PROGRESS_PREVIEW_MAX: usize = 80;
+const SUBAGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Shared heartbeat task for a running sub-agent.
+struct SubagentHeartbeat {
+    cancel_tx: watch::Sender<bool>,
+    join_handle: JoinHandle<()>,
+}
+
+impl SubagentHeartbeat {
+    fn spawn(
+        channels: Arc<ChannelManager>,
+        channel_name: String,
+        channel_metadata: serde_json::Value,
+        agent_id: String,
+        agent_name: String,
+        activity_tx: watch::Sender<Instant>,
+        mut activity_rx: watch::Receiver<Instant>,
+        cancel_tx: watch::Sender<bool>,
+        mut cancel_rx: watch::Receiver<bool>,
+    ) -> Self {
+        let join_handle = tokio::spawn(async move {
+            let mut last_activity = *activity_rx.borrow();
+
+            loop {
+                let sleep_for = SUBAGENT_HEARTBEAT_INTERVAL.saturating_sub(last_activity.elapsed());
+
+                tokio::select! {
+                    _ = cancel_rx.changed() => break,
+                    changed = activity_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        last_activity = *activity_rx.borrow();
+                    }
+                    _ = tokio::time::sleep(sleep_for) => {
+                        if last_activity.elapsed() < SUBAGENT_HEARTBEAT_INTERVAL {
+                            continue;
+                        }
+
+                        let _ = channels
+                            .send_status(
+                                &channel_name,
+                                StatusUpdate::SubagentProgress {
+                                    agent_id: agent_id.clone(),
+                                    message: format!("sub-agent '{agent_name}' still working"),
+                                    category: "activity".to_string(),
+                                },
+                                &channel_metadata,
+                            )
+                            .await;
+
+                        last_activity = Instant::now();
+                        let _ = activity_tx.send(last_activity);
+                    }
+                }
+            }
+        });
+
+        Self {
+            cancel_tx,
+            join_handle,
+        }
+    }
+}
+
+impl Drop for SubagentHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.cancel_tx.send(true);
+        self.join_handle.abort();
+    }
+}
+
+fn touch_subagent_activity(activity_tx: &watch::Sender<Instant>) {
+    let _ = activity_tx.send(Instant::now());
+}
 
 /// Configuration for the sub-agent system.
 #[derive(Debug, Clone)]
@@ -351,6 +426,7 @@ impl SubagentExecutor {
     ) -> Result<SubagentResult, Error> {
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let heartbeat_cancel_tx = cancel_tx.clone();
         let (completion_tx, completion_rx) = oneshot::channel::<SubagentResult>();
         // Bidirectional: parent → sub-agent message channel
         let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
@@ -383,7 +459,7 @@ impl SubagentExecutor {
                     task: request.task.clone(),
                     status: SubagentStatus::Running,
                     spawned_at: chrono::Utc::now(),
-                    cancel_tx,
+                    cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
                 },
@@ -474,6 +550,18 @@ impl SubagentExecutor {
         let active_for_task = self.active.clone();
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
+            let (activity_tx, activity_rx) = watch::channel(Instant::now());
+            let heartbeat = SubagentHeartbeat::spawn(
+                channels.clone(),
+                ch_name.clone(),
+                ch_meta.clone(),
+                id.to_string(),
+                agent_name.clone(),
+                activity_tx.clone(),
+                activity_rx,
+                heartbeat_cancel_tx,
+                cancel_rx.clone(),
+            );
 
             let result = tokio::time::timeout(
                 timeout,
@@ -495,10 +583,13 @@ impl SubagentExecutor {
                     actor_id.as_deref(),
                     agent_workspace_id,
                     &id.to_string(),
+                    activity_tx,
                     cost_tracker_for_task.clone(),
                 ),
             )
             .await;
+
+            drop(heartbeat);
 
             let elapsed = start.elapsed();
 
@@ -898,6 +989,7 @@ async fn run_subagent_loop(
     actor_id: Option<&str>,
     agent_workspace_id: Option<Uuid>,
     agent_id: &str,
+    activity_tx: watch::Sender<Instant>,
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(task.to_string())];
@@ -1032,6 +1124,7 @@ async fn run_subagent_loop(
                                 channel_metadata,
                             )
                             .await;
+                        touch_subagent_activity(&activity_tx);
 
                         context_messages.push(ChatMessage::tool_result(
                             &tc.id,
@@ -1078,6 +1171,7 @@ async fn run_subagent_loop(
                             channel_metadata,
                         )
                         .await;
+                    touch_subagent_activity(&activity_tx);
 
                     if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(
                         &job_ctx.metadata,
@@ -1096,6 +1190,7 @@ async fn run_subagent_loop(
                                 channel_metadata,
                             )
                             .await;
+                        touch_subagent_activity(&activity_tx);
                         context_messages.push(ChatMessage::tool_result(
                             &tc.id,
                             &tc.name,
@@ -1120,6 +1215,7 @@ async fn run_subagent_loop(
                                     channel_metadata,
                                 )
                                 .await;
+                            touch_subagent_activity(&activity_tx);
                             context_messages.push(ChatMessage::tool_result(
                                 &tc.id,
                                 &tc.name,
@@ -1159,6 +1255,7 @@ async fn run_subagent_loop(
                                     channel_metadata,
                                 )
                                 .await;
+                            touch_subagent_activity(&activity_tx);
                             format!("Error: {}", error)
                         }
                         Err(_) => {
@@ -1177,6 +1274,7 @@ async fn run_subagent_loop(
                                     channel_metadata,
                                 )
                                 .await;
+                            touch_subagent_activity(&activity_tx);
                             format!("Error: {}", timeout_message)
                         }
                     };
@@ -1205,7 +1303,9 @@ fn llm_metadata_from_json(value: &serde_json::Value) -> HashMap<String, String> 
                     serde_json::Value::Bool(boolean) => Some((key.clone(), boolean.to_string())),
                     serde_json::Value::Number(number) => Some((key.clone(), number.to_string())),
                     serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                        serde_json::to_string(value).ok().map(|json| (key.clone(), json))
+                        serde_json::to_string(value)
+                            .ok()
+                            .map(|json| (key.clone(), json))
                     }
                 })
                 .collect()
@@ -1386,11 +1486,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subagent_heartbeat_emits_progress_and_stops_on_cancel() {
+        use crate::channels::Channel;
+        use futures::stream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CaptureChannel {
+            progress_count: Arc<AtomicUsize>,
+            tx: tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
+        }
+
+        #[async_trait::async_trait]
+        impl Channel for CaptureChannel {
+            fn name(&self) -> &str {
+                "capture"
+            }
+
+            async fn start(
+                &self,
+            ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                Ok(Box::pin(stream::empty()))
+            }
+
+            async fn respond(
+                &self,
+                _msg: &crate::channels::IncomingMessage,
+                _response: crate::channels::OutgoingResponse,
+            ) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+
+            async fn send_status(
+                &self,
+                status: StatusUpdate,
+                _metadata: &serde_json::Value,
+            ) -> Result<(), crate::error::ChannelError> {
+                if matches!(status, StatusUpdate::SubagentProgress { .. }) {
+                    self.progress_count.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = self.tx.send(status);
+                Ok(())
+            }
+
+            async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress_count = Arc::new(AtomicUsize::new(0));
+        let channel = CaptureChannel {
+            progress_count: Arc::clone(&progress_count),
+            tx,
+        };
+
+        let channels = Arc::new(ChannelManager::new());
+        channels.add(Box::new(channel)).await;
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (activity_tx, activity_rx) =
+            watch::channel(Instant::now() - SUBAGENT_HEARTBEAT_INTERVAL);
+
+        let heartbeat = SubagentHeartbeat::spawn(
+            Arc::clone(&channels),
+            "capture".to_string(),
+            serde_json::json!({"thread_id": "thread-1"}),
+            "agent-1".to_string(),
+            "researcher".to_string(),
+            activity_tx.clone(),
+            activity_rx,
+            cancel_tx.clone(),
+            cancel_rx,
+        );
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("heartbeat should emit")
+            .expect("status channel should remain open");
+        assert!(matches!(first, StatusUpdate::SubagentProgress { .. }));
+        assert_eq!(progress_count.load(Ordering::SeqCst), 1);
+
+        touch_subagent_activity(&activity_tx);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "activity reset should suppress immediate re-heartbeat"
+        );
+
+        let _ = cancel_tx.send(true);
+        drop(heartbeat);
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "heartbeat task should stop after cancellation"
+        );
+    }
+
+    #[tokio::test]
     async fn completed_subagent_is_marked_completed_and_not_running() {
         let llm = Arc::new(StubLlm::new("done"));
         let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
             injection_check_enabled: false,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         }));
         let tools = Arc::new(ToolRegistry::new());
         let channels = Arc::new(ChannelManager::new());

@@ -8,40 +8,6 @@ use ratatui::widgets::*;
 
 use super::{ChatMessage, TuiApp};
 
-const COLOR_ACCENT: Color = Color::Rgb(106, 166, 255);
-const COLOR_ACCENT_SOFT: Color = Color::Rgb(162, 199, 255);
-const COLOR_BORDER: Color = Color::Rgb(82, 96, 125);
-const COLOR_BORDER_SOFT: Color = Color::Rgb(54, 66, 88);
-const COLOR_BODY: Color = Color::Rgb(236, 241, 248);
-const COLOR_MUTED: Color = Color::Rgb(145, 156, 176);
-const COLOR_GOOD: Color = Color::Rgb(120, 217, 173);
-const COLOR_WARN: Color = Color::Rgb(244, 196, 104);
-const COLOR_BAD: Color = Color::Rgb(255, 128, 128);
-
-fn cockpit_border() -> Style {
-    Style::default().fg(COLOR_BORDER)
-}
-
-fn cockpit_border_soft() -> Style {
-    Style::default().fg(COLOR_BORDER_SOFT)
-}
-
-fn cockpit_title() -> Style {
-    Style::default().fg(COLOR_BODY).bg(COLOR_ACCENT).bold()
-}
-
-fn cockpit_accent() -> Style {
-    Style::default().fg(COLOR_ACCENT_SOFT).bold()
-}
-
-fn cockpit_body() -> Style {
-    Style::default().fg(COLOR_BODY)
-}
-
-fn cockpit_muted() -> Style {
-    Style::default().fg(COLOR_MUTED)
-}
-
 impl TuiApp {
     // ── Rendering ────────────────────────────────────────────────────
 
@@ -70,30 +36,30 @@ impl TuiApp {
         };
 
         let header = Line::from(vec![
-            Span::styled(" ThinClaw ", cockpit_title()),
-            Span::styled(" cockpit ", cockpit_accent()),
-            Span::styled("│", cockpit_border_soft()),
-            Span::styled(format!(" model {}", self.model), cockpit_body()),
-            Span::styled("│", cockpit_border_soft()),
-            Span::styled(format!(" agent {}", self.agent_id), cockpit_accent()),
-            Span::styled("│", cockpit_border_soft()),
-            Span::styled(format!(" {}", status), cockpit_muted()),
-            Span::styled(" ", cockpit_muted()),
-            Span::styled(&self.status_text, cockpit_muted()),
+            Span::styled(" ThinClaw ", self.skin.title_style()),
+            Span::styled(format!(" {}", self.skin.name), self.skin.accent_style()),
+            Span::styled("│", self.skin.border_soft_style()),
+            Span::styled(format!(" model {}", self.model), self.skin.body_style()),
+            Span::styled("│", self.skin.border_soft_style()),
+            Span::styled(
+                format!(" agent {}", self.agent_id),
+                self.skin.accent_soft_style(),
+            ),
+            Span::styled("│", self.skin.border_soft_style()),
+            Span::styled(format!(" {}", status), self.skin.muted_style()),
+            Span::styled(" ", self.skin.muted_style()),
+            Span::styled(&self.status_text, self.skin.muted_style()),
         ]);
 
         frame.render_widget(Paragraph::new(header), area);
     }
 
     fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
-        // Count lines first (no borrow conflict)
         let line_count = self.count_chat_lines();
         self.total_chat_lines = line_count;
 
-        // Clamp scroll to valid range
-        let visible_height = area.height.saturating_sub(2); // borders
+        let visible_height = area.height.saturating_sub(2);
         if self.scroll_offset == u16::MAX || self.total_chat_lines <= visible_height {
-            // Auto-scroll to bottom
             self.scroll_offset = self.total_chat_lines.saturating_sub(visible_height);
         }
 
@@ -102,8 +68,8 @@ impl TuiApp {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(cockpit_border())
-                    .title(Span::styled(" Activity deck ", cockpit_muted())),
+                    .border_style(self.skin.border_style())
+                    .title(Span::styled(" Activity deck ", self.skin.muted_style())),
             )
             .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset, 0));
@@ -115,36 +81,32 @@ impl TuiApp {
         let input = Paragraph::new(self.input.as_str()).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(cockpit_accent())
+                .border_style(self.skin.accent_style())
                 .title(Span::styled(
-                    " Command bay (/help for controls) ",
-                    cockpit_title(),
+                    format!(" Command bay ({}) ", self.skin.prompt_symbol()),
+                    self.skin.title_style(),
                 )),
         );
         frame.render_widget(input, area);
 
-        // Position cursor
-        // cursor_pos is a char index — for monospace terminals this maps 1:1
-        // to display columns for ASCII. CJK wide chars would need unicode-width,
-        // but this is a reasonable approximation for typical input.
         #[allow(clippy::cast_possible_truncation)]
         frame.set_cursor_position((area.x + self.cursor_pos as u16 + 1, area.y + 1));
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let (indicator, indicator_style) = if self.active_stream.is_some() {
-            ("●", Style::default().fg(COLOR_GOOD))
+            ("●", self.skin.good_style())
         } else {
-            ("○", Style::default().fg(COLOR_BORDER_SOFT))
+            ("○", self.skin.border_soft_style())
         };
 
         let status_line = Line::from(vec![
             Span::styled(format!(" {} ", indicator), indicator_style),
-            Span::styled(&self.status_text, cockpit_muted()),
-            Span::styled(" · ", cockpit_border_soft()),
-            Span::styled(&self.model, cockpit_accent()),
-            Span::styled(" · ", cockpit_border_soft()),
-            Span::styled(format!("agent {}", self.agent_id), cockpit_muted()),
+            Span::styled(&self.status_text, self.skin.muted_style()),
+            Span::styled(" · ", self.skin.border_soft_style()),
+            Span::styled(&self.model, self.skin.accent_soft_style()),
+            Span::styled(" · ", self.skin.border_soft_style()),
+            Span::styled(format!("agent {}", self.agent_id), self.skin.muted_style()),
         ]);
         frame.render_widget(Paragraph::new(status_line), area);
     }
@@ -156,17 +118,17 @@ impl TuiApp {
             match msg {
                 ChatMessage::User { .. } => count += 1,
                 ChatMessage::Assistant { text, .. } => {
-                    count += 2; // label + closing line
+                    count += 2;
                     count += text.lines().count() as u16;
                 }
                 ChatMessage::ToolCall { args, result, .. } => {
-                    count += 2; // label + closing line
+                    count += 2;
                     if !args.is_empty() {
-                        count += 1; // args label
+                        count += 1;
                         count += args.lines().take(5).count() as u16;
                     }
                     if let Some(r) = result {
-                        count += 1; // result label
+                        count += 1;
                         count += r.lines().take(10).count() as u16;
                     }
                 }
@@ -174,10 +136,10 @@ impl TuiApp {
                     count += text.lines().count() as u16;
                 }
             }
-            count += 1; // spacing
+            count += 1;
         }
         if self.active_stream.is_some() {
-            count += 5; // approximate
+            count += 5;
         }
         count
     }
@@ -189,27 +151,27 @@ impl TuiApp {
             match msg {
                 ChatMessage::User { text } => {
                     lines.push(Line::from(vec![
-                        Span::styled("╭ you ", Style::default().fg(COLOR_GOOD).bold()),
-                        Span::styled("│ ", cockpit_border_soft()),
-                        Span::styled(text, cockpit_body()),
+                        Span::styled("╭ you ", self.skin.good_style()),
+                        Span::styled("│ ", self.skin.border_soft_style()),
+                        Span::styled(text, self.skin.body_style()),
                     ]));
                 }
                 ChatMessage::Assistant { text, model, .. } => {
                     let label = model.as_deref().unwrap_or("AI");
                     lines.push(Line::from(vec![
-                        Span::styled(format!("╭ {label} "), cockpit_accent()),
-                        Span::styled("│ ", cockpit_border_soft()),
-                        Span::styled("response", cockpit_muted()),
+                        Span::styled(format!("╭ {label} "), self.skin.accent_style()),
+                        Span::styled("│ ", self.skin.border_soft_style()),
+                        Span::styled("response", self.skin.muted_style()),
                     ]));
                     for line in text.lines() {
                         lines.push(Line::from(vec![
-                            Span::styled("│ ", cockpit_border_soft()),
-                            Span::styled(line, cockpit_body()),
+                            Span::styled("│ ", self.skin.border_soft_style()),
+                            Span::styled(line, self.skin.body_style()),
                         ]));
                     }
                     lines.push(Line::from(vec![
-                        Span::styled("╰", cockpit_border_soft()),
-                        Span::styled(" next turn ready ", cockpit_muted()),
+                        Span::styled("╰", self.skin.border_soft_style()),
+                        Span::styled(" next turn ready ", self.skin.muted_style()),
                     ]));
                 }
                 ChatMessage::ToolCall {
@@ -218,91 +180,101 @@ impl TuiApp {
                     result,
                     is_error,
                 } => {
+                    let tool_label = self.skin.tool_label(name);
                     let header_style = if *is_error {
-                        Style::default().fg(COLOR_BAD).bold()
+                        self.skin.bad_style()
                     } else {
-                        Style::default().fg(COLOR_WARN).bold()
+                        self.skin.warn_style()
                     };
                     lines.push(Line::from(vec![
                         Span::styled("╭ ", header_style),
-                        Span::styled(format!("tool {name}"), header_style),
+                        Span::styled(format!("tool {tool_label}"), header_style),
                     ]));
                     if !args.is_empty() {
                         lines.push(Line::from(vec![
-                            Span::styled("│ ", cockpit_border_soft()),
-                            Span::styled("input", cockpit_muted()),
+                            Span::styled("│ ", self.skin.border_soft_style()),
+                            Span::styled("input", self.skin.muted_style()),
                         ]));
                         for arg_line in args.lines().take(5) {
                             lines.push(Line::from(vec![
-                                Span::styled("│ ", cockpit_border_soft()),
-                                Span::styled(arg_line, cockpit_body()),
+                                Span::styled("│ ", self.skin.border_soft_style()),
+                                Span::styled(arg_line, self.skin.body_style()),
                             ]));
                         }
                     }
                     if let Some(result) = result {
                         lines.push(Line::from(vec![
-                            Span::styled("│ ", cockpit_border_soft()),
-                            Span::styled("result", cockpit_muted()),
+                            Span::styled("│ ", self.skin.border_soft_style()),
+                            Span::styled("result", self.skin.muted_style()),
                         ]));
-                        let color = if *is_error { COLOR_BAD } else { COLOR_MUTED };
+                        let result_style = if *is_error {
+                            self.skin.bad_style()
+                        } else {
+                            self.skin.muted_style()
+                        };
                         for line in result.lines().take(10) {
                             lines.push(Line::from(vec![
-                                Span::styled("│ ", cockpit_border_soft()),
-                                Span::styled(line, Style::default().fg(color)),
+                                Span::styled("│ ", self.skin.border_soft_style()),
+                                Span::styled(line, result_style),
                             ]));
                         }
                     }
                     lines.push(Line::from(vec![
-                        Span::styled("╰", cockpit_border_soft()),
-                        Span::styled(" tool complete ", cockpit_muted()),
+                        Span::styled("╰", self.skin.border_soft_style()),
+                        Span::styled(" tool complete ", self.skin.muted_style()),
                     ]));
                 }
                 ChatMessage::System { text } => {
                     for line in text.lines() {
                         lines.push(Line::from(vec![
-                            Span::styled("• ", cockpit_border_soft()),
-                            Span::styled(line, cockpit_muted().italic()),
+                            Span::styled("• ", self.skin.border_soft_style()),
+                            Span::styled(line, self.skin.muted_style().italic()),
                         ]));
                     }
                 }
             }
-            lines.push(Line::from("")); // Spacing
+            lines.push(Line::from(""));
         }
 
-        // Active streaming
         if let Some(stream) = &self.active_stream {
             let display = stream.display_text();
             if !display.is_empty() {
                 let display_lines: Vec<String> = display.lines().map(ToOwned::to_owned).collect();
                 lines.push(Line::from(vec![
-                    Span::styled("╭ ", cockpit_accent()),
-                    Span::styled(format!("stream {}", self.model), cockpit_accent()),
+                    Span::styled("╭ ", self.skin.accent_style()),
+                    Span::styled(format!("stream {}", self.model), self.skin.accent_style()),
                 ]));
                 for line in display_lines {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", cockpit_border_soft()),
-                        Span::styled(line, cockpit_body()),
+                        Span::styled("│ ", self.skin.border_soft_style()),
+                        Span::styled(line, self.skin.body_style()),
                     ]));
                 }
                 lines.push(Line::from(vec![
-                    Span::styled("╰", cockpit_border_soft()),
-                    Span::styled(" still working ", cockpit_muted()),
+                    Span::styled("╰", self.skin.border_soft_style()),
+                    Span::styled(" still working ", self.skin.muted_style()),
                 ]));
             } else {
-                // Show thinking indicator
                 lines.push(Line::from(vec![
-                    Span::styled("╭ ", cockpit_accent()),
-                    Span::styled("thinking", cockpit_accent()),
+                    Span::styled("╭ ", self.skin.accent_style()),
+                    Span::styled("thinking", self.skin.accent_style()),
                 ]));
                 lines.push(Line::from(vec![
-                    Span::styled("│ ", cockpit_border_soft()),
-                    Span::styled("holding the line...", cockpit_muted()),
+                    Span::styled("│ ", self.skin.border_soft_style()),
+                    Span::styled("holding the line...", self.skin.muted_style()),
                 ]));
                 lines.push(Line::from(vec![
-                    Span::styled("╰", cockpit_border_soft()),
-                    Span::styled(" stay with me ", cockpit_muted()),
+                    Span::styled("╰", self.skin.border_soft_style()),
+                    Span::styled(" stay with me ", self.skin.muted_style()),
                 ]));
             }
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No messages yet.",
+                self.skin.muted_style(),
+            )));
         }
 
         Text::from(lines)

@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+};
 
 /// Maximum results for filename search.
 const MAX_FILENAME_RESULTS: usize = 100;
@@ -19,8 +21,18 @@ const MAX_SEARCH_DEPTH: usize = 10;
 
 /// Directories to skip during filename search.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "target", ".git", "__pycache__", "venv", ".venv",
-    ".next", "dist", "build", ".cargo", ".tox", "vendor",
+    "node_modules",
+    "target",
+    ".git",
+    "__pycache__",
+    "venv",
+    ".venv",
+    ".next",
+    "dist",
+    "build",
+    ".cargo",
+    ".tox",
+    "vendor",
 ];
 
 /// Enhanced file search tool combining filename and content search.
@@ -79,13 +91,15 @@ impl SearchFilesTool {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read directory: {}", e))
-        })?;
+        let mut entries = fs::read_dir(dir)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read directory: {}", e)))?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read entry: {}", e))
-        })? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read entry: {}", e)))?
+        {
             if results.len() >= MAX_FILENAME_RESULTS {
                 break;
             }
@@ -191,7 +205,10 @@ impl SearchFilesTool {
         // If no exact substring matches, try Levenshtein-like matching
         if suggestions.is_empty() {
             // Try just the extension
-            if let Some(ext) = Path::new(attempted_path).extension().and_then(|e| e.to_str()) {
+            if let Some(ext) = Path::new(attempted_path)
+                .extension()
+                .and_then(|e| e.to_str())
+            {
                 let ext_pattern = format!(".{}", ext);
                 let ext_results = self
                     .search_filenames(&ext_pattern, search_dir, true)

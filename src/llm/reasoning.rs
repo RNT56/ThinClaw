@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::error::LlmError;
 
 use crate::llm::cost_tracker::{CostEntry, CostTracker};
+use crate::llm::model_guidance;
 use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
@@ -251,12 +253,18 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Optional session-scoped vibe overlay block.
+    vibe_overlay: Option<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
+    /// Formatting guidance resolved from the active channel implementation.
+    channel_formatting_hints: Option<String>,
     /// Model name for runtime context.
     model_name: Option<String>,
     /// Cheap model configured for lightweight tasks, if any.
     cheap_model_name: Option<String>,
+    /// Whether model-family-specific guidance should be injected.
+    model_guidance_enabled: bool,
     /// Whether this is a group chat context.
     is_group_chat: bool,
     /// Workspace mode: "unrestricted", "sandboxed", or "project".
@@ -275,6 +283,17 @@ pub struct Reasoning {
 }
 
 impl Reasoning {
+    fn system_message(&self, content: impl Into<String>) -> ChatMessage {
+        let mut message = ChatMessage::system(content);
+        if self.llm.supports_prompt_caching() {
+            message = message.with_provider_metadata(
+                "anthropic",
+                json!({"cache_control": {"type": "ephemeral"}}),
+            );
+        }
+        message
+    }
+
     fn mark_request_metadata(&self, metadata: &mut std::collections::HashMap<String, String>) {
         mark_reasoning_request(metadata, self.channel.as_deref());
     }
@@ -286,9 +305,12 @@ impl Reasoning {
             safety,
             workspace_system_prompt: None,
             skill_context: None,
+            vibe_overlay: None,
             channel: None,
+            channel_formatting_hints: None,
             model_name: None,
             cheap_model_name: None,
+            model_guidance_enabled: true,
             is_group_chat: false,
             workspace_mode: None,
             workspace_root: None,
@@ -324,9 +346,12 @@ impl Reasoning {
             safety: Arc::clone(&self.safety),
             workspace_system_prompt: self.workspace_system_prompt.clone(),
             skill_context: self.skill_context.clone(),
+            vibe_overlay: self.vibe_overlay.clone(),
             channel: self.channel.clone(),
+            channel_formatting_hints: self.channel_formatting_hints.clone(),
             model_name: Some(model_name),
             cheap_model_name: self.cheap_model_name.clone(),
+            model_guidance_enabled: self.model_guidance_enabled,
             is_group_chat: self.is_group_chat,
             workspace_mode: self.workspace_mode.clone(),
             workspace_root: self.workspace_root.clone(),
@@ -377,11 +402,28 @@ impl Reasoning {
         self
     }
 
+    /// Set a temporary session vibe overlay.
+    pub fn with_vibe_overlay(mut self, overlay: String) -> Self {
+        if !overlay.is_empty() {
+            self.vibe_overlay = Some(overlay);
+        }
+        self
+    }
+
     /// Set the channel name for channel-specific formatting hints.
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         let ch = channel.into();
         if !ch.is_empty() {
             self.channel = Some(ch);
+        }
+        self
+    }
+
+    /// Set formatting guidance resolved from the active channel implementation.
+    pub fn with_channel_formatting_hints(mut self, hints: impl Into<String>) -> Self {
+        let hints = hints.into();
+        if !hints.is_empty() {
+            self.channel_formatting_hints = Some(hints);
         }
         self
     }
@@ -397,6 +439,12 @@ impl Reasoning {
 
     pub fn with_cheap_model_name(mut self, name: Option<String>) -> Self {
         self.cheap_model_name = name.filter(|s| !s.is_empty());
+        self
+    }
+
+    /// Enable or disable model-family-specific prompt guidance.
+    pub fn with_model_guidance_enabled(mut self, enabled: bool) -> Self {
+        self.model_guidance_enabled = enabled;
         self
     }
 
@@ -560,7 +608,7 @@ impl Reasoning {
     pub async fn plan(&self, context: &ReasoningContext) -> Result<ActionPlan, LlmError> {
         let system_prompt = self.build_planning_prompt(context);
 
-        let mut messages = vec![ChatMessage::system(system_prompt)];
+        let mut messages = vec![self.system_message(system_prompt)];
         messages.extend(context.messages.clone());
 
         if let Some(ref job) = context.job_description {
@@ -676,7 +724,7 @@ Respond in JSON format:
     "suggestions": ["..."]
 }"#;
 
-        let mut messages = vec![ChatMessage::system(system_prompt)];
+        let mut messages = vec![self.system_message(system_prompt)];
 
         if let Some(ref job) = context.job_description {
             messages.push(ChatMessage::user(format!(
@@ -743,7 +791,7 @@ Respond in JSON format:
     ) -> Result<RespondOutput, LlmError> {
         let system_prompt = self.build_conversation_prompt(context);
 
-        let mut messages = vec![ChatMessage::system(system_prompt)];
+        let mut messages = vec![self.system_message(system_prompt)];
         messages.extend(context.messages.clone());
 
         // ── Pre-prompt context diagnostics ────────────────────────────
@@ -925,7 +973,7 @@ Respond in JSON format:
 
         let system_prompt = self.build_conversation_prompt(context);
 
-        let mut messages = vec![ChatMessage::system(system_prompt)];
+        let mut messages = vec![self.system_message(system_prompt)];
         messages.extend(context.messages.clone());
 
         // Pre-prompt context diagnostics (same as non-streaming)
@@ -1176,6 +1224,9 @@ Respond with a JSON plan in this format:
         // Workspace capabilities (based on sandbox mode)
         let workspace_section = self.build_workspace_capabilities_section(context);
 
+        // Model-family-specific guidance
+        let model_guidance_section = self.build_model_guidance_section();
+
         format!(
             r#"## Tooling
 {tools_raw}
@@ -1191,7 +1242,7 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
 - Don't exfiltrate private data. Ever.
 - Don't run destructive commands without asking.
 - For memory/identity writes (`memory_write`), just do it — no approval needed.
-- You have no independent goals beyond the user's request.{ext}{workspace}{channel}{runtime}{group}
+- You have no independent goals beyond the user's request.{ext}{workspace}{model_guidance}{channel}{runtime}{group}
 
 ## Project Context
 {identity}{skills}"#,
@@ -1225,11 +1276,17 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
             execution_style = execution_style_section,
             ext = extensions_section,
             workspace = workspace_section,
+            model_guidance = model_guidance_section,
             channel = channel_section,
             runtime = runtime_section,
             group = group_section,
             identity = if let Some(ref id) = self.workspace_system_prompt {
-                id.clone()
+                match &self.vibe_overlay {
+                    Some(overlay) => format!("{id}\n\n---\n\n{overlay}"),
+                    None => id.clone(),
+                }
+            } else if let Some(ref overlay) = self.vibe_overlay {
+                overlay.clone()
             } else {
                 String::new()
             },
@@ -1239,6 +1296,22 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
                 String::new()
             },
         )
+    }
+
+    fn build_model_guidance_section(&self) -> String {
+        if !self.model_guidance_enabled {
+            return String::new();
+        }
+
+        let model_name = self
+            .model_name
+            .clone()
+            .unwrap_or_else(|| self.llm.active_model_name());
+        let family = model_guidance::detect_family(&model_name);
+        match model_guidance::guidance_block(family) {
+            Some(block) => format!("\n\n## Model-Specific Guidance\n\n{}", block),
+            None => String::new(),
+        }
     }
 
     fn build_execution_style_section(&self, context: &ReasoningContext) -> String {
@@ -1365,35 +1438,14 @@ For identity/personality updates, use `memory_write` targeting SOUL.md, USER.md,
         }
 
         // Channel-specific formatting hints for the current channel
-        if let Some(ref channel) = self.channel {
-            let hints = match channel.as_str() {
-                "discord" => Some(
-                    "\
-- No markdown tables (Discord renders them as plaintext). Use bullet lists instead.\n\
-- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`.",
-                ),
-                "whatsapp" => Some(
-                    "\
-- No markdown headers or tables (WhatsApp ignores them). Use **bold** for emphasis.\n\
-- Keep messages concise; long replies get truncated on mobile.",
-                ),
-                "telegram" => Some(
-                    "\
-- No markdown tables (Telegram strips them). Bullet lists and bold work well.",
-                ),
-                "slack" => Some(
-                    "\
-- No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
-- Prefer threaded replies when responding to older messages.",
-                ),
-                _ => None,
-            };
-            if let Some(hints) = hints {
-                sections.push(format!(
-                    "\n\n## Channel Formatting ({})\n{}",
-                    channel, hints
-                ));
-            }
+        if let (Some(channel), Some(hints)) = (
+            self.channel.as_ref(),
+            self.channel_formatting_hints.as_ref(),
+        ) {
+            sections.push(format!(
+                "\n\n## Platform Formatting ({})\n{}",
+                channel, hints
+            ));
         }
 
         sections.join("")
@@ -1469,6 +1521,104 @@ mod tests {
 
     struct FinishReasonTestLlm {
         response: FinishReason,
+    }
+
+    struct PromptCachingCaptureLlm {
+        last_request: Arc<tokio::sync::Mutex<Option<CompletionRequest>>>,
+    }
+
+    struct NonCachingCaptureLlm {
+        last_request: Arc<tokio::sync::Mutex<Option<CompletionRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for PromptCachingCaptureLlm {
+        fn model_name(&self) -> &str {
+            "prompt-caching-capture"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            *self.last_request.lock().await = Some(request);
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        fn supports_prompt_caching(&self) -> bool {
+            true
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for NonCachingCaptureLlm {
+        fn model_name(&self) -> &str {
+            "non-caching-capture"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            *self.last_request.lock().await = Some(request);
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
     }
 
     #[async_trait]
@@ -1575,6 +1725,10 @@ mod tests {
                 &crate::config::SafetyConfig {
                     max_output_length: 100_000,
                     injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
                 },
             )),
         );
@@ -1604,6 +1758,10 @@ mod tests {
                 &crate::config::SafetyConfig {
                     max_output_length: 100_000,
                     injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
                 },
             )),
         );
@@ -1627,6 +1785,10 @@ mod tests {
                 &crate::config::SafetyConfig {
                     max_output_length: 100_000,
                     injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
                 },
             )),
         );
@@ -1652,6 +1814,10 @@ mod tests {
                 &crate::config::SafetyConfig {
                     max_output_length: 100_000,
                     injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
                 },
             )),
         );
@@ -1665,5 +1831,234 @@ mod tests {
 
         assert!(prompt.contains("Use `spawn_subagent` when work can be cleanly delegated"));
         assert!(prompt.contains("Do not delegate tiny tasks"));
+    }
+
+    #[test]
+    fn conversation_prompt_includes_model_guidance_for_gpt_family() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done").with_model_name("gpt-4o")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        )
+        .with_model_name("gpt-4o");
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+
+        assert!(prompt.contains("## Model-Specific Guidance"));
+        assert!(prompt.contains("GPT-family models:"));
+    }
+
+    #[test]
+    fn conversation_prompt_skips_model_guidance_when_disabled() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done").with_model_name("gpt-4o")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        )
+        .with_model_name("gpt-4o")
+        .with_model_guidance_enabled(false);
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+
+        assert!(!prompt.contains("## Model-Specific Guidance"));
+    }
+
+    #[test]
+    fn conversation_prompt_includes_vibe_overlay_after_identity() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        )
+        .with_system_prompt("## Identity\n\nBase identity".to_string())
+        .with_vibe_overlay("## Temporary Vibe\n\nBe extra concise.".to_string());
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+
+        assert!(prompt.contains("## Identity\n\nBase identity"));
+        assert!(prompt.contains("## Temporary Vibe\n\nBe extra concise."));
+        assert!(prompt.contains("Base identity\n\n---\n\n## Temporary Vibe"));
+    }
+
+    #[test]
+    fn conversation_prompt_uses_injected_channel_formatting_hints() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        )
+        .with_channel("custom_channel")
+        .with_channel_formatting_hints(
+            "- Custom channel uses plain text only.\n- Keep replies to one paragraph.",
+        );
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+
+        assert!(prompt.contains("## Platform Formatting (custom_channel)"));
+        assert!(prompt.contains("Custom channel uses plain text only."));
+        assert!(prompt.contains("Keep replies to one paragraph."));
+    }
+
+    #[tokio::test]
+    async fn respond_attaches_prompt_cache_hint_on_system_message_when_supported() {
+        let last_request = Arc::new(tokio::sync::Mutex::new(None));
+        let reasoning = Reasoning::new(
+            Arc::new(PromptCachingCaptureLlm {
+                last_request: Arc::clone(&last_request),
+            }),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
+        let _ = reasoning
+            .respond_with_tools(&context)
+            .await
+            .expect("response");
+
+        let request = last_request
+            .lock()
+            .await
+            .clone()
+            .expect("request should be captured");
+        let system = request
+            .messages
+            .first()
+            .expect("system message should be present");
+        let hint = system
+            .provider_metadata
+            .get("anthropic")
+            .and_then(|metadata| metadata.get("cache_control"))
+            .and_then(|cache| cache.get("type"))
+            .and_then(|value| value.as_str());
+
+        assert_eq!(hint, Some("ephemeral"));
+    }
+
+    #[tokio::test]
+    async fn respond_omits_prompt_cache_hint_when_provider_does_not_support_it() {
+        let last_request = Arc::new(tokio::sync::Mutex::new(None));
+        let reasoning = Reasoning::new(
+            Arc::new(NonCachingCaptureLlm {
+                last_request: Arc::clone(&last_request),
+            }),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
+        let _ = reasoning
+            .respond_with_tools(&context)
+            .await
+            .expect("response");
+
+        let request = last_request
+            .lock()
+            .await
+            .clone()
+            .expect("request should be captured");
+        let system = request
+            .messages
+            .first()
+            .expect("system message should be present");
+
+        assert!(system.provider_metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn respond_prompt_keeps_channel_hints_model_guidance_and_cache_hint_together() {
+        let last_request = Arc::new(tokio::sync::Mutex::new(None));
+        let reasoning = Reasoning::new(
+            Arc::new(PromptCachingCaptureLlm {
+                last_request: Arc::clone(&last_request),
+            }),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        )
+        .with_model_name("gpt-4o")
+        .with_channel("telegram")
+        .with_channel_formatting_hints("Use Telegram HTML tags only.");
+
+        let context = ReasoningContext::new().with_messages(vec![ChatMessage::user("hello")]);
+        let _ = reasoning
+            .respond_with_tools(&context)
+            .await
+            .expect("response");
+
+        let request = last_request
+            .lock()
+            .await
+            .clone()
+            .expect("request should be captured");
+        let system = request
+            .messages
+            .first()
+            .expect("system message should be present");
+
+        assert!(system.content.contains("## Model-Specific Guidance"));
+        assert!(system.content.contains("## Platform Formatting (telegram)"));
+        assert!(
+            system
+                .provider_metadata
+                .get("anthropic")
+                .and_then(|metadata| metadata.get("cache_control"))
+                .is_some()
+        );
     }
 }

@@ -657,7 +657,7 @@ These are only needed if you **compile ThinClaw from source**:
 | Dependency | Purpose | Install (macOS) | Install (Linux) |
 |-----------|---------|-----------------|-----------------|
 | Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A |
-| build-essential | C compiler | N/A | `sudo apt install build-essential pkg-config libssl-dev` |
+| build-essential | C compiler + pkg-config | N/A | `sudo apt install build-essential pkg-config` |
 | Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same |
 | wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same |
 | wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same |
@@ -676,6 +676,10 @@ These are only needed if you **compile ThinClaw from source**:
 # Developer setup (any OS):
 ./scripts/dev-setup.sh
 ```
+
+Linux note: the core ThinClaw build now uses Rustls and does not require OpenSSL
+development headers. If you enable the optional `voice` feature, also install
+`libasound2-dev` so `cpal` can link against ALSA.
 
 ---
 

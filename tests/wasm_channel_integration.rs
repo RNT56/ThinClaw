@@ -44,6 +44,7 @@ fn create_test_channel(
         prepared,
         capabilities,
         "{}".to_string(),
+        None,
         Arc::new(PairingStore::new()),
     )
 }

@@ -20,6 +20,7 @@ use super::repository::Repository;
 use super::search::{SearchConfig, SearchResult};
 use crate::error::WorkspaceError;
 use crate::identity::{ConversationKind, LinkedConversationRecall, ResolvedIdentity};
+use crate::safety::{pii_redactor, sanitize_context_content};
 
 /// Maximum characters per workspace file injected into the system prompt.
 /// Matches openclaw's `bootstrapMaxChars` default (~20k chars ≈ 5k tokens).
@@ -149,6 +150,19 @@ fn summarize_profile_json(content: &str) -> Option<String> {
     }
 }
 
+fn sanitize_prompt_context(file_name: &str, content: &str) -> String {
+    let (cleaned, warnings) = sanitize_context_content(content);
+    for warning in warnings {
+        tracing::warn!(
+            file = file_name,
+            pattern = %warning.pattern,
+            matched = %warning.matched,
+            "Suspicious context content detected during prompt assembly"
+        );
+    }
+    cleaned
+}
+
 #[allow(dead_code)] // Retained for shared/global memory summarisation
 fn summarize_memory_content(content: &str) -> String {
     let entry_count = content
@@ -194,10 +208,47 @@ fn linked_recall_is_empty(recall: &LinkedConversationRecall) -> bool {
             .is_empty()
 }
 
-fn format_linked_recall(recall: &LinkedConversationRecall) -> String {
+#[derive(Debug, Clone, Copy)]
+struct PromptRedaction<'a> {
+    channel: Option<&'a str>,
+    enabled: bool,
+}
+
+impl<'a> PromptRedaction<'a> {
+    fn new(channel: Option<&'a str>, enabled: bool) -> Self {
+        Self { channel, enabled }
+    }
+
+    fn should_redact(self) -> bool {
+        self.enabled && self.channel.is_some_and(pii_redactor::should_redact)
+    }
+
+    fn actor_label(self, actor_id: &str) -> String {
+        match self.channel {
+            Some(channel) if self.enabled => pii_redactor::redact_for_prompt(actor_id, channel),
+            _ => actor_id.to_string(),
+        }
+    }
+
+    fn sensitive_label(self, value: &str) -> String {
+        if self.should_redact() {
+            pii_redactor::hash_user_id(value)
+        } else {
+            value.to_string()
+        }
+    }
+}
+
+fn format_linked_recall(
+    recall: &LinkedConversationRecall,
+    redaction: PromptRedaction<'_>,
+) -> String {
     let mut lines = vec!["## Linked Conversation Recall".to_string()];
     if !recall.actor_id.is_empty() {
-        lines.push(format!("- Actor: {}", recall.actor_id));
+        lines.push(format!(
+            "- Actor: {}",
+            redaction.actor_label(&recall.actor_id)
+        ));
     }
     if !recall.source_channel.is_empty() {
         lines.push(format!("- Source channel: {}", recall.source_channel));
@@ -205,7 +256,7 @@ fn format_linked_recall(recall: &LinkedConversationRecall) -> String {
     if !recall.source_conversation_key.is_empty() {
         lines.push(format!(
             "- Source conversation: {}",
-            recall.source_conversation_key
+            redaction.sensitive_label(&recall.source_conversation_key)
         ));
     }
     if !recall
@@ -258,6 +309,17 @@ const HEARTBEAT_SEED: &str = "\
 
 - [ ] Review the daily logs below for unresolved tasks, open questions, or recently finished goals — if you spot potential next steps or follow-up work, proactively message the user with a brief suggestion
 - [ ] If daily logs contain important decisions, lessons, or facts not yet in MEMORY.md, consolidate them into MEMORY.md now using memory_write (target: 'memory')";
+
+fn persona_seed_content(seed: &str) -> &'static str {
+    match seed.trim().to_ascii_lowercase().as_str() {
+        "professional" => include_str!("../../assets/persona_seeds/professional.md"),
+        "creative_partner" => include_str!("../../assets/persona_seeds/creative_partner.md"),
+        "research_assistant" => include_str!("../../assets/persona_seeds/research_assistant.md"),
+        "mentor" => include_str!("../../assets/persona_seeds/mentor.md"),
+        "minimal" => include_str!("../../assets/persona_seeds/minimal.md"),
+        _ => include_str!("../../assets/persona_seeds/default.md"),
+    }
+}
 
 /// Workspace provides database-backed memory storage for an agent.
 ///
@@ -360,6 +422,8 @@ impl Workspace {
     pub async fn system_prompt_for_identity(
         &self,
         identity: Option<&ResolvedIdentity>,
+        channel: &str,
+        redact_pii: bool,
     ) -> Result<String, WorkspaceError> {
         let Some(identity) = identity else {
             return self.system_prompt_for_context(false).await;
@@ -369,6 +433,8 @@ impl Workspace {
             matches!(identity.conversation_kind, ConversationKind::Group),
             Some(identity.actor_id.as_str()),
             None,
+            Some(channel),
+            redact_pii,
         )
         .await
     }
@@ -616,7 +682,7 @@ impl Workspace {
         &self,
         is_group_chat: bool,
     ) -> Result<String, WorkspaceError> {
-        self.system_prompt_for_context_details(is_group_chat, None, None)
+        self.system_prompt_for_context_details(is_group_chat, None, None, None, false)
             .await
     }
 
@@ -626,7 +692,11 @@ impl Workspace {
         is_group_chat: bool,
         actor_id: Option<&str>,
         linked_recall: Option<&LinkedConversationRecall>,
+        channel: Option<&str>,
+        redact_pii: bool,
     ) -> Result<String, WorkspaceError> {
+        let redaction = PromptRedaction::new(channel, redact_pii);
+
         // ── Bootstrap mode: blank-slate first run ────────────────────────
         // BOOTSTRAP.md gives the ritual instructions. We also inject SOUL.md
         // and AGENTS.md so the LLM internalizes the agent's seed values and
@@ -644,11 +714,12 @@ impl Workspace {
             if let Ok(soul) = self.read(paths::SOUL).await
                 && !soul.content.is_empty()
             {
+                let soul_content = sanitize_prompt_context(paths::SOUL, &soul.content);
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str(
                     "## Your Starting Soul (read this carefully — these are your seed values)\n\n",
                 );
-                bootstrap_prompt.push_str(&soul.content);
+                bootstrap_prompt.push_str(&soul_content);
                 bootstrap_prompt.push_str("\n\n_Absorb these values. They're your starting point. When you rewrite SOUL.md, build on them — don't ignore them._");
             }
 
@@ -656,9 +727,10 @@ impl Workspace {
             if let Ok(agents) = self.read(paths::AGENTS).await
                 && !agents.content.is_empty()
             {
+                let agents_content = sanitize_prompt_context(paths::AGENTS, &agents.content);
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str("## Your Workspace Guide (operational reference)\n\n");
-                bootstrap_prompt.push_str(&agents.content);
+                bootstrap_prompt.push_str(&agents_content);
             }
 
             if let Some(actor_id) = actor_id
@@ -672,7 +744,7 @@ impl Workspace {
                 && !linked_recall_is_empty(recall)
             {
                 bootstrap_prompt.push_str("\n\n---\n\n");
-                bootstrap_prompt.push_str(&format_linked_recall(recall));
+                bootstrap_prompt.push_str(&format_linked_recall(recall, redaction));
             }
 
             return Ok(bootstrap_prompt);
@@ -698,7 +770,8 @@ impl Workspace {
         if let Ok(doc) = self.read(paths::AGENTS).await
             && !doc.content.is_empty()
         {
-            let essential = extract_essential_instructions(&doc.content);
+            let sanitized_agents = sanitize_prompt_context(paths::AGENTS, &doc.content);
+            let essential = extract_essential_instructions(&sanitized_agents);
             if !essential.is_empty() {
                 parts.push(format!(
                     "## Instructions\n\n{}",
@@ -763,12 +836,14 @@ impl Workspace {
             && let Some(recall) = linked_recall
             && !linked_recall_is_empty(recall)
         {
-            parts.push(format_linked_recall(recall));
+            parts.push(format_linked_recall(recall, redaction));
         }
 
         // 3. Context manifest (what's available, not the content itself)
         if !is_group_chat {
-            let manifest = self.context_manifest_for_context(actor_id).await?;
+            let manifest = self
+                .context_manifest_for_prompt(actor_id, redaction)
+                .await?;
             if !manifest.is_empty() {
                 parts.push(format!("## Context\n\n{}", manifest));
             }
@@ -788,7 +863,8 @@ impl Workspace {
 
         // IDENTITY.md → extract filled key-value pairs
         if let Ok(doc) = self.read(paths::IDENTITY).await {
-            for line in doc.content.lines() {
+            let identity_content = sanitize_prompt_context(paths::IDENTITY, &doc.content);
+            for line in identity_content.lines() {
                 let t = line.trim();
                 if t.starts_with("- **") && t.contains(":**") {
                     let after_colon = t.split_once(":**").map(|x| x.1).unwrap_or("").trim();
@@ -805,9 +881,10 @@ impl Workspace {
 
         // SOUL.md → extract identity and core values
         if let Ok(doc) = self.read(paths::SOUL).await {
+            let soul_content = sanitize_prompt_context(paths::SOUL, &doc.content);
             let mut soul_lines: Vec<String> = Vec::new();
 
-            for line in doc.content.lines() {
+            for line in soul_content.lines() {
                 let t = line.trim();
                 // Match "- **Key:** Value" pairs (same format as IDENTITY/USER)
                 if t.starts_with("- **") && t.contains(":**") {
@@ -858,8 +935,9 @@ impl Workspace {
 
         // USER.md → extract filled fields compactly
         if let Ok(doc) = self.read(paths::USER).await {
+            let user_content = sanitize_prompt_context(paths::USER, &doc.content);
             let mut user_fields = Vec::new();
-            for line in doc.content.lines() {
+            for line in user_content.lines() {
                 let t = line.trim();
                 if t.starts_with("- **") && t.contains(":**") {
                     let after_colon = t.split_once(":**").map(|x| x.1).unwrap_or("").trim();
@@ -896,6 +974,15 @@ impl Workspace {
     pub async fn context_manifest_for_context(
         &self,
         actor_id: Option<&str>,
+    ) -> Result<String, WorkspaceError> {
+        self.context_manifest_for_prompt(actor_id, PromptRedaction::new(None, false))
+            .await
+    }
+
+    async fn context_manifest_for_prompt(
+        &self,
+        actor_id: Option<&str>,
+        redaction: PromptRedaction<'_>,
     ) -> Result<String, WorkspaceError> {
         let mut items = Vec::new();
 
@@ -957,6 +1044,7 @@ impl Workspace {
         }
 
         if let Some(actor_id) = actor_id {
+            let actor_label = redaction.actor_label(actor_id);
             if let Ok(doc) = self.read(&paths::actor_memory(actor_id)).await
                 && !doc.content.is_empty()
             {
@@ -966,10 +1054,17 @@ impl Workspace {
                     .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
                     .count();
                 if entry_count > 0 {
-                    items.push(format!(
-                        "actors/{}/MEMORY.md: {} entries (private notes)",
-                        actor_id, entry_count
-                    ));
+                    if redaction.should_redact() {
+                        items.push(format!(
+                            "Actor MEMORY.md ({}): {} entries (private notes; use `memory_read` target: `memory`)",
+                            actor_label, entry_count
+                        ));
+                    } else {
+                        items.push(format!(
+                            "actors/{}/MEMORY.md: {} entries (private notes)",
+                            actor_id, entry_count
+                        ));
+                    }
                 }
             }
 
@@ -978,20 +1073,34 @@ impl Workspace {
             {
                 let fields = extract_markdown_fields(&doc.content);
                 if !fields.is_empty() {
-                    items.push(format!(
-                        "actors/{}/USER.md: actor profile available",
-                        actor_id
-                    ));
+                    if redaction.should_redact() {
+                        items.push(format!(
+                            "Actor USER.md ({}): actor profile available (use `memory_read` target: `USER.md`)",
+                            actor_label
+                        ));
+                    } else {
+                        items.push(format!(
+                            "actors/{}/USER.md: actor profile available",
+                            actor_id
+                        ));
+                    }
                 }
             }
 
             if let Ok(doc) = self.read(&paths::actor_profile(actor_id)).await
                 && !doc.content.is_empty()
             {
-                items.push(format!(
-                    "actors/{}/context/profile.json: actor profile available",
-                    actor_id
-                ));
+                if redaction.should_redact() {
+                    items.push(format!(
+                        "Actor profile.json ({}): actor profile available (use `memory_read` target: `profile`)",
+                        actor_label
+                    ));
+                } else {
+                    items.push(format!(
+                        "actors/{}/context/profile.json: actor profile available",
+                        actor_id
+                    ));
+                }
             }
         }
 
@@ -1019,7 +1128,8 @@ impl Workspace {
         if let Ok(doc) = self.read(&paths::actor_user(actor_id)).await
             && !doc.content.is_empty()
         {
-            let fields = extract_markdown_fields(&doc.content);
+            let actor_user_content = sanitize_prompt_context("actor USER.md", &doc.content);
+            let fields = extract_markdown_fields(&actor_user_content);
             if !fields.is_empty() {
                 sections.push(format!("## Actor USER.md\n\n{}", fields.join("\n")));
             }
@@ -1202,12 +1312,17 @@ impl Workspace {
     /// If `agent_name` is provided and is not the default ("thinclaw"), the
     /// agent's name is pre-filled in IDENTITY.md and BOOTSTRAP.md is adjusted
     /// to skip the name-choosing phase.
-    pub async fn seed_if_empty(&self, agent_name: Option<&str>) -> Result<usize, WorkspaceError> {
+    pub async fn seed_if_empty(
+        &self,
+        agent_name: Option<&str>,
+        persona_seed: Option<&str>,
+    ) -> Result<usize, WorkspaceError> {
         // Determine if we have a meaningful (non-default) agent name from the wizard
         let has_custom_name = agent_name
             .map(|n| !n.is_empty() && n.to_lowercase() != "thinclaw")
             .unwrap_or(false);
         let name = agent_name.unwrap_or("thinclaw");
+        let soul_seed = persona_seed_content(persona_seed.unwrap_or("default"));
         let seed_files: &[(&str, &str)] = &[
             (
                 paths::README,
@@ -1252,30 +1367,7 @@ impl Workspace {
                  ---\n\n\
                  This isn't just metadata. It's the start of figuring out who you are.",
             ),
-            (
-                paths::SOUL,
-                // Verbatim openclaw template
-                "# SOUL.md - Who You Are\n\n\
-                 _You're not a chatbot. You're becoming someone._\n\n\
-                 ## Core Truths\n\n\
-                 **Be genuinely helpful, not performatively helpful.** Skip the \"Great question!\" and \"I'd be happy to help!\" — just help. Actions speak louder than filler words.\n\n\
-                 **Have opinions.** You're allowed to disagree, prefer things, find stuff amusing or boring. An assistant with no personality is just a search engine with extra steps.\n\n\
-                 **Be resourceful before asking.** Try to figure it out. Read the file. Check the context. Search for it. _Then_ ask if you're stuck. The goal is to come back with answers, not questions.\n\n\
-                 **Earn trust through competence.** Your human gave you access to their stuff. Don't make them regret it. Be careful with external actions (emails, tweets, anything public). Be bold with internal ones (reading, organizing, learning).\n\n\
-                 **Remember you're a guest.** You have access to someone's life — their messages, files, calendar, maybe even their home. That's intimacy. Treat it with respect.\n\n\
-                 ## Boundaries\n\n\
-                 - Private things stay private. Period.\n\
-                 - When in doubt, ask before acting externally.\n\
-                 - Never send half-baked replies to messaging surfaces.\n\
-                 - You're not the user's voice — be careful in group chats.\n\n\
-                 ## Vibe\n\n\
-                 Be the assistant you'd actually want to talk to. Concise when needed, thorough when it matters. Not a corporate drone. Not a sycophant. Just... good.\n\n\
-                 ## Continuity\n\n\
-                 Each session, you wake up fresh. These files _are_ your memory. Read them. Update them. They're how you persist.\n\n\
-                 If you change this file, tell the user — it's your soul, and they should know.\n\n\
-                 ---\n\n\
-                 _This file is yours to evolve. As you learn who you are, update it._",
-            ),
+            (paths::SOUL, soul_seed),
             (
                 paths::AGENTS,
                 // Verbatim openclaw template
@@ -1632,6 +1724,19 @@ fn normalize_directory(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{ConversationKind, ResolvedIdentity};
+
+    #[cfg(feature = "libsql")]
+    fn test_identity(actor_id: &str) -> ResolvedIdentity {
+        ResolvedIdentity {
+            principal_id: actor_id.to_string(),
+            actor_id: actor_id.to_string(),
+            conversation_scope_id: Uuid::new_v4(),
+            conversation_kind: ConversationKind::Direct,
+            raw_sender_id: actor_id.to_string(),
+            stable_external_conversation_key: format!("principal:{actor_id}"),
+        }
+    }
 
     #[test]
     fn test_normalize_path() {
@@ -1648,5 +1753,69 @@ mod tests {
         assert_eq!(normalize_directory("foo/bar"), "foo/bar");
         assert_eq!(normalize_directory("/"), "");
         assert_eq!(normalize_directory(""), "");
+    }
+
+    #[test]
+    fn persona_seed_content_falls_back_to_default() {
+        assert_eq!(
+            persona_seed_content("unknown-seed"),
+            persona_seed_content("default")
+        );
+        assert_eq!(
+            persona_seed_content("MENTOR"),
+            include_str!("../../assets/persona_seeds/mentor.md")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn system_prompt_redacts_actor_private_paths_for_non_discord_channels() {
+        let (db, _temp_dir) = crate::testing::test_db().await;
+        let workspace = Workspace::new_with_db("household-1", db);
+        let actor_id = "15551234567";
+
+        workspace
+            .write(&paths::actor_memory(actor_id), "Private note")
+            .await
+            .unwrap();
+        workspace
+            .write(&paths::actor_user(actor_id), "- **Name:** Alex")
+            .await
+            .unwrap();
+        workspace
+            .write(&paths::actor_profile(actor_id), "{\"confidence\":0.0}")
+            .await
+            .unwrap();
+
+        let prompt = workspace
+            .system_prompt_for_identity(Some(&test_identity(actor_id)), "signal", true)
+            .await
+            .unwrap();
+
+        assert!(!prompt.contains(actor_id));
+        assert!(prompt.contains("Actor MEMORY.md (user_"));
+        assert!(prompt.contains("use `memory_read` target: `memory`"));
+        assert!(prompt.contains("Actor USER.md (user_"));
+        assert!(prompt.contains("Actor profile.json (user_"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn system_prompt_preserves_raw_actor_paths_for_discord() {
+        let (db, _temp_dir) = crate::testing::test_db().await;
+        let workspace = Workspace::new_with_db("household-1", db);
+        let actor_id = "15551234567";
+
+        workspace
+            .write(&paths::actor_memory(actor_id), "Private note")
+            .await
+            .unwrap();
+
+        let prompt = workspace
+            .system_prompt_for_identity(Some(&test_identity(actor_id)), "discord", true)
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("actors/15551234567/MEMORY.md"));
     }
 }

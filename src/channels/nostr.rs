@@ -266,6 +266,14 @@ impl Channel for NostrChannel {
         Ok(())
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "- Nostr clients often render plain text only. Keep formatting light.\n\
+- Prefer concise paragraphs and avoid tables or heavy markdown."
+                .to_string(),
+        )
+    }
+
     async fn broadcast(
         &self,
         user_id: &str,

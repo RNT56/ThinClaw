@@ -333,6 +333,13 @@ impl Channel for DiscordChannel {
         NAME
     }
 
+    fn formatting_hints(&self) -> Option<String> {
+        Some(
+            "Discord supports markdown. Use ``` for code blocks. Embeds are available for media. Use <@user_id> for mentions."
+                .to_string(),
+        )
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
 
@@ -882,5 +889,22 @@ mod tests {
     fn test_gateway_intents() {
         // GUILDS (1) + GUILD_MESSAGES (512) + DIRECT_MESSAGES (4096) + MESSAGE_CONTENT (32768)
         assert_eq!(GATEWAY_INTENTS, 1 | 512 | 4096 | 32768);
+    }
+
+    #[test]
+    fn formatting_hints_describe_discord_markdown() {
+        let config = DiscordConfig {
+            bot_token: secrecy::SecretString::new("token".to_string().into()),
+            guild_id: None,
+            allow_from: vec![],
+            stream_mode: StreamMode::None,
+        };
+        let channel = DiscordChannel::new(config).expect("discord channel");
+        assert_eq!(
+            channel.formatting_hints().as_deref(),
+            Some(
+                "Discord supports markdown. Use ``` for code blocks. Embeds are available for media. Use <@user_id> for mentions."
+            )
+        );
     }
 }

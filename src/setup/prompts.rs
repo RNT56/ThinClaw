@@ -27,6 +27,8 @@ use ratatui::{
 };
 use secrecy::SecretString;
 
+use crate::terminal_branding::TerminalBranding;
+
 /// Prompt rendering mode for setup interactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptUiMode {
@@ -159,6 +161,8 @@ fn draw_prompt_list(
     cursor_idx: usize,
     selected: Option<&[bool]>,
 ) {
+    let branding = TerminalBranding::current();
+    let skin = &branding.skin;
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -172,18 +176,18 @@ fn draw_prompt_list(
         vec![
             Line::from(Span::styled(
                 "ThinClaw Humanist Cockpit",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(skin.header).bold(),
             )),
-            Line::from(Span::styled(title, Style::default().fg(Color::Cyan).bold())),
-            Line::from(Span::styled(sub, Style::default().fg(Color::Gray))),
+            Line::from(Span::styled(title, skin.accent_style())),
+            Line::from(Span::styled(sub, Style::default().fg(skin.muted))),
         ]
     } else {
         vec![
             Line::from(Span::styled(
                 "ThinClaw Humanist Cockpit",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(skin.header).bold(),
             )),
-            Line::from(Span::styled(title, Style::default().fg(Color::Cyan).bold())),
+            Line::from(Span::styled(title, skin.accent_style())),
         ]
     };
 
@@ -193,7 +197,7 @@ fn draw_prompt_list(
             .block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(skin.border_soft_style()),
             ),
         layout[0],
     );
@@ -212,11 +216,11 @@ fn draw_prompt_list(
                 " "
             };
             let style = if is_cursor {
-                Style::default().fg(Color::Cyan).bold().bg(Color::Black)
+                Style::default().fg(skin.accent).bold().bg(Color::Black)
             } else if is_selected {
-                Style::default().fg(Color::Green)
+                Style::default().fg(skin.good)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(skin.body)
             };
             ListItem::new(Line::from(Span::styled(
                 format!("{} {}", marker, option),
@@ -230,7 +234,7 @@ fn draw_prompt_list(
             Block::default()
                 .title(" Choices ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(skin.border_style()),
         ),
         layout[1],
     );
@@ -239,7 +243,7 @@ fn draw_prompt_list(
         Paragraph::new(help).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(skin.border_soft_style()),
         ),
         layout[2],
     );
@@ -729,14 +733,7 @@ pub fn confirm(prompt: &str, default: bool) -> io::Result<bool> {
 /// print_header("ThinClaw Setup Wizard");
 /// ```
 pub fn print_header(text: &str) {
-    let width = text.len() + 4;
-    let border = "─".repeat(width);
-
-    println!();
-    println!("╭{}╮", border);
-    println!("│  {}  │", text);
-    println!("╰{}╯", border);
-    println!();
+    TerminalBranding::current().print_banner(text, None);
 }
 
 /// Print a step indicator.
@@ -749,6 +746,7 @@ pub fn print_header(text: &str) {
 /// //         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 /// ```
 pub fn print_step(current: usize, total: usize, name: &str) {
+    let branding = TerminalBranding::current();
     let progress_width = 24;
     let filled = if total == 0 {
         0
@@ -758,65 +756,63 @@ pub fn print_step(current: usize, total: usize, name: &str) {
     let empty = progress_width.saturating_sub(filled);
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
 
-    println!("Flight step {}/{}: {}", current, total, name);
     println!(
-        "{}  {:>3}%",
-        bar,
-        current.saturating_mul(100) / total.max(1)
+        "{}",
+        branding.accent(format!("Flight step {current}/{total}: {name}"))
+    );
+    println!(
+        "{}  {}",
+        branding.muted(bar),
+        branding.body_bold(format!(
+            "{:>3}%",
+            current.saturating_mul(100) / total.max(1)
+        ))
     );
     println!();
 }
 
 /// Print a success message with green checkmark.
 pub fn print_success(message: &str) {
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, SetForegroundColor(CrosstermColor::Green));
-    print!("✓");
-    let _ = execute!(stdout, ResetColor);
-    println!(" {}", message);
+    let branding = TerminalBranding::current();
+    println!("{} {}", branding.good("✓"), branding.body(message));
 }
 
 /// Print an error message with red X.
 pub fn print_error(message: &str) {
-    let mut stderr = io::stderr();
-    let _ = execute!(stderr, SetForegroundColor(CrosstermColor::Red));
-    eprint!("✗");
-    let _ = execute!(stderr, ResetColor);
-    eprintln!(" {}", message);
+    let branding = TerminalBranding::current();
+    eprintln!("{} {}", branding.bad("✗"), branding.body(message));
 }
 
 /// Print an info message with blue info icon.
 pub fn print_info(message: &str) {
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, SetForegroundColor(CrosstermColor::Blue));
-    print!("ℹ");
-    let _ = execute!(stdout, ResetColor);
-    println!(" {}", message);
+    let branding = TerminalBranding::current();
+    println!("{} {}", branding.accent("ℹ"), branding.body(message));
 }
 
 /// Print a warning message with a yellow marker.
 pub fn print_warning(message: &str) {
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, SetForegroundColor(CrosstermColor::Yellow));
-    print!("!");
-    let _ = execute!(stdout, ResetColor);
-    println!(" {}", message);
+    let branding = TerminalBranding::current();
+    println!("{} {}", branding.warn("!"), branding.body(message));
 }
 
 /// Print a phase banner with a short description.
 pub fn print_phase_banner(title: &str, description: &str) {
+    let branding = TerminalBranding::current();
     let width = title.len().max(description.len()).max(24) + 4;
     let border = "═".repeat(width);
 
     println!();
-    let mut stdout = io::stdout();
-    let _ = execute!(stdout, SetForegroundColor(CrosstermColor::Cyan));
-    println!("╔{}╗", border);
-    println!("║  {:width$}  ║", title, width = width);
-    let _ = execute!(stdout, ResetColor);
-    println!("╚{}╝", border);
-    println!("  {}", description);
-    println!("  Stay with the recommended route if you want the safest fast path.");
+    println!("{}", branding.accent(format!("╔{}╗", border)));
+    println!(
+        "{}",
+        branding.accent(format!("║  {:width$}  ║", title, width = width))
+    );
+    println!("{}", branding.accent(format!("╚{}╝", border)));
+    println!("  {}", branding.body(description));
+    println!(
+        "  {}",
+        branding.muted("Stay with the recommended route if you want the safest fast path.")
+    );
     println!();
 }
 

@@ -17,9 +17,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::agent::session_search::{SessionSearchRender, SessionSearchService};
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::identity::ConversationKind as IdentityConversationKind;
+use crate::llm::LlmProvider;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
 
@@ -271,12 +273,22 @@ impl Tool for MemorySearchTool {
 /// the database, not workspace documents or memory files.
 pub struct SessionSearchTool {
     store: Arc<dyn Database>,
+    service: SessionSearchService,
 }
 
 impl SessionSearchTool {
     /// Create a new session search tool.
     pub fn new(store: Arc<dyn Database>) -> Self {
-        Self { store }
+        Self {
+            store,
+            service: SessionSearchService::new(),
+        }
+    }
+
+    /// Configure an optional summarizer model for transcript condensation.
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn LlmProvider>) -> Self {
+        self.service = self.service.with_summarizer(summarizer);
+        self
     }
 
     fn current_scope_filters(&self, ctx: &JobContext) -> (String, String, bool, Option<Uuid>) {
@@ -317,6 +329,41 @@ impl SessionSearchTool {
             conversation_id,
         )
     }
+
+    async fn recent_conversation_metadata(
+        &self,
+        principal_id: &str,
+        channel: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, ToolError> {
+        let Some(channel) = channel else {
+            return Ok(Vec::new());
+        };
+        let recent = self
+            .store
+            .list_conversations_with_preview(principal_id, channel, limit as i64)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e)))?;
+        Ok(recent
+            .into_iter()
+            .map(|conversation| {
+                serde_json::json!({
+                    "conversation_id": conversation.id,
+                    "user_id": conversation.user_id,
+                    "actor_id": conversation.actor_id,
+                    "channel": conversation.channel,
+                    "conversation_kind": conversation.conversation_kind.as_str(),
+                    "title": conversation.title,
+                    "message_count": conversation.message_count,
+                    "started_at": conversation.started_at.to_rfc3339(),
+                    "last_activity": conversation.last_activity.to_rfc3339(),
+                    "thread_type": conversation.thread_type,
+                    "handoff": conversation.handoff,
+                    "stable_external_conversation_key": conversation.stable_external_conversation_key,
+                })
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -354,6 +401,11 @@ impl Tool for SessionSearchTool {
                 "all_channels": {
                     "type": "boolean",
                     "description": "If true, search all channels for this actor/user scope. If false (default), search is limited to the current channel.",
+                    "default": false
+                },
+                "summarize_sessions": {
+                    "type": "boolean",
+                    "description": "If true, summarize matching sessions with the auxiliary/cheap model when available. Defaults to true only when a cheap model is configured.",
                     "default": false
                 }
             },
@@ -402,6 +454,28 @@ impl Tool for SessionSearchTool {
             None
         };
 
+        let summarize_sessions = params
+            .get("summarize_sessions")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(self.service.summarizer_configured());
+
+        if query.trim().is_empty() {
+            let recent = self
+                .recent_conversation_metadata(
+                    &principal_id,
+                    channel_filter.as_deref(),
+                    result_limit,
+                )
+                .await?;
+            let output = serde_json::json!({
+                "query": query,
+                "result_count": recent.len(),
+                "recent_sessions": recent,
+                "summarized": false,
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
         let hits = self
             .store
             .search_conversation_messages(
@@ -413,31 +487,25 @@ impl Tool for SessionSearchTool {
                 result_limit as i64,
             )
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?
-            .into_iter()
-            .map(|hit| {
-                serde_json::json!({
-                    "conversation_id": hit.conversation_id,
-                    "message_id": hit.message_id,
-                    "user_id": hit.user_id,
-                    "actor_id": hit.actor_id,
-                    "channel": hit.channel,
-                    "thread_id": hit.thread_id,
-                    "conversation_kind": hit.conversation_kind.as_str(),
-                    "role": hit.role,
-                    "created_at": hit.created_at.to_rfc3339(),
-                    "score": hit.score,
-                    "excerpt": hit.excerpt,
-                    "metadata": hit.metadata,
-                })
-            })
-            .collect::<Vec<_>>();
+            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
+        let SessionSearchRender {
+            results,
+            summarized,
+            fallback,
+        } = self
+            .service
+            .render_results(&self.store, query, hits, summarize_sessions)
+            .await;
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "query": query,
-            "result_count": hits.len(),
-            "results": hits,
+            "result_count": results.len(),
+            "results": results,
+            "summarized": summarized,
         });
+        if fallback {
+            output["fallback"] = serde_json::json!(true);
+        }
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -1144,5 +1212,99 @@ mod tests {
         let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
         assert!(!is_actor_scoped);
         assert_eq!(path, "MEMORY.md");
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod session_search_smoke_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::context::JobContext;
+    use crate::tools::Tool;
+
+    fn make_ctx() -> JobContext {
+        let mut ctx = JobContext::with_user("user-1", "chat", "session-search-test");
+        ctx.metadata = serde_json::json!({
+            "channel": "repl",
+            "thread_id": "thread-1",
+            "conversation_kind": "direct",
+        });
+        ctx
+    }
+
+    #[tokio::test]
+    async fn session_search_smoke_without_summarizer_returns_raw_results() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let conversation_id = db
+            .create_conversation("repl", "user-1", Some("thread-1"))
+            .await
+            .expect("create conversation");
+        db.add_conversation_message(conversation_id, "user", "build error after deploy")
+            .await
+            .expect("insert transcript message");
+
+        let tool = SessionSearchTool::new(Arc::clone(&db));
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "query": "build error",
+                    "summarize_sessions": true
+                }),
+                &make_ctx(),
+            )
+            .await
+            .expect("session_search should succeed");
+
+        assert_eq!(output.result["summarized"], serde_json::json!(false));
+        assert!(output.result.get("fallback").is_none());
+        assert!(
+            output.result["results"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|entry| entry.get("message_id"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_search_smoke_with_summarizer_returns_summaries() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let conversation_id = db
+            .create_conversation("repl", "user-1", Some("thread-1"))
+            .await
+            .expect("create conversation");
+        db.add_conversation_message(
+            conversation_id,
+            "assistant",
+            "Build failed, then fixed after config rollback.",
+        )
+        .await
+        .expect("insert transcript message");
+
+        let summarizer = Arc::new(crate::testing::StubLlm::new("summary bullet"));
+        let tool = SessionSearchTool::new(Arc::clone(&db))
+            .with_summarizer(Arc::clone(&summarizer) as Arc<dyn crate::llm::LlmProvider>);
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "query": "failed fixed",
+                    "summarize_sessions": true
+                }),
+                &make_ctx(),
+            )
+            .await
+            .expect("session_search should succeed");
+
+        assert_eq!(output.result["summarized"], serde_json::json!(true));
+        assert!(output.result.get("fallback").is_none());
+        assert!(
+            output.result["results"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|entry| entry.get("summary"))
+                .is_some()
+        );
+        assert!(summarizer.calls() >= 1);
     }
 }

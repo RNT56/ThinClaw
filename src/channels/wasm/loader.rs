@@ -58,7 +58,7 @@ impl WasmChannelLoader {
         let wasm_bytes = fs::read(wasm_path).await?;
 
         // Read capabilities file
-        let (capabilities, config_json, description, cap_file) =
+        let (capabilities, config_json, description, formatting_hints, cap_file) =
             if let Some(cap_path) = capabilities_path {
                 if cap_path.exists() {
                     let cap_bytes = fs::read(cap_path).await?;
@@ -89,8 +89,9 @@ impl WasmChannelLoader {
 
                     let config = cap_file.config_json();
                     let desc = cap_file.description.clone();
+                    let formatting_hints = cap_file.formatting_hints().map(str::to_owned);
 
-                    (caps, config, desc, Some(cap_file))
+                    (caps, config, desc, formatting_hints, Some(cap_file))
                 } else {
                     tracing::warn!(
                         path = %cap_path.display(),
@@ -101,12 +102,14 @@ impl WasmChannelLoader {
                         "{}".to_string(),
                         None,
                         None,
+                        None,
                     )
                 }
             } else {
                 (
                     ChannelCapabilities::for_channel(name),
                     "{}".to_string(),
+                    None,
                     None,
                     None,
                 )
@@ -124,6 +127,7 @@ impl WasmChannelLoader {
             prepared,
             capabilities,
             config_json,
+            formatting_hints,
             self.pairing_store.clone(),
         );
 

@@ -925,7 +925,9 @@ impl ExperimentStore for PgBackend {
         self.store.upsert_experiment_target_link(link).await
     }
 
-    async fn list_experiment_target_links(&self) -> Result<Vec<ExperimentTargetLink>, DatabaseError> {
+    async fn list_experiment_target_links(
+        &self,
+    ) -> Result<Vec<ExperimentTargetLink>, DatabaseError> {
         self.store.list_experiment_target_links().await
     }
 

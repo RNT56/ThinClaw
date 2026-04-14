@@ -1,8 +1,33 @@
 //! Handler modules for the web gateway API.
 //!
 //! Each module groups related endpoint handlers by domain.
-//!
-//! `skills` is the canonical implementation used by `server.rs`.
-//! All other endpoint handlers live inline in `server.rs`.
 
+pub mod chat;
+pub mod experiments;
+pub mod extensions;
+pub mod gateway;
+pub mod jobs;
+pub mod learning;
+pub mod logs;
+pub mod memory;
+pub mod pairing;
+pub mod projects;
+pub mod providers;
+pub mod routines;
+pub mod settings;
 pub mod skills;
+
+pub(crate) use chat::*;
+pub(crate) use experiments::*;
+pub(crate) use extensions::*;
+pub(crate) use gateway::*;
+pub(crate) use jobs::*;
+pub(crate) use learning::*;
+pub(crate) use logs::*;
+pub(crate) use memory::*;
+pub(crate) use pairing::*;
+pub(crate) use projects::*;
+pub(crate) use providers::*;
+pub(crate) use routines::*;
+pub(crate) use settings::*;
+pub(crate) use skills::*;

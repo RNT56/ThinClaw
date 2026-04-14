@@ -439,6 +439,14 @@ pub trait Channel: Send + Sync {
         StreamMode::None
     }
 
+    /// Return a short formatting hint for the active platform, if useful.
+    ///
+    /// Channels that render markdown, HTML, or plain text differently can
+    /// override this to help prompt assembly tailor its response style.
+    fn formatting_hints(&self) -> Option<String> {
+        None
+    }
+
     /// Update the stream mode at runtime (e.g., from WebUI settings).
     ///
     /// Default implementation does nothing. Channels that support runtime
@@ -489,5 +497,41 @@ pub trait Channel: Send + Sync {
     /// Default implementation does nothing (for channels without typing support).
     async fn send_typing(&self, _chat_id: &str) -> Result<(), ChannelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    struct DummyChannel;
+
+    #[async_trait]
+    impl Channel for DummyChannel {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn formatting_hints_defaults_to_none() {
+        assert_eq!(DummyChannel.formatting_hints(), None);
     }
 }

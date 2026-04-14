@@ -1,0 +1,21 @@
+name = "delphi"
+tagline = "Oracle purple with laurel green for reflective, strategic sessions."
+accent = "#9B6EF3"
+border = "#4B5563"
+body = "#EEE8FF"
+muted = "#8577A3"
+good = "#62A87C"
+warn = "#E2A84B"
+bad = "#D96C7B"
+header = "#5B3E96"
+prompt_symbol = "::"
+ascii_art = [
+  '            .-========-.',
+  '           /  _  ||  _  \',
+  '          /  /_\ || /_\  \',
+  '         |      _||_      |',
+  '         |     /_()_\     |  DELPHI',
+  '          \      ||      /',
+  '           `-.________.-`',
+]
+tool_emojis = { shell = "🔥", browser = "🔮", memory = "🌿", search_files = "📖", todo = "🏛️", subagent = "🪄" }

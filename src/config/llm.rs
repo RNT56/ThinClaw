@@ -72,6 +72,11 @@ pub struct OpenAiDirectConfig {
     /// API key. Initially `None` during early config resolution; populated
     /// after secret injection. Provider construction will fail if still `None`.
     pub api_key: Option<SecretString>,
+    /// All configured API keys for this provider. When more than one key is
+    /// present, the runtime builds one provider entry per key so failover
+    /// leases can balance at the credential level instead of the provider
+    /// level.
+    pub api_keys: Vec<SecretString>,
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
@@ -83,6 +88,8 @@ pub struct AnthropicDirectConfig {
     /// API key. Initially `None` during early config resolution; populated
     /// after secret injection. Provider construction will fail if still `None`.
     pub api_key: Option<SecretString>,
+    /// All configured API keys for this provider.
+    pub api_keys: Vec<SecretString>,
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
@@ -100,6 +107,8 @@ pub struct OllamaConfig {
 pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
+    /// All configured API keys for this provider.
+    pub api_keys: Vec<SecretString>,
     pub model: String,
     /// Extra HTTP headers injected into every LLM request.
     /// Parsed from `LLM_EXTRA_HEADERS` env var (format: `Key:Value,Key2:Value2`).
@@ -112,6 +121,8 @@ pub struct TinfoilConfig {
     /// API key. Initially `None` during early config resolution; populated
     /// after secret injection. Provider construction will fail if still `None`.
     pub api_key: Option<SecretString>,
+    /// All configured API keys for this provider.
+    pub api_keys: Vec<SecretString>,
     pub model: String,
 }
 
@@ -123,6 +134,8 @@ pub struct TinfoilConfig {
 pub struct GeminiDirectConfig {
     /// API key from Google AI Studio (`GEMINI_API_KEY` / `GOOGLE_AI_API_KEY`).
     pub api_key: Option<SecretString>,
+    /// All configured API keys for this provider.
+    pub api_keys: Vec<SecretString>,
     /// Model name (default: "gemini-2.5-flash").
     pub model: String,
     /// Base URL — uses Google's OpenAI-compatible endpoint by default.
@@ -136,6 +149,8 @@ pub struct BedrockDirectConfig {
     pub region: String,
     /// Native Bedrock API key for Mantle/OpenAI-compatible endpoints.
     pub api_key: Option<SecretString>,
+    /// All configured native Bedrock API keys.
+    pub api_keys: Vec<SecretString>,
     /// Legacy OpenAI-compatible proxy URL used to reach Bedrock.
     pub proxy_url: Option<String>,
     /// Optional legacy API key/token for the Bedrock proxy.
@@ -219,6 +234,15 @@ pub struct ReliabilityConfig {
     /// gets an uncertain response from the cheap model, re-send to primary.
     /// Default: true.
     pub smart_routing_cascade: bool,
+
+    /// Default reference models for the Mixture-of-Agents tool.
+    pub moa_reference_models: Vec<String>,
+
+    /// Optional aggregator model override for Mixture-of-Agents synthesis.
+    pub moa_aggregator_model: Option<String>,
+
+    /// Minimum successful reference responses required before aggregation.
+    pub moa_min_successful: usize,
 }
 
 impl Default for ReliabilityConfig {
@@ -235,6 +259,9 @@ impl Default for ReliabilityConfig {
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
+            moa_reference_models: Vec::new(),
+            moa_aggregator_model: None,
+            moa_min_successful: 1,
         }
     }
 }
@@ -299,13 +326,15 @@ impl LlmConfig {
         //   3. Hardcoded default
 
         let openai = if backend == LlmBackend::OpenAi {
-            let api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
+            let api_keys = resolve_secret_credentials("OPENAI_API_KEY", "OPENAI_API_KEYS")?;
+            let api_key = api_keys.first().cloned();
             let model = optional_env("OPENAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "gpt-4o".to_string());
             let base_url = optional_env("OPENAI_BASE_URL")?;
             Some(OpenAiDirectConfig {
                 api_key,
+                api_keys,
                 model,
                 base_url,
             })
@@ -314,13 +343,15 @@ impl LlmConfig {
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
+            let api_keys = resolve_secret_credentials("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEYS")?;
+            let api_key = api_keys.first().cloned();
             let model = optional_env("ANTHROPIC_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
                 api_key,
+                api_keys,
                 model,
                 base_url,
             })
@@ -347,7 +378,8 @@ impl LlmConfig {
                     key: "LLM_BASE_URL".to_string(),
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
-            let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
+            let api_keys = resolve_secret_credentials("LLM_API_KEY", "LLM_API_KEYS")?;
+            let api_key = api_keys.first().cloned();
             let model = optional_env("LLM_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "default".to_string());
@@ -358,6 +390,7 @@ impl LlmConfig {
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
+                api_keys,
                 model,
                 extra_headers,
             })
@@ -366,19 +399,26 @@ impl LlmConfig {
         };
 
         let tinfoil = if backend == LlmBackend::Tinfoil {
-            let api_key = optional_env("TINFOIL_API_KEY")?.map(SecretString::from);
+            let api_keys = resolve_secret_credentials("TINFOIL_API_KEY", "TINFOIL_API_KEYS")?;
+            let api_key = api_keys.first().cloned();
             let model = optional_env("TINFOIL_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "kimi-k2-5".to_string());
-            Some(TinfoilConfig { api_key, model })
+            Some(TinfoilConfig {
+                api_key,
+                api_keys,
+                model,
+            })
         } else {
             None
         };
 
         let gemini = if backend == LlmBackend::Gemini {
-            let api_key = optional_env("GEMINI_API_KEY")?
-                .or_else(|| std::env::var("GOOGLE_AI_API_KEY").ok())
-                .map(SecretString::from);
+            let api_keys = resolve_secret_credentials_with_aliases(
+                &["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
+                &["GEMINI_API_KEYS", "GOOGLE_AI_API_KEYS"],
+            )?;
+            let api_key = api_keys.first().cloned();
             let model = optional_env("GEMINI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "gemini-3.1-flash".to_string());
@@ -387,6 +427,7 @@ impl LlmConfig {
             });
             Some(GeminiDirectConfig {
                 api_key,
+                api_keys,
                 model,
                 base_url,
             })
@@ -398,9 +439,11 @@ impl LlmConfig {
             let region = optional_env("AWS_REGION")?
                 .or_else(|| settings.bedrock_region.clone())
                 .unwrap_or_else(|| "us-east-1".to_string());
-            let api_key = optional_env("BEDROCK_API_KEY")?
-                .or_else(|| optional_env("AWS_BEARER_TOKEN_BEDROCK").ok().flatten())
-                .map(SecretString::from);
+            let api_keys = resolve_secret_credentials_with_aliases(
+                &["BEDROCK_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"],
+                &["BEDROCK_API_KEYS"],
+            )?;
+            let api_key = api_keys.first().cloned();
             let proxy_url =
                 optional_env("BEDROCK_PROXY_URL")?.or_else(|| settings.bedrock_proxy_url.clone());
             let proxy_api_key = optional_env("BEDROCK_PROXY_API_KEY")?.map(SecretString::from);
@@ -413,6 +456,7 @@ impl LlmConfig {
             Some(BedrockDirectConfig {
                 region,
                 api_key,
+                api_keys,
                 proxy_url,
                 proxy_api_key,
                 model_id,
@@ -468,6 +512,22 @@ impl LlmConfig {
             smart_routing_cascade: optional_env("SMART_ROUTING_CASCADE")?
                 .and_then(|value| value.parse::<bool>().ok())
                 .unwrap_or(settings.providers.smart_routing_cascade),
+            moa_reference_models: optional_env("MOA_REFERENCE_MODELS")?
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|entry| !entry.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_else(|| settings.providers.moa_reference_models.clone()),
+            moa_aggregator_model: optional_env("MOA_AGGREGATOR_MODEL")?
+                .or_else(|| settings.providers.moa_aggregator_model.clone()),
+            moa_min_successful: parse_optional_env(
+                "MOA_MIN_SUCCESSFUL",
+                settings.providers.moa_min_successful,
+            )?,
         };
 
         Ok(Self {
@@ -529,6 +589,49 @@ impl LlmConfig {
                 .unwrap_or("llama-local"),
         }
     }
+}
+
+fn resolve_secret_credentials(
+    single_env: &str,
+    multi_env: &str,
+) -> Result<Vec<SecretString>, ConfigError> {
+    resolve_secret_credentials_with_aliases(&[single_env], &[multi_env])
+}
+
+fn resolve_secret_credentials_with_aliases(
+    single_envs: &[&str],
+    multi_envs: &[&str],
+) -> Result<Vec<SecretString>, ConfigError> {
+    let mut values: Vec<String> = Vec::new();
+
+    for env_name in single_envs {
+        if let Some(value) = optional_env(env_name)?
+            && !value.trim().is_empty()
+            && !values.iter().any(|existing| existing == value.trim())
+        {
+            values.push(value.trim().to_string());
+        }
+    }
+
+    for env_name in multi_envs {
+        if let Some(raw) = optional_env(env_name)? {
+            for value in split_secret_list(&raw) {
+                if !values.iter().any(|existing| existing == &value) {
+                    values.push(value);
+                }
+            }
+        }
+    }
+
+    Ok(values.into_iter().map(SecretString::from).collect())
+}
+
+fn split_secret_list(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Parse `LLM_EXTRA_HEADERS` value into a list of (key, value) pairs.

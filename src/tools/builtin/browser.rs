@@ -28,6 +28,7 @@ use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use tokio::sync::RwLock;
 
+use super::browser_cloud::{CloudBrowserSession, DEFAULT_CLOUD_IDLE_TIMEOUT, build_provider};
 use crate::context::JobContext;
 use crate::sandbox::docker_chromium::DockerChromiumConfig;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -139,6 +140,10 @@ struct BrowserInstance {
     _user_data_dir: PathBuf,
     /// Whether this instance is connected to a Docker container.
     is_docker: bool,
+    /// Cloud session metadata when connected to a managed remote browser.
+    cloud_session: Option<CloudBrowserSession>,
+    /// Last observed tool activity for idle cloud-session cleanup.
+    last_activity: Instant,
 }
 
 type SharedBrowser = Arc<RwLock<Option<BrowserInstance>>>;
@@ -158,6 +163,8 @@ pub struct BrowserTool {
     profile_dir: PathBuf,
     /// Docker config for Chromium fallback (or forced mode).
     docker_config: Option<DockerChromiumConfig>,
+    /// Optional cloud browser provider selection.
+    cloud_provider: Option<String>,
 }
 
 impl BrowserTool {
@@ -167,6 +174,7 @@ impl BrowserTool {
             instance: Arc::new(RwLock::new(None)),
             profile_dir,
             docker_config: None,
+            cloud_provider: None,
         }
     }
 
@@ -176,6 +184,17 @@ impl BrowserTool {
             instance: Arc::new(RwLock::new(None)),
             profile_dir,
             docker_config: Some(docker_config),
+            cloud_provider: None,
+        }
+    }
+
+    /// Create a BrowserTool that prefers a managed cloud browser provider.
+    pub fn new_with_cloud(profile_dir: PathBuf, cloud_provider: Option<String>) -> Self {
+        Self {
+            instance: Arc::new(RwLock::new(None)),
+            profile_dir,
+            docker_config: None,
+            cloud_provider,
         }
     }
 
@@ -226,21 +245,36 @@ impl BrowserTool {
         let mut guard = self.instance.write().await;
 
         // If we have an instance, verify Chrome is still alive by pinging CDP.
+        let mut stale_instance = None;
         if let Some(ref instance) = *guard {
-            // `browser.pages()` makes a CDP call — if the process died this
-            // will return an error, signalling we must re-launch.
-            if instance.browser.pages().await.is_err() {
-                tracing::warn!("Chrome process appears dead, re-launching");
-                // If it was a Docker instance, try to stop the dead container.
-                if instance.is_docker
-                    && let Some(ref dc) = self.docker_config
-                {
-                    let _ = dc.stop_container();
-                }
-                *guard = None;
+            let should_expire_cloud = instance.cloud_session.is_some()
+                && instance.last_activity.elapsed() >= DEFAULT_CLOUD_IDLE_TIMEOUT;
+            if should_expire_cloud {
+                tracing::info!(
+                    timeout_secs = DEFAULT_CLOUD_IDLE_TIMEOUT.as_secs(),
+                    "Closing idle cloud browser session before reconnect"
+                );
+                stale_instance = guard.take();
             } else {
-                return Ok(());
+                // `browser.pages()` makes a CDP call — if the process died this
+                // will return an error, signalling we must re-launch.
+                if instance.browser.pages().await.is_err() {
+                    tracing::warn!("Chrome process appears dead, re-launching");
+                    stale_instance = guard.take();
+                } else {
+                    return Ok(());
+                }
             }
+        }
+
+        if let Some(instance) = stale_instance.take() {
+            self.shutdown_browser_instance(instance).await;
+        }
+
+        if let Some(provider) = build_provider(self.cloud_provider.as_deref())? {
+            return self
+                .connect_cloud_chrome(&mut guard, provider.as_ref())
+                .await;
         }
 
         // Check if Docker mode is forced via env var.
@@ -311,6 +345,8 @@ impl BrowserTool {
             current_page: None,
             _user_data_dir: self.profile_dir.clone(),
             is_docker: false,
+            cloud_session: None,
+            last_activity: Instant::now(),
         });
 
         Ok(())
@@ -361,9 +397,76 @@ impl BrowserTool {
             current_page: None,
             _user_data_dir: self.profile_dir.clone(),
             is_docker: true,
+            cloud_session: None,
+            last_activity: Instant::now(),
         });
 
         Ok(())
+    }
+
+    /// Connect to a managed cloud browser provider over remote CDP.
+    async fn connect_cloud_chrome(
+        &self,
+        guard: &mut tokio::sync::RwLockWriteGuard<'_, Option<BrowserInstance>>,
+        provider: &dyn super::browser_cloud::CloudBrowserProvider,
+    ) -> Result<(), ToolError> {
+        let session = provider.create_session().await?;
+        let connect_url = session.connect_url.clone();
+        let label = session.label.clone();
+
+        let (browser, mut handler) = Browser::connect(&connect_url).await.map_err(|error| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to connect to {} at {}: {}",
+                label, connect_url, error
+            ))
+        })?;
+
+        tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+        tracing::info!(
+            provider = provider.label(),
+            endpoint = %connect_url,
+            "Connected to managed cloud browser"
+        );
+
+        **guard = Some(BrowserInstance {
+            browser,
+            pages: Vec::new(),
+            current_page: None,
+            _user_data_dir: self.profile_dir.clone(),
+            is_docker: false,
+            cloud_session: Some(session),
+            last_activity: Instant::now(),
+        });
+
+        Ok(())
+    }
+
+    async fn shutdown_browser_instance(&self, mut instance: BrowserInstance) {
+        let was_docker = instance.is_docker;
+        let cloud_session = instance.cloud_session.clone();
+        let tabs = instance.pages.len();
+
+        for state in instance.pages.drain(..) {
+            let _ = state.page.close().await;
+        }
+        drop(instance.browser);
+
+        if was_docker && let Some(ref dc) = self.docker_config {
+            let _ = dc.stop_container();
+        }
+
+        if let Some(session) = cloud_session
+            && let Ok(Some(provider)) = build_provider(self.cloud_provider.as_deref())
+        {
+            let _ = provider.close_session(&session).await;
+        }
+
+        tracing::debug!(tabs, was_docker, "Browser instance shut down");
+    }
+
+    fn touch_activity(instance: &mut BrowserInstance) {
+        instance.last_activity = Instant::now();
     }
 
     /// Navigate to a URL.
@@ -421,6 +524,7 @@ impl BrowserTool {
             role_refs: HashMap::new(),
         });
         instance.current_page = Some(idx);
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "navigated",
@@ -439,18 +543,6 @@ impl BrowserTool {
         instance
             .pages
             .get_mut(idx)
-            .ok_or_else(|| ToolError::ExecutionFailed("Page not found".into()))
-    }
-
-    /// Get the current page state immutably.
-    fn current_page(instance: &BrowserInstance) -> Result<&PageState, ToolError> {
-        let idx = instance
-            .current_page
-            .ok_or_else(|| ToolError::ExecutionFailed("No page open. Navigate first.".into()))?;
-
-        instance
-            .pages
-            .get(idx)
             .ok_or_else(|| ToolError::ExecutionFailed("Page not found".into()))
     }
 
@@ -533,6 +625,7 @@ impl BrowserTool {
         }
 
         state.role_refs = refs;
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "snapshot": output,
@@ -598,6 +691,7 @@ impl BrowserTool {
 
         // Wait briefly for navigation or DOM update
         tokio::time::sleep(Duration::from_millis(500)).await;
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "clicked",
@@ -676,6 +770,7 @@ impl BrowserTool {
 
             let _ = state.page.execute(key_up).await;
         }
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "typed",
@@ -688,9 +783,9 @@ impl BrowserTool {
     async fn screenshot(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         let screenshot_bytes = state
             .page
@@ -710,6 +805,7 @@ impl BrowserTool {
         tokio::fs::write(&screenshot_path, &screenshot_bytes)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to save screenshot: {e}")))?;
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "screenshot_taken",
@@ -722,9 +818,9 @@ impl BrowserTool {
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         let eval_result = state
             .page
@@ -736,6 +832,7 @@ impl BrowserTool {
             .value()
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "result": value,
@@ -746,9 +843,9 @@ impl BrowserTool {
     async fn get_text(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         let page_url = state.page.url().await.ok().flatten().unwrap_or_default();
 
@@ -801,6 +898,7 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         } else {
             text
         };
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "url": page_url,
@@ -817,30 +915,25 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     /// stopped and removed.
     async fn close_session(&self) -> Result<serde_json::Value, ToolError> {
         let mut guard = self.instance.write().await;
-        if let Some(mut instance) = guard.take() {
+        if let Some(instance) = guard.take() {
             let tab_count = instance.pages.len();
             let was_docker = instance.is_docker;
-            for state in instance.pages.drain(..) {
-                let _ = state.page.close().await;
-            }
-            // Drop the browser, which kills the Chrome process (local) or
-            // closes the WebSocket connection (Docker).
-            drop(instance);
-
-            // Stop the Docker container if applicable.
-            if was_docker && let Some(ref dc) = self.docker_config {
-                let _ = dc.stop_container();
-            }
-
+            let cloud_provider = instance
+                .cloud_session
+                .as_ref()
+                .map(|session| format!("{:?}", session.provider).to_ascii_lowercase());
+            self.shutdown_browser_instance(instance).await;
             tracing::info!(
                 tabs = tab_count,
                 docker = was_docker,
+                ?cloud_provider,
                 "Browser session closed"
             );
             Ok(serde_json::json!({
                 "status": "session_closed",
                 "tabs_closed": tab_count,
                 "was_docker": was_docker,
+                "cloud_provider": cloud_provider,
             }))
         } else {
             Ok(serde_json::json!({
@@ -854,8 +947,8 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     async fn list_tabs(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
 
         let mut tabs = Vec::new();
         for (i, state) in instance.pages.iter().enumerate() {
@@ -867,6 +960,7 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
                 "current": is_current,
             }));
         }
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "tabs": tabs,
@@ -891,6 +985,7 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         }
 
         instance.current_page = Some(tab_index);
+        Self::touch_activity(instance);
         let url = instance.pages[tab_index]
             .page
             .url()
@@ -907,12 +1002,16 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     }
 
     /// Scroll the current page.
-    async fn scroll(&self, direction: &str, amount: Option<i64>) -> Result<serde_json::Value, ToolError> {
+    async fn scroll(
+        &self,
+        direction: &str,
+        amount: Option<i64>,
+    ) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         let pixels = amount.unwrap_or(500);
         let js = match direction {
@@ -923,12 +1022,15 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             _ => format!("window.scrollBy(0, {})", pixels), // default: down
         };
 
-        state.page.evaluate_expression(&js).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Scroll failed: {e}"))
-        })?;
+        state
+            .page
+            .evaluate_expression(&js)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Scroll failed: {e}")))?;
 
         // Allow time for lazy-loaded content
         tokio::time::sleep(Duration::from_millis(300)).await;
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "scrolled",
@@ -972,10 +1074,14 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             key_down_builder = key_down_builder.text(t);
         }
 
-        let key_down = key_down_builder.build()
+        let key_down = key_down_builder
+            .build()
             .map_err(|e| ToolError::ExecutionFailed(format!("KeyEvent build error: {e}")))?;
 
-        state.page.execute(key_down).await
+        state
+            .page
+            .execute(key_down)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Key press failed: {e}")))?;
 
         let key_up = DispatchKeyEventParams::builder()
@@ -984,11 +1090,15 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             .build()
             .map_err(|e| ToolError::ExecutionFailed(format!("KeyEvent build error: {e}")))?;
 
-        state.page.execute(key_up).await
+        state
+            .page
+            .execute(key_up)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Key release failed: {e}")))?;
 
         // Brief pause for any triggered navigation/updates
         tokio::time::sleep(Duration::from_millis(200)).await;
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "status": "key_pressed",
@@ -1000,16 +1110,19 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     async fn go_back(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
-        state.page.evaluate_expression("window.history.back()").await
+        state
+            .page
+            .evaluate_expression("window.history.back()")
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Back navigation failed: {e}")))?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
-
         let url = state.page.url().await.ok().flatten().unwrap_or_default();
+        Self::touch_activity(instance);
         Ok(serde_json::json!({
             "status": "went_back",
             "url": url,
@@ -1020,16 +1133,19 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     async fn go_forward(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
-        state.page.evaluate_expression("window.history.forward()").await
+        state
+            .page
+            .evaluate_expression("window.history.forward()")
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Forward navigation failed: {e}")))?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
-
         let url = state.page.url().await.ok().flatten().unwrap_or_default();
+        Self::touch_activity(instance);
         Ok(serde_json::json!({
             "status": "went_forward",
             "url": url,
@@ -1040,9 +1156,9 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     async fn get_images(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         let js = r#"
         (function() {
@@ -1056,10 +1172,17 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         })()
         "#;
 
-        let eval_result = state.page.evaluate_expression(js).await
+        let eval_result = state
+            .page
+            .evaluate_expression(js)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("get_images failed: {e}")))?;
 
-        let images = eval_result.value().cloned().unwrap_or(serde_json::json!([]));
+        let images = eval_result
+            .value()
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "images": images,
@@ -1071,9 +1194,9 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
     async fn get_console(&self) -> Result<serde_json::Value, ToolError> {
         self.ensure_browser().await?;
 
-        let guard = self.instance.read().await;
-        let instance = guard.as_ref().expect("browser instance ensured");
-        let state = Self::current_page(instance)?;
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
 
         // Inject a console capture script if not already present
         let js = r#"
@@ -1103,10 +1226,17 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
         })()
         "#;
 
-        let eval_result = state.page.evaluate_expression(js).await
+        let eval_result = state
+            .page
+            .evaluate_expression(js)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(format!("get_console failed: {e}")))?;
 
-        let messages = eval_result.value().cloned().unwrap_or(serde_json::json!([]));
+        let messages = eval_result
+            .value()
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+        Self::touch_activity(instance);
 
         Ok(serde_json::json!({
             "console_messages": messages,
@@ -1230,7 +1360,10 @@ impl Tool for BrowserTool {
             "back" => self.go_back().await?,
             "forward" => self.go_forward().await?,
             "scroll" => {
-                let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                let direction = params
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("down");
                 let amount = params.get("amount").and_then(|v| v.as_i64());
                 self.scroll(direction, amount).await?
             }
@@ -1340,5 +1473,14 @@ mod tests {
     fn test_new_without_docker() {
         let tool = BrowserTool::new(PathBuf::from("/tmp/test-browser"));
         assert!(tool.docker_config.is_none());
+    }
+
+    #[test]
+    fn test_new_with_cloud_provider() {
+        let tool = BrowserTool::new_with_cloud(
+            PathBuf::from("/tmp/test-browser"),
+            Some("browser_use".to_string()),
+        );
+        assert_eq!(tool.cloud_provider.as_deref(), Some("browser_use"));
     }
 }

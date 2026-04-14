@@ -12,6 +12,7 @@ use crate::db::Database;
 #[cfg(feature = "postgres")]
 use crate::secrets::PostgresSecretsStore;
 use crate::secrets::{SecretsCrypto, SecretsStore};
+use crate::terminal_branding::TerminalBranding;
 use crate::tools::mcp::{
     McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -112,6 +113,7 @@ pub enum McpCommand {
 
 /// Run an MCP command.
 pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     match cmd {
         McpCommand::Add {
             name,
@@ -125,6 +127,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             scopes,
             description,
         } => {
+            branding.print_banner("MCP", Some("Register a model context server"));
             add_server(
                 name,
                 url,
@@ -139,15 +142,27 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             )
             .await
         }
-        McpCommand::Remove { name } => remove_server(name).await,
-        McpCommand::List { verbose } => list_servers(verbose).await,
+        McpCommand::Remove { name } => {
+            branding.print_banner("MCP", Some("Remove a model context server"));
+            remove_server(name).await
+        }
+        McpCommand::List { verbose } => {
+            branding.print_banner("MCP", Some("Inspect configured servers"));
+            list_servers(verbose).await
+        }
         McpCommand::Auth { name, user } => auth_server(name, user).await,
-        McpCommand::Test { name, user } => test_server(name, user).await,
+        McpCommand::Test { name, user } => {
+            branding.print_banner("MCP", Some("Test a model context server"));
+            test_server(name, user).await
+        }
         McpCommand::Toggle {
             name,
             enable,
             disable,
-        } => toggle_server(name, enable, disable).await,
+        } => {
+            branding.print_banner("MCP", Some("Enable or disable a server"));
+            toggle_server(name, enable, disable).await
+        }
     }
 }
 
@@ -165,6 +180,7 @@ async fn add_server(
     scopes: Option<String>,
     description: Option<String>,
 ) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     use crate::tools::mcp::config::McpTransport;
 
     let is_stdio = command.is_some();
@@ -234,8 +250,10 @@ async fn add_server(
     servers.upsert(config.clone());
     save_servers(db.as_deref(), &servers).await?;
 
-    println!();
-    println!("  ✓ Added MCP server '{}'", name);
+    println!(
+        "  {}",
+        branding.good(format!("Added MCP server '{}'", name))
+    );
     match config.transport {
         McpTransport::Stdio => {
             println!(
@@ -253,7 +271,10 @@ async fn add_server(
 
     if requires_auth {
         println!();
-        println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
+        println!(
+            "  {}",
+            branding.muted(format!("Run `thinclaw mcp auth {}` to authenticate.", name))
+        );
     }
 
     println!();
@@ -263,6 +284,7 @@ async fn add_server(
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let db = connect_db().await;
     let mut servers = load_servers(db.as_deref()).await?;
     if !servers.remove(&name) {
@@ -270,8 +292,10 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
     }
     save_servers(db.as_deref(), &servers).await?;
 
-    println!();
-    println!("  ✓ Removed MCP server '{}'", name);
+    println!(
+        "  {}",
+        branding.good(format!("Removed MCP server '{}'", name))
+    );
     println!();
 
     Ok(())
@@ -279,14 +303,14 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
 
 /// List configured MCP servers.
 async fn list_servers(verbose: bool) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let db = connect_db().await;
     let servers = load_servers(db.as_deref()).await?;
 
     if servers.servers.is_empty() {
+        println!("{}", branding.warn("No MCP servers configured."));
         println!();
-        println!("  No MCP servers configured.");
-        println!();
-        println!("  Add a server with:");
+        println!("{}", branding.body_bold("Add a server with:"));
         println!("    thinclaw mcp add <name> <url>");
         println!("    thinclaw mcp add <name> --command <cmd> --args <args>");
         println!();
@@ -299,8 +323,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!();
-    println!("  Configured MCP servers:");
+    println!("{}", branding.body_bold("Configured MCP servers:"));
     println!();
 
     for server in &servers.servers {
@@ -353,7 +376,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
     if !verbose {
         println!();
-        println!("  Use --verbose for more details.");
+        println!("{}", branding.muted("Use --verbose for more details."));
     }
 
     println!();
@@ -363,6 +386,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     // Get server config
     let db = connect_db().await;
     let servers = load_servers(db.as_deref()).await?;
@@ -373,10 +397,13 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Stdio servers don't use OAuth
     if server.is_stdio() {
-        println!();
+        branding.print_banner("MCP", Some("Authenticate a model context server"));
         println!(
-            "  Server '{}' uses stdio transport and does not require authentication.",
-            name
+            "{}",
+            branding.warn(format!(
+                "Server '{}' uses stdio transport and does not require authentication.",
+                name
+            ))
         );
         println!();
         return Ok(());
@@ -387,8 +414,11 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Check if already authenticated
     if is_authenticated(&server, &secrets, &user_id).await {
-        println!();
-        println!("  Server '{}' is already authenticated.", name);
+        branding.print_banner("MCP", Some("Authenticate a model context server"));
+        println!(
+            "{}",
+            branding.good(format!("Server '{}' is already authenticated.", name))
+        );
         println!();
         print!("  Re-authenticate? [y/N]: ");
         std::io::stdout().flush()?;
@@ -402,30 +432,38 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         println!();
     }
 
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!(
-        "║  {:^62}║",
-        format!("{} Authentication", name.to_uppercase())
-    );
-    println!("╚════════════════════════════════════════════════════════════════╝");
-    println!();
+    branding.print_banner("MCP", Some(&format!("Authenticate {}", name)));
 
     // Perform OAuth flow (supports both pre-configured OAuth and DCR)
     match authorize_mcp_server(&server, &secrets, &user_id).await {
         Ok(_token) => {
             println!();
-            println!("  ✓ Successfully authenticated with '{}'!", name);
+            println!(
+                "  {}",
+                branding.good(format!("Successfully authenticated with '{}'!", name))
+            );
             println!();
-            println!("  You can now use tools from this server.");
+            println!(
+                "  {}",
+                branding.body("You can now use tools from this server.")
+            );
             println!();
         }
         Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
             println!();
-            println!("  ✗ Server does not support OAuth authentication.");
+            println!(
+                "  {}",
+                branding.bad("Server does not support OAuth authentication.")
+            );
             println!();
-            println!("  The server may require a different authentication method,");
-            println!("  or you may need to configure OAuth manually:");
+            println!(
+                "  {}",
+                branding.body("The server may require a different authentication method.")
+            );
+            println!(
+                "  {}",
+                branding.body("You may need to configure OAuth manually:")
+            );
             println!();
             println!("    thinclaw mcp remove {}", name);
             println!(
@@ -436,7 +474,10 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         }
         Err(e) => {
             println!();
-            println!("  ✗ Authentication failed: {}", e);
+            println!(
+                "  {}",
+                branding.bad(format!("Authentication failed: {}", e))
+            );
             println!();
             return Err(e.into());
         }
@@ -447,6 +488,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Test connection to an MCP server.
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     // Get server config
     let db = connect_db().await;
     let servers = load_servers(db.as_deref()).await?;
@@ -455,8 +497,10 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
 
-    println!();
-    println!("  Testing connection to '{}'...", name);
+    println!(
+        "  {}",
+        branding.accent(format!("Testing connection to '{}'...", name))
+    );
 
     // Create client — use from_config for automatic transport dispatch
     if server.is_stdio() {
@@ -464,7 +508,10 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         let client = match McpClient::new_stdio(&server) {
             Ok(c) => c,
             Err(e) => {
-                println!("  ✗ Failed to spawn stdio server: {}", e);
+                println!(
+                    "  {}",
+                    branding.bad(format!("Failed to spawn stdio server: {}", e))
+                );
                 println!();
                 return Ok(());
             }
@@ -473,12 +520,12 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // Test connection
         match client.test_connection().await {
             Ok(()) => {
-                println!("  ✓ Connection successful!");
+                println!("  {}", branding.good("Connection successful!"));
                 println!();
                 print_tools(&client).await;
             }
             Err(e) => {
-                println!("  ✗ Connection failed: {}", e);
+                println!("  {}", branding.bad(format!("Connection failed: {}", e)));
             }
         }
     } else {
@@ -492,8 +539,11 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         } else if server.requires_auth() {
             println!();
             println!(
-                "  ✗ Not authenticated. Run 'thinclaw mcp auth {}' first.",
-                name
+                "  {}",
+                branding.bad(format!(
+                    "Not authenticated. Run `thinclaw mcp auth {}` first.",
+                    name
+                ))
             );
             println!();
             return Ok(());
@@ -504,7 +554,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         // Test connection
         match client.test_connection().await {
             Ok(()) => {
-                println!("  ✓ Connection successful!");
+                println!("  {}", branding.good("Connection successful!"));
                 println!();
                 print_tools(&client).await;
             }
@@ -513,16 +563,25 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                 if err_str.contains("401") || err_str.contains("requires authentication") {
                     if has_tokens {
                         println!(
-                            "  ✗ Authentication failed (token may be expired). Try re-authenticating:"
+                            "  {}",
+                            branding.bad(
+                                "Authentication failed (token may be expired). Try re-authenticating:"
+                            )
                         );
                         println!("    thinclaw mcp auth {}", name);
                     } else {
-                        println!("  ✗ Server requires authentication.");
+                        println!("  {}", branding.bad("Server requires authentication."));
                         println!();
-                        println!("  Run 'thinclaw mcp auth {}' to authenticate.", name);
+                        println!(
+                            "  {}",
+                            branding.muted(format!(
+                                "Run `thinclaw mcp auth {}` to authenticate.",
+                                name
+                            ))
+                        );
                     }
                 } else {
-                    println!("  ✗ Connection failed: {}", e);
+                    println!("  {}", branding.bad(format!("Connection failed: {}", e)));
                 }
             }
         }
@@ -569,6 +628,7 @@ async fn print_tools(client: &McpClient) {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let db = connect_db().await;
     let mut servers = load_servers(db.as_deref()).await?;
 
@@ -589,7 +649,10 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
 
     let status = if new_state { "enabled" } else { "disabled" };
     println!();
-    println!("  ✓ Server '{}' is now {}.", name, status);
+    println!(
+        "  {}",
+        branding.good(format!("Server '{}' is now {}.", name, status))
+    );
     println!();
 
     Ok(())

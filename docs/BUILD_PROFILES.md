@@ -105,6 +105,10 @@ cargo build --all-features
 | `bundled-wasm` | Embed all WASM extensions in binary | (compile-time includes, +6-13 MB) |
 | `voice` | Voice wake word detection | cpal (audio capture) |
 
+Linux note: the default `light` profile does not include `voice`, so a normal
+Linux build does not need ALSA development headers. If you opt into
+`--features light,voice` or `--all-features`, install `libasound2-dev`.
+
 ## Profile Composition
 
 ```
@@ -115,10 +119,21 @@ full = light + web-gateway + repl + tunnel + docker-sandbox
 
 ## CI/CD
 
-- **Tests:** Always run with `--all-features` to ensure nothing is broken.
+CI runs a **feature-matrix** job that verifies every documented profile compiles,
+passes clippy, and compiles tests:
+
+| CI Check | Profiles Tested |
+|----------|----------------|
+| `cargo check` | light (default), full, desktop, minimal-libsql, minimal-postgres |
+| `cargo clippy` | All of the above |
+| `cargo test --no-run` | All of the above (compile-only) |
+| `cargo test` (execution) | `--all-features` (with PostgreSQL service) |
+
+- **Feature matrix:** Catches broken `#[cfg(feature = "...")]` gates before they ship.
+  The `light` profile is especially important since it's what `cargo install thinclaw` produces.
+- **Full test suite:** Runs with `--all-features` and a live PostgreSQL service for
+  integration coverage.
 - **Release builds:** Produce binaries with the `full` profile for maximum compatibility.
-- **Musl targets:** Fully static Linux binaries (no libc dependency) for
-  `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
 
 ## Migration from `full` Default
 

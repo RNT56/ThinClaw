@@ -5,16 +5,20 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::agent::checkpoint;
 use crate::agent::submission::SubmissionResult;
+use crate::agent::vibe::{builtin_vibe_names, preview, resolve_vibe};
 use crate::agent::{Agent, MessageIntent};
 use crate::agent::{mutate_thread_runtime, session::Session};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
 use crate::tools::builtin::llm_tools::{ModelOverride, model_override_scope_key_from_metadata};
+use crate::tui::skin::CliSkin;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -25,6 +29,23 @@ fn format_count(n: u64, suffix: &str) -> String {
     } else {
         format!("{} {}", n, suffix)
     }
+}
+
+fn format_checkpoint_age(timestamp: DateTime<Utc>) -> String {
+    let age = Utc::now().signed_duration_since(timestamp);
+    if age.num_seconds() < 60 {
+        format!("{}s ago", age.num_seconds().max(0))
+    } else if age.num_minutes() < 60 {
+        format!("{}m ago", age.num_minutes())
+    } else if age.num_hours() < 24 {
+        format!("{}h ago", age.num_hours())
+    } else {
+        format!("{}d ago", age.num_days())
+    }
+}
+
+fn rollback_usage() -> &'static str {
+    "Usage:\n  /rollback list\n  /rollback diff <N>\n  /rollback <N> [file]"
 }
 
 impl Agent {
@@ -389,6 +410,7 @@ impl Agent {
                 "  /context          List context sources injected into the prompt\n",
                 "  /context detail   Show full injected context\n",
                 "  /model [name]     Show or switch the active model\n",
+                "  /rollback ...     Filesystem rollback command family (list/diff/restore)\n",
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
@@ -403,6 +425,8 @@ impl Agent {
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
                 "  /resume <id>      Resume from checkpoint\n",
+                "  /vibe [name]      Set, show, or clear a temporary session vibe\n",
+                "  /skin [name]      Show or describe the configured CLI skin\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",
@@ -424,6 +448,75 @@ impl Agent {
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION")
             ))),
+
+            "rollback" => Ok(SubmissionResult::response(
+                self.handle_rollback_command(thread_id, args).await,
+            )),
+
+            "vibe" => {
+                let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
+                    return Ok(SubmissionResult::error(
+                        "Could not find the active session for this thread.",
+                    ));
+                };
+                let mut session = session.lock().await;
+                if args.is_empty() {
+                    return Ok(SubmissionResult::response(
+                        match session.active_vibe.as_ref() {
+                            Some(vibe) => {
+                                format!("Current vibe: {}\n\n{}", vibe.name, preview(vibe))
+                            }
+                            None => format!(
+                                "Current vibe: natural\n\nBuilt-in vibes: {}",
+                                builtin_vibe_names().collect::<Vec<_>>().join(", ")
+                            ),
+                        },
+                    ));
+                }
+
+                if args.len() == 1 && args[0].eq_ignore_ascii_case("reset") {
+                    session.active_vibe = None;
+                    return Ok(SubmissionResult::ok_with_message(
+                        "Vibe cleared. Back to natural voice.",
+                    ));
+                }
+
+                let requested = args.join(" ");
+                let vibe = resolve_vibe(&requested);
+                let preview_text = preview(&vibe).into_owned();
+                let vibe_name = vibe.name.clone();
+                session.active_vibe = Some(vibe);
+                Ok(SubmissionResult::response(format!(
+                    "Vibe set: {}\n\n{}",
+                    vibe_name, preview_text
+                )))
+            }
+
+            "skin" => {
+                let available = CliSkin::available_names().join(", ");
+                if args.is_empty() || args[0].eq_ignore_ascii_case("current") {
+                    Ok(SubmissionResult::response(format!(
+                        "Current CLI skin: {}\nAvailable skins: {}\n\nUse /skin <name> in your local CLI client to switch immediately.",
+                        self.config.cli_skin, available
+                    )))
+                } else if args[0].eq_ignore_ascii_case("list") {
+                    Ok(SubmissionResult::response(format!(
+                        "Available skins: {}\n\nUse /skin <name> in your local CLI client to switch immediately.",
+                        available
+                    )))
+                } else if args[0].eq_ignore_ascii_case("reset") {
+                    Ok(SubmissionResult::response(format!(
+                        "Local clients can reset to their configured default skin. This agent is currently configured for '{}'.",
+                        self.config.cli_skin
+                    )))
+                } else {
+                    let requested = args.join(" ");
+                    Ok(SubmissionResult::response(format!(
+                        "Skin '{}' is available as a local client preset. Current configured skin: {}\nAvailable skins: {}",
+                        requested, self.config.cli_skin, available
+                    )))
+                }
+            }
 
             "tools" => {
                 let tools = self.tools().list().await;
@@ -752,6 +845,152 @@ impl Agent {
         }
 
         Ok(SubmissionResult::response(out))
+    }
+
+    async fn handle_rollback_command(&self, thread_id: Uuid, args: &[String]) -> String {
+        if !self.config.checkpoints_enabled {
+            return "Filesystem checkpoints are disabled in settings.".to_string();
+        }
+
+        let fallback_root = self
+            .config
+            .workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let Some(project_root) =
+            checkpoint::resolve_thread_root(&thread_id.to_string(), fallback_root.as_deref())
+        else {
+            return "Could not resolve the current project root for rollback.".to_string();
+        };
+
+        let thread_scope = thread_id.to_string();
+
+        if args.is_empty() || args[0].eq_ignore_ascii_case("help") {
+            return format!(
+                "{}\n\nActive project: {}",
+                rollback_usage(),
+                project_root.display()
+            );
+        }
+
+        match args[0].as_str() {
+            "list" => {
+                let entries = match checkpoint::list_checkpoints(&project_root).await {
+                    Ok(entries) => entries,
+                    Err(e) => return format!("Error listing checkpoints: {}", e),
+                };
+                if entries.is_empty() {
+                    return format!(
+                        "No filesystem checkpoints found for {}.",
+                        project_root.display()
+                    );
+                }
+
+                let mut out = format!("Filesystem checkpoints for {}:\n", project_root.display());
+                for (idx, entry) in entries.iter().enumerate() {
+                    out.push_str(&format!(
+                        "  {}. {}  {}  {}\n",
+                        idx + 1,
+                        &entry.commit_hash[..entry.commit_hash.len().min(12)],
+                        format_checkpoint_age(entry.timestamp),
+                        entry.summary
+                    ));
+                }
+                out
+            }
+            "diff" => {
+                let Some(raw_index) = args.get(1) else {
+                    return rollback_usage().to_string();
+                };
+                if args.len() != 2 {
+                    return format!(
+                        "{}\n\n`/rollback diff <N>` does not take a file path.",
+                        rollback_usage()
+                    );
+                }
+                let index = match raw_index.parse::<usize>().ok().filter(|n| *n > 0) {
+                    Some(index) => index,
+                    None => {
+                        return "Rollback index must be a positive integer.".to_string();
+                    }
+                };
+                let entries = match checkpoint::list_checkpoints(&project_root).await {
+                    Ok(entries) => entries,
+                    Err(e) => return format!("Error listing checkpoints: {}", e),
+                };
+                let Some(entry) = entries.get(index - 1) else {
+                    return format!(
+                        "Checkpoint {} not found. Run `/rollback list` to inspect available checkpoints.",
+                        index
+                    );
+                };
+                let diff = match checkpoint::diff(&project_root, &entry.commit_hash).await {
+                    Ok(diff) => diff,
+                    Err(e) => return format!("Error computing diff: {}", e),
+                };
+                if diff.trim().is_empty() {
+                    format!(
+                        "No differences between checkpoint {} and the current project state.",
+                        index
+                    )
+                } else {
+                    format!(
+                        "Diff for checkpoint {} ({})\n\n{}",
+                        index,
+                        &entry.commit_hash[..entry.commit_hash.len().min(12)],
+                        diff.trim_end()
+                    )
+                }
+            }
+            _ => {
+                let index = match args[0].parse::<usize>().ok().filter(|n| *n > 0) {
+                    Some(index) => index,
+                    None => return "Rollback index must be a positive integer.".to_string(),
+                };
+
+                let file = if args.len() > 1 {
+                    Some(args[1..].join(" "))
+                } else {
+                    None
+                };
+
+                let entries = match checkpoint::list_checkpoints(&project_root).await {
+                    Ok(entries) => entries,
+                    Err(e) => return format!("Error listing checkpoints: {}", e),
+                };
+                let Some(entry) = entries.get(index - 1) else {
+                    return format!(
+                        "Checkpoint {} not found. Run `/rollback list` to inspect available checkpoints.",
+                        index
+                    );
+                };
+
+                if let Err(e) = checkpoint::restore_with_scope(
+                    &thread_scope,
+                    &project_root,
+                    &entry.commit_hash,
+                    file.as_deref(),
+                )
+                .await
+                {
+                    return format!("Error restoring checkpoint: {}", e);
+                }
+
+                match file {
+                    Some(file) => format!(
+                        "Restored {} from checkpoint {} ({})",
+                        file,
+                        index,
+                        &entry.commit_hash[..entry.commit_hash.len().min(12)]
+                    ),
+                    None => format!(
+                        "Restored project state from checkpoint {} ({})",
+                        index,
+                        &entry.commit_hash[..entry.commit_hash.len().min(12)]
+                    ),
+                }
+            }
+        }
     }
 
     /// Handle legacy command routing from the Router (job commands that go through

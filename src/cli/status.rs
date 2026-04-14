@@ -6,23 +6,29 @@
 use std::path::PathBuf;
 
 use crate::settings::Settings;
+use crate::terminal_branding::TerminalBranding;
 
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let settings = Settings::default();
 
-    println!("ThinClaw Status");
-    println!("===============\n");
+    branding.print_banner(
+        "ThinClaw Status",
+        Some("Runtime health, configured surfaces, and storage posture at a glance."),
+    );
 
     // Version
     println!(
-        "  Version:     {} v{}",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        "{}",
+        branding.key_value(
+            "Version",
+            format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        )
     );
 
     // Database
-    print!("  Database:    ");
+    print!("{}", branding.muted("  Database      "));
     let db_backend = std::env::var("DATABASE_BACKEND")
         .ok()
         .unwrap_or_else(|| "postgres".to_string());
@@ -55,7 +61,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // LLM Backend
-    print!("  LLM Backend: ");
+    print!("{}", branding.muted("  LLM backend   "));
     let llm_backend = std::env::var("LLM_BACKEND")
         .ok()
         .unwrap_or_else(|| "openai_compatible".to_string());
@@ -63,7 +69,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Secrets (auto-detect from env only; skip keychain probe to avoid
     // triggering macOS system password dialogs on a simple status check)
-    print!("  Secrets:     ");
+    print!("{}", branding.muted("  Secrets       "));
     if std::env::var("SECRETS_MASTER_KEY").is_ok() {
         println!("configured (env)");
     } else {
@@ -75,7 +81,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // Embeddings
-    print!("  Embeddings:  ");
+    print!("{}", branding.muted("  Embeddings    "));
     let emb_enabled = settings.embeddings.enabled
         || std::env::var("OPENAI_API_KEY").is_ok()
         || std::env::var("EMBEDDING_ENABLED")
@@ -91,7 +97,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // WASM tools
-    print!("  WASM Tools:  ");
+    print!("{}", branding.muted("  WASM tools    "));
     let tools_dir = settings
         .wasm
         .tools_dir
@@ -105,7 +111,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // WASM channels
-    print!("  Channels:    ");
+    print!("{}", branding.muted("  Channels      "));
     let channels_dir = settings
         .channels
         .wasm_channels_dir
@@ -127,7 +133,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     println!("{}", channel_info.join(", "));
 
     // Heartbeat
-    print!("  Heartbeat:   ");
+    print!("{}", branding.muted("  Heartbeat     "));
     let hb_enabled = settings.heartbeat.enabled
         || std::env::var("HEARTBEAT_ENABLED")
             .map(|v| v == "true")
@@ -139,7 +145,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // MCP servers
-    print!("  MCP Servers: ");
+    print!("{}", branding.muted("  MCP servers   "));
     match crate::tools::mcp::config::load_mcp_servers().await {
         Ok(servers) => {
             let enabled = servers.servers.iter().filter(|s| s.enabled).count();
@@ -151,8 +157,8 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Config path
     println!(
-        "\n  Config:      {}",
-        crate::bootstrap::thinclaw_env_path().display()
+        "\n{}",
+        branding.key_value("Config", crate::bootstrap::thinclaw_env_path().display())
     );
 
     Ok(())

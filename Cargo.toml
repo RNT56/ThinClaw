@@ -102,6 +102,7 @@ cron = "0.13"
 # Safety/sanitization
 regex = "1"
 aho-corasick = "1"
+unicode-normalization = "0.1"
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
@@ -141,7 +142,7 @@ ed25519-dalek = { version = "2", features = ["std"] }
 hex = "0.4"
 
 # Multi-provider LLM support
-rig-core = "0.30"
+rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
 
 # Docker sandbox
 bollard = "0.18"
@@ -169,7 +170,7 @@ chromiumoxide = "0.9.1"
 ratatui = "0.30.0"
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 
 # Document extraction (feature gated)
 pdf-extract = { version = "0.7", optional = true }
@@ -201,7 +202,6 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 criterion = "0.5"

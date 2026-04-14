@@ -54,7 +54,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Tool implementation guidance | [../src/tools/README.md](../src/tools/README.md) |
 | Memory and workspace model | [../src/workspace/README.md](../src/workspace/README.md) |
 | Deep network model | [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md) |
-| Feature-parity tracking | [../FEATURE_PARITY.md](../FEATURE_PARITY.md) |
+| Parity + ThinClaw-first feature tracking | [../FEATURE_PARITY.md](../FEATURE_PARITY.md) |
 
 ## Archive Boundary
 

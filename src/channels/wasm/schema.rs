@@ -62,6 +62,13 @@ pub struct ChannelCapabilitiesFile {
     #[serde(default)]
     pub description: Option<String>,
 
+    /// Optional platform formatting guidance for prompt assembly.
+    ///
+    /// This lets WASM-backed channels declare their own formatting/rendering
+    /// expectations so prompt assembly does not need channel-name switches.
+    #[serde(default)]
+    pub formatting_hints: Option<String>,
+
     /// Setup configuration for the wizard.
     #[serde(default)]
     pub setup: SetupSchema,
@@ -121,6 +128,11 @@ impl ChannelCapabilitiesFile {
             .and_then(|c| c.webhook.as_ref())
             .and_then(|w| w.secret_name.clone())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
+    }
+
+    /// Get formatting hints declared by the channel package, if any.
+    pub fn formatting_hints(&self) -> Option<&str> {
+        self.formatting_hints.as_deref()
     }
 }
 
@@ -390,6 +402,7 @@ mod tests {
             "type": "channel",
             "name": "slack",
             "description": "Slack Events API channel",
+            "formatting_hints": "Use Slack mrkdwn. Avoid triple backticks when plain text will do.",
             "capabilities": {
                 "http": {
                     "allowlist": [
@@ -421,6 +434,10 @@ mod tests {
         assert_eq!(
             file.description,
             Some("Slack Events API channel".to_string())
+        );
+        assert_eq!(
+            file.formatting_hints(),
+            Some("Use Slack mrkdwn. Avoid triple backticks when plain text will do.")
         );
 
         let caps = file.to_capabilities();

@@ -1,0 +1,20 @@
+name = "cockpit"
+tagline = "Humanist Cockpit for operators who like a calm command deck."
+accent = "#6AA6FF"
+border = "#52607D"
+body = "#ECF1F8"
+muted = "#919EB0"
+good = "#78D9AD"
+warn = "#F4C468"
+bad = "#FF8080"
+header = "#6AA6FF"
+prompt_symbol = "›"
+ascii_art = [
+  '        .--------------------------------------.',
+  '       /  []  []  []  []  []  []  []  []       \',
+  '      |==========================================|',
+  '      |  NAV  COMMS  MAP  TOOLS  MEMORY  STATUS  |',
+  '      |__________________________________________|',
+  '           HUMANIST FLIGHT DECK ONLINE',
+]
+tool_emojis = { shell = "🛠", browser = "🛰", memory = "🧠", search_files = "🗂", todo = "📋", subagent = "🧭" }

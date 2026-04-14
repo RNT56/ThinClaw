@@ -40,6 +40,7 @@ pub mod sessions;
 pub mod status;
 pub mod subagent_spawn;
 mod tool;
+pub mod trajectory;
 mod update;
 
 pub use agents::{AgentCommand, run_agents_command};
@@ -68,6 +69,7 @@ pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
 
 use clap::{Parser, Subcommand};
@@ -105,6 +107,7 @@ pub struct Cli {
     pub no_onboard: bool,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run the agent (default if no subcommand given)
@@ -206,6 +209,10 @@ pub enum Command {
     /// Browser automation (headless Chrome)
     #[command(subcommand)]
     Browser(BrowserCommand),
+
+    /// Export or inspect archived agent trajectories
+    #[command(subcommand)]
+    Trajectory(TrajectoryCommand),
 
     /// Check for updates and self-update
     #[command(subcommand)]

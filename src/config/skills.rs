@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
-use crate::settings::Settings;
+use crate::settings::{Settings, SkillTapConfig, WellKnownSkillRegistryConfig};
 
 /// Skills system configuration.
 #[derive(Debug, Clone)]
@@ -19,6 +19,12 @@ pub struct SkillsConfig {
     pub max_active_skills: usize,
     /// Maximum total context tokens allocated to skill prompts.
     pub max_context_tokens: usize,
+    /// Additional GitHub taps used for skill federation.
+    pub skill_taps: Vec<SkillTapConfig>,
+    /// Additional `/.well-known/skills` registries.
+    pub well_known_skill_registries: Vec<WellKnownSkillRegistryConfig>,
+    /// Quarantine directory for externally sourced skills before installation.
+    pub quarantine_dir: PathBuf,
 }
 
 impl Default for SkillsConfig {
@@ -29,6 +35,9 @@ impl Default for SkillsConfig {
             installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
             max_context_tokens: 4000,
+            skill_taps: Vec::new(),
+            well_known_skill_registries: Vec::new(),
+            quarantine_dir: default_quarantine_dir(),
         }
     }
 }
@@ -49,6 +58,13 @@ fn default_installed_skills_dir() -> PathBuf {
         .join("installed_skills")
 }
 
+fn default_quarantine_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".thinclaw")
+        .join("skills_quarantine")
+}
+
 impl SkillsConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
@@ -61,6 +77,11 @@ impl SkillsConfig {
                 .unwrap_or_else(default_installed_skills_dir),
             max_active_skills: parse_optional_env("SKILLS_MAX_ACTIVE", 3)?,
             max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
+            skill_taps: settings.skill_taps.clone(),
+            well_known_skill_registries: settings.well_known_skill_registries.clone(),
+            quarantine_dir: optional_env("SKILLS_QUARANTINE_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_quarantine_dir),
         })
     }
 }

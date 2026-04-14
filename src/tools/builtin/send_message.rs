@@ -15,18 +15,21 @@ use crate::tools::tool::{
 };
 
 /// Supported platform identifiers.
-const SUPPORTED_PLATFORMS: &[&str] = &[
-    "telegram", "discord", "slack", "email", "nostr",
-];
+const SUPPORTED_PLATFORMS: &[&str] = &["telegram", "discord", "slack", "email", "nostr"];
 
 /// Callback for dispatching messages to the gateway's channel infrastructure.
 ///
 /// This is injected at registration time. The callback receives:
 /// (platform, recipient, text, thread_id) and returns either a message ID or error.
 pub type SendMessageFn = Arc<
-    dyn Fn(String, String, String, Option<String>) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
-        > + Send
+    dyn Fn(
+            String,
+            String,
+            String,
+            Option<String>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -216,9 +219,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_with_mock() {
         let send_fn: SendMessageFn = Arc::new(|platform, recipient, _text, _thread| {
-            Box::pin(async move {
-                Ok(format!("msg_{}_{}", platform, recipient))
-            })
+            Box::pin(async move { Ok(format!("msg_{}_{}", platform, recipient)) })
         });
 
         let tool = SendMessageTool::new().with_send_fn(send_fn);

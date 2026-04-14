@@ -16,6 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::context_monitor::ContextPressure;
+use crate::agent::vibe::VibeOverlay;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, ToolCall};
 
@@ -47,6 +49,9 @@ pub struct Session {
     /// Tools that have been auto-approved for this session ("always approve").
     #[serde(default)]
     pub auto_approved_tools: HashSet<String>,
+    /// Temporary session-level vibe overlay. This is intentionally not persisted.
+    #[serde(skip)]
+    pub active_vibe: Option<VibeOverlay>,
 }
 
 impl Session {
@@ -68,6 +73,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
+            active_vibe: None,
         }
     }
 
@@ -94,6 +100,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
+            active_vibe: None,
         }
     }
 
@@ -275,6 +282,8 @@ pub struct ThreadRuntimeState {
     pub auto_approved_tools: Vec<String>,
     #[serde(default)]
     pub active_subagents: Vec<PersistedSubagentState>,
+    #[serde(default)]
+    pub last_context_pressure: Option<ContextPressure>,
 }
 
 /// A conversation thread within a session.
@@ -341,6 +350,7 @@ impl Thread {
         model_override: Option<crate::tools::builtin::llm_tools::ModelOverride>,
         auto_approved_tools: impl IntoIterator<Item = String>,
         active_subagents: Vec<PersistedSubagentState>,
+        last_context_pressure: Option<ContextPressure>,
     ) -> ThreadRuntimeState {
         let mut auto_approved_tools: Vec<String> = auto_approved_tools.into_iter().collect();
         auto_approved_tools.sort();
@@ -353,6 +363,7 @@ impl Thread {
             model_override,
             auto_approved_tools,
             active_subagents,
+            last_context_pressure,
         }
     }
 
@@ -827,6 +838,7 @@ mod tests {
                 parent_thread_id: "thread-1".to_string(),
                 reinject_result: true,
             }],
+            Some(ContextPressure::Warning),
         );
 
         let json = serde_json::to_value(&runtime).expect("serialize runtime");
@@ -855,6 +867,10 @@ mod tests {
         );
         assert_eq!(restored.active_subagents.len(), 1);
         assert_eq!(
+            restored.last_context_pressure,
+            Some(ContextPressure::Warning)
+        );
+        assert_eq!(
             restored.active_subagents[0]
                 .request
                 .allowed_skills
@@ -876,6 +892,7 @@ mod tests {
             model_override: None,
             auto_approved_tools: vec![],
             active_subagents: vec![],
+            last_context_pressure: None,
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);

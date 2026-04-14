@@ -20,7 +20,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::context::JobContext;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+};
 
 /// Maximum output size (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -93,9 +95,9 @@ impl ExecuteCodeTool {
         let script_name = format!("thinclaw_exec_{}{}", uuid::Uuid::new_v4().simple(), ext);
         let script_path = tmp_dir.join(&script_name);
 
-        tokio::fs::write(&script_path, code).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to write script: {}", e))
-        })?;
+        tokio::fs::write(&script_path, code)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write script: {}", e)))?;
 
         let workdir = self
             .working_dir
@@ -286,8 +288,7 @@ impl Tool for ExecuteCodeTool {
         let timeout = Duration::from_secs(timeout_secs);
 
         let start = std::time::Instant::now();
-        let (output, exit_code, exec_duration) =
-            self.execute_code(language, code, timeout).await?;
+        let (output, exit_code, exec_duration) = self.execute_code(language, code, timeout).await?;
 
         let result = serde_json::json!({
             "output": output,
@@ -348,10 +349,7 @@ mod tests {
         assert_eq!(args, vec!["/tmp/test.py".to_string()]);
 
         let args = ExecuteCodeTool::interpreter_args("typescript", "/tmp/test.ts");
-        assert_eq!(
-            args,
-            vec!["tsx".to_string(), "/tmp/test.ts".to_string()]
-        );
+        assert_eq!(args, vec!["tsx".to_string(), "/tmp/test.ts".to_string()]);
     }
 
     #[tokio::test]
@@ -371,14 +369,19 @@ mod tests {
 
         // Might fail if python3 is not installed
         if let Ok(output) = result {
-            assert!(output
-                .result
-                .get("output")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .contains("hello from python"));
-            assert_eq!(output.result.get("exit_code").unwrap(), &serde_json::json!(0));
+            assert!(
+                output
+                    .result
+                    .get("output")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .contains("hello from python")
+            );
+            assert_eq!(
+                output.result.get("exit_code").unwrap(),
+                &serde_json::json!(0)
+            );
         }
     }
 
@@ -398,13 +401,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result
-            .result
-            .get("output")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains("42"));
+        assert!(
+            result
+                .result
+                .get("output")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("42")
+        );
     }
 
     #[tokio::test]
@@ -430,10 +435,12 @@ mod tests {
     fn test_code_length_validation() {
         let tool = ExecuteCodeTool::new();
         let schema = tool.parameters_schema();
-        assert!(schema["properties"]["code"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("code"));
+        assert!(
+            schema["properties"]["code"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("code")
+        );
     }
 
     #[test]

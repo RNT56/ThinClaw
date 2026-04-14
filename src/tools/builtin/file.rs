@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use tokio::fs;
 
+use crate::agent::checkpoint;
 use crate::context::JobContext;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
@@ -159,6 +160,22 @@ fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, Too
     }
 
     Ok(resolved)
+}
+
+async fn checkpoint_before_mutation(
+    ctx: &JobContext,
+    path: &Path,
+    base_dir: Option<&Path>,
+    reason: &str,
+) -> Result<(), ToolError> {
+    match checkpoint::ensure_checkpoint(ctx, path, base_dir, reason).await {
+        Ok(true) | Ok(false) => Ok(()),
+        Err(checkpoint::CheckpointError::Disabled) => Ok(()),
+        Err(err) => Err(ToolError::ExecutionFailed(format!(
+            "Failed to create filesystem checkpoint: {}",
+            err
+        ))),
+    }
 }
 
 /// Read file contents tool.
@@ -336,7 +353,7 @@ impl Tool for WriteFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -363,6 +380,8 @@ impl Tool for WriteFileTool {
         }
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: write_file").await?;
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -656,7 +675,7 @@ impl Tool for ApplyPatchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -672,6 +691,9 @@ impl Tool for ApplyPatchTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: apply_patch")
+            .await?;
 
         // Read current content
         let content = fs::read_to_string(&path)

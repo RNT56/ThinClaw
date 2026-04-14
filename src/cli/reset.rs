@@ -17,6 +17,7 @@ use crate::secrets::keychain::{
     CLAUDE_CODE_API_KEY_ACCOUNT, delete_api_key, delete_master_key, get_api_key, has_master_key,
 };
 use crate::setup::{confirm, print_warning};
+use crate::terminal_branding::TerminalBranding;
 
 #[derive(Args, Debug, Clone)]
 pub struct ResetCommand {
@@ -82,14 +83,22 @@ const POSTGRES_RESET_TABLES: &[&str] = &[
 ];
 
 pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
+    branding.print_banner("Reset", Some("Clear ThinClaw runtime state"));
     print_warning(
         "Full reset deletes ThinClaw state from the configured database, ~/.thinclaw, and ThinClaw-managed keychain entries.",
     );
     println!(
-        "It does not uninstall the ThinClaw binary or remove launchd/systemd service definitions."
+        "{}",
+        branding.body(
+            "It does not uninstall the ThinClaw binary or remove launchd/systemd service definitions."
+        )
     );
     println!(
-        "If a service is running, stop it first so it does not recreate state during the reset."
+        "{}",
+        branding.body(
+            "If a service is running, stop it first so it does not recreate state during the reset."
+        )
     );
     println!();
 
@@ -107,12 +116,21 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     let local_result = reset_local_state(&thinclaw_home_dir())?;
     let keychain_result = reset_keychain_entries().await;
 
-    println!("ThinClaw reset complete.");
-    println!("  Database: {}", db_result.describe());
-    println!("  Local state: {}", local_result.describe());
-    println!("  Keychain: {}", keychain_result.describe());
+    println!("{}", branding.good("ThinClaw reset complete."));
+    println!("{}", branding.key_value("Database", db_result.describe()));
+    println!(
+        "{}",
+        branding.key_value("Local state", local_result.describe())
+    );
+    println!(
+        "{}",
+        branding.key_value("Keychain", keychain_result.describe())
+    );
     println!();
-    println!("Next step: run `thinclaw onboard` to set ThinClaw up again.");
+    println!(
+        "{}",
+        branding.muted("Next step: run `thinclaw onboard` to set ThinClaw up again.")
+    );
 
     Ok(())
 }

@@ -15,6 +15,7 @@ use crate::db::Database;
 #[cfg(feature = "postgres")]
 use crate::secrets::PostgresSecretsStore;
 use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
+use crate::terminal_branding::TerminalBranding;
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -104,6 +105,7 @@ pub enum ToolCommand {
 
 /// Run a tool command.
 pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     match cmd {
         ToolCommand::Install {
             path,
@@ -113,10 +115,22 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
             release,
             skip_build,
             force,
-        } => install_tool(path, name, capabilities, target, release, skip_build, force).await,
-        ToolCommand::List { dir, verbose } => list_tools(dir, verbose).await,
-        ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
-        ToolCommand::Info { name_or_path, dir } => show_tool_info(name_or_path, dir).await,
+        } => {
+            branding.print_banner("Tools", Some("Install a WebAssembly tool"));
+            install_tool(path, name, capabilities, target, release, skip_build, force).await
+        }
+        ToolCommand::List { dir, verbose } => {
+            branding.print_banner("Tools", Some("Inspect installed WebAssembly tools"));
+            list_tools(dir, verbose).await
+        }
+        ToolCommand::Remove { name, dir } => {
+            branding.print_banner("Tools", Some("Remove a WebAssembly tool"));
+            remove_tool(name, dir).await
+        }
+        ToolCommand::Info { name_or_path, dir } => {
+            branding.print_banner("Tools", Some("Inspect a WebAssembly tool"));
+            show_tool_info(name_or_path, dir).await
+        }
         ToolCommand::Auth { name, dir, user } => auth_tool(name, dir, user).await,
     }
 }
@@ -526,6 +540,7 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
 
 /// Configure authentication for a tool.
 async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     let tools_dir = dir.unwrap_or_else(default_tools_dir);
     let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
 
@@ -553,12 +568,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     let display_name = auth.display_name.as_deref().unwrap_or(&name);
 
-    let header = format!("{} Authentication", display_name);
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  {:^62}║", header);
-    println!("╚════════════════════════════════════════════════════════════════╝");
-    println!();
+    branding.print_banner("Tools", Some(&format!("Authenticate {}", display_name)));
 
     // Initialize secrets store
     let config = Config::from_env().await?;

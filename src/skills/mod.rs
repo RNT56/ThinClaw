@@ -17,13 +17,21 @@
 pub mod attenuation;
 pub mod catalog;
 pub mod gating;
+pub mod github_source;
 pub mod parser;
+pub mod quarantine;
 pub mod registry;
+pub mod remote_source;
 pub mod selector;
+pub mod well_known_source;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
+pub use github_source::GitHubSkillSource;
+pub use quarantine::QuarantineManager;
 pub use registry::SkillRegistry;
+pub use remote_source::{RemoteSkill, RemoteSkillHub, RemoteSkillSource};
 pub use selector::prefilter_skills;
+pub use well_known_source::WellKnownSkillSource;
 
 use std::path::PathBuf;
 

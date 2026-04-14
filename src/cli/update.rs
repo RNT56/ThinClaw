@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+use crate::terminal_branding::TerminalBranding;
+
 /// Current binary version (from Cargo.toml).
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -214,54 +216,92 @@ async fn fetch_latest_release(channel: &str) -> anyhow::Result<ReleaseInfo> {
 
 /// Run an update CLI command.
 pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     match cmd {
         UpdateCommand::Info => {
+            branding.print_banner("Update", Some("Inspect the installed build"));
             let info = BuildInfo::current();
-            println!("ThinClaw v{}", info.version);
-            println!("  Target:  {}", info.target);
-            println!("  Profile: {}", info.profile);
-            println!("  Rustc:   {}", info.rustc_version);
-            println!("  Built:   {}", info.build_date);
+            println!(
+                "{}",
+                branding.key_value("Version", format!("ThinClaw v{}", info.version))
+            );
+            println!("{}", branding.key_value("Target", info.target));
+            println!("{}", branding.key_value("Profile", info.profile));
+            println!("{}", branding.key_value("Rustc", info.rustc_version));
+            println!("{}", branding.key_value("Built", info.build_date));
 
             // Check for backup
             let backup = backup_binary_path();
             if backup.exists() {
-                println!("  Backup:  {} (rollback available)", backup.display());
+                println!(
+                    "{}",
+                    branding.key_value(
+                        "Backup",
+                        format!("{} (rollback available)", backup.display())
+                    )
+                );
             }
         }
 
         UpdateCommand::Check { channel } => {
-            println!("Checking for updates ({} channel)...", channel);
+            branding.print_banner("Update", Some("Check for a new release"));
+            println!(
+                "{}",
+                branding.accent(format!("Checking for updates ({} channel)...", channel))
+            );
 
             match fetch_latest_release(&channel).await {
                 Ok(release) => {
                     if is_newer_version(CURRENT_VERSION, &release.version) {
                         println!(
-                            "✅ Update available: v{} → v{}",
-                            CURRENT_VERSION, release.version
+                            "{}",
+                            branding.good(format!(
+                                "Update available: v{} -> v{}",
+                                CURRENT_VERSION, release.version
+                            ))
                         );
 
                         if let Some(ref date) = release.published_at {
-                            println!("   Published: {}", date);
+                            println!("{}", branding.key_value("Published", date));
                         }
 
                         if let Some(size) = release.size_bytes {
-                            println!("   Size: {:.1} MB", size as f64 / (1024.0 * 1024.0));
+                            println!(
+                                "{}",
+                                branding.key_value(
+                                    "Size",
+                                    format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+                                )
+                            );
                         }
 
                         if let Some(ref notes) = release.notes {
                             let preview: String = notes.chars().take(200).collect();
-                            println!("\n   Release notes:\n   {}", preview);
+                            println!();
+                            println!("{}", branding.key_value("Release notes", preview));
                         }
 
-                        println!("\n   Run `thinclaw update install` to update.");
+                        println!();
+                        println!(
+                            "{}",
+                            branding.muted("Run `thinclaw update install` to apply the update.")
+                        );
                     } else {
-                        println!("✅ Already up to date (v{}).", CURRENT_VERSION);
+                        println!(
+                            "{}",
+                            branding.good(format!("Already up to date (v{}).", CURRENT_VERSION))
+                        );
                     }
                 }
                 Err(e) => {
-                    println!("⚠️  Could not check for updates: {}", e);
-                    println!("   This may be due to network issues or rate limiting.");
+                    println!(
+                        "{}",
+                        branding.warn(format!("Could not check for updates: {}", e))
+                    );
+                    println!(
+                        "{}",
+                        branding.muted("This may be due to network issues or rate limiting.")
+                    );
                 }
             }
         }
@@ -271,26 +311,39 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
             yes,
             version,
         } => {
+            branding.print_banner("Update", Some("Download and install a release"));
             let release = if let Some(ref v) = version {
-                println!("Looking for version {}...", v);
+                println!(
+                    "{}",
+                    branding.accent(format!("Looking for version {}...", v))
+                );
                 let r = fetch_latest_release(&channel).await?;
                 if r.version != v.trim_start_matches('v') {
                     anyhow::bail!("Requested version {} not found (latest: {})", v, r.version);
                 }
                 r
             } else {
-                println!("Checking for updates ({} channel)...", channel);
+                println!(
+                    "{}",
+                    branding.accent(format!("Checking for updates ({} channel)...", channel))
+                );
                 fetch_latest_release(&channel).await?
             };
 
             if !is_newer_version(CURRENT_VERSION, &release.version) && version.is_none() {
-                println!("Already up to date (v{}).", CURRENT_VERSION);
+                println!(
+                    "{}",
+                    branding.good(format!("Already up to date (v{}).", CURRENT_VERSION))
+                );
                 return Ok(());
             }
 
             println!(
-                "Update available: v{} → v{}",
-                CURRENT_VERSION, release.version
+                "{}",
+                branding.good(format!(
+                    "Update available: v{} -> v{}",
+                    CURRENT_VERSION, release.version
+                ))
             );
 
             let download_url = release.download_url.as_deref().ok_or_else(|| {
@@ -302,27 +355,37 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
             })?;
 
             if !yes {
-                println!("\nDownload URL: {}", download_url);
-                println!("Proceed with update? Run again with --yes to confirm.");
+                println!();
+                println!("{}", branding.key_value("Download URL", download_url));
+                println!(
+                    "{}",
+                    branding.muted("Run again with `--yes` to confirm the update.")
+                );
                 return Ok(());
             }
 
             // Download
-            println!("Downloading v{}...", release.version);
+            println!(
+                "{}",
+                branding.accent(format!("Downloading v{}...", release.version))
+            );
             let client = reqwest::Client::new();
             let response = client.get(download_url).send().await?;
             let bytes = response.bytes().await?;
 
             println!(
-                "Downloaded {:.1} MB.",
-                bytes.len() as f64 / (1024.0 * 1024.0)
+                "{}",
+                branding.key_value(
+                    "Downloaded",
+                    format!("{:.1} MB", bytes.len() as f64 / (1024.0 * 1024.0))
+                )
             );
 
             // Backup current binary
             let current = std::env::current_exe()?;
             let backup = backup_binary_path();
             std::fs::copy(&current, &backup)?;
-            println!("Backed up current binary to: {}", backup.display());
+            println!("{}", branding.key_value("Backup", backup.display()));
 
             // Replace binary
             let temp_path = current.with_extension("new");
@@ -337,23 +400,36 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
 
             std::fs::rename(&temp_path, &current)?;
             println!(
-                "✅ Updated to v{}. Restart ThinClaw for changes to take effect.",
-                release.version
+                "{}",
+                branding.good(format!(
+                    "Updated to v{}. Restart ThinClaw for changes to take effect.",
+                    release.version
+                ))
             );
         }
 
         UpdateCommand::Rollback => {
+            branding.print_banner("Update", Some("Rollback to the previous build"));
             let backup = backup_binary_path();
             if !backup.exists() {
-                println!("No backup found at {}.", backup.display());
-                println!("Rollback is only available after a successful update.");
+                println!(
+                    "{}",
+                    branding.warn(format!("No backup found at {}.", backup.display()))
+                );
+                println!(
+                    "{}",
+                    branding.muted("Rollback is only available after a successful update.")
+                );
                 return Ok(());
             }
 
             let current = std::env::current_exe()?;
             std::fs::rename(&backup, &current)?;
-            println!("✅ Rolled back to previous version.");
-            println!("Restart ThinClaw for changes to take effect.");
+            println!("{}", branding.good("Rolled back to the previous version."));
+            println!(
+                "{}",
+                branding.muted("Restart ThinClaw for changes to take effect.")
+            );
         }
     }
 
@@ -422,7 +498,7 @@ mod tests {
             channel: "stable".to_string(),
             notes: Some("Bug fixes".to_string()),
             published_at: Some("2026-03-04T00:00:00Z".to_string()),
-            download_url: Some("https://example.com/ironclaw".to_string()),
+            download_url: Some("https://example.com/thinclaw".to_string()),
             size_bytes: Some(15_000_000),
             sha256: None,
         };

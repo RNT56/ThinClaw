@@ -85,6 +85,10 @@ fn permissive_safety() -> SafetyLayer {
     SafetyLayer::new(&SafetyConfig {
         max_output_length: 100_000,
         injection_check_enabled: false,
+        redact_pii_in_prompts: true,
+        smart_approval_mode: "off".to_string(),
+        external_scanner_mode: "off".to_string(),
+        external_scanner_path: None,
     })
 }
 
@@ -93,6 +97,10 @@ fn strict_safety() -> SafetyLayer {
     SafetyLayer::new(&SafetyConfig {
         max_output_length: 100_000,
         injection_check_enabled: true,
+        redact_pii_in_prompts: true,
+        smart_approval_mode: "off".to_string(),
+        external_scanner_mode: "off".to_string(),
+        external_scanner_path: None,
     })
 }
 
@@ -390,6 +398,10 @@ mod safety_layer {
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 10,
             injection_check_enabled: false,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
         });
         let big = "A".repeat(100);
         let out = safety.sanitize_tool_output("tool", &big);

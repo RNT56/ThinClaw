@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tokio::time::{interval, Duration as TokioDuration};
+use tokio::time::{Duration as TokioDuration, interval};
 use uuid::Uuid;
 
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
@@ -16,15 +16,15 @@ use crate::api::{ApiError, ApiResult};
 use crate::db::Database;
 use crate::experiments::adapters::{self, RemoteLaunchAction, RunnerLaunchOutcome};
 use crate::experiments::{
-    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign, ExperimentCampaignStatus,
-    ExperimentCampaignQueueState, ExperimentComparisonPolicy, ExperimentGpuRequirement,
-    ExperimentLease, ExperimentLeaseAuthentication, ExperimentLeaseStatus,
-    ExperimentMetricDefinition, ExperimentModelUsageRecord, ExperimentOpportunity,
-    ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
+    ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign,
+    ExperimentCampaignQueueState, ExperimentCampaignStatus, ExperimentComparisonPolicy,
+    ExperimentGpuRequirement, ExperimentLease, ExperimentLeaseAuthentication,
+    ExperimentLeaseStatus, ExperimentMetricDefinition, ExperimentModelUsageRecord,
+    ExperimentOpportunity, ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
     ExperimentRunnerArtifactUpload, ExperimentRunnerBackend, ExperimentRunnerCompletion,
-    ExperimentRunnerJob, ExperimentRunnerProfile, ExperimentRunnerStatus,
-    ExperimentStopPolicy, ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink,
-    ExperimentTrial, ExperimentTrialStatus, compare_metrics, extract_metrics, hash_lease_token,
+    ExperimentRunnerJob, ExperimentRunnerProfile, ExperimentRunnerStatus, ExperimentStopPolicy,
+    ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink, ExperimentTrial,
+    ExperimentTrialStatus, compare_metrics, extract_metrics, hash_lease_token,
 };
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY, USAGE_TRACKING_EXPERIMENT_ROLE_KEY,
@@ -478,7 +478,9 @@ pub async fn create_project(
         promotion_mode: req
             .promotion_mode
             .unwrap_or(settings.experiments.default_promotion_mode),
-        autonomy_mode: req.autonomy_mode.unwrap_or(ExperimentAutonomyMode::Autonomous),
+        autonomy_mode: req
+            .autonomy_mode
+            .unwrap_or(ExperimentAutonomyMode::Autonomous),
         status: ExperimentProjectStatus::Draft,
         created_at: now,
         updated_at: now,
@@ -776,7 +778,9 @@ pub async fn list_targets(
 }
 
 pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
-    let mut interval = interval(TokioDuration::from_secs(DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS));
+    let mut interval = interval(TokioDuration::from_secs(
+        DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS,
+    ));
     interval.tick().await;
     loop {
         match reconcile_experiments_once(&store, DEFAULT_EXPERIMENT_USER_ID).await {
@@ -792,10 +796,7 @@ pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
     }
 }
 
-async fn reconcile_experiments_once(
-    store: &Arc<dyn Database>,
-    user_id: &str,
-) -> ApiResult<()> {
+async fn reconcile_experiments_once(store: &Arc<dyn Database>, user_id: &str) -> ApiResult<()> {
     let map = store
         .get_all_settings(user_id)
         .await
@@ -848,7 +849,9 @@ async fn reconcile_active_campaign(
     let settings = ensure_experiments_enabled(store, user_id).await?;
     let latest = latest_trial(store, campaign.id).await?;
 
-    let max_trials = campaign.max_trials_override.or(project.stop_policy.max_trials);
+    let max_trials = campaign
+        .max_trials_override
+        .or(project.stop_policy.max_trials);
     let max_trials_reached = latest
         .as_ref()
         .map(|trial| max_trials.is_some_and(|limit| trial.sequence >= limit))
@@ -873,7 +876,9 @@ async fn reconcile_active_campaign(
     if let Some(mut trial) = latest {
         if matches!(
             trial.status,
-            ExperimentTrialStatus::Preparing | ExperimentTrialStatus::Running | ExperimentTrialStatus::Evaluating
+            ExperimentTrialStatus::Preparing
+                | ExperimentTrialStatus::Running
+                | ExperimentTrialStatus::Evaluating
         ) {
             if let Some(lease) = latest_active_lease(store, trial.id).await? {
                 if is_stale_lease(&lease, Utc::now()) {
@@ -942,14 +947,16 @@ async fn reconcile_active_campaign(
                 return Ok(());
             }
 
-            if runtime_budget_reached
-            {
+            if runtime_budget_reached {
                 campaign.status = if campaign.best_commit.is_some() {
                     ExperimentCampaignStatus::AwaitingPromotion
                 } else {
                     ExperimentCampaignStatus::Failed
                 };
-                campaign.pause_reason = Some("Reached the campaign runtime budget. Promote the best commit when ready.".to_string());
+                campaign.pause_reason = Some(
+                    "Reached the campaign runtime budget. Promote the best commit when ready."
+                        .to_string(),
+                );
                 campaign.updated_at = Utc::now();
                 store
                     .update_experiment_campaign(campaign)
@@ -959,14 +966,16 @@ async fn reconcile_active_campaign(
                 return Ok(());
             }
 
-            if cost_budget_reached
-            {
+            if cost_budget_reached {
                 campaign.status = if campaign.best_commit.is_some() {
                     ExperimentCampaignStatus::AwaitingPromotion
                 } else {
                     ExperimentCampaignStatus::Failed
                 };
-                campaign.pause_reason = Some("Reached the campaign cost budget. Promote the best commit when ready.".to_string());
+                campaign.pause_reason = Some(
+                    "Reached the campaign cost budget. Promote the best commit when ready."
+                        .to_string(),
+                );
                 campaign.updated_at = Utc::now();
                 store
                     .update_experiment_campaign(campaign)
@@ -976,13 +985,11 @@ async fn reconcile_active_campaign(
                 return Ok(());
             }
 
-            if infra_failure_threshold_reached || non_improving_threshold_reached
-            {
+            if infra_failure_threshold_reached || non_improving_threshold_reached {
                 campaign.status = ExperimentCampaignStatus::Paused;
                 campaign.pause_reason = Some(format!(
                     "Campaign paused after hitting configured thresholds (infra failures: {}, non-improving trials: {}).",
-                    campaign.failure_count,
-                    campaign.consecutive_non_improving_trials
+                    campaign.failure_count, campaign.consecutive_non_improving_trials
                 ));
                 campaign.updated_at = Utc::now();
                 store
@@ -993,15 +1000,19 @@ async fn reconcile_active_campaign(
                 return Ok(());
             }
 
-            return launch_next_trial_if_ready(store, user_id, &settings, &project, &runner, campaign)
-                .await
-                .map(|_| ());
+            return launch_next_trial_if_ready(
+                store, user_id, &settings, &project, &runner, campaign,
+            )
+            .await
+            .map(|_| ());
         }
 
         if campaign.status == ExperimentCampaignStatus::Running {
-            return launch_next_trial_if_ready(store, user_id, &settings, &project, &runner, campaign)
-                .await
-                .map(|_| ());
+            return launch_next_trial_if_ready(
+                store, user_id, &settings, &project, &runner, campaign,
+            )
+            .await
+            .map(|_| ());
         }
     }
 
@@ -1009,7 +1020,8 @@ async fn reconcile_active_campaign(
         campaign.status = ExperimentCampaignStatus::Paused;
         campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
         campaign.pause_reason = Some(
-            "Campaign state recovery could not find a valid trial record. Resume manually.".to_string(),
+            "Campaign state recovery could not find a valid trial record. Resume manually."
+                .to_string(),
         );
         campaign.updated_at = Utc::now();
         store
@@ -1050,9 +1062,8 @@ async fn launch_next_trial_if_ready(
         ExperimentAutonomyMode::ManualCandidate => {
             campaign.status = ExperimentCampaignStatus::Paused;
             campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
-            campaign.pause_reason = Some(
-                "Awaiting manual candidate changes in the campaign worktree.".to_string(),
-            );
+            campaign.pause_reason =
+                Some("Awaiting manual candidate changes in the campaign worktree.".to_string());
             campaign.updated_at = Utc::now();
             store
                 .update_experiment_campaign(campaign)
@@ -1085,9 +1096,8 @@ async fn launch_next_trial_if_ready(
         Err(error) => {
             campaign.status = ExperimentCampaignStatus::Paused;
             campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
-            campaign.pause_reason = Some(format!(
-                "Autonomous candidate generation paused: {error}"
-            ));
+            campaign.pause_reason =
+                Some(format!("Autonomous candidate generation paused: {error}"));
             campaign.updated_at = Utc::now();
             store
                 .update_experiment_campaign(campaign)
@@ -1097,8 +1107,16 @@ async fn launch_next_trial_if_ready(
             return Ok(());
         }
     };
-    let response = launch_trial(store, user_id, settings, project, runner, campaign.clone(), trial)
-        .await?;
+    let response = launch_trial(
+        store,
+        user_id,
+        settings,
+        project,
+        runner,
+        campaign.clone(),
+        trial,
+    )
+    .await?;
     *campaign = response.campaign;
     Ok(())
 }
@@ -1332,7 +1350,7 @@ pub async fn update_target(
     if req.location.is_some() {
         target.location = req.location;
     }
-    
+
     target.updated_at = Utc::now();
     store
         .update_experiment_target(&target)
@@ -1662,7 +1680,7 @@ async fn maybe_launch_next_queued_after_slot_release(
     user_id: &str,
 ) -> ApiResult<()> {
     loop {
-    match maybe_launch_next_queued_campaign(store, user_id).await {
+        match maybe_launch_next_queued_campaign(store, user_id).await {
             Ok(Some(_)) => continue,
             Ok(None) => break,
             Err(error) => {
@@ -1967,13 +1985,15 @@ async fn revoke_lease_with_runner(
         adapters::revoke_remote_launch(
             &runner,
             &auth,
-            trial.as_ref().and_then(|entry| entry.provider_job_id.as_deref()),
+            trial
+                .as_ref()
+                .and_then(|entry| entry.provider_job_id.as_deref()),
             &provider_job_metadata,
             action,
             provider_api_key.as_deref(),
         )
-            .await
-            .map_err(ApiError::Internal)?
+        .await
+        .map_err(ApiError::Internal)?
     } else {
         None
     };
@@ -2001,14 +2021,8 @@ pub async fn pause_campaign(
         && let Some(lease) = latest_active_lease(store, trial.id).await?
     {
         launch_message = Some(
-            revoke_lease_with_runner(
-                store,
-                user_id,
-                &campaign,
-                &lease,
-                RemoteLaunchAction::Pause,
-            )
-            .await?,
+            revoke_lease_with_runner(store, user_id, &campaign, &lease, RemoteLaunchAction::Pause)
+                .await?,
         );
     }
     maybe_launch_next_queued_after_slot_release(store, user_id).await?;
@@ -2195,27 +2209,26 @@ pub async fn reissue_lease(
     }
     let lease = create_lease(store, &project, &runner, &campaign, &trial).await?;
     let provider_api_key = research_provider_api_key(user_id, &runner).await;
-    let launch_outcome =
-        adapters::try_auto_launch(
-            &runner,
-            campaign_gateway_url(&campaign).as_deref(),
-            &lease,
-            provider_api_key.as_deref(),
-        )
-            .await
-            .unwrap_or_else(|err| RunnerLaunchOutcome {
-                message: err,
-                bootstrap_command: campaign_gateway_url(&campaign)
-                    .as_deref()
-                    .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
-                provider_template: None,
-                provider_job_id: None,
-                provider_job_metadata: serde_json::json!({}),
-                auto_launched: false,
-                requires_operator_action: true,
-            });
+    let launch_outcome = adapters::try_auto_launch(
+        &runner,
+        campaign_gateway_url(&campaign).as_deref(),
+        &lease,
+        provider_api_key.as_deref(),
+    )
+    .await
+    .unwrap_or_else(|err| RunnerLaunchOutcome {
+        message: err,
+        bootstrap_command: campaign_gateway_url(&campaign)
+            .as_deref()
+            .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
+        provider_template: None,
+        provider_job_id: None,
+        provider_job_metadata: serde_json::json!({}),
+        auto_launched: false,
+        requires_operator_action: true,
+    });
 
-        trial.status = if launch_outcome.auto_launched {
+    trial.status = if launch_outcome.auto_launched {
         ExperimentTrialStatus::Running
     } else {
         ExperimentTrialStatus::Preparing
@@ -2303,11 +2316,11 @@ pub async fn promote_campaign(
                 &[],
             )
             .await;
-            if let Ok(output) = pr_result {
-                if !output.trim().is_empty() {
-                    message.push(' ');
-                    message.push_str(output.trim());
-                }
+            if let Ok(output) = pr_result
+                && !output.trim().is_empty()
+            {
+                message.push(' ');
+                message.push_str(output.trim());
             }
         }
     }
@@ -2543,25 +2556,24 @@ async fn launch_trial(
     if runner.backend.is_remote() {
         let lease = create_lease(store, project, runner, &campaign, &trial).await?;
         let provider_api_key = research_provider_api_key(user_id, runner).await;
-        let launch_outcome =
-            adapters::try_auto_launch(
-                runner,
-                campaign_gateway_url(&campaign).as_deref(),
-                &lease,
-                provider_api_key.as_deref(),
-            )
-                .await
-                .unwrap_or_else(|err| RunnerLaunchOutcome {
-                    message: err,
-                    bootstrap_command: campaign_gateway_url(&campaign)
-                        .as_deref()
-                        .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
-                    provider_template: None,
-                    provider_job_id: None,
-                    provider_job_metadata: serde_json::json!({}),
-                    auto_launched: false,
-                    requires_operator_action: true,
-                });
+        let launch_outcome = adapters::try_auto_launch(
+            runner,
+            campaign_gateway_url(&campaign).as_deref(),
+            &lease,
+            provider_api_key.as_deref(),
+        )
+        .await
+        .unwrap_or_else(|err| RunnerLaunchOutcome {
+            message: err,
+            bootstrap_command: campaign_gateway_url(&campaign)
+                .as_deref()
+                .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
+            provider_template: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            auto_launched: false,
+            requires_operator_action: true,
+        });
         trial.status = if launch_outcome.auto_launched {
             ExperimentTrialStatus::Running
         } else {
@@ -2738,7 +2750,9 @@ async fn finalize_trial(
     campaign.trial_count = campaign.trial_count.max(trial.sequence);
     campaign.updated_at = Utc::now();
 
-    let max_trials = campaign.max_trials_override.or(project.stop_policy.max_trials);
+    let max_trials = campaign
+        .max_trials_override
+        .or(project.stop_policy.max_trials);
     let plateau_limit = project
         .stop_policy
         .plateau_window
@@ -2864,8 +2878,7 @@ fn campaign_status_message(
             .to_string();
     }
     if cost_limit_reached {
-        return "Reached the campaign cost budget. Promote the best commit when ready."
-            .to_string();
+        return "Reached the campaign cost budget. Promote the best commit when ready.".to_string();
     }
     if non_improving >= plateau_limit {
         return format!(
@@ -3242,16 +3255,19 @@ async fn run_planner_subagent(
         recent_trial_context(&trials),
         worktree = worktree_path,
     );
-    let system_prompt = format!(
-        "You are the planning role for ThinClaw Research.\n\
+    let system_prompt = "You are the planning role for ThinClaw Research.\n\
          Read context and propose exactly one benchmarkable next mutation.\n\
          Do not edit files. Return raw JSON only."
-    );
+        .to_string();
     spawn_research_subagent(
         "planner",
         task,
         system_prompt,
-        vec!["read_file".to_string(), "list_dir".to_string(), "grep".to_string()],
+        vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep".to_string(),
+        ],
         research_channel_metadata(campaign, trial_id, "planner", &[]),
     )
     .await
@@ -3274,7 +3290,12 @@ async fn run_mutator_subagent(
     };
     let allowed_absolute_paths = allowed_paths
         .iter()
-        .map(|path| Path::new(worktree_path).join(path).to_string_lossy().to_string())
+        .map(|path| {
+            Path::new(worktree_path)
+                .join(path)
+                .to_string_lossy()
+                .to_string()
+        })
         .collect::<Vec<_>>();
     let task = format!(
         "Edit the experiment worktree to implement the planned mutation.\n\
@@ -3342,7 +3363,11 @@ async fn run_reviewer_subagent(
         "reviewer",
         task,
         system_prompt,
-        vec!["read_file".to_string(), "list_dir".to_string(), "grep".to_string()],
+        vec![
+            "read_file".to_string(),
+            "list_dir".to_string(),
+            "grep".to_string(),
+        ],
         research_channel_metadata(campaign, trial_id, "reviewer", &planner.target_ids),
     )
     .await
@@ -3528,24 +3553,26 @@ fn derive_opportunities(
                 logical_role.as_deref(),
                 kind,
             );
-            let linked_target_id =
-                find_linked_target_id(target_links, targets, record, kind)
-                    .or_else(|| find_linked_target(targets, record, kind).map(|target| target.id));
-            let aggregate = opportunities_by_key.entry(key).or_insert_with(|| OpportunityAggregate {
-                provider: record.provider.clone(),
-                model: record.model.clone(),
-                route_key: route_key.clone(),
-                logical_role: logical_role.clone(),
-                kind,
-                class,
-                call_count: 0,
-                error_count: 0,
-                latency_sum_ms: 0,
-                cost_sum_usd: 0.0,
-                first_seen: record.created_at,
-                last_seen: record.created_at,
-                linked_target_id,
-            });
+            let linked_target_id = find_linked_target_id(target_links, targets, record, kind)
+                .or_else(|| find_linked_target(targets, record, kind).map(|target| target.id));
+            let aggregate =
+                opportunities_by_key
+                    .entry(key)
+                    .or_insert_with(|| OpportunityAggregate {
+                        provider: record.provider.clone(),
+                        model: record.model.clone(),
+                        route_key: route_key.clone(),
+                        logical_role: logical_role.clone(),
+                        kind,
+                        class,
+                        call_count: 0,
+                        error_count: 0,
+                        latency_sum_ms: 0,
+                        cost_sum_usd: 0.0,
+                        first_seen: record.created_at,
+                        last_seen: record.created_at,
+                        linked_target_id,
+                    });
             aggregate.call_count = aggregate.call_count.saturating_add(1);
             if !record.success {
                 aggregate.error_count = aggregate.error_count.saturating_add(1);
@@ -3564,7 +3591,9 @@ fn derive_opportunities(
 
     let mut aggregates: Vec<_> = opportunities_by_key.into_values().collect();
     aggregates.sort_by(|left, right| {
-        aggregate_opportunity_score(right).partial_cmp(&aggregate_opportunity_score(left)).unwrap_or(std::cmp::Ordering::Equal)
+        aggregate_opportunity_score(right)
+            .partial_cmp(&aggregate_opportunity_score(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.call_count.cmp(&right.call_count).reverse())
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.model.cmp(&right.model))
@@ -3656,7 +3685,11 @@ impl std::fmt::Debug for UsageClass {
 
 fn usage_classification(record: &ExperimentModelUsageRecord) -> UsageClass {
     let provider = record.provider.to_ascii_lowercase();
-    let endpoint_type = record.endpoint_type.clone().unwrap_or_default().to_ascii_lowercase();
+    let endpoint_type = record
+        .endpoint_type
+        .clone()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let base_url = metadata_string(&record.metadata, "base_url")
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -4116,10 +4149,7 @@ async fn attributed_llm_cost_for_trial(
     Ok(summarize_llm_usage(&fallback, "campaign_window"))
 }
 
-fn summarize_llm_usage(
-    records: &[ExperimentModelUsageRecord],
-    source: &str,
-) -> LlmCostAttribution {
+fn summarize_llm_usage(records: &[ExperimentModelUsageRecord], source: &str) -> LlmCostAttribution {
     let mut total_usd = 0.0;
     let mut latency_sum_ms: u64 = 0;
     let mut latency_count: u64 = 0;
@@ -4133,7 +4163,10 @@ fn summarize_llm_usage(
             latency_sum_ms += latency_ms;
             latency_count += 1;
         }
-        let role_key = record.logical_role.clone().unwrap_or_else(|| "unknown".to_string());
+        let role_key = record
+            .logical_role
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         *by_role.entry(role_key).or_insert(0.0) += cost;
         *by_provider.entry(record.provider.clone()).or_insert(0.0) += cost;
         *by_model
@@ -4234,6 +4267,8 @@ struct ProviderCostEstimate {
     normalization: Option<String>,
 }
 
+type ProviderHourlyRate = (f64, String, Option<f64>, Option<String>, Option<String>);
+
 fn estimated_provider_runtime_cost_usd(trial: &ExperimentTrial) -> Option<ProviderCostEstimate> {
     let runtime_ms = trial.runtime_ms?;
     if runtime_ms == 0 {
@@ -4264,11 +4299,15 @@ fn estimated_provider_runtime_cost_usd(trial: &ExperimentTrial) -> Option<Provid
 fn provider_hourly_rate_usd(
     metadata: &serde_json::Value,
     backend: ExperimentRunnerBackend,
-) -> Option<(f64, String, Option<f64>, Option<String>, Option<String>)> {
+) -> Option<ProviderHourlyRate> {
     match backend {
         ExperimentRunnerBackend::Runpod => numeric_pointer_candidates(
             metadata,
-            &["/pod/adjustedCostPerHr", "/pod/costPerHr", "/launch_request/costPerHr"],
+            &[
+                "/pod/adjustedCostPerHr",
+                "/pod/costPerHr",
+                "/launch_request/costPerHr",
+            ],
         )
         .map(|(credits_per_hour, source)| {
             (
@@ -4360,10 +4399,7 @@ fn json_value_as_f64(value: &serde_json::Value) -> Option<f64> {
     }
 }
 
-fn target_signature(
-    kind: ExperimentTargetKind,
-    metadata: &serde_json::Value,
-) -> Option<String> {
+fn target_signature(kind: ExperimentTargetKind, metadata: &serde_json::Value) -> Option<String> {
     let provider = metadata
         .get("provider")
         .and_then(|value| value.as_str())
@@ -4417,12 +4453,12 @@ fn ensure_unique_target_signature(
     let Some(signature) = target_signature(kind, metadata) else {
         return Ok(());
     };
-    if targets
-        .iter()
-        .any(|existing| existing.kind == kind
+    if targets.iter().any(|existing| {
+        existing.kind == kind
             && skip_target_id != Some(existing.id)
-            && target_signature(existing.kind, &existing.metadata).as_deref() == Some(signature.as_str()))
-    {
+            && target_signature(existing.kind, &existing.metadata).as_deref()
+                == Some(signature.as_str())
+    }) {
         return Err(ApiError::InvalidInput(format!(
             "Duplicate target for linked identity '{signature}'"
         )));

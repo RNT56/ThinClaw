@@ -1,0 +1,22 @@
+name = "midnight"
+tagline = "Night-shift instrumentation with observatory blues and deep-vault contrast."
+accent = "#6C8EBF"
+border = "#483D8B"
+body = "#B0C4DE"
+muted = "#4A5568"
+good = "#48BB78"
+warn = "#ED8936"
+bad = "#FC8181"
+header = "#9F7AEA"
+prompt_symbol = "❯"
+ascii_art = [
+  '                 .        *',
+  '            .       *        .',
+  '               ___/^^^\___',
+  '              /  .-   -.  \',
+  '             /  /  .-.  \  \',
+  '            |   | (   ) |   |  MIDNIGHT WATCH',
+  '             \  \  ---  /  /',
+  '              `-.___.__.-`',
+]
+tool_emojis = { shell = "🌙", browser = "🔭", memory = "🧠", search_files = "🗃", todo = "🕯", subagent = "🦉" }

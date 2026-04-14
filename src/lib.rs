@@ -89,6 +89,7 @@ pub mod skills;
 pub mod tailscale;
 pub mod talk_mode;
 pub mod tauri_commands;
+pub mod terminal_branding;
 pub mod timezone;
 pub mod tools;
 pub mod tracing_fmt;

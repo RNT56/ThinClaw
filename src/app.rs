@@ -40,6 +40,7 @@ pub struct AppComponents {
     pub db: Option<Arc<dyn Database>>,
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     pub llm_runtime: Arc<LlmRuntimeManager>,
+    pub oauth_credential_sync: Option<crate::llm::OAuthCredentialSyncHandle>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
@@ -433,6 +434,7 @@ impl AppBuilder {
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
+        cheap_llm: Option<&Arc<dyn LlmProvider>>,
         cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
     ) -> Result<
         (
@@ -456,7 +458,17 @@ impl AppBuilder {
         } else {
             Arc::new(ToolRegistry::new())
         };
-        tools.register_builtin_tools();
+        tools.register_builtin_tools_with_browser_backend(
+            &self.config.agent.browser_backend,
+            self.config.agent.cloud_browser_provider.as_deref(),
+        );
+        tools.register_moa_tool(
+            Arc::clone(llm),
+            cheap_llm.cloned(),
+            self.config.llm.reliability.moa_reference_models.clone(),
+            self.config.llm.reliability.moa_aggregator_model.clone(),
+            self.config.llm.reliability.moa_min_successful,
+        );
 
         // Create embeddings provider using the unified method
         let embeddings = self.config.embeddings.create_provider();
@@ -482,7 +494,12 @@ impl AppBuilder {
                 ws = ws.with_embeddings(emb.clone());
             }
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws), Some(Arc::clone(db)), None);
+            tools.register_memory_tools(
+                Arc::clone(&ws),
+                Some(Arc::clone(db)),
+                cheap_llm.cloned(),
+                None,
+            );
 
             Some(ws)
         } else {
@@ -834,7 +851,11 @@ impl AppBuilder {
                     // Ensure directory exists
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: sandboxed → {}", dir.display());
-                    tools.register_dev_tools_with_config(Some(dir.clone()), Some(dir));
+                    tools.register_dev_tools_with_safety(
+                        Some(dir.clone()),
+                        Some(dir),
+                        Some(&self.config.safety),
+                    );
                 }
                 "project" => {
                     // Project mode: working dir set, no file sandbox
@@ -843,14 +864,18 @@ impl AppBuilder {
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: project → {}", dir.display());
-                    tools.register_dev_tools_with_config(None, Some(dir));
+                    tools.register_dev_tools_with_safety(
+                        None,
+                        Some(dir),
+                        Some(&self.config.safety),
+                    );
                 }
                 _ => {
                     // Unrestricted: full filesystem access — no base_dir, no working_dir forced.
                     // The agent can write to any absolute path the user/LLM specifies.
                     // (This mode is intended for remote/server deployments or power users.)
                     tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
-                    tools.register_dev_tools();
+                    tools.register_dev_tools_with_safety(None, None, Some(&self.config.safety));
                 }
             }
         }
@@ -894,14 +919,43 @@ impl AppBuilder {
         self.init_secrets().await?;
 
         let providers_settings = self.providers_settings.clone().unwrap_or_default();
+        let primed_oauth_credentials =
+            crate::llm::prime_runtime_oauth_credentials(&providers_settings);
+        if primed_oauth_credentials > 0 {
+            let refreshed = if let Some(ref db) = self.db {
+                Config::from_db_with_toml(db.as_ref(), "default", self.toml_path.as_deref()).await
+            } else {
+                Config::from_env_with_toml(self.toml_path.as_deref()).await
+            };
+
+            match refreshed {
+                Ok(config) => {
+                    self.config = config;
+                    tracing::info!(
+                        primed_oauth_credentials,
+                        "Primed external OAuth credentials into the runtime overlay"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to re-resolve config after priming external OAuth credentials"
+                    );
+                }
+            }
+        }
         let llm_runtime = LlmRuntimeManager::new(
             self.config.clone(),
-            providers_settings,
+            providers_settings.clone(),
             self.db.clone(),
             self.secrets_store.clone(),
             "default",
             self.toml_path.clone(),
         )?;
+        let oauth_credential_sync = crate::llm::OAuthCredentialSyncHandle::start(
+            Arc::clone(&llm_runtime),
+            &providers_settings,
+        );
         let runtime_llm = llm_runtime.primary_handle();
         let runtime_cheap_llm = Some(llm_runtime.cheap_handle());
 
@@ -988,7 +1042,7 @@ impl AppBuilder {
         });
 
         let (safety, tools, embeddings, workspace) = self
-            .init_tools(&llm, Some(Arc::clone(&cost_tracker)))
+            .init_tools(&llm, cheap_llm.as_ref(), Some(Arc::clone(&cost_tracker)))
             .await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -1038,7 +1092,13 @@ impl AppBuilder {
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
-            match ws.seed_if_empty(Some(&self.config.agent.name)).await {
+            match ws
+                .seed_if_empty(
+                    Some(&self.config.agent.name),
+                    Some(&self.config.agent.persona_seed),
+                )
+                .await
+            {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Failed to seed workspace: {}", e);
@@ -1122,7 +1182,49 @@ impl AppBuilder {
             }
             let registry = Arc::new(tokio::sync::RwLock::new(registry));
             let catalog = crate::skills::catalog::shared_catalog();
-            tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+            let mut remote_sources: Vec<Arc<dyn crate::skills::remote_source::RemoteSkillSource>> =
+                Vec::new();
+            if !self.config.skills.skill_taps.is_empty() {
+                match crate::skills::github_source::GitHubSkillSource::new(
+                    self.config.skills.skill_taps.clone(),
+                ) {
+                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to initialize GitHub skill source");
+                    }
+                }
+            }
+            if !self.config.skills.well_known_skill_registries.is_empty() {
+                match crate::skills::well_known_source::WellKnownSkillSource::new(
+                    self.config.skills.well_known_skill_registries.clone(),
+                ) {
+                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to initialize well-known skill source"
+                        );
+                    }
+                }
+            }
+            let remote_hub = if remote_sources.is_empty() {
+                None
+            } else {
+                Some(Arc::new(crate::skills::remote_source::RemoteSkillHub::new(
+                    remote_sources,
+                )))
+            };
+            let quarantine = Arc::new(crate::skills::quarantine::QuarantineManager::new(
+                self.config.skills.quarantine_dir.clone(),
+            ));
+            tools.register_skill_tools(
+                Arc::clone(&registry),
+                Arc::clone(&catalog),
+                remote_hub,
+                quarantine,
+            );
             (Some(registry), Some(catalog))
         } else {
             (None, None)
@@ -1179,6 +1281,7 @@ impl AppBuilder {
             db: self.db,
             secrets_store: self.secrets_store,
             llm_runtime: Arc::clone(&llm_runtime),
+            oauth_credential_sync,
             llm,
             cheap_llm,
             safety,

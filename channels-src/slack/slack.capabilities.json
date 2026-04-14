@@ -2,6 +2,7 @@
   "type": "channel",
   "name": "slack",
   "description": "Slack Events API channel for receiving and responding to Slack messages",
+  "formatting_hints": "Use Slack mrkdwn formatting, not GitHub-flavored markdown. Keep replies easy to skim and avoid relying on raw HTML.",
   "setup": {
     "required_secrets": [
       {

@@ -1,0 +1,20 @@
+name = "solar"
+tagline = "Sunlit instrumentation with crisp stone, brass, and warm archive contrast."
+accent = "#D97706"
+border = "#92400E"
+body = "#1C1917"
+muted = "#78716C"
+good = "#059669"
+warn = "#D97706"
+bad = "#DC2626"
+header = "#B45309"
+prompt_symbol = "›"
+ascii_art = [
+  '                 \  |  /',
+  '              .---\ | /---.',
+  '           ---==== (*) ====---',
+  '              .---/ | \---.',
+  '                 /__|__\',
+  '              SOLAR ARCHIVE',
+]
+tool_emojis = { shell = "☀️", browser = "🔎", memory = "📚", search_files = "🧾", todo = "🪶", subagent = "🦅" }

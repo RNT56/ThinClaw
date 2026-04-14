@@ -1,6 +1,6 @@
 # Complexity guardrails for AI-assisted development quality.
 # These thresholds prevent new violations while preserving existing code.
-# Matches IronClaw's configuration.
+# Matches ThinClaw's configuration.
 
 cognitive-complexity-threshold = 15  # default: 25 (stricter to catch complex new functions)
 too-many-lines-threshold = 100      # default: 100

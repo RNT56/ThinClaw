@@ -124,15 +124,15 @@ fn find_section_byte_range(doc: &str, heading_name: &str) -> Option<(usize, usiz
         offset = line_end;
 
         if let Some((level, title)) = parse_markdown_heading(line) {
-            if let Some((start_offset, current_level, _, current_title)) = &start {
-                if level <= *current_level {
-                    return Some((
-                        *start_offset,
-                        line_start,
-                        *current_level,
-                        current_title.clone(),
-                    ));
-                }
+            if let Some((start_offset, current_level, _, current_title)) = &start
+                && level <= *current_level
+            {
+                return Some((
+                    *start_offset,
+                    line_start,
+                    *current_level,
+                    current_title.clone(),
+                ));
             }
 
             if normalize_heading_name(&title) == target {
@@ -219,7 +219,7 @@ fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, To
         .metadata
         .get("actor_id")
         .and_then(|v| v.as_str())
-        .or_else(|| ctx.actor_id.as_deref());
+        .or(ctx.actor_id.as_deref());
     let conversation_kind = ctx
         .metadata
         .get("conversation_kind")

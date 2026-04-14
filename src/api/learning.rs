@@ -26,7 +26,7 @@ fn event_class(event: &DbLearningEvent) -> String {
         .payload
         .get("class")
         .and_then(|value| value.as_str())
-        .unwrap_or_else(|| event.event_type.as_str())
+        .unwrap_or(event.event_type.as_str())
         .to_string()
 }
 

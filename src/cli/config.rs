@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Subcommand;
 
 use crate::settings::Settings;
+use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ConfigCommand {
@@ -59,13 +60,17 @@ pub enum ConfigCommand {
 /// Connects to the database to read/write settings. Falls back to disk
 /// if the database is not available.
 pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     // Try to connect to the DB for settings access
     let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
         Ok(d) => Some(d),
         Err(e) => {
             eprintln!(
-                "Warning: Could not connect to database ({}), using disk fallback",
-                e
+                "{}",
+                branding.warn(format!(
+                    "Warning: Could not connect to database ({}), using disk fallback",
+                    e
+                ))
             );
             None
         }
@@ -112,12 +117,15 @@ async fn list_settings(
 ) -> anyhow::Result<()> {
     let settings = load_settings(store).await;
     let all = settings.list();
+    let branding = TerminalBranding::current();
 
     let max_key_len = all.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
 
     let source = if store.is_some() { "database" } else { "disk" };
-    println!("Settings (source: {}):", source);
-    println!();
+    branding.print_banner(
+        "ThinClaw Config",
+        Some(&format!("Settings view from the {source} source.")),
+    );
 
     for (key, value) in all {
         if let Some(ref f) = filter
@@ -151,7 +159,11 @@ async fn list_settings(
             value
         };
 
-        println!("  {:width$}  {}", key, display_value, width = max_key_len);
+        println!(
+            "  {}  {}",
+            branding.muted(format!("{key:width$}", width = max_key_len)),
+            branding.body(display_value)
+        );
     }
 
     Ok(())
@@ -196,7 +208,10 @@ async fn set_setting(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save to database: {}", e))?;
 
-    println!("Set {} = {}", path, value);
+    println!(
+        "{}",
+        TerminalBranding::current().good(format!("Set {path} = {value}"))
+    );
     Ok(())
 }
 
@@ -215,7 +230,10 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete setting from database: {}", e))?;
 
-    println!("Reset {} to default: {}", path, default_value);
+    println!(
+        "{}",
+        TerminalBranding::current().good(format!("Reset {path} to default: {default_value}"))
+    );
     Ok(())
 }
 
@@ -242,23 +260,40 @@ async fn init_toml(
         .save_toml(&path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    println!("Config file written to {}", path.display());
+    let branding = TerminalBranding::current();
+    println!(
+        "{}",
+        branding.good(format!("Config file written to {}", path.display()))
+    );
     println!();
-    println!("Edit the file to customize settings.");
-    println!("Priority: env var > config.toml > database > defaults");
+    println!("{}", branding.body("Edit the file to customize settings."));
+    println!(
+        "{}",
+        branding.muted("Priority: env var > config.toml > database > defaults")
+    );
     Ok(())
 }
 
 /// Show the settings storage info.
 fn show_path(has_db: bool) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
     if has_db {
-        println!("Settings stored in: database (settings table)");
+        println!(
+            "{}",
+            branding.body("Settings stored in: database (settings table)")
+        );
     } else {
-        println!("Settings stored in: PostgreSQL (not connected, using defaults)");
+        println!(
+            "{}",
+            branding.warn("Settings stored in: PostgreSQL (not connected, using defaults)")
+        );
     }
     println!(
-        "Env config:         {}",
-        crate::bootstrap::thinclaw_env_path().display()
+        "{}",
+        branding.key_value(
+            "Env config",
+            crate::bootstrap::thinclaw_env_path().display()
+        )
     );
 
     let toml_path = Settings::default_toml_path();
@@ -268,9 +303,11 @@ fn show_path(has_db: bool) -> anyhow::Result<()> {
         "not found (run `thinclaw config init` to create)"
     };
     println!(
-        "TOML config:        {} ({})",
-        toml_path.display(),
-        toml_status
+        "{}",
+        branding.key_value(
+            "TOML config",
+            format!("{} ({})", toml_path.display(), toml_status)
+        )
     );
 
     Ok(())

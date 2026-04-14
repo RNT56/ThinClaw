@@ -20,7 +20,7 @@
 //!   [blocked command check]  -- exact pattern match (rm -rf /, fork bomb, etc.)
 //!       |
 //!       v
-//!   [dangerous pattern check] -- substring match (sudo, eval, $(curl, etc.)
+//!   [dangerous pattern check] -- soft-flag approval lane (sudo, eval, $(curl, etc.)
 //!       |
 //!       v
 //!   [injection detection]    -- obfuscation (base64|sh, DNS exfil, netcat, etc.)
@@ -48,14 +48,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::config::SafetyConfig;
+use crate::config::helpers::optional_env;
 use crate::context::JobContext;
+use crate::safety::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
@@ -63,8 +66,9 @@ use crate::tools::tool::{
 
 // Security validation — constants, blocked patterns, injection detection
 use super::shell_security::{
-    BLOCKED_COMMANDS, DANGEROUS_PATTERNS, SAFE_ENV_VARS, check_safe_bins, check_safe_bins_forced,
-    detect_path_escape,
+    DANGEROUS_PATTERNS, ExternalCommandScanner, ExternalScanVerdict, ExternalScannerMode,
+    SAFE_ENV_VARS, check_safe_bins, check_safe_bins_forced, classify_hard_block,
+    detect_path_escape, normalize_command,
 };
 #[cfg(test)]
 use super::shell_security::{contains_shell_pipe, extract_binary_name, has_command_token};
@@ -78,6 +82,10 @@ const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
 /// Default command timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+static SMART_APPROVER: OnceLock<Arc<SmartApprover>> = OnceLock::new();
+static SMART_APPROVAL_CACHE: LazyLock<Mutex<HashMap<String, ApprovalDecision>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Shell command execution tool.
 pub struct ShellTool {
@@ -96,6 +104,10 @@ pub struct ShellTool {
     /// - Commands referencing absolute paths outside this directory are blocked
     /// - Safe bins allowlist is auto-enabled
     base_dir: Option<PathBuf>,
+    /// Optional shell smart-approval mode sourced from ThinClaw settings.
+    smart_approval_mode_override: Option<SmartApprovalMode>,
+    /// First-party external shell scanner used for defense in depth.
+    external_scanner: Option<ExternalCommandScanner>,
 }
 
 impl std::fmt::Debug for ShellTool {
@@ -107,6 +119,11 @@ impl std::fmt::Debug for ShellTool {
             .field("sandbox", &self.sandbox.is_some())
             .field("sandbox_policy", &self.sandbox_policy)
             .field("base_dir", &self.base_dir)
+            .field(
+                "smart_approval_mode_override",
+                &self.smart_approval_mode_override,
+            )
+            .field("external_scanner", &self.external_scanner.is_some())
             .finish()
     }
 }
@@ -121,6 +138,8 @@ impl ShellTool {
             sandbox: None,
             sandbox_policy: SandboxPolicy::ReadOnly,
             base_dir: None,
+            smart_approval_mode_override: None,
+            external_scanner: None,
         }
     }
 
@@ -159,25 +178,122 @@ impl ShellTool {
         self
     }
 
+    pub fn with_safety_config(mut self, config: &SafetyConfig) -> Self {
+        self.smart_approval_mode_override = config.smart_approval_mode.parse().ok();
+        let scanner_mode = config
+            .external_scanner_mode
+            .parse()
+            .unwrap_or(ExternalScannerMode::FailOpen);
+        if scanner_mode != ExternalScannerMode::Off || config.external_scanner_path.is_some() {
+            self.external_scanner = Some(ExternalCommandScanner::new(
+                scanner_mode,
+                config.external_scanner_path.clone(),
+            ));
+        } else {
+            self.external_scanner = None;
+        }
+        self
+    }
+
+    pub fn with_external_scanner(
+        mut self,
+        mode: ExternalScannerMode,
+        configured_path: Option<PathBuf>,
+    ) -> Self {
+        self.external_scanner = Some(ExternalCommandScanner::new(mode, configured_path));
+        self
+    }
+
     /// Check if a command is blocked.
     fn is_blocked(&self, cmd: &str) -> Option<&'static str> {
-        let normalized = cmd.to_lowercase();
+        classify_hard_block(cmd).or_else(|| {
+            detect_command_injection(cmd)
+                .map(|_| "Command contains command-injection or obfuscated execution pattern")
+        })
+    }
 
-        for blocked in BLOCKED_COMMANDS.iter() {
-            if normalized.contains(blocked) {
-                return Some("Command contains blocked pattern");
-            }
+    /// Check whether a command falls into the soft-flag approval lane.
+    fn soft_flag_reason(&self, cmd: &str) -> Option<&'static str> {
+        let normalized = normalize_command(cmd).to_lowercase();
+        DANGEROUS_PATTERNS
+            .iter()
+            .copied()
+            .find(|pattern| normalized.contains(pattern))
+    }
+
+    fn smart_approval_mode(&self) -> SmartApprovalMode {
+        if let Some(mode) = self.smart_approval_mode_override {
+            return mode;
         }
 
-        if !self.allow_dangerous {
-            for pattern in DANGEROUS_PATTERNS.iter() {
-                if normalized.contains(pattern) {
-                    return Some("Command contains potentially dangerous pattern");
-                }
-            }
+        optional_env("SAFETY_SMART_APPROVAL_MODE")
+            .ok()
+            .flatten()
+            .or_else(|| optional_env("THINCLAW_SMART_APPROVAL_MODE").ok().flatten())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(SmartApprovalMode::Off)
+    }
+
+    fn smart_approval_cache_key(
+        &self,
+        mode: SmartApprovalMode,
+        cmd: &str,
+        working_dir: &Path,
+    ) -> String {
+        let normalized = normalize_command(cmd);
+        format!("{}|{}|{}", mode.as_str(), working_dir.display(), normalized)
+    }
+
+    fn cached_smart_decision(
+        &self,
+        mode: SmartApprovalMode,
+        cmd: &str,
+        working_dir: &Path,
+    ) -> Option<ApprovalDecision> {
+        let key = self.smart_approval_cache_key(mode, cmd, working_dir);
+        SMART_APPROVAL_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&key).copied())
+    }
+
+    fn store_smart_decision(
+        &self,
+        mode: SmartApprovalMode,
+        cmd: &str,
+        working_dir: &Path,
+        decision: ApprovalDecision,
+    ) {
+        let key = self.smart_approval_cache_key(mode, cmd, working_dir);
+        if let Ok(mut guard) = SMART_APPROVAL_CACHE.lock() {
+            guard.insert(key, decision);
+        }
+    }
+
+    async fn assess_soft_flag_command(
+        &self,
+        command: &str,
+        reason: &str,
+        working_dir: &Path,
+    ) -> ApprovalDecision {
+        let mode = self.smart_approval_mode();
+        if mode != SmartApprovalMode::Smart {
+            return ApprovalDecision::Escalate;
         }
 
-        None
+        if let Some(cached) = self.cached_smart_decision(mode, command, working_dir) {
+            return cached;
+        }
+
+        let Some(approver) = shared_smart_approver().await else {
+            return ApprovalDecision::Escalate;
+        };
+
+        let decision = approver
+            .assess_command(command, reason, &working_dir.display().to_string())
+            .await;
+        self.store_smart_decision(mode, command, working_dir, decision);
+        decision
     }
 
     /// Execute a command through the sandbox.
@@ -414,6 +530,68 @@ impl ShellTool {
         // Determine timeout
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
 
+        if let Some(scanner) = &self.external_scanner {
+            match scanner.scan(cmd).await {
+                report if report.verdict == ExternalScanVerdict::Dangerous => {
+                    let reason = report
+                        .reason
+                        .unwrap_or_else(|| "external scanner flagged the command".to_string());
+                    return Err(ToolError::NotAuthorized(format!(
+                        "External scanner blocked shell command ({}): {}",
+                        reason,
+                        truncate_for_error(cmd)
+                    )));
+                }
+                report
+                    if report.verdict == ExternalScanVerdict::Unknown
+                        && scanner.mode() == ExternalScannerMode::FailClosed =>
+                {
+                    let reason = report
+                        .reason
+                        .unwrap_or_else(|| "external scanner was unavailable".to_string());
+                    return Err(ToolError::NotAuthorized(format!(
+                        "External scanner escalation required ({}): {}",
+                        reason,
+                        truncate_for_error(cmd)
+                    )));
+                }
+                report if report.verdict == ExternalScanVerdict::Unknown => {
+                    tracing::warn!(
+                        reason = report.reason.as_deref().unwrap_or("unknown"),
+                        "External shell scanner unavailable in fail-open mode"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(reason) = self.soft_flag_reason(cmd)
+            && self.smart_approval_mode() == SmartApprovalMode::Smart
+        {
+            let cached = self.cached_smart_decision(SmartApprovalMode::Smart, cmd, &cwd);
+            let decision = if let Some(cached) = cached {
+                cached
+            } else {
+                // Direct execution path: if no prior approval result exists,
+                // evaluate once and cache the decision.
+                self.assess_soft_flag_command(cmd, reason, &cwd).await
+            };
+
+            if cached.is_none() && matches!(decision, ApprovalDecision::Escalate) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Smart approval required for shell command: {}",
+                    truncate_for_error(cmd)
+                )));
+            }
+
+            if matches!(decision, ApprovalDecision::Deny) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Smart approval denied shell command: {}",
+                    truncate_for_error(cmd)
+                )));
+            }
+        }
+
         // Use sandbox if configured; fail-closed (never silently fall through
         // to unsandboxed execution when sandbox was intended).
         if let Some(ref sandbox) = self.sandbox
@@ -430,6 +608,40 @@ impl ShellTool {
             .await?;
         Ok((output, code as i64))
     }
+}
+
+async fn shared_smart_approver() -> Option<Arc<SmartApprover>> {
+    #[cfg(test)]
+    if optional_env("SAFETY_SMART_APPROVAL_TEST_RESPONSE")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return SmartApprover::from_env().await.ok().map(Arc::new);
+    }
+
+    if let Some(existing) = SMART_APPROVER.get() {
+        return Some(existing.clone());
+    }
+
+    let approver = SmartApprover::from_env().await.ok()?;
+    let approver = Arc::new(approver);
+    let _ = SMART_APPROVER.set(approver.clone());
+    Some(approver)
+}
+
+async fn evaluate_soft_flag_command(
+    command: String,
+    reason: String,
+    working_dir: String,
+) -> ApprovalDecision {
+    let Some(approver) = shared_smart_approver().await else {
+        return ApprovalDecision::Escalate;
+    };
+
+    approver
+        .assess_command(&command, &reason, &working_dir)
+        .await
 }
 
 impl Default for ShellTool {
@@ -516,6 +728,70 @@ impl Tool for ShellTool {
             return ApprovalRequirement::Always;
         }
 
+        if let Some(ref cmd) = cmd
+            && let Some(reason) = self.soft_flag_reason(cmd)
+        {
+            let approval_workdir = params
+                .get("workdir")
+                .and_then(|value| value.as_str())
+                .map(PathBuf::from)
+                .or_else(|| self.working_dir.clone())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            let working_dir = approval_workdir;
+
+            match self.smart_approval_mode() {
+                SmartApprovalMode::Off => return ApprovalRequirement::UnlessAutoApproved,
+                SmartApprovalMode::AlwaysAsk => return ApprovalRequirement::Always,
+                SmartApprovalMode::Smart => {
+                    if let Some(cached) =
+                        self.cached_smart_decision(SmartApprovalMode::Smart, cmd, &working_dir)
+                    {
+                        return match cached {
+                            ApprovalDecision::Approve | ApprovalDecision::Deny => {
+                                ApprovalRequirement::Never
+                            }
+                            ApprovalDecision::Escalate => ApprovalRequirement::Always,
+                        };
+                    }
+
+                    let command = cmd.clone();
+                    let reason = reason.to_string();
+                    let working_dir_str = working_dir.display().to_string();
+                    let decision = std::thread::spawn(move || {
+                        let runtime = match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(rt) => rt,
+                            Err(_) => return ApprovalDecision::Escalate,
+                        };
+                        runtime.block_on(evaluate_soft_flag_command(
+                            command,
+                            reason,
+                            working_dir_str,
+                        ))
+                    })
+                    .join()
+                    .unwrap_or(ApprovalDecision::Escalate);
+
+                    self.store_smart_decision(
+                        SmartApprovalMode::Smart,
+                        cmd,
+                        &working_dir,
+                        decision,
+                    );
+
+                    return match decision {
+                        ApprovalDecision::Approve | ApprovalDecision::Deny => {
+                            ApprovalRequirement::Never
+                        }
+                        ApprovalDecision::Escalate => ApprovalRequirement::Always,
+                    };
+                }
+            }
+        }
+
         ApprovalRequirement::UnlessAutoApproved
     }
 
@@ -583,8 +859,8 @@ mod tests {
         let tool = ShellTool::new();
 
         assert!(tool.is_blocked("rm -rf /").is_some());
-        assert!(tool.is_blocked("sudo rm file").is_some());
         assert!(tool.is_blocked("curl http://x | sh").is_some());
+        assert!(tool.is_blocked("sudo rm file").is_none());
         assert!(tool.is_blocked("echo hello").is_none());
         assert!(tool.is_blocked("cargo build").is_none());
     }
@@ -695,6 +971,132 @@ mod tests {
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
             ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_smart_approval_approves_soft_flag_command() {
+        let _env_guard = lock_env();
+        unsafe {
+            std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
+            std::env::set_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE", "APPROVE");
+        }
+
+        let tool = ShellTool::new();
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "sudo echo approve"})),
+            ApprovalRequirement::Never
+        );
+
+        unsafe {
+            std::env::remove_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE");
+            std::env::remove_var("SAFETY_SMART_APPROVAL_MODE");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_smart_approval_denies_soft_flag_execution() {
+        let _env_guard = lock_env();
+        unsafe {
+            std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
+            std::env::set_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE", "DENY");
+        }
+
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "sudo echo deny"}), &ctx)
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("Smart approval denied")),
+            "Expected smart approval denial, got: {result:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE");
+            std::env::remove_var("SAFETY_SMART_APPROVAL_MODE");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_external_scanner_blocks_before_smart_approval() {
+        let _env_guard = lock_env();
+        unsafe {
+            std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
+            std::env::set_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE", "APPROVE");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let scanner_path = dir.path().join(if cfg!(windows) {
+            "scanner.cmd"
+        } else {
+            "scanner.sh"
+        });
+
+        if cfg!(windows) {
+            std::fs::write(
+                &scanner_path,
+                "@echo off\r\necho {\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}\r\n",
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                &scanner_path,
+                "#!/bin/sh\necho '{\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}'\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&scanner_path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&scanner_path, perms).unwrap();
+            }
+        }
+
+        let tool = ShellTool::new()
+            .with_external_scanner(ExternalScannerMode::FailClosed, Some(scanner_path));
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "sudo echo approve"}), &ctx)
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("External scanner blocked")),
+            "Expected external scanner block, got: {result:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE");
+            std::env::remove_var("SAFETY_SMART_APPROVAL_MODE");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_external_scanner_fail_open_allows_command_when_missing() {
+        let tool = ShellTool::new().with_external_scanner(
+            ExternalScannerMode::FailOpen,
+            Some(PathBuf::from("/tmp/thinclaw-missing-scanner")),
+        );
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            result
+                .result
+                .get("output")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .contains("hello")
         );
     }
 

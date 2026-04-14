@@ -67,9 +67,7 @@ impl HassClient {
             .header("Content-Type", "application/json")
             .send()
             .await
-            .map_err(|e| {
-                ToolError::ExternalService(format!("HA request failed: {}", e))
-            })?;
+            .map_err(|e| ToolError::ExternalService(format!("HA request failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(ToolError::ExternalService(format!(
@@ -78,9 +76,10 @@ impl HassClient {
             )));
         }
 
-        response.json().await.map_err(|e| {
-            ToolError::ExternalService(format!("HA response parse error: {}", e))
-        })
+        response
+            .json()
+            .await
+            .map_err(|e| ToolError::ExternalService(format!("HA response parse error: {}", e)))
     }
 
     async fn post(
@@ -96,9 +95,7 @@ impl HassClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                ToolError::ExternalService(format!("HA request failed: {}", e))
-            })?;
+            .map_err(|e| ToolError::ExternalService(format!("HA request failed: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -110,9 +107,10 @@ impl HassClient {
             )));
         }
 
-        response.json().await.map_err(|e| {
-            ToolError::ExternalService(format!("HA response parse error: {}", e))
-        })
+        response
+            .json()
+            .await
+            .map_err(|e| ToolError::ExternalService(format!("HA response parse error: {}", e)))
     }
 }
 
@@ -128,7 +126,7 @@ impl HomeAssistantTool {
 
     /// Create from environment variables, if available.
     pub fn from_env() -> Option<Self> {
-        HassClient::from_env().map(|c| Self::new(c))
+        HassClient::from_env().map(Self::new)
     }
 }
 
@@ -188,10 +186,9 @@ impl Tool for HomeAssistantTool {
             "list_entities" => {
                 let domain_filter = params.get("domain").and_then(|v| v.as_str());
 
-                let states: Vec<serde_json::Value> = serde_json::from_value(
-                    self.client.get("states").await?,
-                )
-                .map_err(|e| ToolError::ExternalService(format!("Parse error: {}", e)))?;
+                let states: Vec<serde_json::Value> =
+                    serde_json::from_value(self.client.get("states").await?)
+                        .map_err(|e| ToolError::ExternalService(format!("Parse error: {}", e)))?;
 
                 let mut entities: Vec<serde_json::Value> = states
                     .iter()
@@ -239,10 +236,7 @@ impl Tool for HomeAssistantTool {
             "get_state" => {
                 let entity_id = require_str(&params, "entity_id")?;
 
-                let state = self
-                    .client
-                    .get(&format!("states/{}", entity_id))
-                    .await?;
+                let state = self.client.get(&format!("states/{}", entity_id)).await?;
 
                 Ok(ToolOutput::success(state, start.elapsed()))
             }
@@ -343,10 +337,14 @@ impl Tool for HomeAssistantTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_hass_client_url_normalization() {
-        let client = HassClient::new("http://homeassistant.local:8123/".to_string(), "token".to_string());
+        let client = HassClient::new(
+            "http://homeassistant.local:8123/".to_string(),
+            "token".to_string(),
+        );
         assert_eq!(client.base_url, "http://homeassistant.local:8123");
     }
 
@@ -384,6 +382,7 @@ mod tests {
 
     #[test]
     fn test_from_env_missing() {
+        let _env_guard = lock_env();
         // Clear env vars to ensure from_env returns None
         unsafe {
             std::env::remove_var("HASS_URL");

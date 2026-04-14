@@ -1,8 +1,10 @@
-# ThinClaw ↔ OpenClaw Feature Parity Matrix
+# ThinClaw Parity And ThinClaw-First Feature Matrix
 
-> **Last reconciled:** 2026-04-14 03:19 CEST
+> **Last reconciled:** 2026-04-14 (post parity audit)
 
-This document tracks feature parity between ThinClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
+This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
+
+Scrappy-oriented sections are maintained from ThinClaw-side contracts, local Tauri wiring, and the integration surfaces present in this repo. They are useful for planning and contract verification, but external Scrappy UI implementation details should still be revalidated in the Scrappy repo before release sign-off.
 
 **Key source cross-references:** [`src/service.rs`](src/service.rs) (launchd/systemd), [`src/tools/builtin/canvas.rs`](src/tools/builtin/canvas.rs) (A2UI canvas tool), [`src/channels/imessage.rs`](src/channels/imessage.rs) (iMessage channel), [`src/media/video.rs`](src/media/video.rs) (video pipeline), [`src/channels/signal.rs`](src/channels/signal.rs) (Signal), [`src/channels/discord.rs`](src/channels/discord.rs) (Discord), [`src/channels/nostr.rs`](src/channels/nostr.rs) (Nostr).
 
@@ -13,6 +15,25 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 - 🔮 Planned (in scope but not started)
 - 🚫 Out of scope (intentionally skipped)
 - ➖ N/A (not applicable to Rust implementation)
+
+---
+
+## 0. ThinClaw-First Snapshot
+
+These are the higher-signal capabilities that now go beyond simple OpenClaw catch-up and should continue to grow as first-class ThinClaw features.
+
+| Capability | Status | Notes |
+|---------|--------|-------|
+| Channel-owned formatting hints | ✅ | Native channels own formatting guidance through `Channel::formatting_hints()`. WASM channels can declare `formatting_hints` in `*.capabilities.json`, and prompt assembly consumes the resolved hint through `ChannelManager::formatting_hints_for()` instead of hard-coded channel-name switches. |
+| Watched OAuth credential sync | ✅ | Claude Code, Codex, and custom JSON auth files can seed provider credentials and hot-reload updated tokens into the live runtime without restart. |
+| External pre-exec shell scanner | ✅ | First-party `thinclaw-shell-scan` adds a pre-approval structural scanner with configured/PATH/bundled/cached resolution, verified cache install, and fail-open/fail-closed policy control. |
+| Filesystem checkpoints + `/rollback` | ✅ | Shadow-git checkpoints create reversible file mutation history with list, diff, and restore support. |
+| Remote skill federation | ✅ | ThinClaw now supports GitHub taps plus `/.well-known/skills` registries, quarantine scanning, provenance lock files, and risky-install approval gates. |
+| Accessibility-tree browser automation | ✅ | Managed `agent-browser` integration and cloud browser routing move ThinClaw from screenshot-only inspection toward interaction-oriented browsing. |
+| Session-level `/vibe` overlays | ✅ | Session-scoped tone overlays add playfulness without mutating durable identity files. |
+| CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. |
+| Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide SFT/DPO-friendly offline training datasets. |
+| Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
 
 ---
 
@@ -68,7 +89,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 |---------|----------|----------|----------|-------|
 | CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
-| REPL (simple) | ✅ | ✅ | - | For testing |
+| REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/vibe`; no longer just a testing stub |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
 | WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — text, media (image/audio/video/document/sticker), reply threading, DM pairing, markdown→WhatsApp formatting, message chunking |
 | Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |
@@ -128,6 +149,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ✅ | `ToolPolicyManager` with AllowAll/AllowList/DenyList + hierarchical evaluation ([`src/tools/policy.rs`](src/tools/policy.rs)) |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
+| Platform formatting hints | ✅ | ✅ | Active-channel formatting guidance is injected into prompts across native and WASM channels. WASM channels resolve hints with two-tier precedence: explicit channel/package hint first, built-in platform fallback second, then uniform retrieval through `ChannelManager::formatting_hints_for()` |
 | Linked DM continuity across channels | ❌ | 🚧 | DM scope metadata, actor-linked recall, and handoff storage added; explicit group recall and full UX restrictions still need completion |
 | Per-channel media limits | ✅ | ✅ | `MediaLimits` with per-channel env var overrides + `filter_attachments()` ([`src/media/limits.rs`](src/media/limits.rs)) |
 | Typing indicators | ✅ | ✅ | `Channel::send_typing()` trait method with platform-agnostic interface; TUI + Telegram + extensible to Discord/Signal |
@@ -146,15 +168,18 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
 | `gateway start/stop` | ✅ | ✅ | P2 | `gateway.rs`: start (foreground/bg with PID), stop (SIGTERM), status (health+uptime) |
-| `onboard` (wizard) | ✅ | ✅ | - | Interactive setup with five onboarding lanes, including `Custom / Advanced`, plus Humanist Cockpit copy/readiness framing across CLI and TUI |
+| `onboard` (wizard) | ✅ | ✅ | - | Interactive setup with five onboarding lanes, including `Custom / Advanced`, plus Humanist Cockpit copy/readiness framing and shared CliSkin presentation across CLI and TUI |
+| `/skin` | ❌ | ✅ | - | Runtime local-client skin switching with built-in TOML skins (`cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`), ASCII art, and user overrides |
+| `/vibe` | ❌ | ✅ | - | Session-scoped tone overlay command (`/vibe`, `/vibe <name>`, `/vibe reset`) that never rewrites durable identity files |
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config |
 | `channels` | ✅ | ✅ | P2 | `channels.rs`: list (env+WASM detection), info (per-channel details) |
-| `models` | ✅ | ✅ | - | `list`, `info`, `test` subcommands with Ollama auto-discovery ([`src/cli/models.rs`](src/cli/models.rs)) |
+| `models` | ✅ | ✅ | - | `list`, `info`, `test`, and `verify` subcommands with live provider discovery/probing ([`src/cli/models.rs`](src/cli/models.rs)) |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ✅ | P3 | `list`, `add`, `remove`, `show`, `set-default` subcommands |
-| `sessions` | ✅ | ✅ | P3 | `list`, `show`, `prune` subcommands with thread ownership display |
-| `memory` | ✅ | ✅ | - | Memory search CLI |
+| `sessions` | ✅ | ✅ | P3 | `list`, `show`, `prune`, and `export` subcommands with thread ownership display and transcript export ([`src/cli/sessions.rs`](src/cli/sessions.rs)) |
+| `memory` | ✅ | ✅ | - | `search`, `read`, `write`, `tree`, and `status` subcommands for workspace memory operations ([`src/cli/memory.rs`](src/cli/memory.rs)) |
+| `trajectory` | ❌ | ✅ | P3 | `trajectory export` supports raw archive export plus training-ready `sft` and `dpo` datasets derived from labeled turn trajectories; `trajectory stats` summarizes the local archive ([`src/cli/trajectory.rs`](src/cli/trajectory.rs), [`src/agent/learning.rs`](src/agent/learning.rs)) |
 | `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ✅ | P3 | Device management with CRUD + formatted display ([`src/cli/nodes.rs`](src/cli/nodes.rs)) |
@@ -168,7 +193,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | `doctor` | ✅ | ✅ | - | Diagnostics (DB, binaries, LLM credentials, Tailscale) |
 | `reset` | ❌ | ✅ | - | Destructive full-state reset: clears ThinClaw DB tables, removes `~/.thinclaw`, and deletes ThinClaw-managed keychain entries so onboarding can restart cleanly |
 | `logs` | ✅ | ✅ | P3 | tail/search/show/levels with time-range/level/target filtering ([`src/cli/logs.rs`](src/cli/logs.rs)) |
-| `update` | ✅ | ✅ | P3 | check/install/rollback with stable/beta/nightly channels ([`src/cli/update.rs`](src/cli/update.rs)) |
+| `update` | ✅ | ✅ | P3 | `check`, `install`, `rollback`, and `info` with stable/beta/nightly channels ([`src/cli/update.rs`](src/cli/update.rs)) |
 | `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ✅ | P3 | Command parsing + subagent tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
 | `/export-session` | ✅ | ✅ | P3 | `sessions export` with markdown/JSON output ([`src/cli/sessions.rs`](src/cli/sessions.rs)) |
@@ -183,24 +208,26 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Pi agent runtime | ✅ | ➖ | ThinClaw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
-| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
+| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors, applies per-provider cooldowns, leases individual credential entries (not just provider slots) with fill-first / round-robin / least-used / random selection strategies so multi-key backends can spread parallel traffic across keys, and participates in live OAuth credential refresh via watched auth-file sync + runtime reload ([`src/llm/failover.rs`](src/llm/failover.rs), [`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs)) |
 | Per-sender sessions | ✅ | ✅ | Direct sessions are canonicalized by principal scope (cross-channel/device continuity); group scopes remain isolated |
 | Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
 | Session pruning | ✅ | ✅ | `sessions prune` CLI + auto-cleanup with configurable TTL |
-| Context compaction | ✅ | ✅ | Auto summarization |
+| Context compaction | ✅ | ✅ | Auto summarization with user-visible pressure warnings at 85%/95% before compaction |
 | Closed-loop learning orchestrator | ❌ | ✅ | Event→evaluation→candidate loop with dedupe/cooldown, safe-mode thresholds, Tier A auto-apply, Tier C approval-gated code proposals ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/agent/thread_ops.rs`](src/agent/thread_ops.rs)) |
-| Learning tool suite | ❌ | ✅ | `session_search`, `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
+| Learning tool suite | ❌ | ✅ | `session_search` (FTS + optional cheap-model transcript summaries with fallback), `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/agent/session_search.rs`](src/agent/session_search.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
 | Learning API + audit UI | ❌ | ✅ | `/api/learning/*` endpoints + dedicated Web Learning tab with proposals, feedback, rollbacks, and provider health ([`src/api/learning.rs`](src/api/learning.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html)) |
 | Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Optional external memory providers | ❌ | ✅ | Honcho + Zep adapters, local-first canonical memory, non-fatal provider fallback ([`src/agent/learning.rs`](src/agent/learning.rs)) |
 | Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
+| Persona seed templates | ❌ | ✅ | P4 | Built-in SOUL.md seed presets plus setup-wizard selection for fresh workspaces |
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | ✅ | ActivationCriteria: keywords, patterns, tags, `use_when`/`dont_use_when` routing blocks |
 | Skill path compaction | ✅ | ✅ | `~` prefix via `RuntimeBehavior::compact_path()` ([`src/agent/runtime_behavior.rs`](src/agent/runtime_behavior.rs)) |
 | Thinking modes (low/med/high) | ✅ | ✅ | `ThinkingConfig` enum (Disabled/Enabled with budget_tokens), configurable via `thinking_enabled` + `thinking_budget_tokens` settings |
 | Per-model thinkingDefault override | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var: exact+prefix model match with per-model budget |
+| Model-specific prompt guidance | ❌ | ✅ | Model-family prompt guardrails (GPT/Gemini) injected into conversation system prompts, controlled by `agent.model_guidance_enabled` |
 | Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
 | Tool-level streaming | ✅ | ✅ | `StreamChunk::ToolCall` + `StreamChunk::ToolCallDelta` via `complete_stream_with_tools()` |
 | Z.AI tool_stream | ✅ | ✅ | Full tool_stream protocol with delta accumulation ([`src/channels/tool_stream.rs`](src/channels/tool_stream.rs)) |
@@ -208,13 +235,15 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Autonomous approval mode | ❌ | ✅ | `auto_approve_tools` with NEVER_AUTO_APPROVE_PATTERNS safety preserved; manual “allow session” approvals are channel-scoped by default for safer cross-channel direct-session sharing ([`src/agent/dispatcher.rs`](src/agent/dispatcher.rs), [`src/agent/session.rs`](src/agent/session.rs), [`src/setup/wizard.rs`](src/setup/wizard.rs)) |
+| Smart shell approval triage | ❌ | ✅ | Soft-flag shell commands now pass through `SmartApprover` on the approval path; APPROVE skips the prompt, DENY fails closed, ESCALATE falls back to human approval, while `BLOCKED_COMMANDS` stay unconditional ([`src/safety/smart_approve.rs`](src/safety/smart_approve.rs), [`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs)) |
 | Self-update & restart | ❌ | ✅ | `thinclaw update install` + `/restart` command for orderly shutdown; service-managed installs auto-relaunch and foreground `thinclaw` runs now self-relaunch too ([`src/cli/update.rs`](src/cli/update.rs), [`src/agent/submission.rs`](src/agent/submission.rs), [`src/main.rs`](src/main.rs)) |
 | Elevated mode | ✅ | ✅ | Timeout-based activation with command allowlisting ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Subagent system | ✅ | ✅ | Full `SubagentExecutor` ([`src/agent/subagent_executor.rs`](src/agent/subagent_executor.rs)): in-process agentic loops with isolated context, filtered tools/skills, configurable timeouts, cancellation via watch channels, and durable async-subagent resume metadata |
 | `spawn_subagent` tool | ✅ | ✅ | Declarative tool → dispatcher interception → `SubagentExecutor::spawn()`. Sync (wait=true) and async (wait=false) modes ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | `list_subagents` tool | ✅ | ✅ | Query active/recent sub-agents with ID, status, task, timing info ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | `cancel_subagent` tool | ✅ | ✅ | Cancel running sub-agents by UUID; watch channel + task abort ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
-| Sub-agent lifecycle | ✅ | ✅ | Concurrency limits (default 5), per-agent timeout, status tracking (Running/Completed/Failed/TimedOut/Cancelled), user progress notifications via StatusUpdate::AgentMessage |
+| Sub-agent lifecycle | ✅ | ✅ | Concurrency limits (default 5), per-agent timeout, periodic `StatusUpdate::SubagentProgress` heartbeat updates during long-running runs, status tracking (Running/Completed/Failed/TimedOut/Cancelled), user progress notifications via StatusUpdate::AgentMessage, and worker-side inactivity keepalives so long-running delegated work does not trip the parent wall-clock timeout |
+| Trajectory archive + training export | ❌ | ✅ | Per-turn trajectory logging now stores structured assessment metadata, hydrates explicit learning feedback when available, and exports `json`, `jsonl`, `sft`, and `dpo` datasets for offline training workflows ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/cli/trajectory.rs`](src/cli/trajectory.rs)) |
 | Subagent transparency controls | ❌ | ✅ | End-to-end transparency controls shipped: typed Web subagent SSE events + temporal Web subsessions + `agent.subagent_transparency_level` (`balanced`, `detailed`) filtering + Telegram session mode routing |
 | `/subagents spawn` command | ✅ | ✅ | Command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
 | Persistent multi-agent orchestration | ❌ | ✅ | `AgentRegistry` with DB-backed CRUD, 5 LLM tools (`create_agent`/`list_agents`/`update_agent`/`remove_agent`/`message_agent`), workspace seeding, validation, dual-backend persistence ([`src/agent/agent_registry.rs`](src/agent/agent_registry.rs), [`src/tools/builtin/agent_management.rs`](src/tools/builtin/agent_management.rs)) |
@@ -222,7 +251,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Workspace sandbox modes | ❌ | ✅ | `WORKSPACE_MODE` config: `unrestricted` (default), `sandboxed` (confined to `WORKSPACE_ROOT`), `project` (working dir set, files unrestricted). Drives tool registration + dynamic system prompt ([`src/config/agent.rs`](src/config/agent.rs)) |
 | Dynamic system prompt | ❌ | ✅ | `Reasoning::build_workspace_capabilities_section()` generates mode-specific Desktop Capabilities based on active workspace config and available tools ([`src/llm/reasoning.rs`](src/llm/reasoning.rs)) |
 | Screen capture tool | ❌ | ✅ | `ScreenCaptureTool` — macOS screencapture/Linux gnome-screenshot/scrot; registered when `ALLOW_LOCAL_TOOLS=true` + `SCREEN_CAPTURE_ENABLED=true` (user opt-in via Scrappy toggle). Dynamic system prompt auto-detects and injects guidance ([`src/tools/builtin/screen_capture.rs`](src/tools/builtin/screen_capture.rs)) |
-| Auth profiles | ✅ | ✅ | Multi-key rotation with health tracking ([`src/safety/auth_profiles.rs`](src/safety/auth_profiles.rs)) |
+| Auth profiles | ✅ | ✅ | Multi-key rotation with health tracking, plus watched OAuth auth-file sources (Claude Code, Codex, and custom JSON token files) that prime injected provider credentials and hot-reload the live runtime on token changes without restart ([`src/safety/auth_profiles.rs`](src/safety/auth_profiles.rs), [`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs), [`src/config/mod.rs`](src/config/mod.rs)) |
 | Generic API key rotation | ✅ | ✅ | Multi-strategy rotation with health tracking ([`src/safety/key_rotation.rs`](src/safety/key_rotation.rs)) |
 | Stuck loop detection | ✅ | ✅ | Consecutive same-tool detection with warn at 3, force-text at 5 |
 | llms.txt discovery | ✅ | ✅ | .well-known probing + markdown link parsing ([`src/llm/llms_txt.rs`](src/llm/llms_txt.rs)) |
@@ -253,18 +282,19 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | MiniMax | ✅ | ✅ | P3 | Provider preset + catalog updated to the current `api.minimax.io/v1` OpenAI-compatible endpoint and M2-family defaults ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs), [`src/config/provider_catalog.rs`](src/config/provider_catalog.rs)) |
 | GLM-5 | ✅ | ✅ | P3 | Provider preset via `ProviderPreset::Glm` — Zhipu `glm-4-plus` default ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs)) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
-| llama.cpp (native) | ❌ | ✅ | P3 | `LlamaModel` trait + `LlamaConfig` + `LlamaCppStub` fallback, ready for `llama-cpp-2` FFI ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs)) |
+| llama.cpp (server-mode integration) | ❌ | ✅ | P3 | ThinClaw exposes llama.cpp through a local `llama-server` / OpenAI-compatible endpoint today, while `src/llm/llama_cpp.rs` provides the abstraction layer and future native-hook scaffold rather than a fully wired FFI backend ([`src/llm/provider_factory.rs`](src/llm/provider_factory.rs), [`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs)) |
 
 ### Model Features
 
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
-| Auto-discovery | ✅ | ✅ | `ModelDiscovery` service ([`src/llm/discovery.rs`](src/llm/discovery.rs)): OpenAI/Anthropic/Ollama endpoint scanning |
+| Auto-discovery | ✅ | ✅ | `ModelDiscovery` service covers OpenAI-compatible, Anthropic, Ollama, Cohere, and provider-specific verification paths used by both CLI and WebUI flows ([`src/llm/discovery.rs`](src/llm/discovery.rs), [`src/cli/models.rs`](src/cli/models.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs)) |
 | Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
 | Cooldown management | ✅ | ✅ | Lock-free per-provider cooldown in `FailoverProvider` |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 | Per-model thinkingDefault | ✅ | ✅ | `MODEL_THINKING_OVERRIDE` env var with exact+prefix matching |
+| Prompt caching metadata seam | ✅ | ✅ | `ChatMessage` carries provider-scoped metadata and reasoning attaches Anthropic-compatible `cache_control: {type: "ephemeral"}` hints only when `supports_prompt_caching()` is true; unsupported providers stay metadata-clean while `with_prompt_caching()` remains compatibility fallback in the adapter path |
 | 1M context beta header | ✅ | ✅ | `ExtendedContextConfig` with configurable beta header ([`src/llm/extended_context.rs`](src/llm/extended_context.rs)) |
 | Smart routing WebUI config | ❌ | ✅ | Providers tab now includes a dedicated Routing editor for enable/disable, mode selection, provider roster, per-provider model slot persistence, drag-and-drop primary/cheap pool reordering, fallback chain, policy rules, route simulation, an opt-in “Separate tool planning from final answer” toggle for two-phase cheap synthesis on main-agent tool turns, where the cheap phase only runs after an explicit `NO_TOOLS_NEEDED` planner signal and any primary-model final answer is returned directly, plus a separate toggle to keep primary planning thinking enabled by default ([`src/channels/web/static/app.js`](src/channels/web/static/app.js), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/agent/dispatcher.rs`](src/agent/dispatcher.rs)) |
 | Wizard cheap model API key | ❌ | ✅ | `step_smart_routing` detects cross-provider cheap model, prompts for the missing API key without clobbering the primary backend, and persists canonical provider settings ([`src/setup/wizard/llm.rs`](src/setup/wizard/llm.rs)) |
@@ -316,7 +346,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
 | HTTP path registration | ✅ | ✅ | Plugin route registry with conflict detection ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs)) |
-| Workspace-relative install | ✅ | ✅ | ~/.thinclaw/tools/ |
+| Home-directory install roots | ✅ | ✅ | Default install locations are `~/.thinclaw/tools/` and `~/.thinclaw/channels/`, not workspace-relative |
 | Channel plugins | ✅ | ✅ | WASM channels |
 | Auth plugins | ✅ | ✅ | `AuthPlugin` trait + `AuthCredentials`/`AuthToken` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
 | Memory plugins | ✅ | ✅ | `MemoryPlugin` trait + `MemoryEntry` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
@@ -328,7 +358,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Plugin CLI (`remove`) | ✅ | ✅ | `registry remove <name>` — deletes `.wasm` + `.capabilities.json` from channels/tools dir |
 | ClawHub registry | ✅ | ✅ | `ClawHubConfig` + `CatalogCache` with TTL, search, merge ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs)) |
 | Channel hot-reload | ❌ | ✅ | `ChannelWatcher` polls `~/.thinclaw/channels/` for `.wasm` changes; auto-loads/reloads/removes channels ([`src/channels/wasm/channel_watcher.rs`](src/channels/wasm/channel_watcher.rs)) |
-| REST API (extensions) | ❌ | ✅ | Full CRUD: `GET /api/extensions`, `POST install`, `POST activate`, `DELETE remove`, `GET/POST setup` |
+| REST API (extensions) | ❌ | ✅ | Full management surface: `GET /api/extensions`, `POST install`, `POST activate`, `POST {name}/remove`, `GET/POST setup` |
 | MCP server integration | ✅ | ✅ | Full MCP client with OAuth 2.1, stdio + HTTP transport, session management ([`src/tools/mcp/`](src/tools/mcp/)) |
 | `before_agent_start` hook | ✅ | ✅ | `HookPoint::BeforeAgentStart` — fires before agent main loop, can reject startup |
 | `before_message_write` hook | ✅ | ✅ | `HookPoint::BeforeMessageWrite` — fires before channel write, can modify/suppress |
@@ -342,13 +372,13 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 
 | Feature | OpenClaw | ThinClaw | Notes |
 |---------|----------|----------|-------|
-| Primary config file | ✅ `~/.openclaw/openclaw.json` | ✅ `.env` | Different formats |
+| Primary config file | ✅ `~/.openclaw/openclaw.json` | ✅ `~/.thinclaw/settings.json` | ThinClaw persists primary settings in `settings.json`; `config.toml` is an overlay and `.env` remains bootstrap/env input |
 | JSON5 support | ✅ | ✅ | Comment stripping + trailing comma removal ([`src/config/formats.rs`](src/config/formats.rs)) |
 | YAML alternative | ✅ | ✅ | YAML-to-JSON + JSON-to-YAML serialization ([`src/config/formats.rs`](src/config/formats.rs)) |
 | Environment variable interpolation | ✅ | ✅ | `${VAR}` |
 | Config validation/schema | ✅ | ✅ | Type-safe Config struct |
 | Hot-reload | ✅ | ✅ | `ConfigWatcher` polls mtime, broadcasts changes |
-| Legacy migration | ✅ | ➖ | |
+| Legacy migration | ✅ | ✅ | Legacy bootstrap/settings formats are still migrated forward during startup and settings load |
 | State directory | ✅ `~/.openclaw-state/` | ✅ `~/.thinclaw/` | |
 | Credentials directory | ✅ | ✅ | Session files |
 | Full model compat fields in schema | ✅ | ✅ | `ModelCompat` with context window, feature flags, pricing, pi-ai support ([`src/config/model_compat.rs`](src/config/model_compat.rs)) |
@@ -444,7 +474,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | **PTT** | Global shortcut (Cmd+Shift+V, configurable via `tauri-plugin-global-shortcut`). `useAudioRecorder` hook for mic capture. Backend emits `ptt_toggle` event → ChatProvider toggles recording → Whisper transcription → text inserted. | `lib.rs`, `ChatProvider.tsx`, `use-audio-recorder.ts` |
 | **Agent events** | `LiveAgentStatus.tsx` renders tool execution, approval cards, canvas updates inline. `OpenClawEventInspector.tsx` provides dedicated raw event stream with filters, pause, and clear. | `LiveAgentStatus.tsx`, `OpenClawEventInspector.tsx` |
 | **Auto-updates** | `tauri-plugin-updater` + `tauri-plugin-process` in `Cargo.toml`. Updater config in `tauri.conf.json` with signing key + GitHub Releases endpoint. `UpdateChecker.tsx` — floating notification card: auto-check 5s after launch, download progress bar, install + restart. Signing keypair at `~/.tauri/scrappy.key`. | `Cargo.toml`, `tauri.conf.json`, `lib.rs`, `UpdateChecker.tsx`, `App.tsx` |
-| **Voice wake** | `VoiceWakeOverlay.tsx` + `use-voice-wake.ts` — VAD-based (RMS energy threshold). Floating mic button toggles always-on listening. Auto-starts recording when speech detected, auto-transcribes via Whisper, inserts into chat input. Custom window event bridges to ChatProvider. **Gap:** No real wake-word (e.g. Porcupine/Snowboy) — uses energy-based VAD instead. | `VoiceWakeOverlay.tsx`, `use-voice-wake.ts`, `ChatProvider.tsx` |
+| **Voice wake** | `VoiceWakeOverlay.tsx` + `use-voice-wake.ts` — hybrid wake stack with RMS-energy VAD plus Sherpa-ONNX keyword spotting when the wake-word backend and models are available, with automatic fallback to energy mode otherwise. Floating mic button toggles always-on listening, auto-starts recording on detection, auto-transcribes via Whisper, and inserts text into chat input. | `VoiceWakeOverlay.tsx`, `use-voice-wake.ts`, `ChatProvider.tsx`, `voice_wake.rs` |
 
 ### Owner: Scrappy Agent
 
@@ -530,7 +560,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | WASM sandbox | ❌ | ✅ | ThinClaw innovation |
 | Sandbox env sanitization | ✅ | ✅ | Shell tool scrubs env vars + LD*/DYLD* injection blocks + safe bins allowlist |
 | Workspace sandbox modes | ❌ | ✅ | `WORKSPACE_MODE` (unrestricted/sandboxed/project) + `WORKSPACE_ROOT` — file tools + shell confined to workspace when sandboxed ([`src/config/agent.rs`](src/config/agent.rs), [`src/tools/registry.rs`](src/tools/registry.rs)) |
-| Shell sandbox (3-layer) | ❌ | ✅ | When `base_dir` set: (1) Safe bins allowlist auto-enforced, (2) workdir validation (must be under base_dir), (3) command path scanning (`detect_path_escape` + `..` traversal detection). 11 dedicated tests ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs)) |
+| Shell sandbox (3-layer) | ❌ | ✅ | When `base_dir` set: (1) Safe bins allowlist auto-enforced, (2) workdir validation (must be under base_dir), (3) command path scanning (`detect_path_escape` + `..` traversal detection); plus a first-party pre-exec external shell scanner (`thinclaw-shell-scan`) resolved from configured path / `PATH` / bundled asset / verified cache, with SHA-256-checked cached install, 24h failure cooldown, and fail-open/fail-closed enforcement before smart approval ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs)) |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ✅ | ([`src/safety/elevated.rs`](src/safety/elevated.rs)) |
 | Safe bins allowlist | ✅ | ✅ | `THINCLAW_SAFE_BINS_ONLY` + extensible `THINCLAW_EXTRA_BINS` + desktop bins (open, xdg-open, pbcopy, pbpaste, tee, xargs, chmod) |
@@ -541,7 +571,8 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Skill download path restriction | ✅ | ✅ | ([`src/safety/skill_path.rs`](src/safety/skill_path.rs)) |
 | Webhook signature verification | ✅ | ✅ | |
 | Media URL validation | ✅ | ✅ | SSRF prevention: blocks private IPs, cloud metadata, disallowed schemes ([`src/safety/media_url.rs`](src/safety/media_url.rs)) |
-| Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization |
+| Prompt injection defense | ✅ | ✅ | Pattern detection, sanitization, and context-file scanning for AGENTS.md/SOUL.md/USER.md with invisible Unicode stripping ([`src/safety/sanitizer.rs`](src/safety/sanitizer.rs), [`src/workspace/workspace_core.rs`](src/workspace/workspace_core.rs)) |
+| Prompt-surface PII redaction | ✅ | ✅ | System prompt assembly now hashes actor/conversation identifiers for non-Discord channels and replaces raw actor-private path labels with prompt-safe aliases ([`src/safety/pii_redactor.rs`](src/safety/pii_redactor.rs), [`src/workspace/workspace_core.rs`](src/workspace/workspace_core.rs), [`src/agent/dispatcher.rs`](src/agent/dispatcher.rs)) |
 | Leak detection | ✅ | ✅ | Secret exfiltration |
 | Dangerous tool re-enable warning | ✅ | ✅ | `DangerousToolTracker` ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs)) |
 | OS governance env vars | ❌ | ✅ | Scrappy live-checks macOS permissions and passes to ThinClaw: `ACCESSIBILITY_GRANTED` (AXIsProcessTrusted), `SCREEN_RECORDING_GRANTED` (CGPreflightScreenCaptureAccess), `SCREEN_CAPTURE_ENABLED` (user toggle) |
@@ -567,6 +598,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Docker: Chromium + Xvfb | ✅ | ✅ | `DockerChromiumConfig` with Xvfb + Chrome launch args, full container lifecycle (start/stop/health-check), wired into `BrowserTool` as automatic fallback when no local Chrome binary found. Forced via `BROWSER_DOCKER=always` env var. ([`src/sandbox/docker_chromium.rs`](src/sandbox/docker_chromium.rs), [`src/tools/builtin/browser.rs`](src/tools/builtin/browser.rs)) |
 | Docker: init scripts | ✅ | ✅ | `DockerInitConfig` with script discovery + interpreter detection ([`src/sandbox/docker_init.rs`](src/sandbox/docker_init.rs)) |
 | Browser: extraArgs config | ✅ | ✅ | `BrowserArgsConfig` with custom Chrome flags, proxy, hardening ([`src/tools/browser_args.rs`](src/tools/browser_args.rs)) |
+| Browser: managed cloud CDP providers | ✅ | ✅ | `BrowserTool` now supports Browserbase session provisioning/release and Browser Use remote CDP URLs via `cloud_browser_provider`, while preserving local Chrome and Docker fallback. ([`src/tools/builtin/browser.rs`](src/tools/builtin/browser.rs), [`src/tools/builtin/browser_cloud.rs`](src/tools/builtin/browser_cloud.rs), [`src/config/agent.rs`](src/config/agent.rs)) |
 
 ### Owner: ThinClaw Agent
 
@@ -574,10 +606,10 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 
 ## 17. Scrappy Feature Surfacing Analysis
 
-> **Last updated:** 2026-03-25 — reconciled with workspace sandbox modes, shell sandboxing, screen capture, OS governance
+> **Last updated:** 2026-04-14 — parity-audited against current ThinClaw contracts and Tauri wiring
 >
-> ThinClaw has shipped far more capabilities than Scrappy currently exposes through its UI.
-> This section tracks which ThinClaw features Scrappy surfaces, which need UI, and wiring gaps.
+> ThinClaw now exposes a broad Scrappy-facing contract surface in this repo.
+> This section tracks ThinClaw-side wiring, expected Scrappy feature surfacing, and the integration seams that should be revalidated in the external Scrappy repo when UI behavior changes.
 
 ### 17.1 Features Scrappy Has UI For (Wired)
 
@@ -586,7 +618,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Skills system (§5, §8) | `OpenClawSkills.tsx` — list, toggle, install | ✅ Wired via `openclaw_skills_*` commands |
 | Memory/Workspace (§10) | `OpenClawMemory.tsx`, `MemoryEditor.tsx` | ✅ Wired via `openclaw_get_memory`, `openclaw_save_memory` |
 | Cron/Routines (§14) | `OpenClawAutomations.tsx` | ✅ Wired via `openclaw_cron_*` commands |
-| Channels (§3) | `OpenClawChannels.tsx` | ✅ Wired via `openclaw_channels_list` command |
+| Channels (§3) | `OpenClawChannels.tsx` | ✅ Wired via ThinClaw-side channel status/list surfaces, primarily `openclaw_channel_status_list` |
 | Subagent support (§5) | `SubAgentPanel.tsx` | ✅ Wired via Enhancement 2C |
 | Workspace sandbox modes (§5, §15) | Settings panel — unrestricted/sandboxed/project | ✅ Sets `WORKSPACE_MODE` + `WORKSPACE_ROOT` env vars |
 | OS governance (§15) | Settings panel — screen capture toggle, permission checks | ✅ `ACCESSIBILITY_GRANTED`, `SCREEN_RECORDING_GRANTED`, `SCREEN_CAPTURE_ENABLED` |
@@ -617,14 +649,14 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Animated tray icon (§2) | `ironclaw_channel.rs` — active dot badge on Thinking/ToolStarted, auto-reset | ✅ Backend-driven via TrayState |
 | Auto-updates | `UpdateChecker.tsx` — check/download/install/restart via tauri-plugin-updater | ✅ Wired via `@tauri-apps/plugin-updater` + `tauri-plugin-process` |
 | Voice wake (VAD + KWS) | `VoiceWakeOverlay.tsx` + `use-voice-wake.ts` — VAD energy detection + Sherpa-ONNX keyword spotting → auto-record → transcribe | ✅ Full — energy + Sherpa-ONNX backends |
-| Channel listing (§3) | `OpenClawChannels.tsx` — all 6 channels (Slack, Telegram, Discord, Signal, Webhook, Nostr) with type badges | ✅ Wired via `openclaw_channels_list` command |
+| Channel listing (§3) | `OpenClawChannels.tsx` — channel inventory and status cards | ✅ Wired via `openclaw_channel_status_list` |
 | Stream mode config (§3) | Per-channel stream mode selector in `OpenClawChannels.tsx` (Full/Typing/Disabled) | ✅ Wired via `setSetting` API |
 | Cron lint validator (§14) | Expression validator in `OpenClawAutomations.tsx` with next-5-fire-times display | ✅ Wired via `openclaw_cron_lint` command |
 
-### 17.2 Features ThinClaw Has, Scrappy Has NO UI For
+### 17.2 Additional ThinClaw Features Scrappy Surfacing Tracks
 
-> **Sprint 15: All features fully wired** via unified `tauri_commands` facade module.
-> Scrappy UI exists for 12/12 features. Gmail + routing wired end-to-end in Sprint 15.
+> ThinClaw-side wiring for the features below is present in this repo.
+> Treat the UI status here as an integration snapshot, not a substitute for checking the external Scrappy repo before release.
 
 | ThinClaw Feature | API / Module | Scrappy UI | ThinClaw Wiring | Status |
 |-----------------|-------------|------------|-----------------|--------|
@@ -641,12 +673,12 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | **Plugin lifecycle hooks** | `LifecycleHookRegistry` ([`src/extensions/lifecycle_hooks.rs`](src/extensions/lifecycle_hooks.rs)) | ✅ Timeline tab in Plugins page with color-coded events | ✅ `tauri_commands::plugin_lifecycle_list()` | ✅ End-to-end |
 | **Response cache metrics** | `CachedResponseStore` ([`src/llm/response_cache_ext.rs`](src/llm/response_cache_ext.rs)) | ✅ Hits/misses/rate/size cards + efficiency bar | ✅ `tauri_commands::cache_stats()` | ✅ Shared instance via `AppComponents.response_cache` → `AgentDeps` → `Reasoning::with_response_cache()` |
 
-### 17.3 Tauri Command Wiring — ✅ All Complete
+### 17.3 Tauri Command Wiring Snapshot
 
-> 22+ Tauri commands wired via unified `tauri_commands` facade ([`src/tauri_commands.rs`](src/tauri_commands.rs)).
-> All Tauri commands use `openclaw_*` prefix. Pure Tauri IPC — no REST gateway.
+> 22+ Tauri commands are wired via the unified `tauri_commands` facade ([`src/tauri_commands.rs`](src/tauri_commands.rs)).
+> All Tauri commands use the `openclaw_*` prefix. Pure Tauri IPC — no REST gateway.
 > Scrappy uses `specta` for type generation via `bindings.ts`.
-> All known issues resolved. `openclaw_channels_list` still reads env vars (P3 cleanup).
+> Channel-facing UI currently relies on `openclaw_channel_status_list`; broader inventory/status parity should still be revalidated whenever the external Scrappy repo changes.
 
 ### Owner: Scrappy Agent
 
@@ -768,7 +800,7 @@ running inside Scrappy.
 
 ## Implementation Priorities (ThinClaw)
 
-> **Last updated:** 2026-03-25 — All P0–P3 complete. P5–P7 complete. See §21 for Scrappy architecture.
+> **Last updated:** 2026-04-14 — All P0–P3 complete. P5–P7 complete. See §21 for Scrappy architecture.
 >
 > All open ThinClaw work aggregated from project artifacts into a single prioritized list.
 > Scrappy = macOS desktop app (Tauri/Rust). May later add a native Swift macOS app separately.
@@ -811,6 +843,9 @@ running inside Scrappy.
 - ✅ Configurable image resize dimensions (`with_max_dimensions()`, OpenAI `detail` level hints)
 - ✅ Multiple images per tool call (`format_multiple_for_llm()`)
 - ✅ Skills routing blocks (`use_when`/`dont_use_when` in ActivationCriteria)
+- ✅ Remote skill federation + quarantine pipeline (`GitHubSkillSource`, `WellKnownSkillSource`, `QuarantineManager`, provenance lock files, risky-install approval gate)
+- ✅ Accessibility-tree browser backend + managed cloud browser routing (`agent-browser`, Browserbase, Browser Use)
+- ✅ Anthropic prompt caching (`with_prompt_caching()` compatibility path + provider-scoped message metadata seam with Anthropic `cache_control` hints on supported providers)
 - ✅ `before_agent_start` / `before_message_write` hooks
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ✅ Configuration hot-reload (`ConfigWatcher`)
@@ -831,6 +866,8 @@ running inside Scrappy.
 - ✅ TAURI_INTEGRATION.md §9–§11 verified against code — comprehensive and accurate
 - ✅ Allowlist/blocklist — allow_from + block_from + pairing store (blocklist precedence), CLI `pairing block/unblock/blocked`
 - ✅ OAuth flows — full Auth Code + PKCE browser flow ([`src/cli/tool.rs`](src/cli/tool.rs): `auth_tool_oauth()`, 192 LOC), auto-refresh (`OAuthRefreshConfig`), scope aggregation across tools, built-in Google/GitHub/Notion credentials ([`src/cli/oauth_defaults.rs`](src/cli/oauth_defaults.rs), 571 LOC), token storage with expiry
+- ✅ Watched OAuth credential sync — Claude Code, Codex, and custom JSON auth files can prime injected provider credentials, merge updated tokens into the live runtime overlay, and trigger runtime reloads without restart ([`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs), [`src/config/mod.rs`](src/config/mod.rs))
+- ✅ External pre-exec shell scanner — `thinclaw-shell-scan` runs before smart approval, supports configured/PATH/bundled/cached resolution, SHA-256-verified cache installs, and fail-open / fail-closed modes ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
 
 ### P3 - Lower Priority
 **Channels**
@@ -860,6 +897,7 @@ running inside Scrappy.
 - ✅ CLI: `/subagents spawn` from chat — command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs))
 - ✅ CLI: `logs` query/filter — tail, search, show, levels subcommands with time-range/level/target filtering ([`src/cli/logs.rs`](src/cli/logs.rs))
 - ✅ CLI: `update` self-update — check/install/rollback with stable/beta/nightly channels + binary backup ([`src/cli/update.rs`](src/cli/update.rs))
+- ✅ CLI: filesystem checkpoints + `/rollback` — shadow git snapshots, per-turn dedup, restore/diff/list support ([`src/agent/checkpoint.rs`](src/agent/checkpoint.rs), [`src/agent/commands.rs`](src/agent/commands.rs), [`src/tools/builtin/file.rs`](src/tools/builtin/file.rs))
 - ✅ CLI: `browser` automation — headless Chrome open/screenshot/links/check with DOM extraction ([`src/cli/browser.rs`](src/cli/browser.rs))
 - ✅ CLI: `sessions export` — markdown/JSON transcript export with role labels and timestamps ([`src/cli/sessions.rs`](src/cli/sessions.rs))
 - ✅ CLI: `models` — list/info/test plus `models verify` for live remote provider discovery + chat probes ([`src/cli/models.rs`](src/cli/models.rs))
@@ -871,7 +909,7 @@ running inside Scrappy.
 - ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
 - ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))
 - ✅ Auto model discovery from endpoints ([`src/llm/discovery.rs`](src/llm/discovery.rs): OpenAI/Anthropic/Ollama plus provider-specific Cohere discovery and native Bedrock-compatible endpoint scanning)
-- ✅ `llama.cpp` native interface — `LlamaModel` trait, `LlamaConfig` (GPU layers, sampling, context length), `ModelLoadStatus`, `LlamaCppStub` fallback ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs))
+- ✅ `llama.cpp` server-mode integration scaffold — `LlamaModel` trait, `LlamaConfig` (GPU layers, sampling, context length), `ModelLoadStatus`, `LlamaCppStub`, and provider-factory wiring through `llama-server` / OpenAI-compatible endpoints ([`src/llm/llama_cpp.rs`](src/llm/llama_cpp.rs), [`src/llm/provider_factory.rs`](src/llm/provider_factory.rs))
 - ✅ Provider presets — NVIDIA, Perplexity, MiniMax, GLM-5 pre-configured for OpenAI-compatible endpoint ([`src/llm/provider_presets.rs`](src/llm/provider_presets.rs))
 
 **Memory & Search**
@@ -896,6 +934,7 @@ running inside Scrappy.
 - ✅ Dangerous tool re-enable warning — `DangerousToolTracker` with state history and warning generation ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs))
 - ✅ Workspace sandbox modes — `WORKSPACE_MODE` (unrestricted/sandboxed/project) with `WORKSPACE_ROOT`; drives `register_dev_tools_with_config()` + dynamic system prompt ([`src/config/agent.rs`](src/config/agent.rs))
 - ✅ Shell 3-layer sandbox — When `base_dir` set: (1) `check_safe_bins_forced()`, (2) workdir parameter validation, (3) `detect_path_escape()` with `..` traversal detection. 11 tests ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs))
+- ✅ External pre-exec shell scanner — first-party `thinclaw-shell-scan` with configured/PATH/bundled/cached resolution, SHA-256-verified cache install, 24h failure cooldown, and fail-open / fail-closed enforcement before smart approval ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
 - ✅ Screen capture opt-in — `ScreenCaptureTool` gated on `SCREEN_CAPTURE_ENABLED` env var (user toggle in Scrappy UI) + `ALLOW_LOCAL_TOOLS` ([`src/app.rs`](src/app.rs))
 - ✅ OS governance env vars — Scrappy passes `ACCESSIBILITY_GRANTED` + `SCREEN_RECORDING_GRANTED` from live macOS permission checks
 
@@ -926,15 +965,15 @@ running inside Scrappy.
 - ✅ iMessage channel — `IMessageChannel` (720 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics, 23 tests
 - ❌ Other messaging platforms (LINE, Feishu/Lark, Google Chat, MS Teams, Twitch)
 
-### P5 - Scrappy (Tauri) Integration — ✅ All Complete
-> All Scrappy wiring, macOS features, and Tauri commands are live and verified.
-> 22+ `tauri_commands` wired. See §17 for feature surfacing details, §21 for IPC architecture.
+### P5 - Scrappy (Tauri) Integration — ✅ ThinClaw-Side Contract Complete
+> ThinClaw-side Tauri commands, macOS-facing hooks, and integration surfaces are present in this repo.
+> External Scrappy UI behavior should still be revalidated against the Scrappy repo. See §17 for feature surfacing details and §21 for IPC architecture.
 
-### P6 - Tauri IPC Architecture — ✅ Already Complete
-> Pure in-process Tauri IPC (no HTTP/SSE/GatewayChannel). See §21 for architecture docs.
+### P6 - Tauri IPC Architecture — ✅ ThinClaw-Side Complete
+> Pure in-process Tauri IPC (no HTTP/SSE/GatewayChannel) is implemented on the ThinClaw side. See §21 for architecture docs.
 
-### P7 - Sprint 15 (Gmail + Routing) — ✅ Fully Complete
-> Gmail PKCE OAuth (G1-G3), routing CRUD (R1-R2) — all tasks complete on both ThinClaw and Scrappy sides.
+### P7 - Sprint 15 (Gmail + Routing) — ✅ ThinClaw-Side Complete
+> Gmail PKCE OAuth and routing CRUD are complete on the ThinClaw side. Scrappy-side release readiness should be confirmed in the external repo.
 
 ---
 
@@ -1003,7 +1042,7 @@ These are intentional architectural choices, not gaps to be filled.
 
 ---
 
-## 20. Deployed Built-in Tools (79 total)
+## 20. Shipped Built-in Tools (80 total; some conditional or feature-gated)
 
 > **Updated:** 2026-04-14
 
@@ -1025,7 +1064,7 @@ These are intentional architectural choices, not gaps to be filled.
 
 | Tool | Source | Description |
 |------|--------|-------------|
-| `browser` | [`browser.rs`](src/tools/builtin/browser.rs) | Full browser automation: navigate, snapshot, click, type, press_key, scroll, back, forward, screenshot, evaluate JS, get_text, get_images, console, tabs, switch_tab, close |
+| `browser` | [`browser.rs`](src/tools/builtin/browser.rs) | Full browser automation across local Chrome, Docker Chromium, `agent-browser`, and managed cloud CDP providers (Browserbase / Browser Use): navigate, snapshot, click, type, press_key, scroll, back, forward, screenshot, evaluate JS, get_text, get_images, console, tabs, switch_tab, close |
 | `http` | [`http.rs`](src/tools/builtin/http.rs) | HTTP client with SSRF protection, credential injection, URL allowlists |
 
 ### 20.3 Memory & Knowledge (7 tools)
@@ -1053,7 +1092,7 @@ These are intentional architectural choices, not gaps to be filled.
 | `list_subagents` | [`subagent.rs`](src/tools/builtin/subagent.rs) | Query active/recent sub-agents |
 | `cancel_subagent` | [`subagent.rs`](src/tools/builtin/subagent.rs) | Cancel running sub-agent by UUID |
 
-### 20.5 Jobs & Routines (10 tools)
+### 20.5 Jobs & Routines (11 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
@@ -1073,12 +1112,12 @@ These are intentional architectural choices, not gaps to be filled.
 
 | Tool | Source | Description |
 |------|--------|-------------|
-| `skill_install` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Install prompt-based skills |
+| `skill_install` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Install prompt-based skills from direct content, ClawHub, configured GitHub taps, or configured `/.well-known/skills` registries with quarantine scanning, provenance lock files, and risky-install approval gates |
 | `skill_list` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | List installed skills |
 | `skill_read` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Read skill source |
 | `skill_remove` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Remove a skill |
 | `skill_reload` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Hot-reload skills from disk |
-| `skill_search` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Search skill catalog |
+| `skill_search` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Search local skills, ClawHub, configured GitHub taps, and configured `/.well-known/skills` registries |
 | `tool_install` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Install WASM tool extensions |
 | `tool_list` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | List installed WASM tools |
 | `tool_search` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Search tool registry |
@@ -1107,13 +1146,14 @@ These are intentional architectural choices, not gaps to be filled.
 | `telegram_actions` | [`telegram_actions.rs`](src/tools/builtin/telegram_actions.rs) | Telegram-specific API actions |
 | `apple_mail` | [`apple_mail.rs`](src/tools/builtin/apple_mail.rs) | Read/send Apple Mail via AppleScript |
 
-### 20.9 LLM & Reasoning (4 tools)
+### 20.9 LLM & Reasoning (5 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `llm_select` | [`llm_tools.rs`](src/tools/builtin/llm_tools.rs) | Switch active LLM model at runtime |
 | `llm_list_models` | [`llm_tools.rs`](src/tools/builtin/llm_tools.rs) | List available models across providers |
 | `mixture_of_agents` | [`moa.rs`](src/tools/builtin/moa.rs) | Multi-LLM parallel dispatch + synthesis aggregation |
+| `consult_advisor` | [`advisor.rs`](src/tools/builtin/advisor.rs) | Advisor-executor consultation tool, registered conditionally when routing mode uses the advisor lane |
 | `agent_think` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Explicit reasoning scratchpad (implicit capability tool) |
 
 ### 20.10 Hardware & Environment (5 tools)
@@ -1155,7 +1195,7 @@ These are intentional architectural choices, not gaps to be filled.
 |------|--------|-------------|
 | `build_software` | [`builder/core.rs`](src/tools/builder/core.rs) | LLM-driven iterative build loop for WASM tools, CLI apps, and scripts |
 
-### 20.15 Utility (2 tools)
+### 20.15 Utility (1 tool)
 
 | Tool | Source | Description |
 |------|--------|-------------|

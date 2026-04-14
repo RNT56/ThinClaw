@@ -53,6 +53,11 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Provider-scoped message metadata (for example Anthropic cache hints).
+    ///
+    /// Keys are provider IDs and values are provider-native metadata payloads.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub provider_metadata: std::collections::HashMap<String, serde_json::Value>,
     /// Media attachments for multimodal messages (user role only).
     ///
     /// Supports images, audio, and video. Carried through the pipeline
@@ -73,6 +78,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
     }
@@ -85,6 +91,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
     }
@@ -97,6 +104,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
     }
@@ -116,6 +124,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
     }
@@ -132,6 +141,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            provider_metadata: std::collections::HashMap::new(),
             attachments: Vec::new(),
         }
     }
@@ -139,6 +149,16 @@ impl ChatMessage {
     /// Attach media content (images) for multimodal processing.
     pub fn with_attachments(mut self, attachments: Vec<MediaContent>) -> Self {
         self.attachments = attachments;
+        self
+    }
+
+    /// Attach provider-scoped metadata to this message.
+    pub fn with_provider_metadata(
+        mut self,
+        provider: impl Into<String>,
+        metadata: serde_json::Value,
+    ) -> Self {
+        self.provider_metadata.insert(provider.into(), metadata);
         self
     }
 
@@ -494,6 +514,15 @@ pub trait LlmProvider: Send + Sync {
             id: self.model_name().to_string(),
             context_length: None,
         })
+    }
+
+    /// Whether this provider supports Anthropic-style prompt caching.
+    ///
+    /// Providers that can mark stable system/context blocks for prompt caching
+    /// should override this. Most providers do not support this and return
+    /// `false`.
+    fn supports_prompt_caching(&self) -> bool {
+        false
     }
 
     /// Resolve which model should be reported for a given request.

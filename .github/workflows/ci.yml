@@ -32,6 +32,46 @@ jobs:
       - name: Audit dependencies
         run: cargo deny check
 
+  # ── Per-profile compilation checks ──────────────────────────────────
+  # Verifies that every supported build profile compiles, passes clippy,
+  # and compiles tests.  The "light" profile (default) is what users get
+  # via `cargo install thinclaw` — catching breakage here prevents
+  # shipping broken binaries.  See docs/BUILD_PROFILES.md for details.
+  feature-matrix:
+    name: "Profile: ${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: light (default)
+            cargo-args: ""
+          - name: full
+            cargo-args: "--features full"
+          - name: desktop
+            cargo-args: "--no-default-features --features desktop"
+          - name: minimal-libsql
+            cargo-args: "--no-default-features --features libsql"
+          - name: minimal-postgres
+            cargo-args: "--no-default-features --features postgres"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: profile-${{ matrix.name }}
+      - name: cargo check
+        run: cargo check ${{ matrix.cargo-args }}
+      - name: cargo clippy
+        run: cargo clippy ${{ matrix.cargo-args }} -- -D warnings
+      - name: Compile tests (no run)
+        run: cargo test --no-run ${{ matrix.cargo-args }}
+
   tests:
     name: Run Tests
     runs-on: ubuntu-latest

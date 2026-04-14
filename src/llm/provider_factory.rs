@@ -8,16 +8,16 @@
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 use super::{
     CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig, FailoverProvider,
-    LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider, RigAdapter, SmartRoutingConfig,
-    SmartRoutingProvider,
+    LeaseConfig, LeaseSelectionStrategy, LlmProvider, ProviderLeaseEntry, ResponseCacheConfig,
+    RetryConfig, RetryProvider, RigAdapter, SmartRoutingConfig, SmartRoutingProvider,
 };
 use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
-use crate::settings::{ProvidersSettings, RoutingMode};
+use crate::settings::{CredentialSelectionStrategy, ProvidersSettings, RoutingMode};
 
 /// Create an LLM provider based on configuration.
 pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -31,6 +31,20 @@ pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
         LlmBackend::Bedrock => create_bedrock_provider(config),
         LlmBackend::LlamaCpp => create_llama_cpp_provider(config),
     }
+}
+
+fn credential_entry_id(provider_slug: &str, index: usize) -> String {
+    format!("{provider_slug}:credential:{}", index + 1)
+}
+
+fn resolved_secret_credentials(
+    api_keys: &[SecretString],
+    primary: &Option<SecretString>,
+) -> Vec<SecretString> {
+    if !api_keys.is_empty() {
+        return api_keys.to_vec();
+    }
+    primary.iter().cloned().collect()
 }
 
 fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -102,13 +116,17 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         reason: format!("Failed to create Anthropic client: {}", e),
     })?;
 
-    let model = client.completion_model(&anth.model);
+    let model = client.completion_model(&anth.model).with_prompt_caching();
     tracing::info!(
         "Using Anthropic direct API (model: {}, base_url: {})",
         anth.model,
         anth.base_url.as_deref().unwrap_or("default"),
     );
-    Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+    Ok(Arc::new(RigAdapter::new_with_prompt_caching(
+        model,
+        &anth.model,
+        true,
+    )))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -234,6 +252,14 @@ pub fn create_provider_for_catalog_entry(
     provider_slug: &str,
     model: &str,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    create_provider_for_catalog_entry_with_api_key(provider_slug, model, None)
+}
+
+fn create_provider_for_catalog_entry_with_api_key(
+    provider_slug: &str,
+    model: &str,
+    api_key_override: Option<&str>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use crate::config::provider_catalog::{ApiStyle, endpoint_for};
 
     let endpoint = endpoint_for(provider_slug).ok_or_else(|| LlmError::RequestFailed {
@@ -242,20 +268,24 @@ pub fn create_provider_for_catalog_entry(
     })?;
 
     // Retrieve API key from the injected vars overlay
-    let api_key_str = crate::config::helpers::optional_env(endpoint.env_key_name)
-        .map_err(|e| LlmError::RequestFailed {
-            provider: provider_slug.to_string(),
-            reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
-        })?
-        .or_else(|| {
-            if provider_slug == "openrouter" {
-                crate::config::helpers::optional_env("LLM_API_KEY")
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            }
-        });
+    let api_key_str = if let Some(api_key_override) = api_key_override {
+        Some(api_key_override.to_string())
+    } else {
+        crate::config::helpers::optional_env(endpoint.env_key_name)
+            .map_err(|e| LlmError::RequestFailed {
+                provider: provider_slug.to_string(),
+                reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
+            })?
+            .or_else(|| {
+                if provider_slug == "openrouter" {
+                    crate::config::helpers::optional_env("LLM_API_KEY")
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                }
+            })
+    };
 
     match endpoint.api_style {
         ApiStyle::OpenAi => {
@@ -358,6 +388,86 @@ pub fn create_provider_for_catalog_entry(
     }
 }
 
+fn resolve_catalog_api_keys(
+    provider_slug: &str,
+    env_key_name: &str,
+) -> Result<Vec<String>, LlmError> {
+    fn append_from_env(target: &mut Vec<String>, env_name: &str) -> Result<(), LlmError> {
+        if let Some(value) =
+            crate::config::helpers::optional_env(env_name).map_err(|e| LlmError::RequestFailed {
+                provider: env_name.to_string(),
+                reason: format!("Failed to read env var '{}': {}", env_name, e),
+            })?
+            && !value.trim().is_empty()
+            && !target.iter().any(|existing| existing == value.trim())
+        {
+            target.push(value.trim().to_string());
+        }
+        Ok(())
+    }
+
+    fn append_list_from_env(target: &mut Vec<String>, env_name: &str) -> Result<(), LlmError> {
+        if let Some(raw) =
+            crate::config::helpers::optional_env(env_name).map_err(|e| LlmError::RequestFailed {
+                provider: env_name.to_string(),
+                reason: format!("Failed to read env var '{}': {}", env_name, e),
+            })?
+        {
+            for value in raw
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !target.iter().any(|existing| existing == value) {
+                    target.push(value.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut keys = Vec::new();
+    append_from_env(&mut keys, env_key_name)?;
+    let plural_env = format!("{env_key_name}S");
+    append_list_from_env(&mut keys, &plural_env)?;
+
+    if provider_slug == "openrouter" {
+        append_from_env(&mut keys, "LLM_API_KEY")?;
+        append_list_from_env(&mut keys, "LLM_API_KEYS")?;
+    }
+
+    Ok(keys)
+}
+
+fn create_provider_variants_for_catalog_entry(
+    provider_slug: &str,
+    model: &str,
+) -> Result<Vec<ProviderLeaseEntry>, LlmError> {
+    let endpoint =
+        crate::config::provider_catalog::endpoint_for(provider_slug).ok_or_else(|| {
+            LlmError::RequestFailed {
+                provider: provider_slug.to_string(),
+                reason: format!("Unknown provider '{}' in catalog", provider_slug),
+            }
+        })?;
+    let api_keys = resolve_catalog_api_keys(provider_slug, endpoint.env_key_name)?;
+    if api_keys.is_empty() {
+        return Ok(vec![ProviderLeaseEntry::new(
+            create_provider_for_catalog_entry(provider_slug, model)?,
+            credential_entry_id(provider_slug, 0),
+        )]);
+    }
+
+    let mut entries = Vec::with_capacity(api_keys.len());
+    for (idx, api_key) in api_keys.iter().enumerate() {
+        entries.push(ProviderLeaseEntry::new(
+            create_provider_for_catalog_entry_with_api_key(provider_slug, model, Some(api_key))?,
+            credential_entry_id(provider_slug, idx),
+        ));
+    }
+    Ok(entries)
+}
+
 /// Probe a provider/model pair with a tiny completion before switching to it.
 ///
 /// This catches runtime-only failures such as invalid or revoked model IDs
@@ -393,10 +503,20 @@ fn create_cheap_model_provider(
     config: &LlmConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     if let Some((provider, model)) = cheap_model_spec.split_once('/') {
-        if crate::config::provider_catalog::endpoint_for(provider).is_some() {
-            create_provider_for_catalog_entry(provider, model)
+        let entries = if crate::config::provider_catalog::endpoint_for(provider).is_some() {
+            create_provider_variants_for_catalog_entry(provider, model)?
         } else {
-            create_provider_for_non_catalog_slug(provider, model, config)
+            create_provider_variants_for_non_catalog_slug(provider, model, config)?
+        };
+
+        if entries.len() == 1 {
+            Ok(Arc::clone(&entries[0].provider))
+        } else {
+            Ok(Arc::new(FailoverProvider::with_entries(
+                entries,
+                CooldownConfig::default(),
+                LeaseConfig::default(),
+            )?))
         }
     } else {
         Err(LlmError::RequestFailed {
@@ -575,14 +695,21 @@ pub fn build_provider_chain(
 ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), LlmError> {
     let rel = &config.reliability;
 
-    let primary = create_primary_provider(config, providers_settings)?;
+    let primary_entries = create_primary_providers(config, providers_settings)?;
+    let primary = primary_entries
+        .first()
+        .map(|entry| Arc::clone(&entry.provider))
+        .ok_or_else(|| LlmError::RequestFailed {
+            provider: "llm".to_string(),
+            reason: "No primary providers could be constructed".to_string(),
+        })?;
     let primary_model_name = primary.model_name().to_string();
     tracing::info!("Primary LLM provider initialized: {}", primary_model_name);
 
     // ── 1. Build multi-provider failover chain ───────────────────────────
-    let llm: Arc<dyn LlmProvider> = if let Some(ps) = providers_settings {
-        let mut all_providers: Vec<Arc<dyn LlmProvider>> = vec![primary.clone()];
+    let mut all_entries = primary_entries;
 
+    if let Some(ps) = providers_settings {
         // Determine fallback providers from ProvidersSettings.
         // Use explicit fallback_chain if provided, otherwise auto-build
         // from enabled providers.
@@ -616,11 +743,11 @@ pub fn build_provider_chain(
             }
         }
 
-        append_fallbacks(&mut all_providers, &fallbacks, config);
-        wrap_failover(primary, all_providers, rel)?
-    } else {
-        primary
-    };
+        append_fallbacks(&mut all_entries, &fallbacks, config);
+    }
+
+    let llm: Arc<dyn LlmProvider> =
+        wrap_failover(primary.clone(), all_entries, rel, providers_settings)?;
 
     // ── 2. Retry ─────────────────────────────────────────────────────────
     let retry_config = RetryConfig {
@@ -724,10 +851,191 @@ pub fn build_provider_chain(
     Ok((llm, cheap_llm))
 }
 
-fn create_primary_provider(
+fn create_llm_provider_variants(config: &LlmConfig) -> Result<Vec<ProviderLeaseEntry>, LlmError> {
+    match config.backend {
+        LlmBackend::OpenAi => {
+            let openai = config.openai.as_ref().ok_or_else(|| LlmError::AuthFailed {
+                provider: "openai".to_string(),
+            })?;
+            let keys = resolved_secret_credentials(&openai.api_keys, &openai.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_openai_provider(config)?,
+                    credential_entry_id("openai", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(openai) = variant.openai.as_mut() {
+                    openai.api_key = Some(key.clone());
+                    openai.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_openai_provider(&variant)?,
+                    credential_entry_id("openai", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::Anthropic => {
+            let anthropic = config
+                .anthropic
+                .as_ref()
+                .ok_or_else(|| LlmError::AuthFailed {
+                    provider: "anthropic".to_string(),
+                })?;
+            let keys = resolved_secret_credentials(&anthropic.api_keys, &anthropic.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_anthropic_provider(config)?,
+                    credential_entry_id("anthropic", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(anthropic) = variant.anthropic.as_mut() {
+                    anthropic.api_key = Some(key.clone());
+                    anthropic.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_anthropic_provider(&variant)?,
+                    credential_entry_id("anthropic", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::OpenAiCompatible => {
+            let compat = config
+                .openai_compatible
+                .as_ref()
+                .ok_or_else(|| LlmError::AuthFailed {
+                    provider: "openai_compatible".to_string(),
+                })?;
+            let keys = resolved_secret_credentials(&compat.api_keys, &compat.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_openai_compatible_provider(config)?,
+                    credential_entry_id("openai_compatible", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(compat) = variant.openai_compatible.as_mut() {
+                    compat.api_key = Some(key.clone());
+                    compat.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_openai_compatible_provider(&variant)?,
+                    credential_entry_id("openai_compatible", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::Tinfoil => {
+            let tinfoil = config
+                .tinfoil
+                .as_ref()
+                .ok_or_else(|| LlmError::AuthFailed {
+                    provider: "tinfoil".to_string(),
+                })?;
+            let keys = resolved_secret_credentials(&tinfoil.api_keys, &tinfoil.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_tinfoil_provider(config)?,
+                    credential_entry_id("tinfoil", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(tinfoil) = variant.tinfoil.as_mut() {
+                    tinfoil.api_key = Some(key.clone());
+                    tinfoil.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_tinfoil_provider(&variant)?,
+                    credential_entry_id("tinfoil", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::Gemini => {
+            let gemini = config.gemini.as_ref().ok_or_else(|| LlmError::AuthFailed {
+                provider: "gemini".to_string(),
+            })?;
+            let keys = resolved_secret_credentials(&gemini.api_keys, &gemini.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_gemini_provider(config)?,
+                    credential_entry_id("gemini", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(gemini) = variant.gemini.as_mut() {
+                    gemini.api_key = Some(key.clone());
+                    gemini.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_gemini_provider(&variant)?,
+                    credential_entry_id("gemini", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::Bedrock => {
+            let bedrock = config
+                .bedrock
+                .as_ref()
+                .ok_or_else(|| LlmError::AuthFailed {
+                    provider: "bedrock".to_string(),
+                })?;
+            let keys = resolved_secret_credentials(&bedrock.api_keys, &bedrock.api_key);
+            if keys.is_empty() {
+                return Ok(vec![ProviderLeaseEntry::new(
+                    create_bedrock_provider(config)?,
+                    credential_entry_id("bedrock", 0),
+                )]);
+            }
+
+            let mut entries = Vec::with_capacity(keys.len());
+            for (idx, key) in keys.into_iter().enumerate() {
+                let mut variant = config.clone();
+                if let Some(bedrock) = variant.bedrock.as_mut() {
+                    bedrock.api_key = Some(key.clone());
+                    bedrock.api_keys = vec![key];
+                }
+                entries.push(ProviderLeaseEntry::new(
+                    create_bedrock_provider(&variant)?,
+                    credential_entry_id("bedrock", idx),
+                ));
+            }
+            Ok(entries)
+        }
+        LlmBackend::Ollama => Ok(vec![ProviderLeaseEntry::new(
+            create_ollama_provider(config)?,
+            credential_entry_id("ollama", 0),
+        )]),
+        LlmBackend::LlamaCpp => Ok(vec![ProviderLeaseEntry::new(
+            create_llama_cpp_provider(config)?,
+            credential_entry_id("llama_cpp", 0),
+        )]),
+    }
+}
+
+fn create_primary_providers(
     config: &LlmConfig,
     providers_settings: Option<&ProvidersSettings>,
-) -> Result<Arc<dyn LlmProvider>, LlmError> {
+) -> Result<Vec<ProviderLeaseEntry>, LlmError> {
     if let Some(ps) = providers_settings
         && let Some(primary_slug) = ps.primary.as_deref()
     {
@@ -740,20 +1048,20 @@ fn create_primary_provider(
 
         if let Some(model) = model {
             if crate::config::provider_catalog::endpoint_for(primary_slug).is_some() {
-                return create_provider_for_catalog_entry(primary_slug, &model);
+                return create_provider_variants_for_catalog_entry(primary_slug, &model);
             }
-            return create_provider_for_non_catalog_slug(primary_slug, &model, config);
+            return create_provider_variants_for_non_catalog_slug(primary_slug, &model, config);
         }
     }
 
-    create_llm_provider(config)
+    create_llm_provider_variants(config)
 }
 
-fn create_provider_for_non_catalog_slug(
+fn create_provider_variants_for_non_catalog_slug(
     provider_slug: &str,
     model: &str,
     config: &LlmConfig,
-) -> Result<Arc<dyn LlmProvider>, LlmError> {
+) -> Result<Vec<ProviderLeaseEntry>, LlmError> {
     let mut llm_config = config.clone();
     llm_config.backend = match provider_slug {
         "ollama" => LlmBackend::Ollama,
@@ -792,29 +1100,30 @@ fn create_provider_for_non_catalog_slug(
         _ => {}
     }
 
-    create_llm_provider(&llm_config)
+    create_llm_provider_variants(&llm_config)
 }
 
 fn append_fallbacks(
-    all_providers: &mut Vec<Arc<dyn LlmProvider>>,
+    all_providers: &mut Vec<ProviderLeaseEntry>,
     fallbacks: &[(String, String)],
     config: &LlmConfig,
 ) {
     for (provider_slug, model) in fallbacks {
         let provider = if crate::config::provider_catalog::endpoint_for(provider_slug).is_some() {
-            create_provider_for_catalog_entry(provider_slug, model)
+            create_provider_variants_for_catalog_entry(provider_slug, model)
         } else {
-            create_provider_for_non_catalog_slug(provider_slug, model, config)
+            create_provider_variants_for_non_catalog_slug(provider_slug, model, config)
         };
 
         match provider {
-            Ok(p) => {
+            Ok(mut providers) => {
                 tracing::info!(
-                    "Failover provider added: '{}' (model: {})",
+                    "Failover provider added: '{}' (model: {}, credentials: {})",
                     provider_slug,
-                    model
+                    model,
+                    providers.len()
                 );
-                all_providers.push(p);
+                all_providers.append(&mut providers);
             }
             Err(e) => {
                 tracing::warn!("Skipping fallback provider '{}': {}", provider_slug, e);
@@ -888,23 +1197,38 @@ fn resolve_fallback_entry(ps: &ProvidersSettings, entry: &str) -> Option<(String
 
 fn wrap_failover(
     primary: Arc<dyn LlmProvider>,
-    all_providers: Vec<Arc<dyn LlmProvider>>,
+    all_providers: Vec<ProviderLeaseEntry>,
     rel: &crate::config::ReliabilityConfig,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     if all_providers.len() > 1 {
         let cooldown = CooldownConfig {
             failure_threshold: rel.failover_cooldown_threshold,
             cooldown_duration: std::time::Duration::from_secs(rel.failover_cooldown_secs),
         };
+        let lease = providers_settings
+            .map(|ps| LeaseConfig {
+                max_concurrent: ps.credential_max_concurrent.max(1),
+                selection_strategy: match ps.credential_selection_strategy {
+                    CredentialSelectionStrategy::FillFirst => LeaseSelectionStrategy::FillFirst,
+                    CredentialSelectionStrategy::RoundRobin => LeaseSelectionStrategy::RoundRobin,
+                    CredentialSelectionStrategy::LeastUsed => LeaseSelectionStrategy::LeastUsed,
+                    CredentialSelectionStrategy::Random => LeaseSelectionStrategy::Random,
+                },
+            })
+            .unwrap_or_default();
         tracing::info!(
-            "FailoverProvider enabled with {} providers (cooldown: {}s, threshold: {})",
+            "FailoverProvider enabled with {} credential entries (cooldown: {}s, threshold: {}, lease cap: {}, selection: {:?})",
             all_providers.len(),
             rel.failover_cooldown_secs,
             rel.failover_cooldown_threshold,
+            lease.max_concurrent,
+            lease.selection_strategy,
         );
-        Ok(Arc::new(FailoverProvider::with_cooldown(
+        Ok(Arc::new(FailoverProvider::with_entries(
             all_providers,
             cooldown,
+            lease,
         )?))
     } else {
         Ok(primary)

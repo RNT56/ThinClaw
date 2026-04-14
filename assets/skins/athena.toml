@@ -1,0 +1,20 @@
+name = "athena"
+tagline = "Marble, bronze, and owl-eyed clarity for deliberate work."
+accent = "#C9A24B"
+border = "#6B7280"
+body = "#F5F2E8"
+muted = "#8C8473"
+good = "#6AA884"
+warn = "#D4A053"
+bad = "#C96B5E"
+header = "#315B86"
+prompt_symbol = ">>"
+ascii_art = [
+  '               /\',
+  '          _____/__\_____',
+  '         |  |  .--.  |  |',
+  '         |  | ( oo ) |  |  ATHENA',
+  '         |  | /|__|\ |  |',
+  '         |__|/______\|__|',
+]
+tool_emojis = { shell = "⚒️", browser = "🦉", memory = "📜", search_files = "🏺", todo = "🧵", subagent = "🛡️" }

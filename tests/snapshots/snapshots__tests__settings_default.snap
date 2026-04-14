@@ -101,6 +101,8 @@ expression: settings
   },
   "routines_enabled": false,
   "skills_enabled": false,
+  "skill_taps": [],
+  "well_known_skill_registries": [],
   "claude_code_enabled": false,
   "claude_code_model": null,
   "claude_code_max_turns": null,
@@ -125,7 +127,14 @@ expression: settings
     "auto_approve_tools": false,
     "allow_local_tools": false,
     "subagent_transparency_level": "balanced",
-    "workspace_mode": null
+    "workspace_mode": null,
+    "model_guidance_enabled": true,
+    "cli_skin": "cockpit",
+    "persona_seed": "default",
+    "checkpoints_enabled": true,
+    "max_checkpoints": 50,
+    "browser_backend": "chromium",
+    "cloud_browser_provider": null
   },
   "wasm": {
     "enabled": true,
@@ -148,7 +157,11 @@ expression: settings
   },
   "safety": {
     "max_output_length": 100000,
-    "injection_check_enabled": true
+    "injection_check_enabled": true,
+    "redact_pii_in_prompts": true,
+    "smart_approval_mode": "off",
+    "external_scanner_mode": "fail_open",
+    "external_scanner_path": null
   },
   "builder": {
     "enabled": true,
@@ -166,6 +179,11 @@ expression: settings
     "primary_pool_order": [],
     "cheap_pool_order": [],
     "provider_models": {},
+    "credential_max_concurrent": 3,
+    "credential_selection_strategy": "fill_first",
+    "oauth_sync_enabled": true,
+    "oauth_sync_poll_interval_secs": 30,
+    "oauth_sync_sources": [],
     "smart_routing_enabled": true,
     "routing_mode": "primary_only",
     "smart_routing_cascade": true,
@@ -174,7 +192,58 @@ expression: settings
     "allowed_models": {},
     "fallback_chain": [],
     "policy_rules": [],
+    "moa_reference_models": [],
+    "moa_aggregator_model": null,
+    "moa_min_successful": 1,
     "advisor_max_calls": 3,
     "advisor_escalation_prompt": null
+  },
+  "learning": {
+    "enabled": false,
+    "auto_apply_classes": [
+      "memory",
+      "skill",
+      "prompt"
+    ],
+    "safe_mode": {
+      "enabled": true,
+      "thresholds": {
+        "rollback_ratio": 0.25,
+        "negative_feedback_ratio": 0.2,
+        "min_samples": 8
+      }
+    },
+    "reflection": {
+      "min_tool_calls": 2,
+      "user_correction_threshold": 1
+    },
+    "prompt_mutation": {
+      "enabled": false
+    },
+    "providers": {
+      "honcho": {
+        "enabled": false,
+        "config": {}
+      },
+      "zep": {
+        "enabled": false,
+        "config": {}
+      }
+    },
+    "code_proposals": {
+      "enabled": true,
+      "publish_mode": "branch_pr_draft"
+    },
+    "exports": {
+      "enabled": false
+    }
+  },
+  "experiments": {
+    "enabled": false,
+    "max_concurrent_campaigns": 1,
+    "default_artifact_retention_days": 30,
+    "allow_remote_runners": true,
+    "ui_visibility": "hidden_until_enabled",
+    "default_promotion_mode": "branch_pr_draft"
   }
 }
