@@ -133,6 +133,7 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
         crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
         crate::agent::routine::RoutineAction::Heartbeat { .. } => "heartbeat",
+        crate::agent::routine::RoutineAction::ExperimentCampaign { .. } => "experiment_campaign",
     };
 
     let status = if !r.enabled {

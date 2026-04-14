@@ -33,6 +33,11 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
+use crate::experiments::{
+    ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
+    ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
+    ExperimentTrial,
+};
 use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
     JobEventRecord, LearningArtifactVersion, LearningCandidate, LearningCodeProposal,
@@ -324,43 +329,35 @@ pub trait ConversationStore: Send + Sync {
     ) -> Result<u64, DatabaseError>;
 }
 
+/// String-based identity trait — the legacy/ergonomic API layer.
+///
+/// # Dual-trait architecture
+///
+/// ThinClaw uses two identity traits that work together:
+///
+/// - **`IdentityStore`** (this trait): String-based `actor_id` parameters.
+///   Consumed by CLI commands and external callers that work with string IDs.
+///   Implemented via the `IdentityRegistryStore` bridge below.
+///
+/// - **`IdentityRegistryStore`**: UUID-based `actor_id` parameters.
+///   The canonical trait that database backends implement directly.
+///
+/// The blanket impl at the bottom of this file bridges `IdentityRegistryStore`
+/// → `IdentityStore` by parsing `&str` → `Uuid` and delegating. The `Database`
+/// supertrait requires **both** traits, so any `dyn Database` is guaranteed to
+/// have the full UUID-based implementation.
 #[async_trait]
 pub trait IdentityStore: Send + Sync {
-    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError> {
-        let _ = principal_id;
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
-    async fn get_actor(&self, actor_id: &str) -> Result<Option<ActorRecord>, DatabaseError> {
-        let _ = actor_id;
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
-    async fn upsert_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError> {
-        let _ = actor;
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
-    async fn rename_actor(&self, actor_id: &str, display_name: &str) -> Result<(), DatabaseError> {
-        let _ = (actor_id, display_name);
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
+    async fn list_actors(&self, principal_id: &str) -> Result<Vec<ActorRecord>, DatabaseError>;
+    async fn get_actor(&self, actor_id: &str) -> Result<Option<ActorRecord>, DatabaseError>;
+    async fn upsert_actor(&self, actor: &ActorRecord) -> Result<(), DatabaseError>;
+    async fn rename_actor(&self, actor_id: &str, display_name: &str) -> Result<(), DatabaseError>;
     async fn set_actor_preferred_endpoint(
         &self,
         actor_id: &str,
         channel: &str,
         external_user_id: &str,
-    ) -> Result<(), DatabaseError> {
-        let _ = (actor_id, channel, external_user_id);
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
+    ) -> Result<(), DatabaseError>;
     async fn link_actor_endpoint(
         &self,
         actor_id: &str,
@@ -368,37 +365,16 @@ pub trait IdentityStore: Send + Sync {
         external_user_id: &str,
         metadata: &serde_json::Value,
         approval_status: &str,
-    ) -> Result<(), DatabaseError> {
-        let _ = (
-            actor_id,
-            channel,
-            external_user_id,
-            metadata,
-            approval_status,
-        );
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
+    ) -> Result<(), DatabaseError>;
     async fn unlink_actor_endpoint(
         &self,
         channel: &str,
         external_user_id: &str,
-    ) -> Result<bool, DatabaseError> {
-        let _ = (channel, external_user_id);
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
+    ) -> Result<bool, DatabaseError>;
     async fn list_actor_endpoints(
         &self,
         actor_id: &str,
-    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError> {
-        let _ = actor_id;
-        Err(DatabaseError::Pool(
-            "actor identity registry is not available in this build".to_string(),
-        ))
-    }
+    ) -> Result<Vec<ActorEndpointRecord>, DatabaseError>;
 }
 
 #[async_trait]
@@ -757,6 +733,131 @@ pub trait ToolFailureStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait ExperimentStore: Send + Sync {
+    async fn create_experiment_project(
+        &self,
+        project: &ExperimentProject,
+    ) -> Result<(), DatabaseError>;
+    async fn get_experiment_project(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentProject>, DatabaseError>;
+    async fn list_experiment_projects(&self) -> Result<Vec<ExperimentProject>, DatabaseError>;
+    async fn update_experiment_project(
+        &self,
+        project: &ExperimentProject,
+    ) -> Result<(), DatabaseError>;
+    async fn delete_experiment_project(&self, id: Uuid) -> Result<bool, DatabaseError>;
+
+    async fn create_experiment_runner_profile(
+        &self,
+        profile: &ExperimentRunnerProfile,
+    ) -> Result<(), DatabaseError>;
+    async fn get_experiment_runner_profile(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError>;
+    async fn list_experiment_runner_profiles(
+        &self,
+    ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError>;
+    async fn update_experiment_runner_profile(
+        &self,
+        profile: &ExperimentRunnerProfile,
+    ) -> Result<(), DatabaseError>;
+    async fn delete_experiment_runner_profile(&self, id: Uuid) -> Result<bool, DatabaseError>;
+
+    async fn create_experiment_campaign(
+        &self,
+        campaign: &ExperimentCampaign,
+    ) -> Result<(), DatabaseError>;
+    async fn get_experiment_campaign(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError>;
+    async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError>;
+    async fn update_experiment_campaign(
+        &self,
+        campaign: &ExperimentCampaign,
+    ) -> Result<(), DatabaseError>;
+
+    async fn create_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError>;
+    async fn get_experiment_trial(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError>;
+    async fn list_experiment_trials(
+        &self,
+        campaign_id: Uuid,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError>;
+    async fn update_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError>;
+
+    async fn replace_experiment_artifacts(
+        &self,
+        trial_id: Uuid,
+        artifacts: &[ExperimentArtifactRef],
+    ) -> Result<(), DatabaseError>;
+    async fn list_experiment_artifacts(
+        &self,
+        trial_id: Uuid,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError>;
+
+    async fn create_experiment_target(
+        &self,
+        target: &ExperimentTarget,
+    ) -> Result<(), DatabaseError>;
+    async fn get_experiment_target(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentTarget>, DatabaseError>;
+    async fn list_experiment_targets(&self) -> Result<Vec<ExperimentTarget>, DatabaseError>;
+    async fn update_experiment_target(
+        &self,
+        target: &ExperimentTarget,
+    ) -> Result<(), DatabaseError>;
+    async fn delete_experiment_target(&self, id: Uuid) -> Result<bool, DatabaseError>;
+
+    async fn upsert_experiment_target_link(
+        &self,
+        link: &ExperimentTargetLink,
+    ) -> Result<(), DatabaseError>;
+    async fn list_experiment_target_links(&self) -> Result<Vec<ExperimentTargetLink>, DatabaseError>;
+    async fn delete_experiment_target_links_for_target(
+        &self,
+        target_id: Uuid,
+    ) -> Result<(), DatabaseError>;
+
+    async fn create_experiment_model_usage(
+        &self,
+        usage: &ExperimentModelUsageRecord,
+    ) -> Result<(), DatabaseError>;
+    async fn list_experiment_model_usage(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ExperimentModelUsageRecord>, DatabaseError>;
+    async fn list_experiment_model_usage_for_campaign(
+        &self,
+        campaign_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ExperimentModelUsageRecord>, DatabaseError>;
+    async fn list_experiment_model_usage_for_trial(
+        &self,
+        trial_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ExperimentModelUsageRecord>, DatabaseError>;
+
+    async fn create_experiment_lease(&self, lease: &ExperimentLease) -> Result<(), DatabaseError>;
+    async fn get_experiment_lease(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ExperimentLease>, DatabaseError>;
+    async fn get_experiment_lease_for_trial(
+        &self,
+        trial_id: Uuid,
+    ) -> Result<Option<ExperimentLease>, DatabaseError>;
+    async fn update_experiment_lease(&self, lease: &ExperimentLease) -> Result<(), DatabaseError>;
+}
+
+#[async_trait]
 pub trait SettingsStore: Send + Sync {
     async fn get_setting(
         &self,
@@ -949,6 +1050,7 @@ pub trait Database:
     + RoutineStore
     + IdentityRegistryStore
     + ToolFailureStore
+    + ExperimentStore
     + SettingsStore
     + WorkspaceStore
     + AgentRegistryStore

@@ -1,6 +1,6 @@
 # ThinClaw ↔ OpenClaw Feature Parity Matrix
 
-> **Last reconciled:** 2026-04-13 03:05 CEST
+> **Last reconciled:** 2026-04-14 03:19 CEST
 
 This document tracks feature parity between ThinClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
@@ -191,6 +191,7 @@ This document tracks feature parity between ThinClaw (Rust implementation) and O
 | Closed-loop learning orchestrator | ❌ | ✅ | Event→evaluation→candidate loop with dedupe/cooldown, safe-mode thresholds, Tier A auto-apply, Tier C approval-gated code proposals ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/agent/thread_ops.rs`](src/agent/thread_ops.rs)) |
 | Learning tool suite | ❌ | ✅ | `session_search`, `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
 | Learning API + audit UI | ❌ | ✅ | `/api/learning/*` endpoints + dedicated Web Learning tab with proposals, feedback, rollbacks, and provider health ([`src/api/learning.rs`](src/api/learning.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html)) |
+| Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Optional external memory providers | ❌ | ✅ | Honcho + Zep adapters, local-first canonical memory, non-fatal provider fallback ([`src/agent/learning.rs`](src/agent/learning.rs)) |
 | Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
@@ -999,3 +1000,174 @@ ThinClaw intentionally differs from OpenClaw in these ways:
 10. **OS Keychain secrets**: API keys stored in macOS Keychain / Linux Secret Service rather than encrypted file
 
 These are intentional architectural choices, not gaps to be filled.
+
+---
+
+## 20. Deployed Built-in Tools (79 total)
+
+> **Updated:** 2026-04-14
+
+### 20.1 File & Code Operations (9 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `read_file` | [`file.rs`](src/tools/builtin/file.rs) | Read file contents with line ranges |
+| `write_file` | [`file.rs`](src/tools/builtin/file.rs) | Write/create files with safety checks |
+| `apply_patch` | [`file.rs`](src/tools/builtin/file.rs) | Apply unified diffs to files |
+| `list_dir` | [`file.rs`](src/tools/builtin/file.rs) | List directory contents recursively |
+| `grep` | [`file.rs`](src/tools/builtin/file.rs) | Regex/literal content search across files |
+| `search_files` | [`search_files.rs`](src/tools/builtin/search_files.rs) | Filename pattern search with fuzzy suggestions |
+| `execute_code` | [`execute_code.rs`](src/tools/builtin/execute_code.rs) | Sandboxed code execution (Python/JS/TS/Bash); scrubbed env, timeouts, output capture |
+| `shell` | [`shell.rs`](src/tools/builtin/shell.rs) | Shell command execution with env scrubbing, timeout enforcement |
+| `json` | [`json.rs`](src/tools/builtin/json.rs) | JSON parsing, formatting, and query |
+
+### 20.2 Browser & Web (2 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `browser` | [`browser.rs`](src/tools/builtin/browser.rs) | Full browser automation: navigate, snapshot, click, type, press_key, scroll, back, forward, screenshot, evaluate JS, get_text, get_images, console, tabs, switch_tab, close |
+| `http` | [`http.rs`](src/tools/builtin/http.rs) | HTTP client with SSRF protection, credential injection, URL allowlists |
+
+### 20.3 Memory & Knowledge (7 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `memory_read` | [`memory.rs`](src/tools/builtin/memory.rs) | Read memory documents |
+| `memory_write` | [`memory.rs`](src/tools/builtin/memory.rs) | Write/update memory documents |
+| `memory_search` | [`memory.rs`](src/tools/builtin/memory.rs) | Semantic search across memory |
+| `memory_delete` | [`memory.rs`](src/tools/builtin/memory.rs) | Delete memory documents |
+| `memory_tree` | [`memory.rs`](src/tools/builtin/memory.rs) | Browse memory namespace hierarchy |
+| `session_search` | [`memory.rs`](src/tools/builtin/memory.rs) | Search past conversation sessions |
+| `extract_document` | [`extract_document.rs`](src/tools/builtin/extract_document.rs) | Extract text/tables from PDFs and documents (feature-gated) |
+
+### 20.4 Agent & Sub-agent Management (8 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `create_agent` | [`agent_management.rs`](src/tools/builtin/agent_management.rs) | Create persistent agents with config |
+| `list_agents` | [`agent_management.rs`](src/tools/builtin/agent_management.rs) | List registered agents |
+| `update_agent` | [`agent_management.rs`](src/tools/builtin/agent_management.rs) | Update agent configuration |
+| `remove_agent` | [`agent_management.rs`](src/tools/builtin/agent_management.rs) | Remove a persistent agent |
+| `message_agent` | [`agent_management.rs`](src/tools/builtin/agent_management.rs) | A2A communication via dispatcher |
+| `spawn_subagent` | [`subagent.rs`](src/tools/builtin/subagent.rs) | Spawn sync/async sub-agent loops |
+| `list_subagents` | [`subagent.rs`](src/tools/builtin/subagent.rs) | Query active/recent sub-agents |
+| `cancel_subagent` | [`subagent.rs`](src/tools/builtin/subagent.rs) | Cancel running sub-agent by UUID |
+
+### 20.5 Jobs & Routines (10 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `create_job` | [`job.rs`](src/tools/builtin/job.rs) | Create deferred jobs |
+| `cancel_job` | [`job.rs`](src/tools/builtin/job.rs) | Cancel pending/running jobs |
+| `list_jobs` | [`job.rs`](src/tools/builtin/job.rs) | List jobs with filters |
+| `job_status` | [`job.rs`](src/tools/builtin/job.rs) | Get job status and results |
+| `job_events` | [`job.rs`](src/tools/builtin/job.rs) | Get job event stream |
+| `job_prompt` | [`job.rs`](src/tools/builtin/job.rs) | Send interactive prompts to jobs |
+| `routine_create` | [`routine.rs`](src/tools/builtin/routine.rs) | Create cron-scheduled routines |
+| `routine_list` | [`routine.rs`](src/tools/builtin/routine.rs) | List active routines |
+| `routine_delete` | [`routine.rs`](src/tools/builtin/routine.rs) | Delete a routine |
+| `routine_update` | [`routine.rs`](src/tools/builtin/routine.rs) | Update routine config |
+| `routine_history` | [`routine.rs`](src/tools/builtin/routine.rs) | View routine execution history |
+
+### 20.6 Skills & Extensions (12 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `skill_install` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Install prompt-based skills |
+| `skill_list` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | List installed skills |
+| `skill_read` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Read skill source |
+| `skill_remove` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Remove a skill |
+| `skill_reload` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Hot-reload skills from disk |
+| `skill_search` | [`skill_tools.rs`](src/tools/builtin/skill_tools.rs) | Search skill catalog |
+| `tool_install` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Install WASM tool extensions |
+| `tool_list` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | List installed WASM tools |
+| `tool_search` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Search tool registry |
+| `tool_remove` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Remove a WASM tool |
+| `tool_activate` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Activate/deactivate tools |
+| `tool_auth` | [`extension_tools.rs`](src/tools/builtin/extension_tools.rs) | Manage tool credentials |
+
+### 20.7 Learning & Self-Improvement (6 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `learning_status` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | View learning system status |
+| `learning_history` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Browse learning history |
+| `learning_feedback` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Submit learning feedback |
+| `learning_proposal_review` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Review/approve learning proposals |
+| `prompt_manage` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Manage system prompt overrides |
+| `skill_manage` | [`learning_tools.rs`](src/tools/builtin/learning_tools.rs) | Manage skill lifecycle via learning |
+
+### 20.8 Messaging & Communication (5 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `send_message` | [`send_message.rs`](src/tools/builtin/send_message.rs) | Unified cross-platform messaging (Discord/Slack/Telegram/etc.) via gateway callback |
+| `slack_actions` | [`slack_actions.rs`](src/tools/builtin/slack_actions.rs) | Slack-specific API actions |
+| `discord_actions` | [`discord_actions.rs`](src/tools/builtin/discord_actions.rs) | Discord-specific API actions |
+| `telegram_actions` | [`telegram_actions.rs`](src/tools/builtin/telegram_actions.rs) | Telegram-specific API actions |
+| `apple_mail` | [`apple_mail.rs`](src/tools/builtin/apple_mail.rs) | Read/send Apple Mail via AppleScript |
+
+### 20.9 LLM & Reasoning (4 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `llm_select` | [`llm_tools.rs`](src/tools/builtin/llm_tools.rs) | Switch active LLM model at runtime |
+| `llm_list_models` | [`llm_tools.rs`](src/tools/builtin/llm_tools.rs) | List available models across providers |
+| `mixture_of_agents` | [`moa.rs`](src/tools/builtin/moa.rs) | Multi-LLM parallel dispatch + synthesis aggregation |
+| `agent_think` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Explicit reasoning scratchpad (implicit capability tool) |
+
+### 20.10 Hardware & Environment (5 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `device_info` | [`device_info.rs`](src/tools/builtin/device_info.rs) | System hardware/OS info |
+| `location` | [`location.rs`](src/tools/builtin/location.rs) | Device geolocation |
+| `camera_capture` | [`camera_capture.rs`](src/tools/builtin/camera_capture.rs) | Capture from camera/webcam |
+| `screen_capture` | [`screen_capture.rs`](src/tools/builtin/screen_capture.rs) | macOS/Linux screenshot capture |
+| `tts` | [`tts.rs`](src/tools/builtin/tts.rs) | Text-to-speech synthesis |
+
+### 20.11 UI & Interaction (4 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `canvas` | [`canvas.rs`](src/tools/builtin/canvas.rs) | A2UI canvas panels with interactive components |
+| `clarify` | [`clarify.rs`](src/tools/builtin/clarify.rs) | Structured questions with multiple-choice/free-form options |
+| `vision_analyze` | [`vision.rs`](src/tools/builtin/vision.rs) | Proactive image/video analysis via multimodal LLM |
+| `emit_user_message` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Emit messages to user (implicit capability tool) |
+
+### 20.12 Process & Task Management (3 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `process` | [`process.rs`](src/tools/builtin/process.rs) | Background process lifecycle (start/poll/wait/kill/write) with shared registry + auto-reaper |
+| `todo` | [`todo.rs`](src/tools/builtin/todo.rs) | In-session task planner with merge/replace modes; survives context compaction |
+| `time` | [`time.rs`](src/tools/builtin/time.rs) | Current time, timezone conversion, date arithmetic |
+
+### 20.13 Smart Home & IoT (1 tool)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `homeassistant` | [`homeassistant.rs`](src/tools/builtin/homeassistant.rs) | Home Assistant REST API: entity listing, state queries, service calls; gated on `HASS_URL` + `HASS_TOKEN` |
+
+### 20.14 Builder (1 tool)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `build_software` | [`builder/core.rs`](src/tools/builder/core.rs) | LLM-driven iterative build loop for WASM tools, CLI apps, and scripts |
+
+### 20.15 Utility (2 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `echo` | [`echo.rs`](src/tools/builtin/echo.rs) | Echo input back (testing/debugging) |
+
+### 20.16 Supporting Infrastructure
+
+| Component | Source | Description |
+|-----------|--------|-------------|
+| Composable toolsets | [`toolset.rs`](src/tools/toolset.rs) | Named tool collections (web/dev/memory/safe/full/communication/automation/agents) with recursive includes + cycle detection |
+| OSV malware scanner | [`osv_check.rs`](src/safety/osv_check.rs) | Package scanning via Google OSV API for MCP servers; MAL-* advisory detection, 1h cache, fail-open |
+| Intent display | [`intent_display.rs`](src/tools/intent_display.rs) | Human-readable intent hints and argument extraction for all tool calls |
+| Tool registry | [`registry.rs`](src/tools/registry.rs) | Protected-name enforcement, conditional registration, rate limiting |
+
+### Owner: ThinClaw Agent

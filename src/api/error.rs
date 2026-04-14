@@ -18,6 +18,10 @@ pub enum ApiError {
     #[error("Service unavailable: {0}")]
     Unavailable(String),
 
+    /// Feature exists but is disabled in settings.
+    #[error("Feature disabled: {0}")]
+    FeatureDisabled(String),
+
     /// Internal agent error.
     #[error("Agent error: {0}")]
     Agent(#[from] crate::Error),
@@ -42,6 +46,7 @@ impl ApiError {
             Self::InvalidInput(_) => "invalid_input",
             Self::SessionNotFound(_) => "session_not_found",
             Self::Unavailable(_) => "unavailable",
+            Self::FeatureDisabled(_) => "feature_disabled",
             Self::Agent(_) => "agent_error",
             Self::Serialization(_) => "serialization_error",
             Self::UuidParse(_) => "uuid_parse_error",

@@ -255,6 +255,17 @@ pub enum RoutineAction {
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
     },
+    /// Start or resume an experiment campaign.
+    ExperimentCampaign {
+        /// Experiment project to run.
+        project_id: Uuid,
+        /// Optional runner profile override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner_profile_id: Option<Uuid>,
+        /// Optional max trials override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_trials_override: Option<u32>,
+    },
 }
 
 fn default_max_tokens() -> u32 {
@@ -280,6 +291,7 @@ impl RoutineAction {
             RoutineAction::Lightweight { .. } => "lightweight",
             RoutineAction::FullJob { .. } => "full_job",
             RoutineAction::Heartbeat { .. } => "heartbeat",
+            RoutineAction::ExperimentCampaign { .. } => "experiment_campaign",
         }
     }
 
@@ -389,6 +401,34 @@ impl RoutineAction {
                         .unwrap_or(10) as u32,
                 })
             }
+            "experiment_campaign" => {
+                let project_id = config
+                    .get("project_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "experiment_campaign action".into(),
+                        field: "project_id".into(),
+                    })?;
+                Ok(RoutineAction::ExperimentCampaign {
+                    project_id: Uuid::parse_str(project_id).map_err(|e| {
+                        RoutineError::InvalidCron {
+                            reason: format!("invalid experiment project UUID: {e}"),
+                        }
+                    })?,
+                    runner_profile_id: config
+                        .get("runner_profile_id")
+                        .and_then(|v| v.as_str())
+                        .map(Uuid::parse_str)
+                        .transpose()
+                        .map_err(|e| RoutineError::InvalidCron {
+                            reason: format!("invalid runner profile UUID: {e}"),
+                        })?,
+                    max_trials_override: config
+                        .get("max_trials_override")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                })
+            }
             other => Err(RoutineError::UnknownActionType {
                 action_type: other.to_string(),
             }),
@@ -436,6 +476,15 @@ impl RoutineAction {
                 "active_end_hour": active_end_hour,
                 "target": target,
                 "max_iterations": max_iterations,
+            }),
+            RoutineAction::ExperimentCampaign {
+                project_id,
+                runner_profile_id,
+                max_trials_override,
+            } => serde_json::json!({
+                "project_id": project_id,
+                "runner_profile_id": runner_profile_id,
+                "max_trials_override": max_trials_override,
             }),
         }
     }

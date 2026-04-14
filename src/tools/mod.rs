@@ -14,6 +14,7 @@ pub mod intent_display;
 pub mod mcp;
 pub mod policy;
 pub mod rate_limiter;
+pub mod toolset;
 pub mod wasm;
 
 mod registry;

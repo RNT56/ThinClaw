@@ -36,7 +36,7 @@ use crate::config::GatewayConfig;
 use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
-use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::ToolRegistry;
@@ -120,11 +120,53 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             ),
             thread_id,
         },
-        StatusUpdate::CanvasAction(action) => {
-            let payload = serde_json::to_string(&action).unwrap_or_default();
-            SseEvent::Status {
-                message: format!("[canvas] {}", payload),
-                thread_id,
+        StatusUpdate::CanvasAction(ref action) => {
+            use crate::tools::builtin::CanvasAction;
+            let (action_name, panel_id, content) = match action {
+                CanvasAction::Show {
+                    panel_id,
+                    title,
+                    components,
+                    ..
+                } => (
+                    "show",
+                    panel_id.clone(),
+                    Some(serde_json::json!({
+                        "title": title,
+                        "components": components,
+                    })),
+                ),
+                CanvasAction::Update {
+                    panel_id,
+                    components,
+                } => (
+                    "update",
+                    panel_id.clone(),
+                    Some(serde_json::json!({
+                        "components": components,
+                    })),
+                ),
+                CanvasAction::Dismiss { panel_id } => {
+                    ("dismiss", panel_id.clone(), None)
+                }
+                CanvasAction::Notify {
+                    message,
+                    level,
+                    duration_secs,
+                } => (
+                    "notify",
+                    String::new(),
+                    Some(serde_json::json!({
+                        "message": message,
+                        "level": format!("{:?}", level).to_lowercase(),
+                        "duration_secs": duration_secs,
+                    })),
+                ),
+            };
+            SseEvent::CanvasUpdate {
+                panel_id,
+                action: action_name.to_string(),
+                content,
             }
         }
         StatusUpdate::AgentMessage {
@@ -351,10 +393,7 @@ impl GatewayChannel {
         mut self,
         pq: Arc<
             tokio::sync::Mutex<
-                std::collections::HashMap<
-                    uuid::Uuid,
-                    std::collections::VecDeque<crate::orchestrator::api::PendingPrompt>,
-                >,
+                std::collections::HashMap<uuid::Uuid, std::collections::VecDeque<PendingPrompt>>,
             >,
         >,
     ) -> Self {

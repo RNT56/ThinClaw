@@ -3,6 +3,15 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use crate::api::experiments::{
+    ExperimentArtifactListResponse, ExperimentCampaignActionResponse,
+    ExperimentCampaignListResponse, ExperimentGpuCloudProviderInfo,
+    ExperimentGpuCloudProviderListResponse, ExperimentLaunchDetails,
+    ExperimentLeaseCredentialsResponse, ExperimentLeaseJobResponse,
+    ExperimentModelUsageListResponse, ExperimentOpportunityListResponse,
+    ExperimentProjectListResponse, ExperimentRunnerListResponse,
+    ExperimentRunnerValidationResponse, ExperimentTargetListResponse, ExperimentTrialListResponse,
+};
 pub use crate::api::learning::{
     LearningArtifactVersionItem, LearningArtifactVersionResponse, LearningCandidateItem,
     LearningCandidateResponse, LearningCodeProposalItem, LearningCodeProposalResponse,
@@ -99,6 +108,43 @@ pub struct ApprovalRequest {
     pub user_id: Option<String>,
     #[serde(default)]
     pub actor_id: Option<String>,
+}
+
+// --- Experiments ---
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExperimentGpuCloudConnectRequest {
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExperimentGpuCloudLaunchTestRequest {
+    #[serde(default)]
+    pub runner_profile_id: Option<Uuid>,
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExperimentGpuCloudTemplateRequest {
+    #[serde(default)]
+    pub runner_name: Option<String>,
+    #[serde(default)]
+    pub image_or_runtime: Option<String>,
+    #[serde(default)]
+    pub region_name: Option<String>,
+    #[serde(default)]
+    pub instance_type_name: Option<String>,
+    #[serde(default = "default_experiment_gpu_cloud_quantity")]
+    pub quantity: u32,
+    #[serde(default)]
+    pub ssh_key_names: Vec<String>,
+    #[serde(default)]
+    pub file_system_names: Vec<String>,
+}
+
+fn default_experiment_gpu_cloud_quantity() -> u32 {
+    1
 }
 
 // --- SSE Event Types ---
@@ -299,6 +345,31 @@ pub enum SseEvent {
         action: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<serde_json::Value>,
+    },
+    #[serde(rename = "experiment_opportunity_updated")]
+    ExperimentOpportunityUpdated {
+        opportunity_id: String,
+        status: String,
+        message: String,
+    },
+    #[serde(rename = "experiment_campaign_updated")]
+    ExperimentCampaignUpdated {
+        campaign_id: String,
+        status: String,
+        message: String,
+    },
+    #[serde(rename = "experiment_trial_updated")]
+    ExperimentTrialUpdated {
+        campaign_id: String,
+        trial_id: String,
+        status: String,
+        message: String,
+    },
+    #[serde(rename = "experiment_runner_updated")]
+    ExperimentRunnerUpdated {
+        runner_id: String,
+        status: String,
+        message: String,
     },
 
     /// Agent completed its bootstrap ritual (BOOTSTRAP.md deleted).
@@ -822,6 +893,10 @@ impl WsServerMessage {
             SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
             SseEvent::CostAlert { .. } => "cost_alert",
             SseEvent::CanvasUpdate { .. } => "canvas_update",
+            SseEvent::ExperimentOpportunityUpdated { .. } => "experiment_opportunity_updated",
+            SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
+            SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
+            SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
             SseEvent::BootstrapCompleted => "bootstrap_completed",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);

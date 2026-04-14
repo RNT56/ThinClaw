@@ -975,12 +975,14 @@ impl AppBuilder {
         let llm: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             runtime_llm,
             Arc::clone(&cost_tracker),
+            self.db.clone(),
             Some(Arc::clone(&cost_guard)),
         ));
         let cheap_llm = runtime_cheap_llm.map(|cheap| {
             Arc::new(UsageTrackingProvider::new(
                 cheap,
                 Arc::clone(&cost_tracker),
+                self.db.clone(),
                 Some(Arc::clone(&cost_guard)),
             )) as Arc<dyn LlmProvider>
         });

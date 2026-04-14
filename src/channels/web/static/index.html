@@ -45,6 +45,7 @@
       <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
       <button data-tab="extensions"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg> Extensions</button>
       <button data-tab="skills"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> Skills</button>
+      <button data-tab="research" id="research-tab-button" style="display:none"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M9 3h6"/><path d="M12 3v18"/><path d="m8 21 4-4 4 4"/><path d="M19 7H5"/><path d="m7 7 1.5 6.5a2 2 0 0 0 3 1.2L19 11"/></svg> Research</button>
       <button data-tab="learning"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 19.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg> Learning</button>
       <button data-tab="providers"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Providers</button>
       <button data-tab="costs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Costs</button>
@@ -236,6 +237,397 @@
             </div>
           </section>
           <div class="routine-detail" id="routine-detail" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Research Tab -->
+    <div class="tab-panel" id="tab-research">
+      <div class="research-container ui-dashboard-shell">
+        <div class="research-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Research</h2>
+            <p class="ui-panel-desc">Optional experiment campaigns for benchmarked model and code iteration, with local runners or outbound lease-based cloud execution.</p>
+          </div>
+        </div>
+        <div class="research-shell ui-panel-stack">
+          <div class="ui-panel ui-panel--note research-note" id="research-disabled-note" style="display:none">
+            Enable <code>experiments.enabled</code> in Settings → Advanced → Experiments to use this workspace.
+          </div>
+          <div class="research-subnav" role="tablist" aria-label="Research sections">
+            <button type="button" data-research-subtab="overview" class="active" aria-selected="true" onclick="switchResearchSubtab('overview')">Overview</button>
+            <button type="button" data-research-subtab="opportunities" aria-selected="false" onclick="switchResearchSubtab('opportunities')">Opportunities</button>
+            <button type="button" data-research-subtab="projects" aria-selected="false" onclick="switchResearchSubtab('projects')">Projects</button>
+            <button type="button" data-research-subtab="runners" aria-selected="false" onclick="switchResearchSubtab('runners')">Runners</button>
+            <button type="button" data-research-subtab="campaigns" aria-selected="false" onclick="switchResearchSubtab('campaigns')">Campaigns</button>
+            <button type="button" data-research-subtab="gpu-clouds" aria-selected="false" onclick="switchResearchSubtab('gpu-clouds')">GPU Clouds</button>
+          </div>
+
+          <div class="research-panes">
+            <div class="research-pane active" data-research-pane="overview">
+              <div class="research-summary ui-panel-grid ui-panel-grid--cards" id="research-overview-summary"></div>
+              <div class="research-overview-grid">
+                <section class="ui-panel ui-panel-stack">
+                  <div class="ui-panel-header ui-panel-header--divider">
+                    <div class="ui-panel-copy">
+                      <h3 class="ui-panel-title">What can be improved next</h3>
+                      <p class="ui-panel-desc">ThinClaw automatically surfaces the next likely improvement surfaces from provider routing, usage telemetry, and experiment history.</p>
+                    </div>
+                  </div>
+                  <div class="research-overview-insights" id="research-overview-insights"></div>
+                </section>
+                <section class="ui-panel ui-panel-stack">
+                  <div class="ui-panel-header ui-panel-header--divider">
+                    <div class="ui-panel-copy">
+                      <h3 class="ui-panel-title">Quick path</h3>
+                      <p class="ui-panel-desc">Hosted-model loops can run on CPU-only hardware. GPU Clouds are only needed for self-hosted or cluster-backed iteration.</p>
+                    </div>
+                  </div>
+                  <div id="research-overview-next"></div>
+                </section>
+              </div>
+            </div>
+
+            <div class="research-pane" data-research-pane="opportunities">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Opportunities</h3>
+                    <p class="ui-panel-desc">These entries show which hosted or self-hosted surfaces ThinClaw can improve over time. Use them to prefill a project, then run a benchmark campaign.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-restart" onclick="switchTab('providers')">Open Providers</button>
+                  </div>
+                </div>
+                <div class="research-opportunity-banner ui-panel ui-panel--note">
+                  Hosted-model opportunities do not need a GPU. Self-hosted tuning and training opportunities usually do.
+                </div>
+                <div class="research-opportunities-grid" id="research-opportunities-shell">
+                  <div class="research-opportunities-list" id="research-opportunities-list"></div>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-opportunities-empty" style="display:none">No opportunities available yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="projects">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Benchmark Project</h3>
+                    <p class="ui-panel-desc">This guided form creates the optional research project ThinClaw will control while leaving benchmark scoring and promotion explicit.</p>
+                  </div>
+                </div>
+                <div class="research-form-grid">
+                  <article class="ui-panel ui-panel--subtle ui-panel-stack research-form-card">
+                    <div class="ui-panel-copy">
+                      <h4 class="ui-panel-title ui-panel-title--section">Project Template</h4>
+                      <p class="ui-panel-desc">Use an opportunity to prefill the benchmark harness, then adjust the details before launch.</p>
+                    </div>
+                    <div class="research-form-grid research-form-grid--compact">
+                      <div>
+                        <label class="research-field-label" for="research-project-name">Name</label>
+                        <input type="text" id="research-project-name" class="research-input" placeholder="NanoGPT overnight search">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-default-runner">Default runner</label>
+                        <select id="research-project-default-runner" class="research-input">
+                          <option value="">Choose a validated runner</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-workspace">Workspace path</label>
+                        <input type="text" id="research-project-workspace" class="research-input" placeholder="/path/to/repo">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-workdir">Workdir</label>
+                        <input type="text" id="research-project-workdir" class="research-input" value=".">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-remote">Git remote</label>
+                        <input type="text" id="research-project-remote" class="research-input" value="origin">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-branch">Base branch</label>
+                        <input type="text" id="research-project-branch" class="research-input" value="main">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-prepare">Prepare command</label>
+                        <input type="text" id="research-project-prepare" class="research-input" placeholder="python prepare.py">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-run">Run command</label>
+                        <input type="text" id="research-project-run" class="research-input" placeholder="python train.py">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-mutable">Mutable paths</label>
+                        <textarea id="research-project-mutable" class="research-textarea" rows="4" placeholder="train.py"></textarea>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-fixed">Fixed harness paths</label>
+                        <textarea id="research-project-fixed" class="research-textarea" rows="4" placeholder="prepare.py&#10;README.md"></textarea>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-name">Primary metric name</label>
+                        <input type="text" id="research-project-metric-name" class="research-input" value="bpb">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-comparator">Comparator</label>
+                        <select id="research-project-metric-comparator" class="research-input">
+                          <option value="lower_is_better">lower_is_better</option>
+                          <option value="higher_is_better">higher_is_better</option>
+                          <option value="equal_is_better">equal_is_better</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-regex">Primary metric regex</label>
+                        <input type="text" id="research-project-metric-regex" class="research-input" placeholder="val_bpb:\\s*([0-9.]+)">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-json-path">Primary metric JSON path</label>
+                        <input type="text" id="research-project-metric-json-path" class="research-input" placeholder="metrics.val_bpb">
+                      </div>
+                    </div>
+                    <details class="research-advanced">
+                      <summary>Advanced project config</summary>
+                      <div class="research-form-grid research-form-grid--compact">
+                        <div>
+                          <label class="research-field-label" for="research-project-secondary">Secondary metrics (JSON array)</label>
+                          <textarea id="research-project-secondary" class="research-textarea" rows="5" placeholder='[{"name":"loss","regex":"loss:\\s*([0-9.]+)","comparator":"lower_is_better"}]'>[]</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-comparison">Comparison policy (JSON)</label>
+                          <textarea id="research-project-comparison" class="research-textarea" rows="5" placeholder='{"require_success_exit":true,"allow_equal":false}'></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-stop">Stop policy (JSON)</label>
+                          <textarea id="research-project-stop" class="research-textarea" rows="5" placeholder='{"max_trials":8,"infra_failure_pause_threshold":3,"non_improving_pause_threshold":8}'></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-strategy">Strategy prompt</label>
+                          <textarea id="research-project-strategy" class="research-textarea" rows="5" placeholder="Operate only within mutable paths, preserve the fixed harness, and compare every candidate against the current best."></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-autonomy">Autonomy mode</label>
+                          <select id="research-project-autonomy" class="research-input">
+                            <option value="autonomous">autonomous</option>
+                            <option value="manual_candidate">manual_candidate</option>
+                            <option value="suggest_only">suggest_only</option>
+                          </select>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="research-actions">
+                      <button class="btn-restart" onclick="createResearchProject()">Create Project</button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Projects</h3>
+                    <p class="ui-panel-desc">Each project defines the benchmark harness, mutable paths, and canonical scoring policy.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-projects-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Primary metric</th>
+                        <th>Autonomy</th>
+                        <th>Default runner</th>
+                        <th>Workspace</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-projects-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-projects-empty" style="display:none">No research projects yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="runners">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Runner Profile</h3>
+                    <p class="ui-panel-desc">Backends stay optional. Use <code>local_docker</code> for local execution or any remote backend to issue a lease-scoped runner token.</p>
+                  </div>
+                </div>
+                <div class="research-form-grid">
+                  <article class="ui-panel ui-panel--subtle ui-panel-stack research-form-card">
+                    <div class="research-form-grid research-form-grid--compact">
+                      <div>
+                        <label class="research-field-label" for="research-runner-name">Name</label>
+                        <input type="text" id="research-runner-name" class="research-input" placeholder="RunPod H100 pool">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-backend">Backend</label>
+                        <select id="research-runner-backend" class="research-input">
+                          <option value="local_docker">local_docker</option>
+                          <option value="generic_remote_runner">generic_remote_runner</option>
+                          <option value="ssh">ssh</option>
+                          <option value="slurm">slurm</option>
+                          <option value="kubernetes">kubernetes</option>
+                          <option value="runpod">runpod</option>
+                          <option value="vast">vast</option>
+                          <option value="lambda">lambda</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-image">Image or runtime</label>
+                        <input type="text" id="research-runner-image" class="research-input" placeholder="ghcr.io/acme/research-runner:latest">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-secrets">Secret references</label>
+                        <input type="text" id="research-runner-secrets" class="research-input" placeholder="RUNPOD_API_KEY, SSH_PRIVATE_KEY">
+                      </div>
+                    </div>
+                    <details class="research-advanced">
+                      <summary>Advanced runner config</summary>
+                      <div class="research-form-grid research-form-grid--compact">
+                        <div>
+                          <label class="research-field-label" for="research-runner-backend-config">Backend config (JSON)</label>
+                          <textarea id="research-runner-backend-config" class="research-textarea" rows="5" placeholder='{"host":"gpu.example.com","user":"research"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-gpu">GPU requirements (JSON)</label>
+                          <textarea id="research-runner-gpu" class="research-textarea" rows="5" placeholder='{"gpu_count":1,"gpu_type":"H100"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-env">Env grants (JSON)</label>
+                          <textarea id="research-runner-env" class="research-textarea" rows="5" placeholder='{"HF_HOME":"/cache/hf"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-cache">Cache policy (JSON)</label>
+                          <textarea id="research-runner-cache" class="research-textarea" rows="5" placeholder='{"persist_workspace":false}'>{}</textarea>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="research-actions">
+                      <button class="btn-restart" onclick="createResearchRunner()">Create Runner</button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Runner Profiles</h3>
+                    <p class="ui-panel-desc">Validate backend reachability before attaching a runner to a project or campaign.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-runners-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Backend</th>
+                        <th>Launch mode</th>
+                        <th>Status</th>
+                        <th>Image/runtime</th>
+                        <th>GPU</th>
+                        <th>Provider state</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-runners-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-runners-empty" style="display:none">No runner profiles yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="campaigns">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Start Campaign</h3>
+                    <p class="ui-panel-desc">Baseline runs first. Local campaigns execute immediately; remote campaigns issue a lease token and stay outbound-only.</p>
+                  </div>
+                </div>
+                <div class="research-start-form">
+                  <select id="research-start-project" class="research-input">
+                    <option value="">Choose a project</option>
+                  </select>
+                  <select id="research-start-runner" class="research-input">
+                    <option value="">Use project default runner</option>
+                  </select>
+                  <input type="number" id="research-start-max-trials" class="research-input" min="1" placeholder="Max trials override">
+                  <button class="btn-restart" onclick="startResearchCampaign()">Start Campaign</button>
+                </div>
+                <div class="research-lease-shell" id="research-lease-shell" style="display:none">
+                  <div class="ui-panel-copy">
+                    <h4 class="ui-panel-title ui-panel-title--section">Remote Lease</h4>
+                    <p class="ui-panel-desc" id="research-lease-description">Use this one-time command from the remote runner host or cluster job.</p>
+                  </div>
+                  <pre class="research-lease-output" id="research-lease-output"></pre>
+                  <div class="research-lease-actions">
+                    <button class="btn-restart" type="button" onclick="reissueResearchLease()">Reissue Lease</button>
+                    <button class="btn-cancel" type="button" onclick="copyResearchLeaseCommand()">Copy Command</button>
+                  </div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Campaigns</h3>
+                    <p class="ui-panel-desc">Campaigns keep the best commit and pause cleanly between candidate trials so the operator stays in control.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-campaigns-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Project</th>
+                        <th>Runner</th>
+                        <th>Status</th>
+                        <th>Queue</th>
+                        <th>Trials</th>
+                        <th>Best metric</th>
+                        <th>Budget</th>
+                        <th>Provider</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-campaigns-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-campaigns-empty" style="display:none">No campaigns yet.</div>
+              </section>
+              <section class="ui-panel ui-panel-stack" id="research-detail-panel">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Campaign Detail</h3>
+                    <p class="ui-panel-desc">Inspect the current worktree, recent trials, and uploaded artifacts for the selected campaign.</p>
+                  </div>
+                </div>
+                <div class="research-detail" id="research-detail">Select a campaign to inspect its worktree and trials.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="gpu-clouds">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">GPU Clouds</h3>
+                    <p class="ui-panel-desc">Quick-launch assistant for external GPU providers. Connect credentials, generate a runner template, and launch a test job from the same place.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-restart" onclick="switchTab('providers')">Open Provider Vault</button>
+                  </div>
+                </div>
+                <div class="research-cloud-grid" id="research-gpu-clouds-shell">
+                  <div class="research-cloud-grid" id="research-gpu-clouds-grid"></div>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-gpu-clouds-empty" style="display:none">No cloud provider cards available.</div>
+              </section>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -566,8 +958,11 @@
     <div class="tab-panel" id="tab-providers">
       <div class="providers-container">
         <div class="providers-header">
-          <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Provider Vault</h2>
-          <p class="providers-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>
+          <div class="providers-header-copy">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Provider Vault</h2>
+            <p class="providers-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>
+          </div>
+          <button class="btn-ext providers-research-link" onclick="openResearchGpuClouds()">Open Research GPU Clouds</button>
         </div>
         <div class="providers-content" id="providers-content">
           <div class="settings-loading">Loading providers...</div>

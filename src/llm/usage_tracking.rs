@@ -6,7 +6,9 @@ use futures::StreamExt;
 use rust_decimal::Decimal;
 
 use crate::agent::cost_guard::CostGuard;
+use crate::db::Database;
 use crate::error::LlmError;
+use crate::experiments::ExperimentModelUsageRecord;
 use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::costs;
 use crate::llm::provider::{
@@ -17,6 +19,23 @@ use crate::llm::provider::{
 pub const USAGE_TRACKING_OWNER_KEY: &str = "thinclaw.usage_tracking.owner";
 pub const USAGE_TRACKING_OWNER_REASONING: &str = "reasoning";
 pub const USAGE_TRACKING_AGENT_KEY: &str = "thinclaw.usage_tracking.agent";
+pub const USAGE_TRACKING_TELEMETRY_KEY: &str = "thinclaw.usage_tracking.telemetry_key";
+pub const USAGE_TRACKING_ENDPOINT_TYPE_KEY: &str = "thinclaw.usage_tracking.endpoint_type";
+pub const USAGE_TRACKING_WORKLOAD_TAG_KEY: &str = "thinclaw.usage_tracking.workload_tag";
+pub const USAGE_TRACKING_PROMPT_ASSET_IDS_KEY: &str = "thinclaw.usage_tracking.prompt_asset_ids";
+pub const USAGE_TRACKING_RETRIEVAL_ASSET_IDS_KEY: &str =
+    "thinclaw.usage_tracking.retrieval_asset_ids";
+pub const USAGE_TRACKING_TOOL_POLICY_IDS_KEY: &str = "thinclaw.usage_tracking.tool_policy_ids";
+pub const USAGE_TRACKING_EVALUATOR_IDS_KEY: &str = "thinclaw.usage_tracking.evaluator_ids";
+pub const USAGE_TRACKING_PARSER_IDS_KEY: &str = "thinclaw.usage_tracking.parser_ids";
+pub const USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY: &str =
+    "thinclaw.usage_tracking.experiment_campaign_id";
+pub const USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY: &str =
+    "thinclaw.usage_tracking.experiment_trial_id";
+pub const USAGE_TRACKING_EXPERIMENT_ROLE_KEY: &str =
+    "thinclaw.usage_tracking.experiment_role";
+pub const USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY: &str =
+    "thinclaw.usage_tracking.experiment_target_ids";
 
 pub fn mark_reasoning_request(metadata: &mut HashMap<String, String>, agent_id: Option<&str>) {
     metadata.insert(
@@ -78,6 +97,7 @@ async fn record_guard_only(
 
 async fn record_usage(
     tracker: &Arc<tokio::sync::Mutex<CostTracker>>,
+    db: Option<&Arc<dyn Database>>,
     guard: Option<&Arc<CostGuard>>,
     metadata: &HashMap<String, String>,
     fallback_model: &str,
@@ -85,21 +105,20 @@ async fn record_usage(
     cost_usd: Option<f64>,
     input_tokens: u32,
     output_tokens: u32,
+    latency_ms: Option<u64>,
+    success: bool,
 ) {
     let model = resolve_model(fallback_model, provider_model);
     let cost_usd =
         cost_usd.unwrap_or_else(|| fallback_cost_usd(&model, input_tokens, output_tokens));
-    let provider = if let Some(idx) = model.find('/') {
-        model[..idx].to_string()
-    } else {
-        "unknown".to_string()
-    };
+    let (provider, model_name, route_key, logical_role) =
+        usage_identity(metadata, &model, provider_model);
     let request_id = Some(uuid::Uuid::new_v4().to_string());
     let entry = CostEntry {
         timestamp: chrono::Utc::now().to_rfc3339(),
         agent_id: metadata_agent_id(metadata),
-        provider,
-        model: model.clone(),
+        provider: provider.clone(),
+        model: model_name.clone(),
         input_tokens,
         output_tokens,
         cost_usd,
@@ -113,11 +132,118 @@ async fn record_usage(
             .record_llm_call_with_cost(&model, input_tokens, output_tokens, cost_decimal)
             .await;
     }
+    if let Some(db) = db {
+        let record = ExperimentModelUsageRecord {
+            id: uuid::Uuid::new_v4(),
+            provider,
+            model: model_name,
+            route_key,
+            logical_role,
+            endpoint_type: metadata.get(USAGE_TRACKING_ENDPOINT_TYPE_KEY).cloned(),
+            workload_tag: metadata.get(USAGE_TRACKING_WORKLOAD_TAG_KEY).cloned(),
+            latency_ms,
+            cost_usd: Some(cost_usd),
+            success,
+            prompt_asset_ids: metadata_csv_list(metadata, USAGE_TRACKING_PROMPT_ASSET_IDS_KEY),
+            retrieval_asset_ids: metadata_csv_list(
+                metadata,
+                USAGE_TRACKING_RETRIEVAL_ASSET_IDS_KEY,
+            ),
+            tool_policy_ids: metadata_csv_list(metadata, USAGE_TRACKING_TOOL_POLICY_IDS_KEY),
+            evaluator_ids: metadata_csv_list(metadata, USAGE_TRACKING_EVALUATOR_IDS_KEY),
+            parser_ids: metadata_csv_list(metadata, USAGE_TRACKING_PARSER_IDS_KEY),
+            metadata: usage_record_metadata(metadata),
+            created_at: chrono::Utc::now(),
+        };
+        if let Err(error) = db.create_experiment_model_usage(&record).await {
+            tracing::debug!(%error, "Failed to persist experiment model usage record");
+        }
+    }
+}
+
+fn usage_record_metadata(metadata: &HashMap<String, String>) -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    if let Some(agent_id) = metadata_agent_id(metadata) {
+        payload.insert("agent_id".to_string(), serde_json::json!(agent_id));
+    }
+    if let Some(owner) = metadata.get(USAGE_TRACKING_OWNER_KEY).filter(|value| !value.is_empty()) {
+        payload.insert("owner".to_string(), serde_json::json!(owner));
+    }
+    for (input_key, output_key) in [
+        (
+            USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY,
+            "experiment_campaign_id",
+        ),
+        (USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY, "experiment_trial_id"),
+        (USAGE_TRACKING_EXPERIMENT_ROLE_KEY, "experiment_role"),
+        (
+            USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY,
+            "experiment_target_ids",
+        ),
+    ] {
+        if let Some(value) = metadata.get(input_key).filter(|value| !value.is_empty()) {
+            payload.insert(output_key.to_string(), serde_json::json!(value));
+        }
+    }
+    serde_json::Value::Object(payload)
+}
+
+fn metadata_csv_list(metadata: &HashMap<String, String>, key: &str) -> Vec<String> {
+    metadata
+        .get(key)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn usage_identity(
+    metadata: &HashMap<String, String>,
+    resolved_model: &str,
+    provider_model: Option<&str>,
+) -> (String, String, Option<String>, Option<String>) {
+    if let Some(key) = metadata.get(USAGE_TRACKING_TELEMETRY_KEY) {
+        let mut parts = key.splitn(3, '|');
+        let logical_role = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let provider = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| provider_from_model(resolved_model));
+        let model = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| resolve_model(resolved_model, provider_model));
+        return (provider, model, Some(key.clone()), logical_role);
+    }
+    (
+        provider_from_model(resolved_model),
+        resolve_model(resolved_model, provider_model),
+        None,
+        None,
+    )
+}
+
+fn provider_from_model(model: &str) -> String {
+    model.split('/').next().unwrap_or("unknown").to_string()
 }
 
 pub struct UsageTrackingProvider {
     inner: Arc<dyn LlmProvider>,
     tracker: Arc<tokio::sync::Mutex<CostTracker>>,
+    db: Option<Arc<dyn Database>>,
     guard: Option<Arc<CostGuard>>,
 }
 
@@ -125,11 +251,13 @@ impl UsageTrackingProvider {
     pub fn new(
         inner: Arc<dyn LlmProvider>,
         tracker: Arc<tokio::sync::Mutex<CostTracker>>,
+        db: Option<Arc<dyn Database>>,
         guard: Option<Arc<CostGuard>>,
     ) -> Self {
         Self {
             inner,
             tracker,
+            db,
             guard,
         }
     }
@@ -141,6 +269,8 @@ impl UsageTrackingProvider {
         cost_usd: Option<f64>,
         input_tokens: u32,
         output_tokens: u32,
+        latency_ms: Option<u64>,
+        success: bool,
     ) {
         if metadata_is_reasoning_owned(metadata) {
             // Reasoning records to CostTracker itself, but we must still update
@@ -160,6 +290,7 @@ impl UsageTrackingProvider {
         }
         record_usage(
             &self.tracker,
+            self.db.as_ref(),
             self.guard.as_ref(),
             metadata,
             &self.inner.active_model_name(),
@@ -167,6 +298,8 @@ impl UsageTrackingProvider {
             cost_usd,
             input_tokens,
             output_tokens,
+            latency_ms,
+            success,
         )
         .await;
     }
@@ -184,16 +317,28 @@ impl LlmProvider for UsageTrackingProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let metadata = request.metadata.clone();
-        let response = self.inner.complete(request).await?;
-        self.track_completion(
-            &metadata,
-            response.provider_model.as_deref(),
-            response.cost_usd,
-            response.input_tokens,
-            response.output_tokens,
-        )
-        .await;
-        Ok(response)
+        let started = std::time::Instant::now();
+        let response = self.inner.complete(request).await;
+        match response {
+            Ok(response) => {
+                self.track_completion(
+                    &metadata,
+                    response.provider_model.as_deref(),
+                    response.cost_usd,
+                    response.input_tokens,
+                    response.output_tokens,
+                    Some(started.elapsed().as_millis() as u64),
+                    true,
+                )
+                .await;
+                Ok(response)
+            }
+            Err(error) => {
+                self.track_completion(&metadata, None, None, 0, 0, Some(started.elapsed().as_millis() as u64), false)
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     async fn complete_with_tools(
@@ -201,16 +346,28 @@ impl LlmProvider for UsageTrackingProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let metadata = request.metadata.clone();
-        let response = self.inner.complete_with_tools(request).await?;
-        self.track_completion(
-            &metadata,
-            response.provider_model.as_deref(),
-            response.cost_usd,
-            response.input_tokens,
-            response.output_tokens,
-        )
-        .await;
-        Ok(response)
+        let started = std::time::Instant::now();
+        let response = self.inner.complete_with_tools(request).await;
+        match response {
+            Ok(response) => {
+                self.track_completion(
+                    &metadata,
+                    response.provider_model.as_deref(),
+                    response.cost_usd,
+                    response.input_tokens,
+                    response.output_tokens,
+                    Some(started.elapsed().as_millis() as u64),
+                    true,
+                )
+                .await;
+                Ok(response)
+            }
+            Err(error) => {
+                self.track_completion(&metadata, None, None, 0, 0, Some(started.elapsed().as_millis() as u64), false)
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     async fn complete_stream(
@@ -218,6 +375,7 @@ impl LlmProvider for UsageTrackingProvider {
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
         let metadata = request.metadata.clone();
+        let started = std::time::Instant::now();
         let mut stream = self.inner.complete_stream(request).await?;
         if metadata_is_reasoning_owned(&metadata) {
             // Still need CostGuard recording for budget enforcement, even
@@ -251,6 +409,17 @@ impl LlmProvider for UsageTrackingProvider {
                                     finish_reason,
                                 });
                             }
+                            Err(error) => {
+                                record_guard_only(
+                                    &guard,
+                                    &fallback_model,
+                                    None,
+                                    None,
+                                    0,
+                                    0,
+                                ).await;
+                                yield Err(error);
+                            }
                             other => yield other,
                         }
                     }
@@ -260,6 +429,7 @@ impl LlmProvider for UsageTrackingProvider {
             return Ok(stream);
         }
         let tracker = Arc::clone(&self.tracker);
+        let db = self.db.as_ref().map(Arc::clone);
         let guard = self.guard.as_ref().map(Arc::clone);
         let fallback_model = self.inner.active_model_name();
         let wrapped = async_stream::stream! {
@@ -272,28 +442,48 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                        record_usage(
-                            &tracker,
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            provider_model.as_deref(),
-                            cost_usd,
-                            input_tokens,
-                            output_tokens,
-                        ).await;
-                        yield Ok(StreamChunk::Done {
-                            provider_model,
-                            cost_usd,
-                            input_tokens,
-                            output_tokens,
-                            finish_reason,
-                        });
+                            record_usage(
+                                &tracker,
+                                db.as_ref(),
+                                guard.as_ref(),
+                                &metadata,
+                                &fallback_model,
+                                provider_model.as_deref(),
+                                cost_usd,
+                                input_tokens,
+                                output_tokens,
+                                Some(started.elapsed().as_millis() as u64),
+                                true,
+                            ).await;
+                            yield Ok(StreamChunk::Done {
+                                provider_model,
+                                cost_usd,
+                                input_tokens,
+                                output_tokens,
+                                finish_reason,
+                            });
+                            }
+                            Err(error) => {
+                                record_usage(
+                                    &tracker,
+                                    db.as_ref(),
+                                    guard.as_ref(),
+                                    &metadata,
+                                    &fallback_model,
+                                    None,
+                                    None,
+                                    0,
+                                    0,
+                                    Some(started.elapsed().as_millis() as u64),
+                                    false,
+                                )
+                                .await;
+                                yield Err(error);
+                            }
+                            other => yield other,
+                        }
                     }
-                    other => yield other,
-                }
-            }
-        };
+                };
         Ok(Box::pin(wrapped))
     }
 
@@ -302,6 +492,7 @@ impl LlmProvider for UsageTrackingProvider {
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
         let metadata = request.metadata.clone();
+        let started = std::time::Instant::now();
         let mut stream = self.inner.complete_stream_with_tools(request).await?;
         if metadata_is_reasoning_owned(&metadata) {
             if let Some(ref guard) = self.guard {
@@ -333,6 +524,17 @@ impl LlmProvider for UsageTrackingProvider {
                                     finish_reason,
                                 });
                             }
+                            Err(error) => {
+                                record_guard_only(
+                                    &guard,
+                                    &fallback_model,
+                                    None,
+                                    None,
+                                    0,
+                                    0,
+                                ).await;
+                                yield Err(error);
+                            }
                             other => yield other,
                         }
                     }
@@ -342,6 +544,7 @@ impl LlmProvider for UsageTrackingProvider {
             return Ok(stream);
         }
         let tracker = Arc::clone(&self.tracker);
+        let db = self.db.as_ref().map(Arc::clone);
         let guard = self.guard.as_ref().map(Arc::clone);
         let fallback_model = self.inner.active_model_name();
         let wrapped = async_stream::stream! {
@@ -354,28 +557,48 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                        record_usage(
-                            &tracker,
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            provider_model.as_deref(),
-                            cost_usd,
-                            input_tokens,
-                            output_tokens,
-                        ).await;
-                        yield Ok(StreamChunk::Done {
-                            provider_model,
-                            cost_usd,
-                            input_tokens,
-                            output_tokens,
-                            finish_reason,
-                        });
+                            record_usage(
+                                &tracker,
+                                db.as_ref(),
+                                guard.as_ref(),
+                                &metadata,
+                                &fallback_model,
+                                provider_model.as_deref(),
+                                cost_usd,
+                                input_tokens,
+                                output_tokens,
+                                Some(started.elapsed().as_millis() as u64),
+                                true,
+                            ).await;
+                            yield Ok(StreamChunk::Done {
+                                provider_model,
+                                cost_usd,
+                                input_tokens,
+                                output_tokens,
+                                finish_reason,
+                            });
+                            }
+                            Err(error) => {
+                                record_usage(
+                                    &tracker,
+                                    db.as_ref(),
+                                    guard.as_ref(),
+                                    &metadata,
+                                    &fallback_model,
+                                    None,
+                                    None,
+                                    0,
+                                    0,
+                                    Some(started.elapsed().as_millis() as u64),
+                                    false,
+                                )
+                                .await;
+                                yield Err(error);
+                            }
+                            other => yield other,
+                        }
                     }
-                    other => yield other,
-                }
-            }
-        };
+                };
         Ok(Box::pin(wrapped))
     }
 
@@ -427,6 +650,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             Arc::new(StubLlm::new("ok").with_model_name("openai/gpt-5.4-mini")),
             Arc::clone(&tracker),
+            None,
             Some(Arc::clone(&guard)),
         ));
 
@@ -452,6 +676,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             Arc::new(StubLlm::new("ok").with_model_name("openai/gpt-5.4")),
             Arc::clone(&tracker),
+            None,
             Some(Arc::clone(&guard)),
         ));
 
@@ -477,6 +702,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             Arc::new(StubLlm::new("streamed").with_model_name("openai/gpt-5.4-mini")),
             Arc::clone(&tracker),
+            None,
             None,
         ));
 

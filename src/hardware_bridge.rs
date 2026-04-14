@@ -112,6 +112,10 @@ impl SensorResponse {
     }
 
     /// Create a denied response (user explicitly refused access).
+    ///
+    /// Structurally identical to [`error()`](Self::error) but uses
+    /// [`SensorResponseKind::Denied`] so the host application (Scrappy/Tauri)
+    /// can show "permission denied" UI instead of a system error dialog.
     pub fn denied(message: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -123,6 +127,11 @@ impl SensorResponse {
     }
 
     /// Create an error response (system/hardware failure, not user denial).
+    ///
+    /// Structurally identical to [`denied()`](Self::denied) but uses
+    /// [`SensorResponseKind::Error`] so the host application (Scrappy/Tauri)
+    /// can show a system error dialog with retry options instead of a
+    /// permission-denied message.
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -296,9 +305,21 @@ impl BridgedTool {
                         .data
                         .ok_or_else(|| "No data in response".to_string())
                 } else {
-                    Err(response
+                    let message = response
                         .error
-                        .unwrap_or_else(|| "Unknown bridge error".to_string()))
+                        .unwrap_or_else(|| "Unknown bridge error".to_string());
+
+                    match response.kind {
+                        SensorResponseKind::Denied => {
+                            Err(format!("Hardware bridge request denied: {message}"))
+                        }
+                        SensorResponseKind::Error => {
+                            Err(format!("Hardware bridge request failed: {message}"))
+                        }
+                        SensorResponseKind::Success => {
+                            Err(format!("Hardware bridge request failed: {message}"))
+                        }
+                    }
                 }
             }
             Err(_) => {
@@ -526,6 +547,27 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn test_bridged_tool_system_error() {
+        let bridge = Arc::new(MockBridge {
+            response: SensorResponse::error("Camera unavailable"),
+        });
+        let approvals = Arc::new(SessionApprovals::new());
+        let tool = BridgedTool::new(
+            bridge,
+            approvals,
+            SensorType::Camera,
+            "capture_camera_frame",
+            "Test camera tool",
+        );
+
+        let result = tool
+            .call(serde_json::json!({}), "Testing".to_string())
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed"));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 
 mod agent_registry;
 mod conversations;
+mod experiments;
 mod identity;
 mod jobs;
 mod routines;
@@ -257,6 +258,14 @@ pub(crate) fn get_json(row: &libsql::Row, idx: i32) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+pub(crate) fn row_json_to<T: serde::de::DeserializeOwned>(
+    row: &libsql::Row,
+    idx: i32,
+) -> Result<T, DatabaseError> {
+    serde_json::from_value(get_json(row, idx))
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))
+}
+
 /// Parse a timestamp from a text column.
 ///
 /// If the column is NULL or the value cannot be parsed, logs a warning and
@@ -315,10 +324,17 @@ impl Database for LibSqlBackend {
         // On a brand-new database the tables don't exist yet, so every ALTER
         // TABLE fails with "no such table" — those are silently ignored here
         // and SCHEMA (step 2) creates the complete, correct table layout.
-        for stmt in libsql_migrations::UPGRADES {
-            match conn.execute(stmt, ()).await {
+        let mut upgrades = libsql_migrations::UPGRADES.to_vec();
+        upgrades.sort_by_key(|upgrade| upgrade.version);
+
+        for upgrade in upgrades {
+            match conn.execute(upgrade.sql, ()).await {
                 Ok(_) => {
-                    tracing::debug!(stmt, "Applied column upgrade");
+                    tracing::debug!(
+                        migration_version = upgrade.version,
+                        migration_description = upgrade.description,
+                        "Applied libSQL column upgrade"
+                    );
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -327,11 +343,16 @@ impl Database for LibSqlBackend {
                         || msg.contains("no such table")
                         || msg.contains("no such column")
                     {
-                        tracing::trace!(stmt, "Column upgrade skipped (expected): {}", msg);
+                        tracing::trace!(
+                            migration_version = upgrade.version,
+                            migration_description = upgrade.description,
+                            "Column upgrade skipped (expected): {}",
+                            msg
+                        );
                     } else {
                         return Err(DatabaseError::Migration(format!(
-                            "libSQL upgrade failed on `{}`: {}",
-                            stmt, e
+                            "libSQL upgrade failed at '{}' (`{}`): {}",
+                            upgrade.description, upgrade.sql, e
                         )));
                     }
                 }

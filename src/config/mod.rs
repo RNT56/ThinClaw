@@ -10,6 +10,7 @@ mod builder;
 mod channels;
 mod database;
 mod embeddings;
+mod experiments;
 pub mod formats;
 mod heartbeat;
 pub(crate) mod helpers;
@@ -24,7 +25,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod skills;
-mod tunnel;
+pub mod tunnel;
 mod wasm;
 pub mod watcher;
 mod webchat;
@@ -45,6 +46,7 @@ pub use self::channels::{
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
+pub use self::experiments::ExperimentsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
@@ -57,7 +59,10 @@ pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
-pub use self::tunnel::TunnelConfig;
+pub use self::tunnel::{
+    CloudflareTunnelConfig, CustomTunnelConfig, NgrokTunnelConfig, TailscaleTunnelConfig,
+    TunnelConfig, TunnelProviderConfig,
+};
 pub use self::wasm::WasmConfig;
 pub use self::webchat::{WebChatConfig, WebChatTheme};
 
@@ -174,6 +179,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub experiments: ExperimentsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -298,6 +304,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
+            experiments: ExperimentsConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: helpers::optional_env("OBSERVABILITY_BACKEND")
                     .ok()

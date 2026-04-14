@@ -15,6 +15,7 @@ use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::SecretsStore;
 
+#[cfg(feature = "docker-sandbox")]
 /// Initialize tracing for worker/bridge processes (info level).
 pub(crate) fn init_worker_tracing() {
     tracing_subscriber::fmt()
@@ -83,6 +84,7 @@ pub(crate) async fn run_worker(
         .map_err(|e| anyhow::anyhow!("Worker failed: {}", e))
 }
 
+#[cfg(feature = "docker-sandbox")]
 /// Run the Claude Code bridge subcommand (inside Docker containers).
 pub(crate) async fn run_claude_bridge(
     job_id: uuid::Uuid,
@@ -116,6 +118,7 @@ pub(crate) async fn run_claude_bridge(
 }
 
 /// Start managed tunnel if configured and no static URL is already set.
+#[cfg(feature = "tunnel")]
 pub(crate) async fn start_tunnel(
     mut config: thinclaw::config::Config,
 ) -> (

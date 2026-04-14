@@ -986,7 +986,7 @@ async fn run_subagent_loop(
             },
             job_description: None,
             current_state: None,
-            metadata: std::collections::HashMap::new(),
+            metadata: llm_metadata_from_json(&job_ctx.metadata),
             force_text,
             thinking: Default::default(),
             max_output_tokens: None,
@@ -1191,6 +1191,26 @@ async fn run_subagent_loop(
         name: "subagent".to_string(),
         reason: format!("Exceeded maximum iterations ({})", max_iterations),
     }))
+}
+
+fn llm_metadata_from_json(value: &serde_json::Value) -> HashMap<String, String> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(key, value)| match value {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(text) => Some((key.clone(), text.clone())),
+                    serde_json::Value::Bool(boolean) => Some((key.clone(), boolean.to_string())),
+                    serde_json::Value::Number(number) => Some((key.clone(), number.to_string())),
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        serde_json::to_string(value).ok().map(|json| (key.clone(), json))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

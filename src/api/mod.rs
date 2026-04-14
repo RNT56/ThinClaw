@@ -21,6 +21,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod experiments;
 pub mod extensions;
 pub mod learning;
 pub mod memory;

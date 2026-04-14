@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "docker-sandbox")]
+use thinclaw::orchestrator::{
+    ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore, api::OrchestratorState,
+};
 use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
@@ -24,10 +28,6 @@ use thinclaw::{
     },
     config::Config,
     hooks::bootstrap_hooks,
-    orchestrator::{
-        ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
-        api::OrchestratorState,
-    },
     pairing::PairingStore,
 };
 
@@ -130,6 +130,12 @@ async fn main() -> anyhow::Result<()> {
             thinclaw::bootstrap::load_thinclaw_env();
             return thinclaw::cli::run_cron_command(cron_cmd.clone()).await;
         }
+        Some(Command::Experiments(experiments_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            return thinclaw::cli::run_experiments_command(experiments_cmd.clone()).await;
+        }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
@@ -164,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
+        #[cfg(feature = "docker-sandbox")]
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -172,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
             init_worker_tracing();
             return run_worker(*job_id, orchestrator_url, *max_iterations).await;
         }
+        #[cfg(feature = "docker-sandbox")]
         Some(Command::ClaudeBridge {
             job_id,
             orchestrator_url,
@@ -235,6 +243,21 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Browser(browser_cmd)) => {
             init_cli_tracing();
             return thinclaw::cli::run_browser_command(browser_cmd.clone()).await;
+        }
+        Some(Command::ExperimentRunner {
+            lease_id,
+            gateway_url,
+            token,
+            workspace_root,
+        }) => {
+            init_cli_tracing();
+            return thinclaw::experiments::runner::run_remote_runner(
+                gateway_url,
+                *lease_id,
+                token,
+                workspace_root.clone(),
+            )
+            .await;
         }
         Some(Command::Update(update_cmd)) => {
             init_cli_tracing();
@@ -315,7 +338,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
+    #[cfg(feature = "tunnel")]
     let (config, active_tunnel) = start_tunnel(config).await;
+    #[cfg(not(feature = "tunnel"))]
+    let _active_tunnel: Option<Box<dyn std::any::Any>> = None;
 
     // ── Orchestrator / container job manager ────────────────────────────
 
@@ -353,11 +379,13 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    #[cfg(feature = "docker-sandbox")]
     let prompt_queue = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
         uuid::Uuid,
         std::collections::VecDeque<thinclaw::orchestrator::api::PendingPrompt>,
     >::new()));
 
+    #[cfg(feature = "docker-sandbox")]
     let container_job_manager: Option<Arc<ContainerJobManager>> =
         if config.sandbox.enabled && docker_status.is_ok() {
             let token_store = TokenStore::new();
@@ -426,6 +454,9 @@ async fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+
+    #[cfg(not(feature = "docker-sandbox"))]
+    let _container_job_manager: Option<std::sync::Arc<std::convert::Infallible>> = None;
 
     // ── Channel setup ──────────────────────────────────────────────────
 
@@ -745,6 +776,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(thinclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
+    #[cfg(feature = "docker-sandbox")]
     components.tools.register_job_tools(
         Arc::clone(&components.context_manager),
         container_job_manager.clone(),
@@ -756,6 +788,17 @@ async fn main() -> anyhow::Result<()> {
         } else {
             None
         },
+        components.secrets_store.clone(),
+    );
+
+    #[cfg(not(feature = "docker-sandbox"))]
+    components.tools.register_job_tools(
+        Arc::clone(&components.context_manager),
+        None,
+        components.db.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        None,
         components.secrets_store.clone(),
     );
 
@@ -788,6 +831,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
         }
+        #[cfg(feature = "docker-sandbox")]
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
@@ -814,6 +858,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             gw = gw.with_webhook_routes(vec![gateway_webhook_routes]);
         }
+        #[cfg(feature = "docker-sandbox")]
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -886,11 +931,29 @@ async fn main() -> anyhow::Result<()> {
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,
-            tunnel_url: active_tunnel
-                .as_ref()
-                .and_then(|t| t.public_url())
-                .or_else(|| config.tunnel.public_url.clone()),
-            tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
+            tunnel_url: {
+                #[cfg(feature = "tunnel")]
+                {
+                    active_tunnel
+                        .as_ref()
+                        .and_then(|t| t.public_url())
+                        .or_else(|| config.tunnel.public_url.clone())
+                }
+                #[cfg(not(feature = "tunnel"))]
+                {
+                    config.tunnel.public_url.clone()
+                }
+            },
+            tunnel_provider: {
+                #[cfg(feature = "tunnel")]
+                {
+                    active_tunnel.as_ref().map(|t| t.name().to_string())
+                }
+                #[cfg(not(feature = "tunnel"))]
+                {
+                    None
+                }
+            },
         };
         thinclaw::boot_screen::print_boot_screen(&boot_info);
     }
@@ -1108,6 +1171,14 @@ async fn main() -> anyhow::Result<()> {
         executor = executor.with_cost_tracker(Arc::clone(&components.cost_tracker));
 
         let executor = std::sync::Arc::new(executor);
+        thinclaw::api::experiments::register_experiment_subagent_executor(std::sync::Arc::clone(
+            &executor,
+        ));
+        if let Some(ref secrets_store) = components.secrets_store {
+            thinclaw::api::experiments::register_experiment_secrets_store(std::sync::Arc::clone(
+                secrets_store,
+            ));
+        }
         let inject_tx = channels.inject_sender();
         let db_for_subagent_results = components.db.as_ref().map(Arc::clone);
 
@@ -1283,6 +1354,18 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Pricing sync background task started (24h interval)");
     }
 
+    if config.experiments.enabled {
+        if let Some(db) = components.db.as_ref().cloned() {
+            let experiments_db = Arc::clone(&db);
+            tokio::spawn(async move {
+                thinclaw::api::experiments::start_experiment_controller_loop(experiments_db).await;
+            });
+            tracing::info!("Experiment controller reconciler started (periodic cadence)");
+        }
+    } else {
+        tracing::info!("Experiment controller not started because experiments are disabled.");
+    }
+
     // Clone handles for the shutdown flush (before components are moved into deps).
     let shutdown_db = components.db.as_ref().map(Arc::clone);
     let shutdown_tracker = Arc::clone(&components.cost_tracker);
@@ -1342,6 +1425,7 @@ async fn main() -> anyhow::Result<()> {
         server.lock().await.shutdown().await;
     }
 
+    #[cfg(feature = "tunnel")]
     if let Some(tunnel) = active_tunnel {
         tracing::info!("Stopping {} tunnel...", tunnel.name());
         if let Err(e) = tunnel.stop().await {

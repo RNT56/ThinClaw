@@ -9,21 +9,27 @@ mod apple_mail;
 mod browser;
 mod camera_capture;
 mod canvas;
+mod clarify;
 mod device_info;
 mod discord_actions;
 mod echo;
+mod execute_code;
 pub mod extension_tools;
 #[cfg(feature = "document-extraction")]
 mod extract_document;
 mod file;
+mod homeassistant;
 mod http;
 mod job;
 mod json;
 mod learning_tools;
 mod location;
 mod memory;
+mod moa;
+pub(crate) mod process;
 pub mod routine;
 mod screen_capture;
+mod send_message;
 pub(crate) mod shell;
 pub(crate) mod shell_security;
 pub mod skill_tools;
@@ -31,7 +37,10 @@ mod slack_actions;
 pub mod subagent;
 mod telegram_actions;
 mod time;
+pub(crate) mod todo;
 mod tts;
+mod vision;
+mod search_files;
 
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
 pub use agent_management::{
@@ -41,6 +50,7 @@ pub use apple_mail::AppleMailTool;
 pub use browser::BrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
+pub use clarify::ClarifyTool;
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
@@ -50,6 +60,8 @@ pub use extension_tools::{
 #[cfg(feature = "document-extraction")]
 pub use extract_document::ExtractDocumentTool;
 pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use execute_code::ExecuteCodeTool;
+pub use homeassistant::HomeAssistantTool;
 pub use http::HttpTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
@@ -68,10 +80,13 @@ pub use memory::{
     MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
     SessionSearchTool,
 };
+pub use moa::MoaTool;
+pub use process::{ProcessTool, SharedProcessRegistry, start_reaper};
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
 pub use screen_capture::ScreenCaptureTool;
+pub use send_message::{SendMessageFn, SendMessageTool};
 pub use shell::ShellTool;
 pub use skill_tools::{
     SkillInstallTool, SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
@@ -81,7 +96,10 @@ pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;
+pub use todo::{TodoTool, SharedTodoStore, new_shared_todo_store};
 pub use tts::TtsTool;
+pub use vision::VisionAnalyzeTool;
+pub use search_files::SearchFilesTool;
 
 mod html_converter;
 

@@ -905,6 +905,214 @@ return w(m,0).replace(/\n{3,}/g,'\n\n').trim();
             "url": url,
         }))
     }
+
+    /// Scroll the current page.
+    async fn scroll(&self, direction: &str, amount: Option<i64>) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().expect("browser instance ensured");
+        let state = Self::current_page(instance)?;
+
+        let pixels = amount.unwrap_or(500);
+        let js = match direction {
+            "up" => format!("window.scrollBy(0, -{})", pixels),
+            "down" => format!("window.scrollBy(0, {})", pixels),
+            "top" => "window.scrollTo(0, 0)".to_string(),
+            "bottom" => "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+            _ => format!("window.scrollBy(0, {})", pixels), // default: down
+        };
+
+        state.page.evaluate_expression(&js).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Scroll failed: {e}"))
+        })?;
+
+        // Allow time for lazy-loaded content
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        Ok(serde_json::json!({
+            "status": "scrolled",
+            "direction": direction,
+            "pixels": pixels,
+        }))
+    }
+
+    /// Press a keyboard key (Enter, Tab, Escape, etc.) on the current page.
+    async fn press_key(&self, key: &str) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let mut guard = self.instance.write().await;
+        let instance = guard.as_mut().expect("browser instance ensured");
+        let state = Self::current_page_mut(instance)?;
+
+        // Map user-friendly key names to CDP key identifiers
+        let (key_code, text) = match key.to_lowercase().as_str() {
+            "enter" | "return" => ("Enter", Some("\r")),
+            "tab" => ("Tab", Some("\t")),
+            "escape" | "esc" => ("Escape", None),
+            "backspace" => ("Backspace", None),
+            "delete" => ("Delete", None),
+            "arrowup" | "up" => ("ArrowUp", None),
+            "arrowdown" | "down" => ("ArrowDown", None),
+            "arrowleft" | "left" => ("ArrowLeft", None),
+            "arrowright" | "right" => ("ArrowRight", None),
+            "space" => ("Space", Some(" ")),
+            "home" => ("Home", None),
+            "end" => ("End", None),
+            "pageup" => ("PageUp", None),
+            "pagedown" => ("PageDown", None),
+            _ => (key, None),
+        };
+
+        let mut key_down_builder = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyDown)
+            .key(key_code);
+
+        if let Some(t) = text {
+            key_down_builder = key_down_builder.text(t);
+        }
+
+        let key_down = key_down_builder.build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("KeyEvent build error: {e}")))?;
+
+        state.page.execute(key_down).await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Key press failed: {e}")))?;
+
+        let key_up = DispatchKeyEventParams::builder()
+            .r#type(DispatchKeyEventType::KeyUp)
+            .key(key_code)
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("KeyEvent build error: {e}")))?;
+
+        state.page.execute(key_up).await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Key release failed: {e}")))?;
+
+        // Brief pause for any triggered navigation/updates
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        Ok(serde_json::json!({
+            "status": "key_pressed",
+            "key": key_code,
+        }))
+    }
+
+    /// Go back in browser history.
+    async fn go_back(&self) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().expect("browser instance ensured");
+        let state = Self::current_page(instance)?;
+
+        state.page.evaluate_expression("window.history.back()").await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Back navigation failed: {e}")))?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let url = state.page.url().await.ok().flatten().unwrap_or_default();
+        Ok(serde_json::json!({
+            "status": "went_back",
+            "url": url,
+        }))
+    }
+
+    /// Go forward in browser history.
+    async fn go_forward(&self) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().expect("browser instance ensured");
+        let state = Self::current_page(instance)?;
+
+        state.page.evaluate_expression("window.history.forward()").await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Forward navigation failed: {e}")))?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let url = state.page.url().await.ok().flatten().unwrap_or_default();
+        Ok(serde_json::json!({
+            "status": "went_forward",
+            "url": url,
+        }))
+    }
+
+    /// Get all images on the current page with their src and alt text.
+    async fn get_images(&self) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().expect("browser instance ensured");
+        let state = Self::current_page(instance)?;
+
+        let js = r#"
+        (function() {
+            const imgs = Array.from(document.querySelectorAll('img'));
+            return imgs.slice(0, 50).map(img => ({
+                src: img.src || '',
+                alt: img.alt || '',
+                width: img.naturalWidth || img.width || 0,
+                height: img.naturalHeight || img.height || 0,
+            }));
+        })()
+        "#;
+
+        let eval_result = state.page.evaluate_expression(js).await
+            .map_err(|e| ToolError::ExecutionFailed(format!("get_images failed: {e}")))?;
+
+        let images = eval_result.value().cloned().unwrap_or(serde_json::json!([]));
+
+        Ok(serde_json::json!({
+            "images": images,
+            "count": images.as_array().map(|a| a.len()).unwrap_or(0),
+        }))
+    }
+
+    /// Get browser console messages from the current page.
+    async fn get_console(&self) -> Result<serde_json::Value, ToolError> {
+        self.ensure_browser().await?;
+
+        let guard = self.instance.read().await;
+        let instance = guard.as_ref().expect("browser instance ensured");
+        let state = Self::current_page(instance)?;
+
+        // Inject a console capture script if not already present
+        let js = r#"
+        (function() {
+            if (!window.__tc_console) {
+                window.__tc_console = [];
+                const orig = {
+                    log: console.log,
+                    warn: console.warn,
+                    error: console.error,
+                    info: console.info,
+                };
+                ['log', 'warn', 'error', 'info'].forEach(level => {
+                    console[level] = function(...args) {
+                        window.__tc_console.push({
+                            level: level,
+                            message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '),
+                            time: Date.now()
+                        });
+                        if (window.__tc_console.length > 100) window.__tc_console.shift();
+                        orig[level].apply(console, args);
+                    };
+                });
+            }
+            const msgs = window.__tc_console.slice(-50);
+            return msgs;
+        })()
+        "#;
+
+        let eval_result = state.page.evaluate_expression(js).await
+            .map_err(|e| ToolError::ExecutionFailed(format!("get_console failed: {e}")))?;
+
+        let messages = eval_result.value().cloned().unwrap_or(serde_json::json!([]));
+
+        Ok(serde_json::json!({
+            "console_messages": messages,
+            "count": messages.as_array().map(|a| a.len()).unwrap_or(0),
+        }))
+    }
 }
 
 #[async_trait]
@@ -915,7 +1123,8 @@ impl Tool for BrowserTool {
 
     fn description(&self) -> &str {
         "Browse the web: navigate pages, read content via accessibility snapshots, \
-         click elements, type text, take screenshots, and evaluate JavaScript. \
+         click elements, type text, press keys, scroll, go back/forward, take \
+         screenshots, extract images, read console output, and evaluate JavaScript. \
          Use 'snapshot' after navigation to see what's on the page — it returns an \
          accessibility tree with numbered refs (e.g., ref=\"e1\") that you can use \
          with 'click' and 'type' actions. Use 'close' when finished browsing."
@@ -927,7 +1136,7 @@ impl Tool for BrowserTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["navigate", "snapshot", "click", "type", "screenshot", "evaluate", "get_text", "close", "tabs", "switch_tab"],
+                    "enum": ["navigate", "snapshot", "click", "type", "press_key", "scroll", "screenshot", "evaluate", "get_text", "get_images", "console", "back", "forward", "close", "tabs", "switch_tab"],
                     "description": "The browser action to perform"
                 },
                 "url": {
@@ -949,6 +1158,19 @@ impl Tool for BrowserTool {
                 "tab_index": {
                     "type": "integer",
                     "description": "Tab index to switch to (for 'switch_tab' action)"
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Key to press (for 'press_key' action, e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown')"
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "top", "bottom"],
+                    "description": "Scroll direction (for 'scroll' action, default 'down')"
+                },
+                "amount": {
+                    "type": "integer",
+                    "description": "Scroll amount in pixels (for 'scroll' action, default 500)"
                 }
             },
             "required": ["action"]
@@ -1003,6 +1225,21 @@ impl Tool for BrowserTool {
                 self.evaluate(expression).await?
             }
             "get_text" => self.get_text().await?,
+            "get_images" => self.get_images().await?,
+            "console" => self.get_console().await?,
+            "back" => self.go_back().await?,
+            "forward" => self.go_forward().await?,
+            "scroll" => {
+                let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                let amount = params.get("amount").and_then(|v| v.as_i64());
+                self.scroll(direction, amount).await?
+            }
+            "press_key" => {
+                let key = params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters("'press_key' requires 'key' parameter".into())
+                })?;
+                self.press_key(key).await?
+            }
             "close" => self.close_session().await?,
             "tabs" => self.list_tabs().await?,
             "switch_tab" => {
@@ -1018,7 +1255,7 @@ impl Tool for BrowserTool {
             }
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
-                    "Unknown action: '{action}'. Use: navigate, snapshot, click, type, screenshot, evaluate, get_text, close, tabs, switch_tab"
+                    "Unknown action: '{action}'. Use: navigate, snapshot, click, type, press_key, scroll, screenshot, evaluate, get_text, get_images, console, back, forward, close, tabs, switch_tab"
                 )));
             }
         };

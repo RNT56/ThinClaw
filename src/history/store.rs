@@ -334,6 +334,9 @@ impl Store {
 
     /// Run database migrations (embedded via refinery).
     pub async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        #[cfg(debug_assertions)]
+        self.assert_refinery_migration_order()?;
+
         use refinery::embed_migrations;
         embed_migrations!("migrations");
 
@@ -342,6 +345,77 @@ impl Store {
             .run_async(&mut **client)
             .await
             .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_refinery_migration_order(&self) -> Result<(), DatabaseError> {
+        let mut migration_versions = Vec::new();
+        let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+
+        let mut seen = std::collections::HashSet::new();
+
+        for entry in std::fs::read_dir(&migrations_dir).map_err(|e| {
+            DatabaseError::Migration(format!(
+                "Cannot read migrations directory {:?}: {e}",
+                migrations_dir
+            ))
+        })? {
+            let entry = entry.map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "Failed to iterate migrations directory {:?}: {e}",
+                    migrations_dir
+                ))
+            })?;
+
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(|name| name.to_str()) {
+                Some(name) => name,
+                None => {
+                    return Err(DatabaseError::Migration(format!(
+                        "Non-UTF8 migration filename in {:?}",
+                        path
+                    )));
+                }
+            };
+
+            let version = match parse_migration_version(file_name) {
+                Some(version) => version,
+                None => {
+                    return Err(DatabaseError::Migration(format!(
+                        "Migration filename must be versioned as V<version>__*.sql: {file_name}"
+                    )));
+                }
+            };
+
+            if !seen.insert(version) {
+                return Err(DatabaseError::Migration(format!(
+                    "Duplicate migration version detected in postgres migrations: {version}"
+                )));
+            }
+
+            migration_versions.push(version);
+        }
+
+        migration_versions.sort_unstable();
+
+        if let Some(previous) = migration_versions.windows(2).find_map(|pair| {
+            if pair[0] >= pair[1] {
+                Some((pair[0], pair[1]))
+            } else {
+                None
+            }
+        }) {
+            return Err(DatabaseError::Migration(format!(
+                "PostgreSQL migration versions are not strictly increasing: {} -> {}",
+                previous.0, previous.1
+            )));
+        }
+
         Ok(())
     }
 
@@ -3496,4 +3570,11 @@ impl Store {
         let count: i64 = row.get("cnt");
         Ok(count > 0)
     }
+}
+
+#[cfg(debug_assertions)]
+fn parse_migration_version(file_name: &str) -> Option<u32> {
+    let stem = file_name.strip_suffix(".sql")?;
+    let (version_part, _rest) = stem.split_once("__")?;
+    version_part.strip_prefix('V')?.parse::<u32>().ok()
 }

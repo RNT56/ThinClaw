@@ -21,6 +21,7 @@ bench-results/
 
 # Local analysis/comparison reports
 thinclaw_vs_ironclaw_report.md
+thinclaw_upgrade.md
 
 # OS System Files
 .DS_Store

@@ -86,53 +86,15 @@ pub(crate) async fn kill_shared(proc: &SharedProcess) -> Result<()> {
 }
 
 // ── Configuration types ──────────────────────────────────────────
+//
+// Canonical definitions live in `crate::config::tunnel` so that config
+// resolution works without compiling this entire runtime module.
+// Re-exported here for backwards compatibility with existing consumers.
 
-/// Provider-specific config for Cloudflare tunnels.
-#[derive(Debug, Clone, Default)]
-pub struct CloudflareTunnelConfig {
-    /// Token from the Cloudflare Zero Trust dashboard.
-    pub token: String,
-}
-
-/// Provider-specific config for Tailscale tunnels.
-#[derive(Debug, Clone, Default)]
-pub struct TailscaleTunnelConfig {
-    /// Use `tailscale funnel` (public) instead of `tailscale serve` (tailnet).
-    pub funnel: bool,
-    /// Override the hostname (default: auto-detect from `tailscale status`).
-    pub hostname: Option<String>,
-}
-
-/// Provider-specific config for ngrok tunnels.
-#[derive(Debug, Clone, Default)]
-pub struct NgrokTunnelConfig {
-    /// ngrok auth token (required).
-    pub auth_token: String,
-    /// Custom domain (requires ngrok paid plan).
-    pub domain: Option<String>,
-}
-
-/// Provider-specific config for custom tunnel commands.
-#[derive(Debug, Clone, Default)]
-pub struct CustomTunnelConfig {
-    /// Shell command with `{port}` and `{host}` placeholders.
-    pub start_command: String,
-    /// HTTP endpoint to poll for health checks.
-    pub health_url: Option<String>,
-    /// Substring to match in stdout for URL extraction.
-    pub url_pattern: Option<String>,
-}
-
-/// Full tunnel configuration.
-#[derive(Debug, Clone, Default)]
-pub struct TunnelProviderConfig {
-    /// Provider name: "none", "cloudflare", "tailscale", "ngrok", "custom".
-    pub provider: String,
-    pub cloudflare: Option<CloudflareTunnelConfig>,
-    pub tailscale: Option<TailscaleTunnelConfig>,
-    pub ngrok: Option<NgrokTunnelConfig>,
-    pub custom: Option<CustomTunnelConfig>,
-}
+pub use crate::config::tunnel::{
+    CloudflareTunnelConfig, CustomTunnelConfig, NgrokTunnelConfig, TailscaleTunnelConfig,
+    TunnelProviderConfig,
+};
 
 // ── Factory ──────────────────────────────────────────────────────
 

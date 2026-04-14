@@ -19,8 +19,11 @@ use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
-use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+#[cfg(test)]
+use crate::sandbox_types::{ContainerJobConfig, TokenStore};
+use crate::sandbox_types::{
+    ContainerJobManager, ContainerState, CredentialGrant, JobMode, PendingPrompt,
+};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
@@ -442,11 +445,10 @@ impl CreateJobTool {
 
             match jm.get_handle(job_id).await {
                 Some(handle) => match handle.state {
-                    crate::orchestrator::job_manager::ContainerState::Running
-                    | crate::orchestrator::job_manager::ContainerState::Creating => {
+                    ContainerState::Running | ContainerState::Creating => {
                         tokio::time::sleep(poll_interval).await;
                     }
-                    crate::orchestrator::job_manager::ContainerState::Stopped => {
+                    ContainerState::Stopped => {
                         let message = handle
                             .completion_result
                             .as_ref()
@@ -492,7 +494,7 @@ impl CreateJobTool {
                             )));
                         }
                     }
-                    crate::orchestrator::job_manager::ContainerState::Failed => {
+                    ContainerState::Failed => {
                         let message = handle
                             .completion_result
                             .as_ref()
@@ -1234,12 +1236,7 @@ pub struct JobPromptTool {
 
 /// Type alias matching `crate::channels::web::server::PromptQueue`.
 pub type PromptQueue = Arc<
-    tokio::sync::Mutex<
-        std::collections::HashMap<
-            Uuid,
-            std::collections::VecDeque<crate::orchestrator::api::PendingPrompt>,
-        >,
-    >,
+    tokio::sync::Mutex<std::collections::HashMap<Uuid, std::collections::VecDeque<PendingPrompt>>>,
 >;
 
 impl JobPromptTool {
@@ -1335,7 +1332,7 @@ impl Tool for JobPromptTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let prompt = crate::orchestrator::api::PendingPrompt {
+        let prompt = PendingPrompt {
             content: content.to_string(),
             done,
         };
@@ -1607,8 +1604,8 @@ mod tests {
     fn test_sandbox_schema_includes_project_dir() {
         let manager = Arc::new(ContextManager::new(5));
         let jm = Arc::new(ContainerJobManager::new(
-            crate::orchestrator::job_manager::ContainerJobConfig::default(),
-            crate::orchestrator::TokenStore::new(),
+            ContainerJobConfig::default(),
+            TokenStore::new(),
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
@@ -1623,8 +1620,8 @@ mod tests {
     fn test_sandbox_schema_includes_credentials() {
         let manager = Arc::new(ContextManager::new(5));
         let jm = Arc::new(ContainerJobManager::new(
-            crate::orchestrator::job_manager::ContainerJobConfig::default(),
-            crate::orchestrator::TokenStore::new(),
+            ContainerJobConfig::default(),
+            TokenStore::new(),
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();

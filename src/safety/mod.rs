@@ -15,6 +15,7 @@ pub mod elevated;
 pub mod key_rotation;
 mod leak_detector;
 pub mod media_url;
+pub mod osv_check;
 mod policy;
 mod sanitizer;
 pub mod skill_path;

@@ -7,6 +7,8 @@
 
 #[cfg(feature = "postgres")]
 mod analytics;
+#[cfg(feature = "postgres")]
+mod experiments;
 mod store;
 
 #[cfg(feature = "postgres")]

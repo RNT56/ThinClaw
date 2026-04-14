@@ -20,6 +20,7 @@ mod completion;
 mod config;
 mod cron;
 mod doctor;
+mod experiments;
 mod gateway;
 mod identity;
 mod logs;
@@ -48,6 +49,7 @@ pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command};
 pub use doctor::run_doctor_command;
+pub use experiments::{ExperimentsCommand, run_experiments_command};
 pub use gateway::{GatewayCommand, run_gateway_command};
 pub use identity::{IdentityCommand, run_identity_command};
 pub use logs::{LogCommand, run_log_command};
@@ -134,6 +136,10 @@ pub enum Command {
     #[command(subcommand)]
     Cron(CronCommand),
 
+    /// Manage optional experiment/research automation, including opportunities, targets, providers, and campaigns.
+    #[command(subcommand)]
+    Experiments(ExperimentsCommand),
+
     /// Manage the web gateway
     #[command(subcommand)]
     Gateway(GatewayCommand),
@@ -210,6 +216,7 @@ pub enum Command {
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
+    #[cfg(feature = "docker-sandbox")]
     Worker {
         /// Job ID to execute.
         #[arg(long)]
@@ -226,6 +233,7 @@ pub enum Command {
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
+    #[cfg(feature = "docker-sandbox")]
     ClaudeBridge {
         /// Job ID to execute.
         #[arg(long)]
@@ -242,6 +250,21 @@ pub enum Command {
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
         model: String,
+    },
+
+    /// Run as a lease-scoped remote experiment runner (internal/automation use).
+    ExperimentRunner {
+        #[arg(long)]
+        lease_id: uuid::Uuid,
+
+        #[arg(long)]
+        gateway_url: String,
+
+        #[arg(long)]
+        token: String,
+
+        #[arg(long)]
+        workspace_root: Option<std::path::PathBuf>,
     },
 }
 

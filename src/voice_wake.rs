@@ -61,26 +61,79 @@ pub enum WakeBackend {
         /// Path to the model directory.
         model_path: String,
         /// Encoder ONNX filename (relative to `model_path`).
-        /// Default: `"encoder-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        /// Default: [`WakeBackend::DEFAULT_ENCODER_FILENAME`].
         encoder_filename: String,
         /// Decoder ONNX filename (relative to `model_path`).
-        /// Default: `"decoder-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        /// Default: [`WakeBackend::DEFAULT_DECODER_FILENAME`].
         decoder_filename: String,
         /// Joiner ONNX filename (relative to `model_path`).
-        /// Default: `"joiner-epoch-12-avg-2-chunk-16-left-64.onnx"`.
+        /// Default: [`WakeBackend::DEFAULT_JOINER_FILENAME`].
         joiner_filename: String,
     },
 }
 
 impl WakeBackend {
+    /// Default Sherpa-ONNX encoder model filename.
+    pub const DEFAULT_ENCODER_FILENAME: &'static str =
+        "encoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+
+    /// Default Sherpa-ONNX decoder model filename.
+    pub const DEFAULT_DECODER_FILENAME: &'static str =
+        "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+
+    /// Default Sherpa-ONNX joiner model filename.
+    pub const DEFAULT_JOINER_FILENAME: &'static str = "joiner-epoch-12-avg-2-chunk-16-left-64.onnx";
+
     /// Create a `SherpaOnnx` backend with default model filenames.
-    #[allow(dead_code)]
+    ///
+    /// Uses the **zipformer-transducer epoch 12** checkpoint filenames as defaults.
+    ///
+    /// For custom filenames, call [`WakeBackend::sherpa_onnx_with_filenames`].
+    ///
+    /// NOTE: When this backend graduates from scaffold to production, these
+    /// defaults should be wirable via `VoiceWakeConfig` / env vars.
     pub fn sherpa_onnx(model_path: impl Into<String>) -> Self {
+        Self::sherpa_onnx_with_filenames(
+            model_path,
+            Self::DEFAULT_ENCODER_FILENAME,
+            Self::DEFAULT_DECODER_FILENAME,
+            Self::DEFAULT_JOINER_FILENAME,
+        )
+    }
+
+    /// Create a `SherpaOnnx` backend with custom model filenames.
+    ///
+    /// Empty/whitespace filenames are replaced with the defaults above.
+    pub fn sherpa_onnx_with_filenames(
+        model_path: impl Into<String>,
+        encoder_filename: impl Into<String>,
+        decoder_filename: impl Into<String>,
+        joiner_filename: impl Into<String>,
+    ) -> Self {
         Self::SherpaOnnx {
             model_path: model_path.into(),
-            encoder_filename: "encoder-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
-            decoder_filename: "decoder-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
-            joiner_filename: "joiner-epoch-12-avg-2-chunk-16-left-64.onnx".to_string(),
+            encoder_filename: Self::normalize_sherpa_filename(
+                encoder_filename.into(),
+                Self::DEFAULT_ENCODER_FILENAME,
+            ),
+            decoder_filename: Self::normalize_sherpa_filename(
+                decoder_filename.into(),
+                Self::DEFAULT_DECODER_FILENAME,
+            ),
+            joiner_filename: Self::normalize_sherpa_filename(
+                joiner_filename.into(),
+                Self::DEFAULT_JOINER_FILENAME,
+            ),
+        }
+    }
+
+    fn normalize_sherpa_filename(filename: String, default: &'static str) -> String {
+        let trimmed = filename.trim();
+
+        if trimmed.is_empty() {
+            default.to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 }
@@ -402,12 +455,31 @@ impl VoiceWakeRuntime {
             return Self::detection_loop_cpal(running, event_tx, config).await;
         }
 
+        let model_path = model_path.trim().to_string();
+
         if !std::path::Path::new(&model_path).exists() {
             tracing::warn!(
                 model_path = %model_path,
                 "Sherpa-ONNX model directory not found; falling back to energy-based detection"
             );
             return Self::detection_loop_cpal(running, event_tx, config).await;
+        }
+
+        for (filename, description) in [
+            (encoder_filename.as_str(), "encoder"),
+            (decoder_filename.as_str(), "decoder"),
+            (joiner_filename.as_str(), "joiner"),
+        ] {
+            let file_path = std::path::Path::new(&model_path).join(filename);
+            if !file_path.exists() {
+                tracing::warn!(
+                    model_path = %model_path,
+                    file = %file_path.display(),
+                    component = description,
+                    "Sherpa-ONNX model file missing; falling back to energy-based detection"
+                );
+                return Self::detection_loop_cpal(running, event_tx, config).await;
+            }
         }
 
         // PCM audio channel: cpal audio thread → Sherpa feeder thread.

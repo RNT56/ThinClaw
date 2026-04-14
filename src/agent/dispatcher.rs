@@ -683,6 +683,29 @@ impl Agent {
                 }
             }
 
+            // ── Canvas action drain ────────────────────────────────────
+            // Drain any pending user interactions from canvas panels
+            // (button clicks, form submissions) and inject them as
+            // context messages so the LLM can respond to UI actions.
+            if let Some(ref store) = self.deps.canvas_store {
+                let actions = store.drain_actions().await;
+                for action in actions {
+                    let values_json = serde_json::to_string(&action.values)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let msg = format!(
+                        "[Canvas Interaction] The user interacted with canvas panel \"{}\": \
+                         action=\"{}\", values={}",
+                        action.panel_id, action.action, values_json
+                    );
+                    tracing::info!(
+                        panel_id = %action.panel_id,
+                        action = %action.action,
+                        "Injecting canvas action into context"
+                    );
+                    context_messages.push(ChatMessage::system(&msg));
+                }
+            }
+
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
             if iteration == nudge_at {
@@ -2441,6 +2464,7 @@ impl Agent {
                             Arc::new(crate::llm::usage_tracking::UsageTrackingProvider::new(
                                 provider,
                                 Arc::clone(tracker),
+                                self.deps.store.clone(),
                                 Some(Arc::clone(&self.deps.cost_guard)),
                             ))
                                 as Arc<dyn crate::llm::LlmProvider>

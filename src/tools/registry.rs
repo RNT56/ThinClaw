@@ -11,23 +11,26 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
-use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
+use crate::sandbox_types::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool, CanvasTool,
-    CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, GrepTool,
-    HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool,
-    LearningHistoryTool, LearningProposalReviewTool, LearningStatusTool, ListAgentsTool,
-    ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, PromptManageTool,
-    PromptQueue, ReadFileTool, RemoveAgentTool, SessionSearchTool, SharedModelOverride, ShellTool,
-    SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool, WriteFileTool,
+    ClarifyTool, CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool, EmitUserMessageTool,
+    ExecuteCodeTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool,
+    JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool,
+    LearningProposalReviewTool, LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool,
+    LlmListModelsTool, LlmSelectTool, MoaTool, MemoryDeleteTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, ProcessTool,
+    PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool,
+    SendMessageTool, SessionSearchTool, SharedModelOverride, SharedProcessRegistry, ShellTool,
+    SharedTodoStore, SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool,
+    SkillReloadTool, SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool,
+    UpdateAgentTool, VisionAnalyzeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -102,6 +105,16 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "learning_history",
     "learning_feedback",
     "learning_proposal_review",
+    // Hermes-parity tools
+    "process",
+    "todo",
+    "clarify",
+    "vision_analyze",
+    "send_message",
+    "homeassistant",
+    "mixture_of_agents",
+    "execute_code",
+    "search_files",
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
@@ -375,6 +388,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(JsonTool));
         self.register_sync(Arc::new(DeviceInfoTool::new()));
         self.register_sync(Arc::new(CanvasTool));
+        self.register_sync(Arc::new(ClarifyTool));
 
         // Browser tool with user-local profile dir.
         // Attach Docker Chromium config when the env var is set, so the tool
@@ -409,6 +423,12 @@ impl ToolRegistry {
         // Document extraction tool (when feature is enabled)
         #[cfg(feature = "document-extraction")]
         self.register_sync(Arc::new(crate::tools::builtin::ExtractDocumentTool));
+
+        // Home Assistant tool (gated on env vars)
+        if let Some(ha_tool) = HomeAssistantTool::from_env() {
+            self.register_sync(Arc::new(ha_tool));
+            tracing::info!("Registered Home Assistant tool (HASS_URL + HASS_TOKEN)");
+        }
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -771,6 +791,104 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RemoveAgentTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(MessageAgentTool::new(registry)));
         tracing::info!("Registered 5 agent management tools");
+    }
+
+    /// Register the background process management tool.
+    ///
+    /// Provides start/list/poll/wait/kill/write actions for long-running background
+    /// processes. The registry is shared so the auto-reaper can update statuses.
+    pub fn register_process_tool(&self, registry: SharedProcessRegistry) {
+        self.register_sync(Arc::new(ProcessTool::new(registry)));
+        tracing::info!("Registered background process tool");
+    }
+
+    /// Register the in-session todo/task planner tool.
+    ///
+    /// The todo store is session-scoped and its active items survive context
+    /// compaction by being injected back via the `ContextInjector`.
+    pub fn register_todo_tool(&self, store: SharedTodoStore) {
+        self.register_sync(Arc::new(TodoTool::new(store)));
+        tracing::info!("Registered todo planner tool");
+    }
+
+    /// Register the vision analysis tool.
+    ///
+    /// Allows the agent to proactively analyze images by path or URL
+    /// using the current multimodal LLM provider.
+    pub fn register_vision_tool(&self, llm: Arc<dyn LlmProvider>) {
+        self.register_sync(Arc::new(VisionAnalyzeTool::new(llm)));
+        tracing::info!("Registered vision analysis tool");
+    }
+
+    /// Register the Mixture-of-Agents (MoA) reasoning tool.
+    ///
+    /// Dispatches complex prompts to multiple LLMs in parallel and synthesizes
+    /// their responses. Only registered when multiple providers are configured.
+    pub fn register_moa_tool(
+        &self,
+        primary: Arc<dyn LlmProvider>,
+        cheap: Option<Arc<dyn LlmProvider>>,
+    ) {
+        let tool = MoaTool::new(primary, cheap);
+        if tool.is_viable() {
+            self.register_sync(Arc::new(tool));
+            tracing::info!("Registered Mixture-of-Agents tool");
+        } else {
+            tracing::debug!("MoA tool not registered (requires at least 2 providers)");
+        }
+    }
+
+    /// Register the unified cross-platform send message tool.
+    ///
+    /// The send function is injected at registration time from the gateway's
+    /// channel infrastructure. If no send function is provided, the tool
+    /// returns a clear error when invoked.
+    pub fn register_send_message_tool(
+        &self,
+        send_fn: Option<crate::tools::builtin::SendMessageFn>,
+    ) {
+        let mut tool = SendMessageTool::new();
+        if let Some(f) = send_fn {
+            tool = tool.with_send_fn(f);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::info!("Registered unified send_message tool");
+    }
+
+    /// Register the sandboxed code execution tool.
+    ///
+    /// Supports Python, JavaScript/TypeScript, and Bash execution in a
+    /// subprocess with scrubbed environment and captured output.
+    pub fn register_execute_code_tool(
+        &self,
+        working_dir: Option<std::path::PathBuf>,
+        allow_network: bool,
+    ) {
+        let mut tool = ExecuteCodeTool::new();
+        if let Some(dir) = working_dir {
+            tool = tool.with_working_dir(dir);
+        }
+        if allow_network {
+            tool = tool.with_network(true);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::info!("Registered execute_code tool");
+    }
+
+    /// Register the filename search tool.
+    ///
+    /// Searches directories recursively for files matching a name pattern.
+    /// Complements GrepTool (content search) with filename-based discovery.
+    pub fn register_search_files_tool(
+        &self,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        let mut tool = SearchFilesTool::new();
+        if let Some(dir) = base_dir {
+            tool = tool.with_base_dir(dir);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::info!("Registered search_files tool");
     }
 
     /// Register the software builder tool.

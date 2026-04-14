@@ -24,6 +24,7 @@ use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
+use crate::api::experiments as experiments_api;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
@@ -586,6 +587,34 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             )
             .await
         }
+        RoutineAction::ExperimentCampaign {
+            project_id,
+            runner_profile_id,
+            max_trials_override,
+        } => Ok(
+            match experiments_api::start_campaign(
+                &ctx.store,
+                "default",
+                *project_id,
+                experiments_api::StartExperimentCampaignRequest {
+                    runner_profile_id: *runner_profile_id,
+                    max_trials_override: *max_trials_override,
+                    gateway_url: None,
+                },
+            )
+            .await
+            {
+                Ok(response) => (
+                    RunStatus::Attention,
+                    Some(format!(
+                        "Experiment campaign {} started: {}",
+                        response.campaign.id, response.message
+                    )),
+                    None,
+                ),
+                Err(error) => (RunStatus::Failed, Some(error.to_string()), None),
+            },
+        ),
     };
 
     // Decrement running count

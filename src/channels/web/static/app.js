@@ -18,6 +18,100 @@ const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 const SUBAGENT_EVENTS_CAP = 120;
 const SUBAGENT_SESSION_STORAGE_KEY = 'thinclaw_subagent_sessions_v1';
 const SUBAGENT_SESSION_STORAGE_LIMIT = 96;
+let experimentsFeatureEnabled = false;
+let experimentsRefreshTimer = null;
+const experimentsState = {
+  projects: [],
+  runners: [],
+  campaigns: [],
+  targets: [],
+  opportunities: [],
+  gpuClouds: [],
+  gpuCloudConnections: new Map(),
+  gpuCloudDrafts: new Map(),
+  trialsByCampaign: new Map(),
+  artifactsByTrial: new Map(),
+  selectedCampaignId: null,
+  selectedTrialId: null,
+  selectedOpportunityId: null,
+  lastLease: null,
+  lastLeaseCampaignId: null,
+};
+let currentResearchSubtab = 'overview';
+
+const RESEARCH_SUBTABS = ['overview', 'opportunities', 'projects', 'runners', 'campaigns', 'gpu-clouds'];
+
+const RESEARCH_GPU_CLOUDS = [
+  {
+    slug: 'runpod',
+    name: 'RunPod',
+    badge: 'Lease-based GPUs',
+    launchModeLabel: 'Controller managed',
+    accountUrl: 'https://www.runpod.io/',
+    docsUrl: 'https://docs.runpod.io/',
+    providerKeyLabel: 'RunPod API key',
+    providerKeyPlaceholder: 'RUNPOD_API_KEY',
+    backend: 'runpod',
+    runnerName: 'RunPod GPU Runner',
+    image: 'ghcr.io/thinclaw/research-runner:latest',
+    gpuRequirements: { gpu_count: 1, gpu_type: 'H100' },
+    backendConfig: {
+      provider: 'runpod',
+      template_mode: 'lease',
+    },
+    envGrants: {},
+    secretReference: 'research_runpod_api_key',
+    description: 'Fast GPU pods for overnight benchmark loops, remote lease execution, and model iteration.',
+    launchHint: 'Connect credentials, create a runner profile, and ThinClaw can auto-launch RunPod pods for Research campaigns.',
+    readinessNote: 'Turnkey once credentials are connected and the runner validates.',
+  },
+  {
+    slug: 'vast',
+    name: 'Vast.ai',
+    badge: 'Marketplace GPUs',
+    launchModeLabel: 'Controller managed',
+    accountUrl: 'https://vast.ai/',
+    docsUrl: 'https://docs.vast.ai/',
+    providerKeyLabel: 'Vast.ai API key',
+    providerKeyPlaceholder: 'VAST_API_KEY',
+    backend: 'vast',
+    runnerName: 'Vast.ai GPU Runner',
+    image: 'ghcr.io/thinclaw/research-runner:latest',
+    gpuRequirements: { gpu_count: 1, accelerator: 'gpu' },
+    backendConfig: {
+      provider: 'vast',
+      launch_mode: 'template',
+    },
+    envGrants: {},
+    secretReference: 'research_vast_api_key',
+    description: 'Flexible marketplace GPUs for cheap experimentation and burst capacity.',
+    launchHint: 'Connect credentials, create a runner profile, and ThinClaw can auto-launch Vast.ai instances for Research campaigns.',
+    readinessNote: 'Turnkey once credentials are connected and the runner validates.',
+  },
+  {
+    slug: 'lambda',
+    name: 'Lambda',
+    badge: 'Cluster GPUs',
+    launchModeLabel: 'Controller managed',
+    accountUrl: 'https://lambda.ai/',
+    docsUrl: 'https://docs.lambda.ai/',
+    providerKeyLabel: 'Lambda API key',
+    providerKeyPlaceholder: 'LAMBDA_API_KEY',
+    backend: 'lambda',
+    runnerName: 'Lambda GPU Runner',
+    image: 'ghcr.io/thinclaw/research-runner:latest',
+    gpuRequirements: { gpu_count: 1, gpu_type: 'A100' },
+    backendConfig: {
+      provider: 'lambda',
+      launch_mode: 'api',
+    },
+    envGrants: {},
+    secretReference: 'research_lambda_api_key',
+    description: 'Managed GPU clusters for longer-running self-hosted optimization and fine-tuning jobs.',
+    launchHint: 'Fill in the Lambda launch form once, and ThinClaw will build a controller-managed Lambda Cloud launch payload for the runner automatically.',
+    readinessNote: 'Turnkey once credentials are connected and the Lambda launch form is filled.',
+  },
+];
 
 // --- Tool Activity State ---
 let _activeGroup = null;
@@ -161,6 +255,7 @@ function authenticate() {
       connectLogSSE();
       startGatewayStatusPolling();
       checkTeeStatus();
+      loadOptionalFeatureFlags();
       loadThreads();
       loadMemoryTree();
       loadJobs();
@@ -226,6 +321,56 @@ function apiFetch(path, options) {
     }
     return res.json();
   });
+}
+
+function boolSettingValue(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  return String(value).toLowerCase() === 'true';
+}
+
+function applyResearchVisibility(enabled) {
+  experimentsFeatureEnabled = !!enabled;
+  const button = document.getElementById('research-tab-button');
+  const panel = document.getElementById('tab-research');
+  const note = document.getElementById('research-disabled-note');
+  if (button) button.style.display = experimentsFeatureEnabled ? '' : 'none';
+  if (panel) panel.dataset.enabled = experimentsFeatureEnabled ? 'true' : 'false';
+  if (note) note.style.display = experimentsFeatureEnabled ? 'none' : 'block';
+  if (!experimentsFeatureEnabled && currentTab === 'research') {
+    switchTab('chat');
+  }
+}
+
+function applyOptionalFeatureFlagsFromRows(rows) {
+  const values = new Map();
+  (rows || []).forEach((row) => {
+    if (row && row.key) values.set(row.key, row.value);
+  });
+  applyResearchVisibility(boolSettingValue(values.get('experiments.enabled'), false));
+}
+
+function applyOptionalFeatureFlagsFromCache() {
+  const rows = Object.entries(settingsCache).map(([key, entry]) => ({
+    key: key,
+    value: entry ? entry.value : null,
+  }));
+  applyOptionalFeatureFlagsFromRows(rows);
+}
+
+function loadOptionalFeatureFlags() {
+  apiFetch('/api/settings')
+    .then((data) => applyOptionalFeatureFlagsFromRows(data.settings || []))
+    .catch(() => applyResearchVisibility(false));
+}
+
+function queueResearchRefresh() {
+  if (!experimentsFeatureEnabled) return;
+  clearTimeout(experimentsRefreshTimer);
+  experimentsRefreshTimer = setTimeout(() => {
+    if (currentTab === 'research') loadExperiments();
+  }, 200);
 }
 
 // --- SSE ---
@@ -359,6 +504,18 @@ function connectSSE() {
     showToast(msg, alertType === 'exceeded' ? 'error' : 'warning');
     // Auto-refresh cost dashboard if it's the active tab
     if (currentTab === 'costs') loadCostDashboard();
+  });
+
+  // Canvas / A2UI panel updates
+  eventSource.addEventListener('canvas_update', (e) => {
+    const data = JSON.parse(e.data);
+    handleCanvasUpdate(data);
+  });
+
+  ['experiment_campaign_updated', 'experiment_trial_updated', 'experiment_runner_updated', 'experiment_opportunity_updated'].forEach((evtType) => {
+    eventSource.addEventListener(evtType, () => {
+      queueResearchRefresh();
+    });
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -1798,6 +1955,10 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
 });
 
 function switchTab(tab) {
+  if (tab === 'research' && !experimentsFeatureEnabled) {
+    showToast('Enable experiments in Settings → Advanced → Experiments to use Research.', 'error');
+    tab = 'chat';
+  }
   currentTab = tab;
   document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
     b.classList.toggle('active', b.getAttribute('data-tab') === tab);
@@ -1809,6 +1970,10 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
+  if (tab === 'research') {
+    loadExperiments();
+    switchResearchSubtab(currentResearchSubtab || 'overview', { render: false });
+  }
   if (tab === 'learning') loadLearning();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') {
@@ -3678,6 +3843,1929 @@ function deleteRoutine(id, name) {
     .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
 }
 
+// --- Research / Experiments ---
+
+function researchBadgeClass(value) {
+  const normalized = String(value || '').toLowerCase();
+  if (['validated', 'ready', 'accepted', 'completed'].includes(normalized)) return 'completed';
+  if (['running'].includes(normalized)) return 'active';
+  if (['paused', 'awaiting_promotion', 'draft', 'preparing', 'evaluating'].includes(normalized)) return 'stuck';
+  if (['cancelled', 'failed', 'crashed', 'timed_out', 'infra_failed', 'rejected', 'unavailable', 'archived'].includes(normalized)) return 'failed';
+  return 'pending';
+}
+
+function formatResearchMetricValue(value) {
+  if (value == null) return '-';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return num.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function formatResearchMetricsSummary(metrics) {
+  if (!metrics || typeof metrics !== 'object') return '-';
+  const entries = Object.entries(metrics);
+  if (!entries.length) return '-';
+  return entries
+    .slice(0, 4)
+    .map(([key, value]) => key + '=' + formatResearchMetricValue(value))
+    .join(' · ');
+}
+
+function shortCommit(value) {
+  if (!value) return '-';
+  return String(value).slice(0, 12);
+}
+
+function parseResearchList(value) {
+  return String(value || '')
+    .split(/\n|,/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseResearchJson(value, label, fallback, requireArray) {
+  const raw = String(value || '').trim();
+  if (!raw) return fallback;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    throw new Error(label + ' must be valid JSON.');
+  }
+  if (requireArray && !Array.isArray(parsed)) {
+    throw new Error(label + ' must be a JSON array.');
+  }
+  return parsed;
+}
+
+function getResearchSubtabLabel(subtab) {
+  switch (subtab) {
+    case 'gpu-clouds':
+      return 'GPU Clouds';
+    case 'overview':
+      return 'Overview';
+    case 'opportunities':
+      return 'Opportunities';
+    case 'projects':
+      return 'Projects';
+    case 'runners':
+      return 'Runners';
+    case 'campaigns':
+      return 'Campaigns';
+    default:
+      return 'Overview';
+  }
+}
+
+function syncResearchSubtabButtons() {
+  const active = currentResearchSubtab || 'overview';
+  document.querySelectorAll('[data-research-subtab]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.researchSubtab === active);
+    button.setAttribute('aria-selected', button.dataset.researchSubtab === active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-research-pane]').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.researchPane === active);
+  });
+}
+
+function switchResearchSubtab(subtab, options) {
+  const next = RESEARCH_SUBTABS.includes(subtab) ? subtab : 'overview';
+  currentResearchSubtab = next;
+  syncResearchSubtabButtons();
+  if (!options || options.render !== false) {
+    if (next === 'overview') {
+      renderResearchOverview();
+    } else if (next === 'opportunities') {
+      renderResearchOpportunities();
+    } else if (next === 'projects') {
+      renderResearchProjects();
+    } else if (next === 'runners') {
+      renderResearchRunners();
+    } else if (next === 'campaigns') {
+      renderResearchCampaigns();
+      renderResearchDetail();
+    } else if (next === 'gpu-clouds') {
+      renderResearchGpuClouds();
+    }
+  }
+}
+
+function openResearchGpuClouds() {
+  if (!experimentsFeatureEnabled) {
+    showToast('Enable experiments in Settings → Advanced → Experiments to use GPU Clouds.', 'error');
+    return;
+  }
+  if (currentTab !== 'research') {
+    switchTab('research');
+  }
+  switchResearchSubtab('gpu-clouds');
+}
+
+function researchOpportunityGpuLabel(level) {
+  const normalized = String(level || '').toLowerCase();
+  if (normalized === 'gpu required') return 'GPU required';
+  if (normalized === 'gpu recommended') return 'GPU recommended';
+  if (normalized === 'required') return 'GPU required';
+  if (normalized === 'recommended') return 'GPU recommended';
+  if (normalized === 'not_needed') return 'GPU not needed';
+  return 'GPU not needed';
+}
+
+function researchOpportunityBadgeClass(level) {
+  const normalized = String(level || '').toLowerCase();
+  if (normalized === 'gpu required') return 'failed';
+  if (normalized === 'gpu recommended') return 'stuck';
+  return 'completed';
+}
+
+function researchOpportunitySourceLabel(opportunity) {
+  const parts = [];
+  if (opportunity.provider) parts.push(opportunity.provider);
+  if (opportunity.model) parts.push(opportunity.model);
+  if (opportunity.route) parts.push(opportunity.route);
+  return parts.length ? parts.join(' / ') : 'Telemetry inferred';
+}
+
+function researchOpportunityTitle(kind) {
+  switch (String(kind || '')) {
+    case 'prompt_asset':
+    case 'hosted_prompt_routing':
+      return 'Hosted prompt and routing loop';
+    case 'routing_policy':
+      return 'Routing policy tuning';
+    case 'rag_config':
+    case 'rag_pipeline':
+      return 'RAG pipeline tuning';
+    case 'tool_policy':
+    case 'tool_orchestration':
+      return 'Tool orchestration tuning';
+    case 'evaluator':
+      return 'Evaluator tuning';
+    case 'parser':
+      return 'Parser reliability tuning';
+    case 'inference_config':
+    case 'open_weights_inference_tuning':
+      return 'Self-hosted inference tuning';
+    case 'training_config':
+    case 'self_hosted_finetune':
+      return 'Fine-tune and training loop';
+    case 'training_code':
+    case 'open_weights_training_code':
+    case 'autoresearch_single_file':
+      return 'Training code benchmark loop';
+    case 'serving_config':
+      return 'Serving config tuning';
+    default:
+      return 'Research opportunity';
+  }
+}
+
+function researchOpportunityPreset(kind, raw) {
+  if (raw && raw.suggested_preset) return String(raw.suggested_preset);
+  switch (String(kind || '')) {
+    case 'prompt_asset':
+    case 'routing_policy':
+    case 'hosted_prompt_routing':
+      return 'hosted_prompt_routing';
+    case 'rag_config':
+    case 'rag_pipeline':
+      return 'rag_pipeline';
+    case 'tool_policy':
+    case 'evaluator':
+    case 'parser':
+    case 'tool_orchestration':
+      return 'tool_orchestration';
+    case 'inference_config':
+    case 'serving_config':
+    case 'open_weights_inference_tuning':
+      return 'open_weights_inference_tuning';
+    case 'training_config':
+    case 'self_hosted_finetune':
+      return 'self_hosted_finetune';
+    case 'training_code':
+    case 'open_weights_training_code':
+      return 'open_weights_training_code';
+    default:
+      return 'autoresearch_single_file';
+  }
+}
+
+function researchOpportunityTargetKind(kind) {
+  switch (String(kind || '')) {
+    case 'hosted_prompt_routing':
+      return 'prompt_asset';
+    case 'rag_pipeline':
+      return 'rag_config';
+    case 'tool_orchestration':
+      return 'tool_policy';
+    case 'open_weights_inference_tuning':
+      return 'inference_config';
+    case 'self_hosted_finetune':
+      return 'training_config';
+    case 'open_weights_training_code':
+    case 'autoresearch_single_file':
+      return 'training_code';
+    default:
+      return String(kind || 'prompt_asset');
+  }
+}
+
+function buildResearchProjectHintFromOpportunity(opportunity, kind, gpuLevel) {
+  const comparator = gpuLevel === 'GPU required' ? 'lower_is_better' : 'higher_is_better';
+  const metricName = gpuLevel === 'GPU required' ? 'loss' : 'quality';
+  const strategyByKind = {
+    prompt_asset: 'Improve prompts and system instructions while preserving the surrounding benchmark harness.',
+    routing_policy: 'Tune routing, fallback, retry, and model selection policy while preserving benchmark inputs.',
+    rag_config: 'Improve retrieval, reranking, chunking, and context assembly without widening the evaluation scope.',
+    tool_policy: 'Refine tool selection, guardrails, and orchestration while preserving the task contract.',
+    evaluator: 'Tighten evaluator prompts, scoring rules, and judge criteria without changing the measured outcome.',
+    parser: 'Improve output parsing, schema validation, and recovery logic for structured responses.',
+    inference_config: 'Adjust inference and runtime settings to improve throughput, latency, and quality for self-hosted models.',
+    training_config: 'Benchmark fine-tuning and training configuration changes without broadening the harness.',
+    training_code: 'Improve training code or benchmark harness logic while keeping the evaluation fixed.',
+    serving_config: 'Adjust self-hosted serving and batching configuration to improve cost/latency/quality.',
+  };
+  return {
+    name: researchOpportunityTitle(kind),
+    mutable_paths: [],
+    fixed_paths: [],
+    metric_name: metricName,
+    comparator: comparator,
+    strategy: strategyByKind[kind] || String(opportunity.summary || ''),
+  };
+}
+
+function buildFallbackResearchOpportunities() {
+  const providers = Array.isArray(providerRoutingConfig?.providers) ? providerRoutingConfig.providers : [];
+  const primary = providers.find((provider) => provider.primary) || providers.find((provider) => provider.enabled) || providers[0] || null;
+  const cheap = providers.find((provider) => provider.preferred_cheap) || providers.find((provider) => provider.enabled && provider !== primary) || null;
+  const localProviders = providers.filter((provider) => ['ollama', 'llama_cpp'].includes(provider.slug));
+  const hostedProviders = providers.filter((provider) => !['ollama', 'llama_cpp'].includes(provider.slug));
+  const opportunities = [
+    {
+      id: 'hosted-routing-loop',
+      kind: 'hosted_prompt_routing',
+      title: 'Hosted model routing loop',
+      provider: primary ? primary.display_name : 'Hosted provider',
+      model: primary ? getProviderRoleModel(primary, 'primary', { allowDefault: true }) || primary.default_model || 'current route' : 'current route',
+      route: primary ? (primary.primary_model || primary.default_model || 'primary slot') : 'provider routing',
+      gpu_level: 'GPU not needed',
+      summary: 'Improve prompts, routing policy, fallback order, and evaluation around the currently active hosted model path.',
+      signals: ['provider routing config', 'route simulations', 'model usage telemetry'],
+      project_hint: {
+        name: 'Hosted routing benchmark',
+        mutable_paths: ['src/llm/route_planner.rs', 'src/llm/runtime_manager.rs', 'src/llm/provider.rs'],
+        fixed_paths: ['src/channels/web/static/app.js', 'README.md'],
+        metric_name: 'success_rate',
+        comparator: 'higher_is_better',
+        strategy: 'Tune prompts, routing policy, fallbacks, and output validation for the current hosted provider path.',
+      },
+    },
+    {
+      id: 'rag-pipeline-loop',
+      kind: 'rag_pipeline',
+      title: 'RAG pipeline tuning',
+      provider: hostedProviders.length ? hostedProviders[0].display_name : 'Retrieval stack',
+      model: cheap ? (getProviderRoleModel(cheap, 'cheap', { allowDefault: true }) || cheap.cheap_model || 'cheap route') : 'retrieval route',
+      route: 'retrieval and ranking',
+      gpu_level: 'GPU not needed',
+      summary: 'Optimize chunking, retrieval, reranking, context packing, and answer formatting for hosted or local model calls.',
+      signals: ['retrieval hit rate', 'answer quality', 'latency', 'cost'],
+      project_hint: {
+        name: 'RAG pipeline benchmark',
+        mutable_paths: ['src/workspace', 'src/llm'],
+        fixed_paths: ['README.md'],
+        metric_name: 'answer_quality',
+        comparator: 'higher_is_better',
+        strategy: 'Improve retrieval, ranking, and response assembly while preserving current interfaces.',
+      },
+    },
+    {
+      id: 'self-hosted-inference-loop',
+      kind: 'open_weights_inference_tuning',
+      title: 'Self-hosted inference tuning',
+      provider: localProviders.length ? localProviders[0].display_name : 'Local / cluster model',
+      model: localProviders.length ? (getProviderRoleModel(localProviders[0], 'primary', { allowDefault: true }) || localProviders[0].default_model || 'local model') : 'local model',
+      route: 'inference configuration',
+      gpu_level: 'GPU recommended',
+      summary: 'Tune quantization, serving parameters, batching, and runtime defaults for self-hosted models.',
+      signals: ['latency', 'token throughput', 'quality', 'memory footprint'],
+      project_hint: {
+        name: 'Inference tuning benchmark',
+        mutable_paths: ['src/llm', 'src/config'],
+        fixed_paths: ['README.md'],
+        metric_name: 'latency',
+        comparator: 'lower_is_better',
+        strategy: 'Adjust runtime and serving knobs to improve throughput and quality without broadening the benchmark surface.',
+      },
+    },
+    {
+      id: 'self-hosted-training-loop',
+      kind: 'self_hosted_finetune',
+      title: 'Fine-tune / training loop',
+      provider: localProviders.length ? localProviders[0].display_name : 'GPU training stack',
+      model: localProviders.length ? (getProviderRoleModel(localProviders[0], 'primary', { allowDefault: true }) || localProviders[0].default_model || 'trainable model') : 'trainable model',
+      route: 'training code',
+      gpu_level: 'GPU required',
+      summary: 'Iterate on training code, datasets, prompts, and evaluation harnesses for open-weight models.',
+      signals: ['eval score', 'loss', 'throughput', 'checkpoint quality'],
+      project_hint: {
+        name: 'Training benchmark',
+        mutable_paths: ['train.py', 'prepare.py'],
+        fixed_paths: ['README.md'],
+        metric_name: 'loss',
+        comparator: 'lower_is_better',
+        strategy: 'Change only the training surface that the benchmark allows, and keep the harness stable while searching.',
+      },
+    },
+  ];
+  return opportunities;
+}
+
+function normalizeResearchOpportunity(opportunity, index) {
+  if (!opportunity || typeof opportunity !== 'object') return null;
+  const kind = String(firstDefined(opportunity.kind, opportunity.opportunity_type, opportunity.type, 'opportunity'));
+  const id = String(firstDefined(opportunity.id, opportunity.opportunity_id, kind, 'opportunity-' + String(index + 1)));
+  const gpuLevel = researchOpportunityGpuLabel(firstDefined(opportunity.gpu_level, opportunity.gpu_requirement, opportunity.gpu));
+  const route = firstDefined(opportunity.route, opportunity.route_key, opportunity.logical_role, null);
+  const title = String(firstDefined(opportunity.title, opportunity.name, researchOpportunityTitle(kind)));
+  const signals = Array.isArray(opportunity.signals)
+    ? opportunity.signals.slice()
+    : [opportunity.metadata?.endpoint_type, opportunity.metadata?.workload_tag, opportunity.metadata?.latency_ms != null ? 'latency telemetry' : null, opportunity.metadata?.cost_usd != null ? 'cost telemetry' : null].filter(Boolean);
+  return {
+    id: id,
+    kind: kind,
+    title: title,
+    provider: firstDefined(opportunity.provider, null),
+    model: firstDefined(opportunity.model, null),
+    route: route,
+    gpu_level: gpuLevel,
+    summary: String(firstDefined(opportunity.summary, opportunity.description, '')),
+    signals: signals,
+    project_hint: opportunity.project_hint && typeof opportunity.project_hint === 'object'
+      ? opportunity.project_hint
+      : buildResearchProjectHintFromOpportunity(opportunity, kind, gpuLevel),
+    source: String(firstDefined(opportunity.source, opportunity.origin, 'telemetry')),
+    confidence: firstDefined(opportunity.confidence, null),
+    linked_target_id: firstDefined(opportunity.linked_target_id, null),
+    suggested_preset: researchOpportunityPreset(kind, opportunity),
+    updated_at: firstDefined(opportunity.updated_at, opportunity.created_at, null),
+    raw: opportunity,
+  };
+}
+
+function formatResearchOpportunitySignals(opportunity) {
+  if (!opportunity.signals || !opportunity.signals.length) return '';
+  return opportunity.signals.slice(0, 4).map((signal) => '<span class="research-opportunity-chip">' + escapeHtml(signal) + '</span>').join('');
+}
+
+function renderResearchOpportunityCard(opportunity) {
+  const scope = researchOpportunitySourceLabel(opportunity);
+  const signalHtml = formatResearchOpportunitySignals(opportunity);
+  const needsGpuClouds = ['open_weights_inference_tuning', 'self_hosted_finetune', 'training_config', 'training_code', 'inference_config', 'serving_config'].includes(opportunity.kind);
+  const selectSubtab = needsGpuClouds ? 'gpu-clouds' : 'projects';
+  const linkButton = opportunity.linked_target_id
+    ? '<button class="btn-cancel" onclick="switchResearchSubtab(\'projects\')">Linked target</button>'
+    : '<button class="btn-cancel" onclick="linkResearchOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Link target</button>';
+  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-opportunity-card">' +
+    '<div class="research-opportunity-head">' +
+      '<div>' +
+        '<div class="research-opportunity-kicker">' + escapeHtml(opportunity.kind) + '</div>' +
+        '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(opportunity.title) + '</h4>' +
+      '</div>' +
+      '<span class="badge ' + researchOpportunityBadgeClass(opportunity.gpu_level) + '">' + escapeHtml(opportunity.gpu_level) + '</span>' +
+    '</div>' +
+    '<div class="research-opportunity-source">' + escapeHtml(scope) + '</div>' +
+    '<div class="research-opportunity-summary">' + escapeHtml(opportunity.summary || 'No summary provided.') + '</div>' +
+    '<div class="research-opportunity-signals">' + signalHtml + '</div>' +
+    '<div class="research-opportunity-actions">' +
+      '<button class="btn-restart" onclick="primeResearchProjectFormFromOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Create Project</button>' +
+      linkButton +
+      '<button class="btn-cancel" onclick="switchResearchSubtab(\'' + escapeJsString(selectSubtab) + '\')">Open ' + escapeHtml(getResearchSubtabLabel(selectSubtab)) + '</button>' +
+      (needsGpuClouds
+        ? '<button class="btn-restart" onclick="openResearchGpuClouds()">GPU Clouds</button>'
+        : '<button class="btn-restart" onclick="switchTab(\'providers\')">Providers</button>') +
+    '</div>' +
+    '<div class="research-opportunity-note">Source: ' + escapeHtml(opportunity.source || 'inferred')
+      + (opportunity.linked_target_id ? ' · linked target ready' : '')
+      + '</div>' +
+    '</article>';
+}
+
+function formatUsd(value, minimumFractionDigits, maximumFractionDigits) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '-';
+  const min = minimumFractionDigits == null ? (numeric < 1 ? 4 : 2) : minimumFractionDigits;
+  const max = maximumFractionDigits == null ? Math.max(min, numeric < 1 ? 4 : 2) : maximumFractionDigits;
+  return '$' + numeric.toLocaleString(undefined, {
+    minimumFractionDigits: min,
+    maximumFractionDigits: max,
+  });
+}
+
+function parseResearchObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function trimResearchText(value, maxLength) {
+  const text = String(value || '').trim();
+  if (!text) return '-';
+  if (!maxLength || text.length <= maxLength) return text;
+  return text.slice(0, Math.max(0, maxLength - 1)).trimEnd() + '…';
+}
+
+function isResearchGpuCloudBackend(backend) {
+  return ['runpod', 'vast', 'lambda'].includes(String(backend || '').toLowerCase());
+}
+
+function isResearchRemoteBackend(backend) {
+  return !['', 'local_docker'].includes(String(backend || '').toLowerCase());
+}
+
+function researchQueueLabel(campaign) {
+  if (!campaign) return 'not_queued';
+  if (campaign.queue_state === 'queued' && campaign.queue_position) {
+    return 'queued (#' + campaign.queue_position + ')';
+  }
+  return campaign.queue_state || 'not_queued';
+}
+
+function researchLaunchModeForBackend(backend, backendConfig) {
+  const normalized = String(backend || '').toLowerCase();
+  const config = parseResearchObject(backendConfig);
+  switch (normalized) {
+    case 'local_docker':
+      return {
+        label: 'Local container',
+        detail: 'Runs entirely on the local ThinClaw host.',
+        className: 'completed',
+      };
+    case 'generic_remote_runner':
+      return {
+        label: 'Lease bootstrap',
+        detail: 'ThinClaw issues a lease; you start the remote runner.',
+        className: 'stuck',
+      };
+    case 'ssh':
+      return {
+        label: 'Controller SSH',
+        detail: 'ThinClaw launches the remote process over SSH.',
+        className: 'completed',
+      };
+    case 'slurm':
+      return {
+        label: 'Controller Slurm',
+        detail: 'ThinClaw submits a batch job and tracks it.',
+        className: 'completed',
+      };
+    case 'kubernetes':
+      return {
+        label: 'Controller Kubernetes',
+        detail: 'ThinClaw creates and revokes a Kubernetes Job.',
+        className: 'completed',
+      };
+    case 'runpod':
+      return {
+        label: 'Controller RunPod',
+        detail: 'ThinClaw creates and revokes provider pods directly.',
+        className: 'completed',
+      };
+    case 'vast':
+      return {
+        label: 'Controller Vast.ai',
+        detail: 'ThinClaw selects or launches an instance and revokes it.',
+        className: 'completed',
+      };
+    case 'lambda':
+      if (config.launch_payload && typeof config.launch_payload === 'object' && !Array.isArray(config.launch_payload)) {
+        return {
+          label: 'Controller Lambda',
+          detail: 'Lambda Cloud API launch payload is configured.',
+          className: 'completed',
+        };
+      }
+      return {
+        label: 'Conditional / manual',
+        detail: 'Add backend_config.launch_payload for controller launch; otherwise use lease/bootstrap on a pre-provisioned instance.',
+        className: 'stuck',
+      };
+    default:
+      return {
+        label: normalized || 'Unknown',
+        detail: 'Runner launch mode could not be inferred.',
+        className: 'pending',
+      };
+  }
+}
+
+function researchRunnerProviderState(runner) {
+  if (!runner) {
+    return {
+      label: '-',
+      detail: '-',
+      className: 'pending',
+    };
+  }
+  const backend = String(runner.backend || '').toLowerCase();
+  if (!isResearchGpuCloudBackend(backend)) {
+    if (backend === 'local_docker') {
+      return {
+        label: 'No cloud secret needed',
+        detail: 'Local runner; no external provider account required.',
+        className: 'completed',
+      };
+    }
+    return {
+      label: 'BYO backend',
+      detail: 'Provider credentials are handled by your cluster or host configuration.',
+      className: 'pending',
+    };
+  }
+  const providerConfig = getResearchGpuCloudConfig(backend);
+  const connected = experimentsState.gpuCloudConnections.get(backend) || false;
+  const expectedSecret = providerConfig ? providerConfig.secretReference : null;
+  const attached = expectedSecret ? (runner.secret_references || []).includes(expectedSecret) : false;
+  if (connected && attached) {
+    return {
+      label: 'Credential attached',
+      detail: expectedSecret + ' is connected and attached to this runner.',
+      className: 'completed',
+    };
+  }
+  if (connected && !attached) {
+    return {
+      label: 'Secret not attached',
+      detail: 'Provider credential is connected, but this runner is missing ' + expectedSecret + '.',
+      className: 'stuck',
+    };
+  }
+  return {
+    label: 'Credential missing',
+    detail: 'Connect ' + (expectedSecret || 'the provider secret') + ' before launching provider compute.',
+    className: 'failed',
+  };
+}
+
+function activeTrialForCampaign(campaign) {
+  if (!campaign) return null;
+  const trials = experimentsState.trialsByCampaign.get(campaign.id) || [];
+  if (!trials.length) return null;
+  if (campaign.active_trial_id) {
+    const active = trials.find((trial) => trial.id === campaign.active_trial_id);
+    if (active) return active;
+  }
+  const inFlight = trials.find((trial) => ['preparing', 'running', 'evaluating'].includes(String(trial.status || '').toLowerCase()));
+  return inFlight || trials[trials.length - 1] || null;
+}
+
+function researchCampaignBudgetSnapshot(campaign, project) {
+  const stop = parseResearchObject(project ? project.stop_policy : null);
+  const trialCount = Number(campaign && campaign.trial_count != null ? campaign.trial_count : 0);
+  const totalRuntimeMs = Number(campaign && campaign.total_runtime_ms != null ? campaign.total_runtime_ms : 0);
+  const totalCostUsd = Number(campaign && campaign.total_cost_usd != null ? campaign.total_cost_usd : 0);
+  const maxTrials = stop.max_trials != null ? Number(stop.max_trials) : null;
+  const maxRuntimeSecs = stop.max_total_runtime_secs != null ? Number(stop.max_total_runtime_secs) : null;
+  const maxCostUsd = stop.max_total_cost_usd != null ? Number(stop.max_total_cost_usd) : null;
+  const trialRatio = maxTrials && maxTrials > 0 ? Math.min(1, trialCount / maxTrials) : null;
+  const runtimeRatio = maxRuntimeSecs && maxRuntimeSecs > 0 ? Math.min(1, totalRuntimeMs / (maxRuntimeSecs * 1000)) : null;
+  const costRatio = maxCostUsd && maxCostUsd > 0 ? Math.min(1, totalCostUsd / maxCostUsd) : null;
+  const riskRatio = Math.max(
+    trialRatio != null ? trialRatio : 0,
+    runtimeRatio != null ? runtimeRatio : 0,
+    costRatio != null ? costRatio : 0
+  );
+  return {
+    trialCount,
+    totalRuntimeMs,
+    totalCostUsd,
+    maxTrials,
+    maxRuntimeSecs,
+    maxCostUsd,
+    trialRatio,
+    runtimeRatio,
+    costRatio,
+    riskRatio,
+    plateauWindow: stop.plateau_window != null ? Number(stop.plateau_window) : null,
+    infraFailurePauseThreshold: stop.infra_failure_pause_threshold,
+    nonImprovingPauseThreshold: stop.non_improving_pause_threshold,
+  };
+}
+
+function researchBudgetBadgeClass(ratio) {
+  if (ratio == null) return 'pending';
+  if (ratio >= 0.95) return 'failed';
+  if (ratio >= 0.75) return 'stuck';
+  if (ratio > 0) return 'active';
+  return 'completed';
+}
+
+function renderResearchProgressRow(label, usedText, limitText, ratio, badgeLabel) {
+  const safeRatio = ratio == null ? 0 : Math.max(0, Math.min(1, Number(ratio) || 0));
+  return '<div class="research-progress-row">'
+    + '<div class="research-progress-head">'
+    + '<strong>' + escapeHtml(label) + '</strong>'
+    + '<span>' + escapeHtml(usedText + (limitText ? (' / ' + limitText) : '')) + '</span>'
+    + '</div>'
+    + '<div class="research-progress-track"><span class="research-progress-bar ' + researchBudgetBadgeClass(ratio) + '" style="width:' + (safeRatio * 100).toFixed(1) + '%"></span></div>'
+    + '<div class="research-progress-foot">'
+    + '<span>' + escapeHtml(badgeLabel || (ratio == null ? 'No limit configured' : Math.round(safeRatio * 100) + '% used')) + '</span>'
+    + '</div>'
+    + '</div>';
+}
+
+function renderResearchKeyValueGrid(items) {
+  const rows = (items || []).filter((entry) => entry && entry[1] != null && String(entry[1]).trim() !== '' && String(entry[1]).trim() !== '-');
+  if (!rows.length) return '<div class="research-detail-note">No detail available yet.</div>';
+  return '<div class="research-detail-kv">'
+    + rows.map(([label, value]) => '<div><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(String(value)) + '</span></div>').join('')
+    + '</div>';
+}
+
+function renderResearchJsonDetails(title, value, summaryText) {
+  const objectValue = parseResearchObject(value);
+  const keys = Object.keys(objectValue);
+  if (!keys.length) return '';
+  return '<details class="research-advanced research-json-block">'
+    + '<summary>' + escapeHtml(summaryText || title) + '</summary>'
+    + '<pre class="research-json">' + escapeHtml(JSON.stringify(objectValue, null, 2)) + '</pre>'
+    + '</details>';
+}
+
+function researchTrialProviderSummary(trial, runner) {
+  const metadata = parseResearchObject(trial ? trial.provider_job_metadata : null);
+  const provider = String(firstDefined(metadata.provider, trial ? trial.runner_backend : null, runner ? runner.backend : null, 'local_docker'));
+  const launchMode = researchLaunchModeForBackend(provider, runner ? runner.backend_config : {});
+  const manualLaunchRequired = String(firstDefined(metadata.status, '')) === 'manual_launch_required';
+  const costEstimate = parseResearchObject(metadata.cost_estimate);
+  const stateLabel = manualLaunchRequired
+    ? 'Manual launch required'
+    : trial && trial.provider_job_id
+      ? 'Provider job tracked'
+      : isResearchRemoteBackend(provider)
+        ? 'Lease/bootstrap'
+        : 'Local execution';
+  const stateClass = manualLaunchRequired
+    ? 'stuck'
+    : trial && trial.provider_job_id
+      ? 'completed'
+      : isResearchRemoteBackend(provider)
+        ? 'pending'
+        : 'completed';
+  const launchRequest = parseResearchObject(metadata.launch_request);
+  const summaryItems = [
+    ['Provider', provider],
+    ['State', stateLabel],
+    ['Launch mode', launchMode.label],
+    ['Provider job', firstDefined(trial ? trial.provider_job_id : null, metadata.pod_id, metadata.instance_id, '-')],
+    ['Runner backend', runner ? runner.backend : (trial ? trial.runner_backend : '-')],
+    ['Cost source', firstDefined(costEstimate.source, '-')],
+  ];
+  if (provider === 'runpod') {
+    summaryItems.push(
+      ['Pod status', firstDefined(metadata.pod && metadata.pod.desiredStatus, metadata.pod && metadata.pod.status, '-')],
+      ['GPU types', (launchRequest.gpuTypeIds || []).join(', ') || '-'],
+      ['Data centers', (launchRequest.dataCenterIds || []).join(', ') || '-']
+    );
+  } else if (provider === 'vast') {
+    const offer = parseResearchObject(metadata.selected_offer);
+    summaryItems.push(
+      ['Offer ID', firstDefined(metadata.ask_id, offer.id, '-')],
+      ['Offer hourly', offer.dph_total != null ? formatUsd(offer.dph_total, 4, 4) : '-'],
+      ['GPU', firstDefined(offer.gpu_name, offer.gpu_name_array && offer.gpu_name_array[0], '-')]
+    );
+  } else if (provider === 'lambda') {
+    const instance = parseResearchObject(metadata.instance);
+    const fileSystems = Array.isArray(launchRequest.file_system_names)
+      ? launchRequest.file_system_names
+      : (Array.isArray(instance.file_system_names)
+        ? instance.file_system_names
+        : (Array.isArray(instance.file_systems)
+          ? instance.file_systems.map((entry) => firstDefined(entry.name, entry.file_system_name, entry.id)).filter(Boolean)
+          : []));
+    const sshKeys = Array.isArray(launchRequest.ssh_key_names)
+      ? launchRequest.ssh_key_names
+      : (Array.isArray(instance.ssh_key_names) ? instance.ssh_key_names : []);
+    summaryItems.push(
+      ['Instance type', firstDefined(launchRequest.instance_type_name, metadata.instance && metadata.instance.instance_type_name, '-')],
+      ['Region', firstDefined(launchRequest.region_name, metadata.instance && metadata.instance.region_name, '-')],
+      ['Quantity', String(firstDefined(launchRequest.quantity, 1))],
+      ['Status', firstDefined(instance.status, instance.state, '-')],
+      ['Hostname', firstDefined(instance.hostname, instance.name, '-')],
+      ['Public IP', firstDefined(instance.public_ip, instance.ip, instance.ip_address, '-')],
+      ['Private IP', firstDefined(instance.private_ip, instance.private_ipv4, '-')],
+      ['SSH keys', sshKeys.length ? sshKeys.join(', ') : '-'],
+      ['Filesystems', fileSystems.length ? fileSystems.join(', ') : '-'],
+      ['Jupyter URL', firstDefined(instance.jupyter_url, instance.ide_url, '-')]
+    );
+  }
+  return {
+    provider,
+    metadata,
+    launchMode,
+    stateLabel,
+    stateClass,
+    manualLaunchRequired,
+    costEstimate,
+    summaryItems,
+  };
+}
+
+function researchCloudCardState(config, inventory) {
+  const connected = experimentsState.gpuCloudConnections.get(config.slug) || (inventory ? !!inventory.connected : false);
+  return {
+    connectionLabel: connected ? 'Connected' : 'Not connected',
+    connectionClass: connected ? 'completed' : 'stuck',
+    launchLabel: config.launchModeLabel || 'Controller managed',
+    launchClass: connected ? 'completed' : 'pending',
+    launchDetail: config.readinessNote || config.launchHint,
+  };
+}
+
+function renderResearchOverview() {
+  const summary = document.getElementById('research-overview-summary') || document.getElementById('research-summary');
+  const insights = document.getElementById('research-overview-insights');
+  const next = document.getElementById('research-overview-next');
+  if (!summary || !insights || !next) return;
+  const activeCampaigns = experimentsState.campaigns.filter((campaign) => !['completed', 'failed', 'cancelled'].includes(String(campaign.status || '').toLowerCase())).length;
+  const queuedCampaigns = experimentsState.campaigns.filter((campaign) => String(campaign.queue_state || '') === 'queued').length;
+  const validatedRunners = experimentsState.runners.filter((runner) => String(runner.status || '').toLowerCase() === 'validated').length;
+  const remoteRunners = experimentsState.runners.filter((runner) => String(runner.backend || '') !== 'local_docker').length;
+  const connectedGpuClouds = experimentsState.gpuClouds.filter((provider) => provider && provider.connected).length;
+  const autoLaunchReadyRunners = experimentsState.runners.filter((runner) => {
+    const launchMode = researchLaunchModeForBackend(runner.backend, runner.backend_config);
+    const providerState = researchRunnerProviderState(runner);
+    return launchMode.className === 'completed' && providerState.className !== 'failed';
+  }).length;
+  const gpuRequired = experimentsState.opportunities.filter((opportunity) => String(opportunity.gpu_level || '').toLowerCase() === 'gpu required').length;
+  const gpuRecommended = experimentsState.opportunities.filter((opportunity) => String(opportunity.gpu_level || '').toLowerCase() === 'gpu recommended').length;
+  const totalSpend = experimentsState.campaigns.reduce((sum, campaign) => sum + Number(campaign.total_cost_usd || 0), 0);
+  const totalRuntimeMs = experimentsState.campaigns.reduce((sum, campaign) => sum + Number(campaign.total_runtime_ms || 0), 0);
+  const budgetTrackedCampaigns = experimentsState.campaigns.filter((campaign) => {
+    const project = projectById(campaign.project_id);
+    const stop = parseResearchObject(project ? project.stop_policy : null);
+    return stop.max_total_cost_usd != null || stop.max_total_runtime_secs != null || stop.max_trials != null;
+  }).length;
+  const nearCapCampaigns = experimentsState.campaigns.filter((campaign) => {
+    const project = projectById(campaign.project_id);
+    return researchCampaignBudgetSnapshot(campaign, project).riskRatio >= 0.75;
+  }).length;
+  const recentWinner = experimentsState.campaigns.find((campaign) => campaign.best_commit || campaign.baseline_commit) || null;
+  const recentWinnerProject = recentWinner ? projectById(recentWinner.project_id) : null;
+  summary.innerHTML = ''
+    + summaryCard('Projects', experimentsState.projects.length, '')
+    + summaryCard('Validated Runners', validatedRunners, 'completed')
+    + summaryCard('Active Campaigns', activeCampaigns, 'active')
+    + summaryCard('Queued Campaigns', queuedCampaigns, queuedCampaigns ? 'stuck' : 'completed')
+    + summaryCard('Total Spend', formatUsd(totalSpend, 2, 4), totalSpend > 0 ? 'active' : '')
+    + summaryCard('GPU-Required Opportunities', gpuRequired, 'failed');
+  insights.innerHTML = ''
+    + '<article class="ui-panel ui-panel--subtle ui-panel-stack research-overview-insight">'
+    + '<div class="research-overview-insight-kicker">What can be improved next</div>'
+    + '<div class="research-overview-insight-body">ThinClaw can improve prompts, routing, retrieval, tool policy, evaluation, inference settings, and training code. Hosted-model loops do not need a GPU; self-hosted/open-weight loops often do.</div>'
+    + '</article>'
+    + '<article class="ui-panel ui-panel--subtle ui-panel-stack research-overview-insight">'
+    + '<div class="research-overview-insight-kicker">Current readiness</div>'
+    + '<div class="research-overview-insight-grid">'
+    + metaItem('Validated runners', String(validatedRunners))
+    + metaItem('Remote runners', String(remoteRunners))
+    + metaItem('Connected GPU clouds', String(connectedGpuClouds))
+    + metaItem('Auto-launch ready runners', String(autoLaunchReadyRunners))
+    + metaItem('GPU recommended', String(gpuRecommended))
+    + metaItem('GPU required', String(gpuRequired))
+    + '</div>'
+    + '</article>'
+    + '<article class="ui-panel ui-panel--subtle ui-panel-stack research-overview-insight">'
+    + '<div class="research-overview-insight-kicker">Budgets and provider activity</div>'
+    + '<div class="research-overview-insight-grid">'
+    + metaItem('Tracked spend', formatUsd(totalSpend, 2, 4))
+    + metaItem('Tracked runtime', formatDurationMs(totalRuntimeMs))
+    + metaItem('Budget-tracked campaigns', String(budgetTrackedCampaigns))
+    + metaItem('Near budget cap', String(nearCapCampaigns))
+    + '</div>'
+    + (recentWinner
+      ? '<div class="research-overview-insight-body">Most recent promotable result: <strong>' + escapeHtml(recentWinnerProject ? recentWinnerProject.name : recentWinner.project_id)
+        + '</strong> with ' + escapeHtml(campaignPrimaryMetricDisplay(recentWinner)) + ' at ' + escapeHtml(formatUsd(recentWinner.total_cost_usd || 0, 2, 4)) + ' total spend.</div>'
+      : '<div class="research-overview-insight-body">No promotable winner yet. Start with a hosted-model prompt or routing benchmark if you want a CPU-only first run.</div>')
+    + '</article>';
+
+  const nextActions = [];
+  if (!experimentsState.runners.length) {
+    nextActions.push('<button class="btn-restart" onclick="switchResearchSubtab(\'runners\')">Create a runner profile</button>');
+  }
+  if (!experimentsState.projects.length) {
+    nextActions.push('<button class="btn-restart" onclick="switchResearchSubtab(\'projects\')">Create a benchmark project</button>');
+  }
+  if (!experimentsState.opportunities.length) {
+    nextActions.push('<button class="btn-restart" onclick="switchResearchSubtab(\'opportunities\')">Inspect opportunities</button>');
+  }
+  if (experimentsState.runners.some((runner) => String(runner.backend || '').toLowerCase() === 'lambda' && researchLaunchModeForBackend(runner.backend, runner.backend_config).className !== 'completed')) {
+    nextActions.push('<button class="btn-cancel" onclick="openResearchGpuClouds()">Finish Lambda launch setup</button>');
+  }
+  next.innerHTML = ''
+    + '<div class="research-overview-next-shell">'
+    + '<div class="research-overview-next-text">'
+    + '<h4 class="ui-panel-title ui-panel-title--section">Fast path</h4>'
+    + '<p class="ui-panel-desc">Hosted-model improvements can start on CPU-only machines. GPU Clouds are only needed for cluster-backed or self-hosted training and inference work.</p>'
+    + '</div>'
+    + '<div class="research-overview-next-actions">' + nextActions.join('') + '</div>'
+    + '</div>';
+}
+
+function renderResearchOpportunities() {
+  const list = document.getElementById('research-opportunities-list');
+  const empty = document.getElementById('research-opportunities-empty');
+  const shell = document.getElementById('research-opportunities-shell');
+  if (!list || !empty || !shell) return;
+  const opportunities = experimentsState.opportunities || [];
+  if (!opportunities.length) {
+    list.innerHTML = '';
+    shell.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  shell.style.display = '';
+  empty.style.display = 'none';
+  list.innerHTML = opportunities.map((opportunity) => renderResearchOpportunityCard(opportunity)).join('');
+}
+
+function getResearchGpuCloudConfig(slug) {
+  return RESEARCH_GPU_CLOUDS.find((entry) => entry.slug === slug) || null;
+}
+
+function getResearchGpuCloudInventoryState(slug) {
+  const live = Array.isArray(experimentsState.gpuClouds) ? experimentsState.gpuClouds : [];
+  return live.find((entry) => String(entry.slug || entry.provider || '') === slug) || null;
+}
+
+function splitResearchCommaList(value) {
+  return String(value || '')
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function defaultResearchGpuCloudDraft(slug) {
+  const config = getResearchGpuCloudConfig(slug);
+  const inventory = getResearchGpuCloudInventoryState(slug);
+  const templateHint = inventory && inventory.template_hint ? parseResearchObject(inventory.template_hint) : {};
+  const defaults = parseResearchObject(templateHint.field_defaults);
+  return {
+    runner_name: firstDefined(defaults.runner_name, templateHint.default_runner_name, config ? config.runnerName : '', ''),
+    image_or_runtime: firstDefined(defaults.image_or_runtime, templateHint.default_image_or_runtime, config ? config.image : '', ''),
+    region_name: firstDefined(defaults.region_name, ''),
+    instance_type_name: firstDefined(defaults.instance_type_name, ''),
+    quantity: Math.max(1, Number(firstDefined(defaults.quantity, 1)) || 1),
+    ssh_key_names: Array.isArray(defaults.ssh_key_names) ? defaults.ssh_key_names.join(', ') : '',
+    file_system_names: Array.isArray(defaults.file_system_names) ? defaults.file_system_names.join(', ') : '',
+  };
+}
+
+function getResearchGpuCloudDraft(slug) {
+  if (!experimentsState.gpuCloudDrafts.has(slug)) {
+    experimentsState.gpuCloudDrafts.set(slug, defaultResearchGpuCloudDraft(slug));
+  }
+  return experimentsState.gpuCloudDrafts.get(slug);
+}
+
+function syncResearchGpuCloudDraftFromDom(slug) {
+  const draft = Object.assign({}, getResearchGpuCloudDraft(slug));
+  const runnerName = document.getElementById('research-cloud-runner-name-' + slug);
+  const image = document.getElementById('research-cloud-image-' + slug);
+  const region = document.getElementById('research-cloud-region-' + slug);
+  const instanceType = document.getElementById('research-cloud-instance-type-' + slug);
+  const quantity = document.getElementById('research-cloud-quantity-' + slug);
+  const sshKeys = document.getElementById('research-cloud-ssh-keys-' + slug);
+  const fileSystems = document.getElementById('research-cloud-filesystems-' + slug);
+  if (runnerName) draft.runner_name = runnerName.value.trim();
+  if (image) draft.image_or_runtime = image.value.trim();
+  if (region) draft.region_name = region.value.trim();
+  if (instanceType) draft.instance_type_name = instanceType.value.trim();
+  if (quantity) {
+    const parsed = Number(quantity.value);
+    draft.quantity = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 1;
+  }
+  if (sshKeys) draft.ssh_key_names = sshKeys.value.trim();
+  if (fileSystems) draft.file_system_names = fileSystems.value.trim();
+  experimentsState.gpuCloudDrafts.set(slug, draft);
+  return draft;
+}
+
+function researchGpuCloudTemplateBody(slug) {
+  const draft = syncResearchGpuCloudDraftFromDom(slug);
+  return {
+    runner_name: draft.runner_name || null,
+    image_or_runtime: draft.image_or_runtime || null,
+    region_name: draft.region_name || null,
+    instance_type_name: draft.instance_type_name || null,
+    quantity: Math.max(1, Number(draft.quantity || 1)),
+    ssh_key_names: splitResearchCommaList(draft.ssh_key_names),
+    file_system_names: splitResearchCommaList(draft.file_system_names),
+  };
+}
+
+function fetchResearchGpuCloudTemplate(slug) {
+  return apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/template', {
+    method: 'POST',
+    body: researchGpuCloudTemplateBody(slug),
+  });
+}
+
+function renderResearchGpuCloudCard(config) {
+  const inventory = getResearchGpuCloudInventoryState(config.slug);
+  const cloudState = researchCloudCardState(config, inventory);
+  const draft = getResearchGpuCloudDraft(config.slug);
+  const keyValue = document.getElementById('research-cloud-key-' + config.slug)?.value || '';
+  const templateHint = inventory && inventory.template_hint ? parseResearchObject(inventory.template_hint) : {};
+  const quantityNote = firstDefined(templateHint.quantity_note, '');
+  const lambdaForm = config.slug === 'lambda'
+    ? '<div class="research-cloud-template research-cloud-template--lambda">'
+      + '<div class="research-form-grid research-form-grid--compact">'
+      + '<div><label class="research-field-label" for="research-cloud-runner-name-' + escapeHtml(config.slug) + '">Runner name</label><input type="text" class="research-input" id="research-cloud-runner-name-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.runner_name || config.runnerName) + '" placeholder="Lambda GPU Runner"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-image-' + escapeHtml(config.slug) + '">Image / runtime</label><input type="text" class="research-input" id="research-cloud-image-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.image_or_runtime || config.image) + '" placeholder="' + escapeHtml(config.image) + '"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-region-' + escapeHtml(config.slug) + '">Region</label><input type="text" class="research-input" id="research-cloud-region-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.region_name || '') + '" placeholder="Optional account default"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-instance-type-' + escapeHtml(config.slug) + '">Instance type</label><input type="text" class="research-input" id="research-cloud-instance-type-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.instance_type_name || '') + '" placeholder="gpu_1x_a100_sxm4"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-quantity-' + escapeHtml(config.slug) + '">Quantity</label><input type="number" min="1" step="1" class="research-input" id="research-cloud-quantity-' + escapeHtml(config.slug) + '" value="' + escapeHtml(String(firstDefined(draft.quantity, 1))) + '"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-ssh-keys-' + escapeHtml(config.slug) + '">SSH key names</label><input type="text" class="research-input" id="research-cloud-ssh-keys-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.ssh_key_names || '') + '" placeholder="default-key, team-key"></div>'
+      + '<div><label class="research-field-label" for="research-cloud-filesystems-' + escapeHtml(config.slug) + '">Filesystem names</label><input type="text" class="research-input" id="research-cloud-filesystems-' + escapeHtml(config.slug) + '" value="' + escapeHtml(draft.file_system_names || '') + '" placeholder="datasets, checkpoints"></div>'
+      + '</div>'
+      + '<div class="research-cloud-template-hint">' + escapeHtml(quantityNote || 'ThinClaw currently launches one Lambda instance per research trial so one runner can claim one lease cleanly.') + '</div>'
+      + '</div>'
+    : '';
+  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-cloud-card" data-research-cloud="' + escapeHtml(config.slug) + '">' +
+    '<div class="research-cloud-card-head">' +
+      '<div>' +
+        '<div class="research-cloud-kicker">' + escapeHtml(config.badge) + '</div>' +
+        '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(config.name) + '</h4>' +
+      '</div>' +
+      '<div class="research-inline-badges">'
+        + '<span class="badge ' + cloudState.connectionClass + '">' + escapeHtml(cloudState.connectionLabel) + '</span>'
+        + '<span class="badge ' + cloudState.launchClass + '">' + escapeHtml(cloudState.launchLabel) + '</span>'
+      + '</div>' +
+    '</div>' +
+    '<div class="research-cloud-description">' + escapeHtml(config.description) + '</div>' +
+    '<div class="research-cloud-status-grid">' +
+      '<div><strong>Launch mode</strong><span>' + escapeHtml(cloudState.launchLabel) + '</span></div>' +
+      '<div><strong>Backend</strong><span>' + escapeHtml(config.backend) + '</span></div>' +
+      '<div><strong>Secret</strong><span>' + escapeHtml(config.secretReference) + '</span></div>' +
+      '<div><strong>Template hint</strong><span>' + escapeHtml(String(firstDefined(templateHint.recommended_secret_reference, config.secretReference))) + '</span></div>' +
+    '</div>' +
+    '<div class="research-cloud-callout">' + escapeHtml(cloudState.launchDetail) + '</div>' +
+    '<div class="research-cloud-links">' +
+      '<a class="research-cloud-link" href="' + escapeHtml(config.accountUrl) + '" target="_blank" rel="noreferrer">Create account</a>' +
+      '<a class="research-cloud-link" href="' + escapeHtml(config.docsUrl) + '" target="_blank" rel="noreferrer">Docs</a>' +
+      '<button class="research-cloud-link button" type="button" onclick="applyResearchGpuCloudTemplate(\'' + escapeJsString(config.slug) + '\')">Use template</button>' +
+    '</div>' +
+    '<div class="research-cloud-credential">' +
+      '<label class="research-field-label" for="research-cloud-key-' + escapeHtml(config.slug) + '">' + escapeHtml(config.providerKeyLabel) + '</label>' +
+      '<input type="password" class="research-input" id="research-cloud-key-' + escapeHtml(config.slug) + '" placeholder="' + escapeHtml(config.providerKeyPlaceholder) + '" value="' + escapeHtml(keyValue) + '">' +
+      '<div class="research-cloud-credential-actions">' +
+        '<button class="btn-restart" type="button" onclick="saveResearchGpuCloudCredential(\'' + escapeJsString(config.slug) + '\')">Connect</button>' +
+        '<button class="btn-cancel" type="button" onclick="validateResearchGpuCloud(\'' + escapeJsString(config.slug) + '\')">Validate</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="research-cloud-template">' +
+      '<div class="research-cloud-template-hint">' + escapeHtml(config.launchHint) + '</div>' +
+      lambdaForm +
+      '<div class="research-cloud-template-actions">' +
+        '<button class="btn-restart" type="button" onclick="launchResearchGpuCloudTestJob(\'' + escapeJsString(config.slug) + '\')">Launch test job</button>' +
+        '<button class="btn-cancel" type="button" onclick="switchResearchSubtab(\'runners\')">Open runners</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="research-cloud-template-meta">' +
+      '<div><strong>Backend</strong><span>' + escapeHtml(config.backend) + '</span></div>' +
+      '<div><strong>Image/runtime</strong><span>' + escapeHtml(draft.image_or_runtime || config.image) + '</span></div>' +
+      '<div><strong>GPU</strong><span>' + escapeHtml(JSON.stringify(config.gpuRequirements)) + '</span></div>' +
+      '<div><strong>Secret</strong><span>' + escapeHtml(config.secretReference) + '</span></div>' +
+    '</div>' +
+    '</article>';
+}
+
+function renderResearchGpuClouds() {
+  const grid = document.getElementById('research-gpu-clouds-grid');
+  const empty = document.getElementById('research-gpu-clouds-empty');
+  const shell = document.getElementById('research-gpu-clouds-shell');
+  if (!grid || !empty || !shell) return;
+  const cards = RESEARCH_GPU_CLOUDS;
+  if (!cards.length) {
+    grid.innerHTML = '';
+    shell.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  shell.style.display = '';
+  empty.style.display = 'none';
+  grid.innerHTML = cards.map((config) => renderResearchGpuCloudCard(config)).join('');
+}
+
+function saveResearchGpuCloudCredential(slug) {
+  const config = getResearchGpuCloudConfig(slug);
+  syncResearchGpuCloudDraftFromDom(slug);
+  const input = document.getElementById('research-cloud-key-' + slug);
+  const apiKey = input ? input.value.trim() : '';
+  if (!apiKey) {
+    showToast('Enter a ' + (config ? config.providerKeyLabel : 'provider') + ' first.', 'error');
+    return;
+  }
+  apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/connect', {
+    method: 'POST',
+    body: { api_key: apiKey },
+  }).then((data) => {
+    showToast(data.message || (config ? config.name + ' credential saved' : 'Credential saved'), 'success');
+    experimentsState.gpuCloudConnections.set(slug, true);
+    loadExperiments();
+  }).catch((err) => {
+    showToast('Failed to save credential: ' + err.message, 'error');
+  });
+}
+
+function validateResearchGpuCloud(slug) {
+  const config = getResearchGpuCloudConfig(slug);
+  syncResearchGpuCloudDraftFromDom(slug);
+  const input = document.getElementById('research-cloud-key-' + slug);
+  const apiKey = input ? input.value.trim() : '';
+  if (!apiKey && !getResearchGpuCloudInventoryState(slug)?.connected) {
+    showToast('Add a credential first for ' + (config ? config.name : slug) + '.', 'warning');
+    return;
+  }
+  apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/validate', {
+    method: 'POST',
+  }).then((data) => {
+    showToast(data.message || ((config ? config.name : slug) + ' validated'), data.connected ? 'success' : 'warning');
+    loadExperiments();
+  }).catch((err) => {
+    showToast('Validation failed: ' + err.message, 'error');
+  });
+}
+
+function applyResearchGpuCloudTemplate(slug) {
+  const config = getResearchGpuCloudConfig(slug);
+  if (!config) {
+    showToast('Unknown GPU cloud provider: ' + slug, 'error');
+    return;
+  }
+  fetchResearchGpuCloudTemplate(slug).then((data) => {
+    const payload = data.runner_payload || null;
+    if (!payload) {
+      throw new Error('Template response did not include a runner payload.');
+    }
+    const runnerName = document.getElementById('research-runner-name');
+    const runnerBackend = document.getElementById('research-runner-backend');
+    const runnerImage = document.getElementById('research-runner-image');
+    const runnerBackendConfig = document.getElementById('research-runner-backend-config');
+    const runnerGpu = document.getElementById('research-runner-gpu');
+    const runnerEnv = document.getElementById('research-runner-env');
+    const runnerSecrets = document.getElementById('research-runner-secrets');
+    if (runnerName) runnerName.value = payload.name || config.runnerName;
+    if (runnerBackend) runnerBackend.value = payload.backend || config.backend;
+    if (runnerImage) runnerImage.value = payload.image_or_runtime || config.image;
+    if (runnerBackendConfig) runnerBackendConfig.value = JSON.stringify(payload.backend_config || {}, null, 2);
+    if (runnerGpu) runnerGpu.value = JSON.stringify(payload.gpu_requirements || config.gpuRequirements || {}, null, 2);
+    if (runnerEnv) runnerEnv.value = JSON.stringify(payload.env_grants || config.envGrants || {}, null, 2);
+    if (runnerSecrets) runnerSecrets.value = Array.isArray(payload.secret_references) ? payload.secret_references.join(', ') : config.secretReference;
+    switchResearchSubtab('runners');
+    const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
+    showToast(warnings.length ? warnings[0] : (data.message || (config.name + ' runner template applied')), warnings.length ? 'warning' : 'success');
+  }).catch((err) => {
+    showToast('Failed to apply template: ' + err.message, 'error');
+  });
+}
+
+function launchResearchGpuCloudTestJob(slug) {
+  const config = getResearchGpuCloudConfig(slug);
+  if (!config) {
+    showToast('Unknown GPU cloud provider: ' + slug, 'error');
+    return;
+  }
+  fetchResearchGpuCloudTemplate(slug).then((templateData) => {
+    const payload = templateData.runner_payload || null;
+    if (!payload) {
+      throw new Error('Template response did not include a runner payload.');
+    }
+    return apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/launch-test', {
+      method: 'POST',
+    }).then((providerData) => ({ providerData, payload, templateData }));
+  }).then(({ providerData, payload, templateData }) => {
+    return apiFetch('/api/experiments/runners', {
+      method: 'POST',
+      body: payload,
+    }).then((runner) => ({ providerData, runner, templateData }));
+  }).then(({ providerData, runner, templateData }) => {
+    return apiFetch('/api/experiments/runners/' + encodeURIComponent(runner.id) + '/validate', {
+      method: 'POST',
+    }).then((validation) => ({ providerData, runner, validation, templateData }));
+  }).then(({ providerData, runner, validation, templateData }) => {
+    experimentsState.selectedCampaignId = null;
+    const warnings = Array.isArray(templateData && templateData.warnings) ? templateData.warnings.filter(Boolean) : [];
+    showToast(
+      ((providerData.message || config.name + ' is ready') + ' ' + (validation.message || 'Runner validated.'))
+        + (warnings.length ? (' ' + warnings[0]) : ''),
+      warnings.length ? 'warning' : 'success'
+    );
+    loadExperiments();
+    switchResearchSubtab('runners');
+  }).catch((err) => {
+    showToast('Failed to prepare test job: ' + err.message, 'error');
+  });
+}
+
+function primeResearchProjectFormFromOpportunity(opportunityId) {
+  const opportunity = (experimentsState.opportunities || []).find((entry) => entry.id === opportunityId) || null;
+  if (!opportunity) {
+    showToast('Opportunity not found', 'error');
+    return;
+  }
+  experimentsState.selectedOpportunityId = opportunity.id;
+  const hint = opportunity.project_hint || {};
+  const projectName = document.getElementById('research-project-name');
+  const mutable = document.getElementById('research-project-mutable');
+  const fixed = document.getElementById('research-project-fixed');
+  const metricName = document.getElementById('research-project-metric-name');
+  const comparator = document.getElementById('research-project-metric-comparator');
+  const strategy = document.getElementById('research-project-strategy');
+  if (projectName) projectName.value = hint.name || opportunity.title || 'Research benchmark';
+  if (mutable) mutable.value = Array.isArray(hint.mutable_paths) ? hint.mutable_paths.join('\n') : '';
+  if (fixed) fixed.value = Array.isArray(hint.fixed_paths) ? hint.fixed_paths.join('\n') : '';
+  if (metricName) metricName.value = hint.metric_name || (opportunity.gpu_level === 'GPU required' ? 'loss' : 'quality');
+  if (comparator) comparator.value = hint.comparator || (opportunity.gpu_level === 'GPU required' ? 'lower_is_better' : 'higher_is_better');
+  if (strategy) strategy.value = hint.strategy || opportunity.summary || strategy.value;
+  switchResearchSubtab('projects');
+  showToast('Project form prefilled from ' + opportunity.title, 'success');
+}
+
+function linkResearchOpportunity(opportunityId) {
+  const opportunity = (experimentsState.opportunities || []).find((entry) => entry.id === opportunityId) || null;
+  if (!opportunity) {
+    showToast('Opportunity not found', 'error');
+    return;
+  }
+  const suggestedId = opportunity.route || opportunity.model || opportunity.provider || '';
+  const targetId = window.prompt('Enter the asset/config ID to link to this opportunity.', suggestedId);
+  if (!targetId || !targetId.trim()) return;
+  const targetName = window.prompt('Optional display name for the linked target.', targetId.trim()) || targetId.trim();
+  const location = window.prompt('Optional file path or config location for this target.', '') || '';
+  apiFetch('/api/experiments/targets/link', {
+    method: 'POST',
+    body: {
+      opportunity_id: opportunity.id,
+      target_type: researchOpportunityTargetKind(opportunity.kind),
+      target_id: targetId.trim(),
+      target_name: targetName.trim(),
+      location: location.trim() || null,
+      metadata: {
+        provider: opportunity.provider,
+        model: opportunity.model,
+        route_key: opportunity.route || null,
+      },
+    },
+  }).then(() => {
+    showToast('Research target linked', 'success');
+    loadExperiments();
+  }).catch((err) => {
+    showToast('Failed to link target: ' + err.message, 'error');
+  });
+}
+
+function copyResearchLeaseCommand() {
+  const output = document.getElementById('research-lease-output');
+  if (!output || !output.textContent.trim()) {
+    showToast('No lease command available yet.', 'warning');
+    return;
+  }
+  navigator.clipboard.writeText(output.textContent.trim()).then(() => {
+    showToast('Lease command copied', 'success');
+  }).catch(() => {
+    showToast('Copy failed. You can select the command manually.', 'warning');
+  });
+}
+
+function reissueResearchLease(campaignId) {
+  const activeCampaignId = campaignId || experimentsState.selectedCampaignId;
+  if (!activeCampaignId) {
+    showToast('Select a campaign first.', 'error');
+    return;
+  }
+  apiFetch('/api/experiments/campaigns/' + encodeURIComponent(activeCampaignId) + '/reissue-lease', {
+    method: 'POST',
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to reissue lease: ' + err.message, 'error'));
+}
+
+function runnerNameById(runnerId) {
+  const runner = experimentsState.runners.find((entry) => entry.id === runnerId);
+  return runner ? runner.name : '-';
+}
+
+function projectById(projectId) {
+  return experimentsState.projects.find((entry) => entry.id === projectId) || null;
+}
+
+function campaignById(campaignId) {
+  return experimentsState.campaigns.find((entry) => entry.id === campaignId) || null;
+}
+
+function campaignPrimaryMetricDisplay(campaign) {
+  const project = projectById(campaign.project_id);
+  if (!project) return '-';
+  const value = campaign.best_metrics ? campaign.best_metrics[project.primary_metric.name] : null;
+  if (value == null) return '-';
+  return formatResearchMetricValue(value) + ' ' + project.primary_metric.name;
+}
+
+function syncResearchSelectOptions() {
+  const runnerOptions = experimentsState.runners.map((runner) => {
+    return '<option value="' + escapeHtml(runner.id) + '">'
+      + escapeHtml(runner.name + ' (' + runner.backend + ' / ' + runner.status + ')')
+      + '</option>';
+  }).join('');
+  const projectOptions = experimentsState.projects.map((project) => {
+    return '<option value="' + escapeHtml(project.id) + '">' + escapeHtml(project.name) + '</option>';
+  }).join('');
+
+  const defaultRunnerSelect = document.getElementById('research-project-default-runner');
+  if (defaultRunnerSelect) {
+    const current = defaultRunnerSelect.value;
+    defaultRunnerSelect.innerHTML = '<option value="">Choose a validated runner</option>' + runnerOptions;
+    defaultRunnerSelect.value = experimentsState.runners.some((runner) => runner.id === current) ? current : '';
+  }
+
+  const startRunnerSelect = document.getElementById('research-start-runner');
+  if (startRunnerSelect) {
+    const current = startRunnerSelect.value;
+    startRunnerSelect.innerHTML = '<option value="">Use project default runner</option>' + runnerOptions;
+    startRunnerSelect.value = experimentsState.runners.some((runner) => runner.id === current) ? current : '';
+  }
+
+  const startProjectSelect = document.getElementById('research-start-project');
+  if (startProjectSelect) {
+    const current = startProjectSelect.value;
+    startProjectSelect.innerHTML = '<option value="">Choose a project</option>' + projectOptions;
+    startProjectSelect.value = experimentsState.projects.some((project) => project.id === current) ? current : '';
+  }
+}
+
+function renderResearchSummary() {
+  renderResearchOverview();
+}
+
+function renderResearchProjects() {
+  const tbody = document.getElementById('research-projects-tbody');
+  const empty = document.getElementById('research-projects-empty');
+  const shell = document.getElementById('research-projects-shell');
+  if (!tbody || !empty || !shell) return;
+  const projects = experimentsState.projects;
+  if (!projects.length) {
+    tbody.innerHTML = '';
+    shell.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  shell.style.display = '';
+  empty.style.display = 'none';
+  tbody.innerHTML = projects.map((project) => {
+    const runnerLabel = project.default_runner_profile_id ? runnerNameById(project.default_runner_profile_id) : '-';
+    return '<tr>'
+      + '<td>' + escapeHtml(project.name) + '</td>'
+      + '<td><span class="badge ' + researchBadgeClass(project.status) + '">' + escapeHtml(project.status) + '</span></td>'
+      + '<td>' + escapeHtml(project.primary_metric.name + ' (' + project.primary_metric.comparator + ')') + '</td>'
+      + '<td>' + escapeHtml(project.autonomy_mode || 'autonomous') + '</td>'
+      + '<td>' + escapeHtml(runnerLabel) + '</td>'
+      + '<td title="' + escapeHtml(project.workspace_path) + '">' + escapeHtml(project.workspace_path) + '</td>'
+      + '<td><div class="research-actions-cell">'
+      + '<button class="btn-restart" onclick="primeResearchStartForm(\'' + escapeJsString(project.id) + '\', \'' + escapeJsString(project.default_runner_profile_id || '') + '\')">Queue Run</button>'
+      + '<button class="btn-cancel" onclick="deleteResearchProject(\'' + escapeJsString(project.id) + '\', \'' + escapeJsString(project.name) + '\')">Delete</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderResearchRunners() {
+  const tbody = document.getElementById('research-runners-tbody');
+  const empty = document.getElementById('research-runners-empty');
+  const shell = document.getElementById('research-runners-shell');
+  if (!tbody || !empty || !shell) return;
+  const runners = experimentsState.runners;
+  if (!runners.length) {
+    tbody.innerHTML = '';
+    shell.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  shell.style.display = '';
+  empty.style.display = 'none';
+  tbody.innerHTML = runners.map((runner) => {
+    const gpu = runner.gpu_requirements && Object.keys(runner.gpu_requirements).length
+      ? JSON.stringify(runner.gpu_requirements)
+      : '-';
+    const launchMode = researchLaunchModeForBackend(runner.backend, runner.backend_config);
+    const providerState = researchRunnerProviderState(runner);
+    return '<tr>'
+      + '<td>' + escapeHtml(runner.name) + '</td>'
+      + '<td>' + escapeHtml(runner.backend) + '</td>'
+      + '<td><span class="badge ' + launchMode.className + '">' + escapeHtml(launchMode.label) + '</span><div class="research-table-note">' + escapeHtml(launchMode.detail) + '</div></td>'
+      + '<td><span class="badge ' + researchBadgeClass(runner.status) + '">' + escapeHtml(runner.status) + '</span></td>'
+      + '<td title="' + escapeHtml(runner.image_or_runtime || '-') + '">' + escapeHtml(trimResearchText(runner.image_or_runtime || '-', 40)) + '</td>'
+      + '<td title="' + escapeHtml(gpu) + '">' + escapeHtml(gpu) + '</td>'
+      + '<td><span class="badge ' + providerState.className + '">' + escapeHtml(providerState.label) + '</span><div class="research-table-note">' + escapeHtml(providerState.detail) + '</div></td>'
+      + '<td><div class="research-actions-cell">'
+      + '<button class="btn-restart" onclick="validateResearchRunner(\'' + escapeJsString(runner.id) + '\')">Validate</button>'
+      + '<button class="btn-cancel" onclick="deleteResearchRunner(\'' + escapeJsString(runner.id) + '\', \'' + escapeJsString(runner.name) + '\')">Delete</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderResearchCampaigns() {
+  const tbody = document.getElementById('research-campaigns-tbody');
+  const empty = document.getElementById('research-campaigns-empty');
+  const shell = document.getElementById('research-campaigns-shell');
+  if (!tbody || !empty || !shell) return;
+  const campaigns = experimentsState.campaigns;
+  if (!campaigns.length) {
+    tbody.innerHTML = '';
+    shell.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  shell.style.display = '';
+  empty.style.display = 'none';
+  tbody.innerHTML = campaigns.map((campaign) => {
+    const project = projectById(campaign.project_id);
+    const runner = experimentsState.runners.find((entry) => entry.id === campaign.runner_profile_id) || null;
+    const budget = researchCampaignBudgetSnapshot(campaign, project);
+    const budgetText = budget.maxCostUsd != null
+      ? (formatUsd(campaign.total_cost_usd || 0, 2, 4) + ' / ' + formatUsd(budget.maxCostUsd, 2, 4))
+      : formatUsd(campaign.total_cost_usd || 0, 2, 4);
+    const budgetDetail = budget.maxRuntimeSecs != null
+      ? (formatDurationMs(campaign.total_runtime_ms) + ' / ' + formatDuration(budget.maxRuntimeSecs))
+      : formatDurationMs(campaign.total_runtime_ms);
+    const providerMode = researchLaunchModeForBackend(runner ? runner.backend : null, runner ? runner.backend_config : null);
+    const activeTrial = activeTrialForCampaign(campaign);
+    const providerSummary = activeTrial ? researchTrialProviderSummary(activeTrial, runner) : null;
+    const status = String(campaign.status || '').toLowerCase();
+    const selectedClass = experimentsState.selectedCampaignId === campaign.id ? ' class="research-selected-row"' : '';
+    const canPause = status === 'running';
+    const canResume = status === 'paused';
+    const canCancel = !['completed', 'failed', 'cancelled'].includes(status);
+    const canPromote = !!(campaign.best_commit || campaign.baseline_commit);
+    const canReissue = !['completed', 'failed', 'cancelled'].includes(status);
+    return '<tr' + selectedClass + '>'
+      + '<td>' + escapeHtml(project ? project.name : campaign.project_id) + '</td>'
+      + '<td>' + escapeHtml(runnerNameById(campaign.runner_profile_id)) + '</td>'
+      + '<td><span class="badge ' + researchBadgeClass(campaign.status) + '">' + escapeHtml(campaign.status) + '</span></td>'
+      + '<td><span class="badge ' + researchBadgeClass(campaign.queue_state) + '">' + escapeHtml(researchQueueLabel(campaign)) + '</span></td>'
+      + '<td>' + escapeHtml(String(campaign.trial_count || 0)) + '</td>'
+      + '<td>' + escapeHtml(campaignPrimaryMetricDisplay(campaign)) + '</td>'
+      + '<td><span class="badge ' + researchBudgetBadgeClass(budget.riskRatio) + '">' + escapeHtml(budgetText) + '</span><div class="research-table-note">' + escapeHtml(budgetDetail) + '</div></td>'
+      + '<td><span class="badge ' + (providerSummary ? providerSummary.stateClass : providerMode.className) + '">' + escapeHtml(providerSummary ? providerSummary.stateLabel : providerMode.label) + '</span><div class="research-table-note">' + escapeHtml(providerSummary ? providerSummary.launchMode.detail : providerMode.detail) + '</div></td>'
+      + '<td>' + formatRelativeTime(campaign.updated_at) + '</td>'
+      + '<td><div class="research-actions-cell">'
+      + '<button class="btn-restart" onclick="selectResearchCampaign(\'' + escapeJsString(campaign.id) + '\')">View</button>'
+      + (canPause ? '<button class="btn-cancel" onclick="pauseResearchCampaign(\'' + escapeJsString(campaign.id) + '\')">Pause</button>' : '')
+      + (canResume ? '<button class="btn-restart" onclick="resumeResearchCampaign(\'' + escapeJsString(campaign.id) + '\')">Resume</button>' : '')
+      + (canCancel ? '<button class="btn-cancel" onclick="cancelResearchCampaign(\'' + escapeJsString(campaign.id) + '\')">Cancel</button>' : '')
+      + (canPromote ? '<button class="btn-restart" onclick="promoteResearchCampaign(\'' + escapeJsString(campaign.id) + '\')">Promote</button>' : '')
+      + (canReissue ? '<button class="btn-restart" onclick="reissueResearchLease(\'' + escapeJsString(campaign.id) + '\')">Reissue Lease</button>' : '')
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderResearchArtifacts(selectedTrial, artifacts) {
+  if (!selectedTrial) {
+    return '<div class="empty-state ui-panel-empty">Select a trial to inspect artifacts.</div>';
+  }
+  if (!artifacts) {
+    return '<div class="settings-loading">Loading artifacts...</div>';
+  }
+  if (!artifacts.length) {
+    return '<div class="empty-state ui-panel-empty">No artifacts recorded for this trial.</div>';
+  }
+  return '<div class="research-artifact-list">' + artifacts.map((artifact) => {
+    const size = artifact.size_bytes != null ? artifact.size_bytes + ' bytes' : 'size unavailable';
+    return '<div class="research-artifact-item">'
+      + '<strong>' + escapeHtml(artifact.kind) + '</strong>'
+      + '<div class="research-artifact-meta">' + escapeHtml(artifact.uri_or_local_path) + '</div>'
+      + '<div class="research-artifact-meta">' + escapeHtml(size + ' · fetchable=' + artifact.fetchable) + '</div>'
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+function renderResearchDetail() {
+  const container = document.getElementById('research-detail');
+  if (!container) return;
+  if (!experimentsFeatureEnabled) {
+    container.innerHTML = 'Enable experiments in Settings → Advanced to use Research.';
+    return;
+  }
+  const campaign = campaignById(experimentsState.selectedCampaignId);
+  if (!campaign) {
+    container.innerHTML = 'Select a campaign to inspect its worktree and trials.';
+    return;
+  }
+  const project = projectById(campaign.project_id);
+  const runner = experimentsState.runners.find((entry) => entry.id === campaign.runner_profile_id) || null;
+  const trials = experimentsState.trialsByCampaign.get(campaign.id);
+  if (!trials) {
+    container.innerHTML = '<div class="settings-loading">Loading campaign detail...</div>';
+    return;
+  }
+  if (!experimentsState.selectedTrialId || !trials.some((trial) => trial.id === experimentsState.selectedTrialId)) {
+    experimentsState.selectedTrialId = trials.length ? trials[trials.length - 1].id : null;
+  }
+  const selectedTrial = trials.find((trial) => trial.id === experimentsState.selectedTrialId) || null;
+  const artifacts = selectedTrial ? experimentsState.artifactsByTrial.get(selectedTrial.id) : null;
+  const costEstimate = selectedTrial && selectedTrial.provider_job_metadata
+    ? selectedTrial.provider_job_metadata.cost_estimate || null
+    : null;
+  const costBreakdown = selectedTrial && selectedTrial.artifact_manifest_json
+    ? selectedTrial.artifact_manifest_json.cost_breakdown || null
+    : null;
+  const runnerCostBreakdown = costBreakdown && costBreakdown.runner ? costBreakdown.runner : null;
+  const budget = researchCampaignBudgetSnapshot(campaign, project);
+  const budgetLimit = project && project.stop_policy ? project.stop_policy.max_total_cost_usd : null;
+  const budgetUsage = budgetLimit && campaign.total_cost_usd != null
+    ? Math.min(100, (Number(campaign.total_cost_usd) / Number(budgetLimit)) * 100)
+    : null;
+  const lastLeaseMatches = !!(experimentsState.lastLease && experimentsState.lastLeaseCampaignId === campaign.id);
+  const queueLabel = researchQueueLabel(campaign);
+  const providerSummary = researchTrialProviderSummary(selectedTrial, runner);
+  const launchMode = researchLaunchModeForBackend(runner ? runner.backend : null, runner ? runner.backend_config : null);
+  const leaseState = lastLeaseMatches
+    ? 'Lease issued in this browser session'
+    : (isResearchRemoteBackend(runner ? runner.backend : null) && campaign.active_trial_id ? 'Remote trial active; reissue available' : '-');
+  const leaseActions = lastLeaseMatches
+    ? '<div class="research-detail-actions">'
+      + '<button class="btn-restart" onclick="reissueResearchLease(\'' + escapeJsString(campaign.id) + '\')">Reissue Lease</button>'
+      + '<button class="btn-cancel" onclick="copyResearchLeaseCommand()">Copy Lease Command</button>'
+      + '</div>'
+    : '';
+  const budgetSection = ''
+    + '<section class="ui-panel ui-panel--subtle ui-panel-stack research-detail-section">'
+    + '<div class="ui-panel-copy">'
+    + '<h4 class="ui-panel-title ui-panel-title--section">Budgets & thresholds</h4>'
+    + '<p class="ui-panel-desc">Track campaign cost, runtime, and trial count against the configured stop policy.</p>'
+    + '</div>'
+    + '<div class="research-progress-list">'
+    + renderResearchProgressRow('Campaign cost', formatUsd(campaign.total_cost_usd || 0, 2, 4), budget.maxCostUsd != null ? formatUsd(budget.maxCostUsd, 2, 4) : null, budget.costRatio, budget.maxCostUsd != null ? Math.round((budget.costRatio || 0) * 100) + '% used' : 'No cost cap configured')
+    + renderResearchProgressRow('Campaign runtime', formatDurationMs(campaign.total_runtime_ms), budget.maxRuntimeSecs != null ? formatDuration(budget.maxRuntimeSecs) : null, budget.runtimeRatio, budget.maxRuntimeSecs != null ? Math.round((budget.runtimeRatio || 0) * 100) + '% used' : 'No runtime cap configured')
+    + renderResearchProgressRow('Trial count', String(campaign.trial_count || 0), budget.maxTrials != null ? String(budget.maxTrials) : null, budget.trialRatio, budget.maxTrials != null ? Math.round((budget.trialRatio || 0) * 100) + '% used' : 'No trial cap configured')
+    + '</div>'
+    + renderResearchKeyValueGrid([
+      ['Failure count', String(campaign.failure_count || 0)],
+      ['Infra pause threshold', String(budget.infraFailurePauseThreshold)],
+      ['Non-improving streak', String(campaign.consecutive_non_improving_trials || 0)],
+      ['Non-improving pause threshold', String(budget.nonImprovingPauseThreshold)],
+      ['Plateau window', budget.plateauWindow != null ? String(budget.plateauWindow) : '-'],
+      ['Active trial ID', campaign.active_trial_id || '-'],
+      ['Budget updated', parseResearchObject(campaign.metadata).cost_summary ? parseResearchObject(campaign.metadata).cost_summary.updated_at || '-' : '-'],
+    ])
+    + '</section>';
+  const providerSection = ''
+    + '<section class="ui-panel ui-panel--subtle ui-panel-stack research-detail-section">'
+    + '<div class="ui-panel-copy">'
+    + '<h4 class="ui-panel-title ui-panel-title--section">Provider state</h4>'
+    + '<p class="ui-panel-desc">See how the current runner launches work, whether a provider job is tracked, and where the runner cost estimate came from.</p>'
+    + '</div>'
+    + '<div class="research-inline-badges">'
+    + '<span class="badge ' + launchMode.className + '">' + escapeHtml(launchMode.label) + '</span>'
+    + '<span class="badge ' + providerSummary.stateClass + '">' + escapeHtml(providerSummary.stateLabel) + '</span>'
+    + (providerSummary.manualLaunchRequired ? '<span class="badge stuck">Operator action required</span>' : '')
+    + '</div>'
+    + '<div class="research-detail-note">' + escapeHtml(providerSummary.launchMode.detail) + '</div>'
+    + renderResearchKeyValueGrid([
+      ['Lease state', leaseState],
+      ['Provider', providerSummary.provider],
+      ['Provider job ID', selectedTrial && selectedTrial.provider_job_id ? selectedTrial.provider_job_id : '-'],
+      ['Cost source', firstDefined(costEstimate && costEstimate.source, runnerCostBreakdown && runnerCostBreakdown.source, '-')],
+      ['Estimated runner cost', costEstimate && costEstimate.usd != null ? formatUsd(costEstimate.usd, 2, 4) : '-'],
+      ['Native hourly rate', costEstimate && costEstimate.native_hourly_rate != null ? String(costEstimate.native_hourly_rate) + ' ' + String(firstDefined(costEstimate.native_currency, '')) : '-'],
+      ['Normalization', firstDefined(costEstimate && costEstimate.normalization, '-')],
+    ].concat(providerSummary.summaryItems))
+    + renderResearchJsonDetails('Provider launch metadata', providerSummary.metadata, 'Provider launch metadata')
+    + '</section>';
+  const reasoningSection = selectedTrial
+    ? '<section class="ui-panel ui-panel--subtle ui-panel-stack research-detail-section">'
+      + '<div class="ui-panel-copy">'
+      + '<h4 class="ui-panel-title ui-panel-title--section">Trial reasoning</h4>'
+      + '<p class="ui-panel-desc">Autonomous campaigns preserve the planner hypothesis, mutator summary, and reviewer decision for the selected trial.</p>'
+      + '</div>'
+      + renderResearchKeyValueGrid([
+        ['Started', selectedTrial.started_at ? formatDate(selectedTrial.started_at) : '-'],
+        ['Completed', selectedTrial.completed_at ? formatDate(selectedTrial.completed_at) : '-'],
+        ['Runtime', selectedTrial.runtime_ms != null ? formatDurationMs(selectedTrial.runtime_ms) : '-'],
+        ['Hypothesis', selectedTrial.hypothesis || '-'],
+        ['Mutation summary', selectedTrial.mutation_summary || '-'],
+        ['Reviewer decision', selectedTrial.reviewer_decision || '-'],
+        ['Trial summary', selectedTrial.summary || selectedTrial.decision_reason || '-'],
+      ])
+      + renderResearchJsonDetails('Trial cost breakdown', costBreakdown, 'Trial cost breakdown')
+      + '</section>'
+    : '';
+  container.innerHTML = ''
+    + '<div class="research-detail-copy">'
+    + '<div><strong>' + escapeHtml(project ? project.name : campaign.project_id) + '</strong> · '
+    + '<span class="badge ' + researchBadgeClass(campaign.status) + '">' + escapeHtml(campaign.status) + '</span></div>'
+    + '<div class="research-detail-note">' + escapeHtml(campaign.pause_reason || 'Campaign active with explicit operator control between trials.') + '</div>'
+    + leaseActions
+    + '</div>'
+    + '<div class="research-detail-grid">'
+    + metaItem('Runner', runner ? runner.name + ' (' + runner.backend + ')' : campaign.runner_profile_id)
+    + metaItem('Branch', campaign.experiment_branch || '-')
+    + metaItem('Worktree', campaign.worktree_path || '-')
+    + metaItem('Autonomy', project ? (project.autonomy_mode || 'autonomous') : 'autonomous')
+    + metaItem('Queue', queueLabel)
+    + metaItem('Trials', String(campaign.trial_count || trials.length || 0))
+    + metaItem('Best Commit', shortCommit(campaign.best_commit || campaign.baseline_commit))
+    + metaItem('Primary Metric', campaignPrimaryMetricDisplay(campaign))
+    + metaItem('Total Runtime', formatDurationMs(campaign.total_runtime_ms))
+    + metaItem('Total Cost', campaign.total_cost_usd != null ? ('$' + Number(campaign.total_cost_usd).toFixed(4)) : '-')
+    + metaItem('LLM Cost', campaign.total_llm_cost_usd != null ? ('$' + Number(campaign.total_llm_cost_usd).toFixed(4)) : '-')
+    + metaItem('Runner Cost', campaign.total_runner_cost_usd != null ? ('$' + Number(campaign.total_runner_cost_usd).toFixed(4)) : '-')
+    + metaItem('Budget', budgetLimit != null ? ('$' + Number(budgetLimit).toFixed(4) + (budgetUsage != null ? (' (' + budgetUsage.toFixed(0) + '% used)') : '')) : '-')
+    + metaItem('Runtime Limit', budget.maxRuntimeSecs != null ? formatDuration(budget.maxRuntimeSecs) : '-')
+    + metaItem('Trial Limit', budget.maxTrials != null ? String(budget.maxTrials) : '-')
+    + metaItem('Lease State', leaseState)
+    + metaItem('Launch Mode', launchMode.label)
+    + metaItem('Provider Job', selectedTrial && selectedTrial.provider_job_id ? selectedTrial.provider_job_id : '-')
+    + metaItem('Trial Cost', selectedTrial && selectedTrial.attributed_cost_usd != null ? ('$' + Number(selectedTrial.attributed_cost_usd).toFixed(4)) : '-')
+    + metaItem('Trial LLM Cost', selectedTrial && selectedTrial.llm_cost_usd != null ? ('$' + Number(selectedTrial.llm_cost_usd).toFixed(4)) : '-')
+    + metaItem('Trial Runner Cost', selectedTrial && selectedTrial.runner_cost_usd != null ? ('$' + Number(selectedTrial.runner_cost_usd).toFixed(4)) : '-')
+    + metaItem('Cost Source', costEstimate && costEstimate.source ? costEstimate.source : '-')
+    + metaItem('LLM Source', costBreakdown && costBreakdown.llm && costBreakdown.llm.source ? costBreakdown.llm.source : '-')
+    + metaItem('Runner Source', runnerCostBreakdown && runnerCostBreakdown.source ? runnerCostBreakdown.source : '-')
+    + metaItem('Updated', formatDate(campaign.updated_at))
+    + '</div>'
+    + '<div class="research-detail-sections">'
+    + budgetSection
+    + providerSection
+    + reasoningSection
+    + '</div>'
+    + '<div class="research-inline-stack">'
+    + '<div class="ui-panel-table-wrap">'
+    + '<table class="ui-panel-table">'
+    + '<thead><tr><th>#</th><th>Status</th><th>Commit</th><th>Metrics</th><th>Summary</th><th>Artifacts</th></tr></thead>'
+    + '<tbody>'
+    + (trials.length ? trials.map((trial) => {
+      const rowClass = experimentsState.selectedTrialId === trial.id ? ' class="research-selected-row"' : '';
+      return '<tr' + rowClass + '>'
+        + '<td>' + escapeHtml(String(trial.sequence)) + '</td>'
+        + '<td><span class="badge ' + researchBadgeClass(trial.status) + '">' + escapeHtml(trial.status) + '</span></td>'
+        + '<td title="' + escapeHtml(trial.candidate_commit || '') + '">' + escapeHtml(shortCommit(trial.candidate_commit)) + '</td>'
+        + '<td title="' + escapeHtml(JSON.stringify(trial.metrics_json || {})) + '">' + escapeHtml(formatResearchMetricsSummary(trial.metrics_json)) + '</td>'
+        + '<td title="' + escapeHtml(((trial.decision_reason || trial.summary || '').trim()) + (trial.provider_job_id ? (' · provider_job=' + trial.provider_job_id) : '')) + '">' + escapeHtml(trial.summary || trial.decision_reason || '-') + '</td>'
+        + '<td><button class="btn-restart" onclick="selectResearchTrial(\'' + escapeJsString(trial.id) + '\')">View</button></td>'
+        + '</tr>';
+    }).join('') : '<tr><td colspan="6">No trials recorded yet.</td></tr>')
+    + '</tbody></table></div>'
+    + '<div>'
+    + '<div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Trial Artifacts</h4></div>'
+    + renderResearchArtifacts(selectedTrial, artifacts)
+    + (lastLeaseMatches
+      ? '<div class="research-detail-lease"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Lease</h4><p class="ui-panel-desc">The current lease command is ready to copy or reissue from the active campaign.</p></div><pre class="research-lease-output">' + escapeHtml(document.getElementById('research-lease-output')?.textContent || '') + '</pre></div>'
+      : '')
+    + '</div>'
+    + '</div>';
+}
+
+function loadExperimentTrials(campaignId) {
+  if (!campaignId) return Promise.resolve();
+  return apiFetch('/api/experiments/campaigns/' + encodeURIComponent(campaignId) + '/trials')
+    .then((data) => {
+      const trials = data.trials || [];
+      experimentsState.trialsByCampaign.set(campaignId, trials);
+      if (!experimentsState.selectedTrialId || !trials.some((trial) => trial.id === experimentsState.selectedTrialId)) {
+        experimentsState.selectedTrialId = trials.length ? trials[trials.length - 1].id : null;
+      }
+      renderResearchDetail();
+      if (experimentsState.selectedTrialId) {
+        return loadExperimentArtifacts(experimentsState.selectedTrialId);
+      }
+      return null;
+    })
+    .catch((err) => {
+      const container = document.getElementById('research-detail');
+      if (container) {
+        container.innerHTML = '<div class="empty-state ui-panel-empty">Failed to load campaign detail: ' + escapeHtml(err.message) + '</div>';
+      }
+    });
+}
+
+function loadExperimentArtifacts(trialId) {
+  if (!trialId) return Promise.resolve();
+  return apiFetch('/api/experiments/trials/' + encodeURIComponent(trialId) + '/artifacts')
+    .then((data) => {
+      experimentsState.artifactsByTrial.set(trialId, data.artifacts || []);
+      renderResearchDetail();
+    })
+    .catch((err) => {
+      showToast('Failed to load artifacts: ' + err.message, 'error');
+    });
+}
+
+function selectResearchCampaign(campaignId) {
+  experimentsState.selectedCampaignId = campaignId;
+  experimentsState.selectedTrialId = null;
+  switchResearchSubtab('campaigns', { render: false });
+  renderResearchCampaigns();
+  renderResearchDetail();
+  loadExperimentTrials(campaignId);
+}
+
+function selectResearchTrial(trialId) {
+  experimentsState.selectedTrialId = trialId;
+  renderResearchDetail();
+  if (!experimentsState.artifactsByTrial.has(trialId)) {
+    loadExperimentArtifacts(trialId);
+  }
+}
+
+function loadExperiments() {
+  if (!experimentsFeatureEnabled) {
+    renderResearchSummary();
+    renderResearchOpportunities();
+    renderResearchProjects();
+    renderResearchRunners();
+    renderResearchCampaigns();
+    renderResearchDetail();
+    renderResearchGpuClouds();
+    return Promise.resolve();
+  }
+  const summary = document.getElementById('research-overview-summary') || document.getElementById('research-summary');
+  if (summary) summary.innerHTML = '<div class="settings-loading">Loading research data...</div>';
+  Promise.allSettled([
+    apiFetch('/api/experiments/projects'),
+    apiFetch('/api/experiments/runners'),
+    apiFetch('/api/experiments/campaigns'),
+    apiFetch('/api/experiments/opportunities'),
+    apiFetch('/api/experiments/targets'),
+    apiFetch('/api/experiments/providers/gpu-clouds'),
+    apiFetch('/api/providers/config'),
+  ]).then((results) => {
+    experimentsState.projects = results[0].status === 'fulfilled' ? (results[0].value.projects || []) : [];
+    experimentsState.runners = results[1].status === 'fulfilled' ? (results[1].value.runners || []) : [];
+    experimentsState.campaigns = results[2].status === 'fulfilled' ? (results[2].value.campaigns || []) : [];
+    const fetchedOpportunities = results[3].status === 'fulfilled' ? (results[3].value.opportunities || []) : [];
+    experimentsState.targets = results[4].status === 'fulfilled' ? (results[4].value.targets || []) : [];
+    const gpuCloudsRes = results[5].status === 'fulfilled' ? (results[5].value.providers || []) : [];
+    const configRes = results[6].status === 'fulfilled' ? results[6].value : null;
+    experimentsState.campaigns.sort((left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime());
+    const normalizedConfig = configRes ? applyPersistedProvidersConfig(configRes) : null;
+    if (normalizedConfig) {
+      providerRoutingConfig = Object.assign({}, providerRoutingConfig || {}, normalizedConfig);
+      if (Array.isArray(normalizedConfig.providers)) {
+        providerRoutingConfig.providers = mergeProviderEntries([], normalizedConfig.providers);
+      }
+    }
+    experimentsState.gpuClouds = gpuCloudsRes;
+    experimentsState.gpuCloudConnections.clear();
+    (gpuCloudsRes || []).forEach((provider) => {
+      if (provider && provider.slug && provider.connected) {
+        experimentsState.gpuCloudConnections.set(provider.slug, true);
+      }
+    });
+    experimentsState.opportunities = fetchedOpportunities.length
+      ? fetchedOpportunities.map((entry, index) => normalizeResearchOpportunity(entry, index)).filter(Boolean)
+      : buildFallbackResearchOpportunities().map((entry, index) => normalizeResearchOpportunity(entry, index)).filter(Boolean);
+    if (!experimentsState.selectedCampaignId || !experimentsState.campaigns.some((campaign) => campaign.id === experimentsState.selectedCampaignId)) {
+      experimentsState.selectedCampaignId = experimentsState.campaigns[0] ? experimentsState.campaigns[0].id : null;
+      experimentsState.selectedTrialId = null;
+    }
+    syncResearchSelectOptions();
+    renderResearchSummary();
+    renderResearchOpportunities();
+    renderResearchProjects();
+    renderResearchRunners();
+    renderResearchCampaigns();
+    renderResearchDetail();
+    renderResearchGpuClouds();
+    switchResearchSubtab(currentResearchSubtab, { render: false });
+    if (experimentsState.selectedCampaignId) {
+      loadExperimentTrials(experimentsState.selectedCampaignId);
+    }
+  }).catch((err) => {
+    const detail = document.getElementById('research-detail');
+    if (detail) {
+      detail.innerHTML = '<div class="empty-state ui-panel-empty">Failed to load Research: ' + escapeHtml(err.message) + '</div>';
+    }
+    renderResearchOverview();
+    renderResearchOpportunities();
+    renderResearchGpuClouds();
+  });
+}
+
+function primeResearchStartForm(projectId, runnerId) {
+  const projectSelect = document.getElementById('research-start-project');
+  const runnerSelect = document.getElementById('research-start-runner');
+  if (projectSelect) projectSelect.value = projectId || '';
+  if (runnerSelect) runnerSelect.value = runnerId || '';
+  switchResearchSubtab('campaigns', { render: false });
+  showToast('Campaign start form prefilled', 'success');
+}
+
+function backendLaunchHint(backend) {
+  switch (backend) {
+    case 'ssh':
+      return 'Run this command from the SSH target host or wrap it in your SSH launcher.';
+    case 'slurm':
+      return 'Wrap this command in an sbatch job on the configured Slurm login node.';
+    case 'kubernetes':
+      return 'Use this command as the container entrypoint for the Kubernetes Job.';
+    case 'runpod':
+      return 'Use this command in the RunPod worker startup command or image entrypoint.';
+    default:
+      return 'Run this command from any host that can reach the gateway and the repo remote.';
+  }
+}
+
+function renderResearchLease(auth, campaign) {
+  const shell = document.getElementById('research-lease-shell');
+  const output = document.getElementById('research-lease-output');
+  const description = document.getElementById('research-lease-description');
+  if (!shell || !output || !description || !auth || !campaign) return;
+  const runner = experimentsState.runners.find((entry) => entry.id === campaign.runner_profile_id);
+  const gatewayUrl = window.location.origin;
+  description.textContent = backendLaunchHint(runner ? runner.backend : '');
+  output.textContent = 'thinclaw experiment-runner'
+    + ' --lease-id ' + auth.lease_id
+    + ' --gateway-url ' + gatewayUrl
+    + ' --token ' + auth.token;
+  shell.style.display = '';
+}
+
+function handleResearchCampaignResponse(data) {
+  if (!data) return;
+  if (data.campaign) {
+    experimentsState.selectedCampaignId = data.campaign.id;
+    switchResearchSubtab('campaigns', { render: false });
+  }
+  experimentsState.lastLease = data.lease || null;
+  experimentsState.lastLeaseCampaignId = data.lease
+    ? (data.campaign ? data.campaign.id : experimentsState.selectedCampaignId)
+    : null;
+  if (data.lease && data.campaign) {
+    renderResearchLease(data.lease, data.campaign);
+  } else {
+    const shell = document.getElementById('research-lease-shell');
+    if (shell) shell.style.display = 'none';
+  }
+  showToast(data.message || 'Research action complete', 'success');
+  loadExperiments();
+}
+
+function createResearchRunner() {
+  try {
+    const payload = {
+      name: document.getElementById('research-runner-name')?.value.trim(),
+      backend: document.getElementById('research-runner-backend')?.value || 'local_docker',
+      backend_config: parseResearchJson(document.getElementById('research-runner-backend-config')?.value, 'Backend config', {}),
+      image_or_runtime: document.getElementById('research-runner-image')?.value.trim() || null,
+      gpu_requirements: parseResearchJson(document.getElementById('research-runner-gpu')?.value, 'GPU requirements', {}),
+      env_grants: parseResearchJson(document.getElementById('research-runner-env')?.value, 'Env grants', {}),
+      secret_references: parseResearchList(document.getElementById('research-runner-secrets')?.value),
+      cache_policy: parseResearchJson(document.getElementById('research-runner-cache')?.value, 'Cache policy', {}),
+    };
+    if (!payload.name) throw new Error('Runner name is required.');
+    apiFetch('/api/experiments/runners', {
+      method: 'POST',
+      body: payload,
+    }).then(() => {
+      showToast('Runner profile created', 'success');
+      loadExperiments();
+      switchResearchSubtab('runners', { render: false });
+    }).catch((err) => showToast('Failed to create runner: ' + err.message, 'error'));
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function createResearchProject() {
+  try {
+    const metricRegex = document.getElementById('research-project-metric-regex')?.value.trim() || null;
+    const metricJsonPath = document.getElementById('research-project-metric-json-path')?.value.trim() || null;
+    if (!metricRegex && !metricJsonPath) {
+      throw new Error('Primary metric needs either a regex or a JSON path.');
+    }
+    const payload = {
+      name: document.getElementById('research-project-name')?.value.trim(),
+      workspace_path: document.getElementById('research-project-workspace')?.value.trim(),
+      git_remote_name: document.getElementById('research-project-remote')?.value.trim() || 'origin',
+      base_branch: document.getElementById('research-project-branch')?.value.trim() || 'main',
+      preset: (() => {
+        const selectedOpportunity = (experimentsState.opportunities || []).find((entry) => entry.id === experimentsState.selectedOpportunityId) || null;
+        return selectedOpportunity ? selectedOpportunity.suggested_preset : 'autoresearch_single_file';
+      })(),
+      strategy_prompt: document.getElementById('research-project-strategy')?.value.trim() || null,
+      workdir: document.getElementById('research-project-workdir')?.value.trim() || '.',
+      prepare_command: document.getElementById('research-project-prepare')?.value.trim() || null,
+      run_command: document.getElementById('research-project-run')?.value.trim(),
+      mutable_paths: parseResearchList(document.getElementById('research-project-mutable')?.value),
+      fixed_paths: parseResearchList(document.getElementById('research-project-fixed')?.value),
+      primary_metric: {
+        name: document.getElementById('research-project-metric-name')?.value.trim() || 'primary_metric',
+        regex: metricRegex,
+        json_path: metricJsonPath,
+        comparator: document.getElementById('research-project-metric-comparator')?.value || 'lower_is_better',
+      },
+      secondary_metrics: parseResearchJson(document.getElementById('research-project-secondary')?.value, 'Secondary metrics', [], true),
+      comparison_policy: parseResearchJson(document.getElementById('research-project-comparison')?.value, 'Comparison policy', null),
+      stop_policy: parseResearchJson(document.getElementById('research-project-stop')?.value, 'Stop policy', null),
+      default_runner_profile_id: document.getElementById('research-project-default-runner')?.value || null,
+      promotion_mode: 'branch_pr_draft',
+      autonomy_mode: document.getElementById('research-project-autonomy')?.value || 'autonomous',
+    };
+    if (!payload.name) throw new Error('Project name is required.');
+    if (!payload.workspace_path) throw new Error('Workspace path is required.');
+    if (!payload.run_command) throw new Error('Run command is required.');
+    if (!payload.mutable_paths.length) throw new Error('At least one mutable path is required.');
+    apiFetch('/api/experiments/projects', {
+      method: 'POST',
+      body: payload,
+    }).then(() => {
+      showToast('Research project created', 'success');
+      loadExperiments();
+      switchResearchSubtab('projects', { render: false });
+    }).catch((err) => showToast('Failed to create project: ' + err.message, 'error'));
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function deleteResearchProject(projectId, name) {
+  if (!confirm('Delete research project "' + name + '"?')) return;
+  apiFetch('/api/experiments/projects/' + encodeURIComponent(projectId), {
+    method: 'DELETE',
+  }).then(() => {
+    showToast('Research project deleted', 'success');
+    loadExperiments();
+  }).catch((err) => showToast('Failed to delete project: ' + err.message, 'error'));
+}
+
+function validateResearchRunner(runnerId) {
+  apiFetch('/api/experiments/runners/' + encodeURIComponent(runnerId) + '/validate', {
+    method: 'POST',
+  }).then((data) => {
+    showToast(data.message || 'Runner validated', data.valid ? 'success' : 'warning');
+    loadExperiments();
+  }).catch((err) => showToast('Failed to validate runner: ' + err.message, 'error'));
+}
+
+function deleteResearchRunner(runnerId, name) {
+  if (!confirm('Delete runner "' + name + '"?')) return;
+  apiFetch('/api/experiments/runners/' + encodeURIComponent(runnerId), {
+    method: 'DELETE',
+  }).then(() => {
+    showToast('Runner deleted', 'success');
+    loadExperiments();
+  }).catch((err) => showToast('Failed to delete runner: ' + err.message, 'error'));
+}
+
+function startResearchCampaign() {
+  const projectId = document.getElementById('research-start-project')?.value || '';
+  const runnerId = document.getElementById('research-start-runner')?.value || '';
+  const maxTrialsRaw = document.getElementById('research-start-max-trials')?.value || '';
+  if (!projectId) {
+    showToast('Choose a project first', 'error');
+    return;
+  }
+  apiFetch('/api/experiments/projects/' + encodeURIComponent(projectId) + '/campaigns', {
+    method: 'POST',
+    body: {
+      runner_profile_id: runnerId || null,
+      max_trials_override: maxTrialsRaw ? Number(maxTrialsRaw) : null,
+    },
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to start campaign: ' + err.message, 'error'));
+}
+
+function pauseResearchCampaign(campaignId) {
+  apiFetch('/api/experiments/campaigns/' + encodeURIComponent(campaignId) + '/pause', {
+    method: 'POST',
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to pause campaign: ' + err.message, 'error'));
+}
+
+function resumeResearchCampaign(campaignId) {
+  apiFetch('/api/experiments/campaigns/' + encodeURIComponent(campaignId) + '/resume', {
+    method: 'POST',
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to resume campaign: ' + err.message, 'error'));
+}
+
+function cancelResearchCampaign(campaignId) {
+  if (!confirm('Cancel this research campaign?')) return;
+  apiFetch('/api/experiments/campaigns/' + encodeURIComponent(campaignId) + '/cancel', {
+    method: 'POST',
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to cancel campaign: ' + err.message, 'error'));
+}
+
+function promoteResearchCampaign(campaignId) {
+  apiFetch('/api/experiments/campaigns/' + encodeURIComponent(campaignId) + '/promote', {
+    method: 'POST',
+  }).then(handleResearchCampaignResponse)
+    .catch((err) => showToast('Failed to promote campaign: ' + err.message, 'error'));
+}
+
 // --- Learning ---
 
 function loadLearning() {
@@ -5167,6 +7255,90 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Canvas / A2UI Panel Rendering ---
+
+// Track active canvas panels by panel_id for dismiss/update
+const _canvasPanels = new Map();
+
+function handleCanvasUpdate(data) {
+  const action = data.action;
+  const panelId = data.panel_id;
+  const content = data.content;
+
+  switch (action) {
+    case 'show':
+      showCanvasPanel(panelId, content);
+      break;
+    case 'update':
+      updateCanvasPanel(panelId, content);
+      break;
+    case 'dismiss':
+      dismissCanvasPanel(panelId);
+      break;
+    case 'notify':
+      if (content) {
+        const level = content.level || 'info';
+        const toastType = level === 'error' ? 'error' : level === 'warning' ? 'warning' : level === 'success' ? 'success' : 'info';
+        showToast(content.message || 'Notification', toastType);
+      }
+      break;
+  }
+}
+
+function showCanvasPanel(panelId, content) {
+  // Remove existing panel with same ID
+  dismissCanvasPanel(panelId);
+
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'canvas-panel-card';
+  card.setAttribute('data-canvas-panel-id', panelId);
+
+  const title = (content && content.title) || panelId;
+
+  card.innerHTML =
+    '<div class="canvas-panel-header">' +
+      '<span class="canvas-panel-icon">\u25A0</span>' +
+      '<span class="canvas-panel-title">' + escapeHtml(title) + '</span>' +
+      '<span class="canvas-panel-actions">' +
+        '<a href="/canvas/' + encodeURIComponent(panelId) + '" target="_blank" class="canvas-panel-open" title="Open in new tab">\u2197</a>' +
+        '<button class="canvas-panel-dismiss" title="Dismiss" onclick="dismissCanvasPanel(\'' + escapeJsString(panelId) + '\')">\u2715</button>' +
+      '</span>' +
+    '</div>' +
+    '<div class="canvas-panel-body">' +
+      '<iframe src="/canvas/' + encodeURIComponent(panelId) + '" class="canvas-panel-iframe" sandbox="allow-scripts allow-forms allow-same-origin" loading="lazy"></iframe>' +
+    '</div>';
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+  _canvasPanels.set(panelId, card);
+}
+
+function updateCanvasPanel(panelId, content) {
+  const card = _canvasPanels.get(panelId);
+  if (card) {
+    // Refresh the iframe to pick up updated content
+    const iframe = card.querySelector('.canvas-panel-iframe');
+    if (iframe) {
+      iframe.src = iframe.src;
+    }
+  } else {
+    // Panel not visible — show it fresh
+    showCanvasPanel(panelId, content);
+  }
+}
+
+function dismissCanvasPanel(panelId) {
+  const card = _canvasPanels.get(panelId);
+  if (card) {
+    card.classList.add('canvas-panel-dismissing');
+    card.addEventListener('animationend', () => card.remove());
+    // Fallback removal if animation doesn't fire
+    setTimeout(() => { if (card.parentNode) card.remove(); }, 400);
+    _canvasPanels.delete(panelId);
+  }
+}
+
 // --- Toasts ---
 
 function showToast(message, type) {
@@ -5351,6 +7523,17 @@ const SETTINGS_SCHEMA = {
       { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
     ]
   },
+  'Experiments': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M9 3h6"/><path d="M12 3v18"/><path d="m8 21 4-4 4 4"/><path d="M19 7H5"/><path d="m7 7 1.5 6.5a2 2 0 0 0 3 1.2L19 11"/></svg>',
+    fields: [
+      { key: 'experiments.enabled', label: 'Enabled', type: 'bool', desc: 'Show the optional Research UI and unlock experiment APIs, CLI actions, and campaign control.' },
+      { key: 'experiments.max_concurrent_campaigns', label: 'Max concurrent campaigns', type: 'number', desc: 'Upper bound on concurrent experiment campaigns.', min: 0 },
+      { key: 'experiments.default_artifact_retention_days', label: 'Artifact retention (days)', type: 'number', desc: 'Default retention window for experiment logs and artifact references.', min: 1 },
+      { key: 'experiments.allow_remote_runners', label: 'Allow remote runners', type: 'bool', desc: 'Permit SSH, Slurm, Kubernetes, RunPod, and generic remote lease runners.' },
+      { key: 'experiments.ui_visibility', label: 'UI visibility', type: 'select', options: [{ value: 'hidden_until_enabled', label: 'Hidden until enabled' }], desc: 'Advanced-only visibility policy for the Research tab.' },
+      { key: 'experiments.default_promotion_mode', label: 'Default promotion mode', type: 'select', options: [{ value: 'branch_pr_draft', label: 'Branch + draft PR' }], desc: 'Default promotion target when a campaign finishes with a best candidate.' },
+    ]
+  },
 };
 
 // All known schema keys for filtering "Other"
@@ -5441,7 +7624,7 @@ function renderProvidersWorkspace(providers, config) {
   const mergedProviders = mergeProviderEntries(providers, config.providers || []);
 
   let html = '<section class="ui-panel ui-panel-stack providers-workspace-shell">';
-  html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models, then choose a routing strategy to distribute work across providers.</p></div><div class="ui-panel-actions"><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
+  html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models, then choose a routing strategy to distribute work across providers.</p></div><div class="ui-panel-actions"><button id="providers-open-research" class="btn-vault-save providers-shell-save providers-shell-secondary">Research GPU Clouds</button><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
   if (config.last_reload_error) {
     html += '<div class="ui-inline-alert ui-inline-alert--error">' + escapeHtml(config.last_reload_error) + '</div>';
   } else if (config.runtime_revision) {
@@ -5850,6 +8033,11 @@ function renderToggleOption(id, label, desc, checked, wrapperId) {
 function attachProvidersEvents() {
   const container = document.getElementById('providers-content');
   container.onclick = (event) => {
+    const openResearchBtn = event.target.closest('#providers-open-research');
+    if (openResearchBtn) {
+      openResearchGpuClouds();
+      return;
+    }
     const saveKeyBtn = event.target.closest('.btn-vault-save[data-slug]');
     if (saveKeyBtn) {
       saveProviderKey(saveKeyBtn.dataset.slug);
@@ -7535,6 +9723,7 @@ function loadSettings() {
       if (SENSITIVE_KEYS.has(s.key)) continue;
       settingsCache[s.key] = { value: s.value, updated_at: s.updated_at };
     }
+    applyOptionalFeatureFlagsFromCache();
     renderSettings();
   }).catch((err) => {
     container.innerHTML = '<div class="empty-state">Failed to load settings: ' + escapeHtml(err.message) + '</div>';
@@ -7846,6 +10035,7 @@ function saveSetting(key, value) {
       .then((res) => {
         if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         delete settingsCache[key];
+        if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
         showToast('Reset ' + key + ' to default', 'success');
       })
       .catch((err) => showToast('Failed: ' + err.message, 'error'));
@@ -7858,6 +10048,7 @@ function saveSetting(key, value) {
     }).then((res) => {
       if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
       settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
+      if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
       showToast('Saved ' + key, 'success');
     }).catch((err) => showToast('Failed: ' + err.message, 'error'));
   }

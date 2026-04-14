@@ -23,6 +23,9 @@ use crate::llm::route_planner::{
     validate_providers_settings as validate_planner_settings,
 };
 use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy, RoutingRule};
+use crate::llm::usage_tracking::{
+    USAGE_TRACKING_ENDPOINT_TYPE_KEY, USAGE_TRACKING_TELEMETRY_KEY, USAGE_TRACKING_WORKLOAD_TAG_KEY,
+};
 use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
 use crate::secrets::SecretsStore;
 use crate::settings::{ProvidersSettings, RoutingMode, Settings};
@@ -263,19 +266,59 @@ impl RuntimeLlmProvider {
         })
     }
 
-    fn resolved_completion_request(mut request: CompletionRequest) -> CompletionRequest {
+    fn resolved_completion_request(
+        mut request: CompletionRequest,
+        telemetry_key: &str,
+        workload_tag: &str,
+    ) -> CompletionRequest {
         // The runtime resolves `request.model` to a concrete provider before
         // delegating, so downstream adapters should not see a stale override.
+        let endpoint_type = if request.model.is_some() {
+            "model_override"
+        } else {
+            "runtime_routed"
+        };
         request.model = None;
+        request.metadata.insert(
+            USAGE_TRACKING_TELEMETRY_KEY.to_string(),
+            telemetry_key.to_string(),
+        );
+        request
+            .metadata
+            .entry(USAGE_TRACKING_ENDPOINT_TYPE_KEY.to_string())
+            .or_insert_with(|| endpoint_type.to_string());
+        request
+            .metadata
+            .entry(USAGE_TRACKING_WORKLOAD_TAG_KEY.to_string())
+            .or_insert_with(|| workload_tag.to_string());
         request
     }
 
     fn resolved_tool_completion_request(
         mut request: ToolCompletionRequest,
+        telemetry_key: &str,
+        workload_tag: &str,
     ) -> ToolCompletionRequest {
         // The runtime resolves `request.model` to a concrete provider before
         // delegating, so downstream adapters should not see a stale override.
+        let endpoint_type = if request.model.is_some() {
+            "model_override"
+        } else {
+            "runtime_routed"
+        };
         request.model = None;
+        request.metadata.insert(
+            USAGE_TRACKING_TELEMETRY_KEY.to_string(),
+            telemetry_key.to_string(),
+        );
+        request
+            .metadata
+            .entry(USAGE_TRACKING_ENDPOINT_TYPE_KEY.to_string())
+            .or_insert_with(|| endpoint_type.to_string());
+        request
+            .metadata
+            .entry(USAGE_TRACKING_WORKLOAD_TAG_KEY.to_string())
+            .or_insert_with(|| workload_tag.to_string());
         request
     }
 }
@@ -297,7 +340,11 @@ impl LlmProvider for RuntimeLlmProvider {
         let start = Instant::now();
         let result = route
             .provider
-            .complete(Self::resolved_completion_request(request))
+            .complete(Self::resolved_completion_request(
+                request,
+                &route.telemetry_key,
+                "chat_completion",
+            ))
             .await;
         self.manager
             .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
@@ -314,7 +361,11 @@ impl LlmProvider for RuntimeLlmProvider {
         let start = Instant::now();
         let result = route
             .provider
-            .complete_with_tools(Self::resolved_tool_completion_request(request))
+            .complete_with_tools(Self::resolved_tool_completion_request(
+                request,
+                &route.telemetry_key,
+                "tool_completion",
+            ))
             .await;
         self.manager
             .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
@@ -331,7 +382,11 @@ impl LlmProvider for RuntimeLlmProvider {
         let start = Instant::now();
         let result = route
             .provider
-            .complete_stream(Self::resolved_completion_request(request))
+            .complete_stream(Self::resolved_completion_request(
+                request,
+                &route.telemetry_key,
+                "stream_completion",
+            ))
             .await;
         self.manager
             .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
@@ -348,7 +403,11 @@ impl LlmProvider for RuntimeLlmProvider {
         let start = Instant::now();
         let result = route
             .provider
-            .complete_stream_with_tools(Self::resolved_tool_completion_request(request))
+            .complete_stream_with_tools(Self::resolved_tool_completion_request(
+                request,
+                &route.telemetry_key,
+                "tool_stream_completion",
+            ))
             .await;
         self.manager
             .record_route_outcome(&route.telemetry_key, start.elapsed(), result.is_ok());
@@ -2137,7 +2196,8 @@ mod tests {
         let request = CompletionRequest::new(vec![crate::llm::ChatMessage::user("hi")])
             .with_model("openai/gpt-5.4-mini");
 
-        let resolved = RuntimeLlmProvider::resolved_completion_request(request);
+        let resolved =
+            RuntimeLlmProvider::resolved_completion_request(request, "test|openai|gpt-5.4-mini", "test");
 
         assert!(resolved.model.is_none());
     }
@@ -2148,7 +2208,11 @@ mod tests {
             ToolCompletionRequest::new(vec![crate::llm::ChatMessage::user("hi")], Vec::new())
                 .with_model("openai/gpt-5.4-mini");
 
-        let resolved = RuntimeLlmProvider::resolved_tool_completion_request(request);
+        let resolved = RuntimeLlmProvider::resolved_tool_completion_request(
+            request,
+            "test|openai|gpt-5.4-mini",
+            "test",
+        );
 
         assert!(resolved.model.is_none());
     }

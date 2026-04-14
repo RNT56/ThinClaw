@@ -420,6 +420,9 @@ async fn edit_routine(
             crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => {
                 *prompt = Some(new_prompt.clone());
             }
+            crate::agent::routine::RoutineAction::ExperimentCampaign { .. } => {
+                anyhow::bail!("experiment_campaign routines do not support prompt editing");
+            }
         }
         changes.push("prompt updated".to_string());
     }
@@ -512,6 +515,9 @@ async fn trigger_routine(
         crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
             .clone()
             .unwrap_or_else(|| "Heartbeat check".to_string()),
+        crate::agent::routine::RoutineAction::ExperimentCampaign { project_id, .. } => {
+            format!("Run experiment campaign for project {project_id}")
+        }
     };
 
     println!("🔄 Triggering routine '{}' ({})", routine.name, routine.id);

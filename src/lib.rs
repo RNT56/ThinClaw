@@ -37,7 +37,7 @@
 //!
 //! # Features
 //!
-//! - **Multi-channel interaction** - CLI, Slack, Telegram, HTTP webhooks
+//! - **Multi-channel interaction** - CLI, HTTP, Discord, and WASM-sandboxed channels (Telegram, WhatsApp, and Slack)
 //! - **Parallel job execution** - Run multiple jobs with isolated contexts
 //! - **Pluggable tools** - MCP, 3rd party services, dynamic tools
 //! - **Self-repair** - Detect and fix stuck jobs and broken tools
@@ -60,7 +60,9 @@ pub mod document_extraction;
 pub mod error;
 pub mod estimation;
 pub mod evaluation;
+pub mod experiments;
 pub mod extensions;
+pub mod hardware_bridge;
 pub mod history;
 pub mod hooks;
 pub mod i18n;
@@ -68,12 +70,7 @@ pub mod identity;
 pub mod llm;
 pub mod media;
 pub mod observability;
-pub mod tui;
-// NOTE: `orchestrator` and `worker` are not feature-gated because
-// `tools/registry.rs`, `tools/builtin/job.rs`, and `channels/web/mod.rs`
-// have hard dependencies on `orchestrator::job_manager`. Gating them
-// would cascade into conditional tool registration — deferred to a
-// future pass.
+#[cfg(feature = "docker-sandbox")]
 pub mod orchestrator;
 pub mod pairing;
 pub mod profile;
@@ -82,6 +79,7 @@ pub mod qr_pairing;
 pub mod registry;
 pub mod safety;
 pub mod sandbox;
+pub mod sandbox_types;
 pub mod secrets;
 #[cfg(feature = "repl")]
 pub mod service;
@@ -94,15 +92,14 @@ pub mod tauri_commands;
 pub mod timezone;
 pub mod tools;
 pub mod tracing_fmt;
-// NOTE: `tunnel` is not feature-gated because `config::tunnel::TunnelConfig`
-// has a hard dependency on `crate::tunnel::TunnelProviderConfig`. Gating
-// requires first extracting tunnel data types into `config/` — deferred.
-pub mod hardware_bridge;
+pub mod tui;
+#[cfg(feature = "tunnel")]
 pub mod tunnel;
 pub mod update_checker;
 pub mod util;
 #[cfg(feature = "voice")]
 pub mod voice_wake;
+#[cfg(feature = "docker-sandbox")]
 pub mod worker;
 pub mod workspace;
 

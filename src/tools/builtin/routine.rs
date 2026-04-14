@@ -447,6 +447,11 @@ impl Tool for RoutineUpdateTool {
                 RoutineAction::Lightweight { prompt: p, .. } => *p = prompt.to_string(),
                 RoutineAction::FullJob { description: d, .. } => *d = prompt.to_string(),
                 RoutineAction::Heartbeat { prompt: p, .. } => *p = Some(prompt.to_string()),
+                RoutineAction::ExperimentCampaign { .. } => {
+                    return Err(ToolError::InvalidParameters(
+                        "experiment_campaign routines do not accept prompt updates".to_string(),
+                    ));
+                }
             }
         }
 

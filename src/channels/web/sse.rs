@@ -134,6 +134,12 @@ impl SseManager {
                     SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
                     SseEvent::CostAlert { .. } => "cost_alert",
                     SseEvent::CanvasUpdate { .. } => "canvas_update",
+                    SseEvent::ExperimentOpportunityUpdated { .. } => {
+                        "experiment_opportunity_updated"
+                    }
+                    SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
+                    SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
+                    SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
                     SseEvent::BootstrapCompleted => "bootstrap_completed",
                 };
                 Ok(Event::default().event(event_type).data(data))

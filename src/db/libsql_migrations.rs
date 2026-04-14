@@ -252,6 +252,209 @@ CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_user_status_created
 CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_status
     ON learning_code_proposals(status);
 
+-- ==================== Experiments ====================
+
+CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    backend_config TEXT NOT NULL DEFAULT '{}',
+    image_or_runtime TEXT,
+    gpu_requirements TEXT NOT NULL DEFAULT '{}',
+    env_grants TEXT NOT NULL DEFAULT '{}',
+    secret_references TEXT NOT NULL DEFAULT '[]',
+    cache_policy TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_updated
+    ON experiment_runner_profiles(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS experiment_projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    workspace_path TEXT NOT NULL,
+    git_remote_name TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    preset TEXT NOT NULL DEFAULT 'autoresearch_single_file',
+    strategy_prompt TEXT NOT NULL DEFAULT '',
+    workdir TEXT NOT NULL DEFAULT '.',
+    prepare_command TEXT,
+    run_command TEXT NOT NULL,
+    mutable_paths TEXT NOT NULL DEFAULT '[]',
+    fixed_paths TEXT NOT NULL DEFAULT '[]',
+    primary_metric TEXT NOT NULL DEFAULT '{}',
+    secondary_metrics TEXT NOT NULL DEFAULT '[]',
+    comparison_policy TEXT NOT NULL DEFAULT '{}',
+    stop_policy TEXT NOT NULL DEFAULT '{}',
+    default_runner_profile_id TEXT REFERENCES experiment_runner_profiles(id) ON DELETE SET NULL,
+    promotion_mode TEXT NOT NULL DEFAULT 'branch_pr_draft',
+    autonomy_mode TEXT NOT NULL DEFAULT 'autonomous',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_projects_updated
+    ON experiment_projects(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS experiment_campaigns (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES experiment_projects(id) ON DELETE CASCADE,
+    runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL DEFAULT 'pending_baseline',
+    baseline_commit TEXT,
+    best_commit TEXT,
+    best_metrics TEXT NOT NULL DEFAULT '{}',
+    experiment_branch TEXT,
+    remote_ref TEXT,
+    worktree_path TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    trial_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    pause_reason TEXT,
+    queue_state TEXT NOT NULL DEFAULT 'not_queued',
+    queue_position INTEGER NOT NULL DEFAULT 0,
+    active_trial_id TEXT,
+    total_runtime_ms INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd TEXT NOT NULL DEFAULT '0',
+    consecutive_non_improving_trials INTEGER NOT NULL DEFAULT 0,
+    max_trials_override INTEGER,
+    gateway_url TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    total_llm_cost_usd TEXT NOT NULL DEFAULT '0',
+    total_runner_cost_usd TEXT NOT NULL DEFAULT '0'
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_campaigns_project
+    ON experiment_campaigns(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS experiment_trials (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES experiment_campaigns(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    candidate_commit TEXT,
+    parent_best_commit TEXT,
+    status TEXT NOT NULL DEFAULT 'preparing',
+    runner_backend TEXT NOT NULL,
+    exit_code INTEGER,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    summary TEXT,
+    decision_reason TEXT,
+    log_preview_path TEXT,
+    artifact_manifest_json TEXT NOT NULL DEFAULT '{}',
+    runtime_ms INTEGER,
+    attributed_cost_usd TEXT,
+    hypothesis TEXT,
+    mutation_summary TEXT,
+    reviewer_decision TEXT,
+    provider_job_id TEXT,
+    provider_job_metadata TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    llm_cost_usd TEXT,
+    runner_cost_usd TEXT,
+    UNIQUE (campaign_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_trials_campaign
+    ON experiment_trials(campaign_id, sequence ASC);
+
+CREATE TABLE IF NOT EXISTS experiment_artifact_refs (
+    id TEXT PRIMARY KEY,
+    trial_id TEXT NOT NULL REFERENCES experiment_trials(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    uri_or_local_path TEXT NOT NULL,
+    size_bytes INTEGER,
+    fetchable INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_artifact_refs_trial
+    ON experiment_artifact_refs(trial_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS experiment_leases (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL REFERENCES experiment_campaigns(id) ON DELETE CASCADE,
+    trial_id TEXT NOT NULL REFERENCES experiment_trials(id) ON DELETE CASCADE,
+    runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    token_hash TEXT NOT NULL,
+    job_payload TEXT NOT NULL DEFAULT '{}',
+    credentials_payload TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_leases_trial
+    ON experiment_leases(trial_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS experiment_targets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '"prompt_asset"',
+    location TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_targets_updated
+    ON experiment_targets(updated_at DESC, name ASC);
+
+CREATE TABLE IF NOT EXISTS experiment_target_links (
+    id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL REFERENCES experiment_targets(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT '"prompt_asset"',
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    route_key TEXT NOT NULL DEFAULT '',
+    logical_role TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (target_id, kind, provider, model, route_key, logical_role)
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_target_links_lookup
+    ON experiment_target_links(provider, model, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS experiment_model_usage_records (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    route_key TEXT,
+    logical_role TEXT,
+    endpoint_type TEXT,
+    workload_tag TEXT,
+    latency_ms INTEGER,
+    cost_usd TEXT,
+    success INTEGER NOT NULL DEFAULT 1,
+    prompt_asset_ids TEXT NOT NULL DEFAULT '[]',
+    retrieval_asset_ids TEXT NOT NULL DEFAULT '[]',
+    tool_policy_ids TEXT NOT NULL DEFAULT '[]',
+    evaluator_ids TEXT NOT NULL DEFAULT '[]',
+    parser_ids TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_created
+    ON experiment_model_usage_records(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_provider_model
+    ON experiment_model_usage_records(provider, model, created_at DESC);
+
 -- ==================== Identity Registry ====================
 
 CREATE TABLE IF NOT EXISTS actors (
@@ -817,45 +1020,303 @@ CREATE INDEX IF NOT EXISTS idx_agent_ws_default ON agent_workspaces(is_default);
 
 "#;
 
+/// A single libSQL column upgrade step.
+#[derive(Debug, Clone, Copy)]
+pub struct LibsqlColumnUpgrade {
+    /// Target migration version that this statement belongs to.
+    pub version: u32,
+    /// Human-readable reason for tracing and diagnostics.
+    pub description: &'static str,
+    /// SQL statement to execute.
+    pub sql: &'static str,
+}
+
 /// Idempotent column-upgrade statements for existing libSQL databases.
 ///
 /// The consolidated `SCHEMA` uses `CREATE TABLE IF NOT EXISTS`, which is a no-op
 /// when the table already exists.  These `ALTER TABLE ADD COLUMN` statements
 /// bring pre-V10/V11 tables up to date.  Each is run individually so that
 /// "duplicate column" errors (column already present) can be safely ignored.
-pub const UPGRADES: &[&str] = &[
+pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
     // ── V11: conversations ──────────────────────────────────────────────
-    "ALTER TABLE conversations ADD COLUMN actor_id TEXT",
-    "ALTER TABLE conversations ADD COLUMN conversation_scope_id TEXT",
-    "ALTER TABLE conversations ADD COLUMN conversation_kind TEXT NOT NULL DEFAULT 'direct'",
-    "ALTER TABLE conversations ADD COLUMN stable_external_conversation_key TEXT",
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add actor/scoping fields to conversations",
+        sql: "ALTER TABLE conversations ADD COLUMN actor_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add conversation scope id",
+        sql: "ALTER TABLE conversations ADD COLUMN conversation_scope_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add conversation kind field",
+        sql: "ALTER TABLE conversations ADD COLUMN conversation_kind TEXT NOT NULL DEFAULT 'direct'",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add stable conversation key",
+        sql: "ALTER TABLE conversations ADD COLUMN stable_external_conversation_key TEXT",
+    },
     // ── V11: conversation_messages ───────────────────────────────────────
-    "ALTER TABLE conversation_messages ADD COLUMN actor_id TEXT",
-    "ALTER TABLE conversation_messages ADD COLUMN actor_display_name TEXT",
-    "ALTER TABLE conversation_messages ADD COLUMN raw_sender_id TEXT",
-    "ALTER TABLE conversation_messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add actor id to conversation messages",
+        sql: "ALTER TABLE conversation_messages ADD COLUMN actor_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add actor display name to conversation messages",
+        sql: "ALTER TABLE conversation_messages ADD COLUMN actor_display_name TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add raw sender id to conversation messages",
+        sql: "ALTER TABLE conversation_messages ADD COLUMN raw_sender_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add metadata JSON to conversation messages",
+        sql: "ALTER TABLE conversation_messages ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+    },
     // ── V10: actors + actor_endpoints (handled by CREATE TABLE IF NOT EXISTS) ──
     // ── V11: agent_jobs ─────────────────────────────────────────────────
-    "ALTER TABLE agent_jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE agent_jobs ADD COLUMN principal_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE agent_jobs ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
-    "ALTER TABLE agent_jobs ADD COLUMN project_dir TEXT",
-    "ALTER TABLE agent_jobs ADD COLUMN job_mode TEXT NOT NULL DEFAULT 'worker'",
-    "ALTER TABLE agent_jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'sandbox'",
-    "ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE agent_jobs ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE agent_jobs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
-    "ALTER TABLE agent_jobs ADD COLUMN transitions TEXT NOT NULL DEFAULT '[]'",
-    "UPDATE agent_jobs SET principal_id = user_id WHERE user_id IS NOT NULL AND (principal_id IS NULL OR principal_id = 'default')",
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add legacy user fields to jobs",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add legacy principal actor reference to jobs",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN principal_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add actor id to jobs",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add project directory to jobs",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN project_dir TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add job mode for worker behavior",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN job_mode TEXT NOT NULL DEFAULT 'worker'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add job source metadata",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'sandbox'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add token usage counters",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add max token budget",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add structured job metadata",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Add job state transitions history",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN transitions TEXT NOT NULL DEFAULT '[]'",
+    },
+    LibsqlColumnUpgrade {
+        version: 10,
+        description: "Backfill principal id from user_id",
+        sql: "UPDATE agent_jobs SET principal_id = user_id WHERE user_id IS NOT NULL AND (principal_id IS NULL OR principal_id = 'default')",
+    },
     // ── V11: routines ───────────────────────────────────────────────────
-    "ALTER TABLE routines ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add actor id to routines",
+        sql: "ALTER TABLE routines ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'default'",
+    },
     // ── V13: agent capability isolation ────────────────────────────────
-    "ALTER TABLE agent_workspaces ADD COLUMN allowed_tools TEXT",
-    "ALTER TABLE agent_workspaces ADD COLUMN allowed_skills TEXT",
+    LibsqlColumnUpgrade {
+        version: 13,
+        description: "Add allowed tools/workspace restrictions",
+        sql: "ALTER TABLE agent_workspaces ADD COLUMN allowed_tools TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 13,
+        description: "Add allowed skills/workspace restrictions",
+        sql: "ALTER TABLE agent_workspaces ADD COLUMN allowed_skills TEXT",
+    },
     // ── V11: memory_chunks embedding parity ─────────────────────────────
-    "ALTER TABLE memory_chunks ADD COLUMN embedding_blob BLOB",
-    "ALTER TABLE memory_chunks ADD COLUMN embedding_dim INTEGER",
-    "CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_dim ON memory_chunks(embedding_dim)",
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add binary embedding payload",
+        sql: "ALTER TABLE memory_chunks ADD COLUMN embedding_blob BLOB",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add embedding dimension metadata",
+        sql: "ALTER TABLE memory_chunks ADD COLUMN embedding_dim INTEGER",
+    },
+    LibsqlColumnUpgrade {
+        version: 11,
+        description: "Add index for embedding dimension",
+        sql: "CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_dim ON memory_chunks(embedding_dim)",
+    },
+    // ── V16: experiment campaign/trial persistence parity ──────────────
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add autonomy mode to experiment projects",
+        sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT 'autonomous'",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add queue state to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN queue_state TEXT NOT NULL DEFAULT 'not_queued'",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add queue position to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN queue_position INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add active trial id to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN active_trial_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add total runtime tracking to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN total_runtime_ms INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add total cost tracking to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN total_cost_usd TEXT NOT NULL DEFAULT '0'",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add non-improving counter to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN consecutive_non_improving_trials INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add trial override cap to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN max_trials_override INTEGER",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add campaign gateway override",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN gateway_url TEXT",
+    },
+    // ── V16: experiment trial metadata/tracing parity ─────────────────
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add runtime to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN runtime_ms INTEGER",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add attributed cost to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN attributed_cost_usd TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add hypothesis field to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN hypothesis TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add mutation summary to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN mutation_summary TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add reviewer decision to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN reviewer_decision TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add provider job id to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN provider_job_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add provider job metadata to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN provider_job_metadata TEXT NOT NULL DEFAULT '{}'",
+    },
+    // ── V16: experiment model usage attribution parity ─────────────────
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add evaluator ids to model usage records",
+        sql: "ALTER TABLE experiment_model_usage_records ADD COLUMN evaluator_ids TEXT NOT NULL DEFAULT '[]'",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add parser ids to model usage records",
+        sql: "ALTER TABLE experiment_model_usage_records ADD COLUMN parser_ids TEXT NOT NULL DEFAULT '[]'",
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Create experiment target links table",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS experiment_target_links (
+                id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL REFERENCES experiment_targets(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL DEFAULT '"prompt_asset"',
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                route_key TEXT NOT NULL DEFAULT '',
+                logical_role TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (target_id, kind, provider, model, route_key, logical_role)
+            )
+        "#,
+    },
+    LibsqlColumnUpgrade {
+        version: 16,
+        description: "Add target-link lookup index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_target_links_lookup ON experiment_target_links(provider, model, updated_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add total llm cost to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN total_llm_cost_usd TEXT NOT NULL DEFAULT '0'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add total runner cost to experiment campaigns",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN total_runner_cost_usd TEXT NOT NULL DEFAULT '0'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add llm cost to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN llm_cost_usd TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add runner cost to experiment trials",
+        sql: "ALTER TABLE experiment_trials ADD COLUMN runner_cost_usd TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add model usage trial lookup index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_trial ON experiment_model_usage_records(json_extract(metadata, '$.experiment_trial_id'), created_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add model usage campaign lookup index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_campaign ON experiment_model_usage_records(json_extract(metadata, '$.experiment_campaign_id'), created_at DESC)",
+    },
 ];
 
 /// Idempotent data repairs for legacy libSQL databases.

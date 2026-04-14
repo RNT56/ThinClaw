@@ -102,6 +102,61 @@ pub fn describe_intent(tool_name: &str, args: &serde_json::Value) -> ToolIntent 
             let preview: String = prompt.chars().take(50).collect();
             format!("Generating image: {}", preview)
         }
+        "process" => {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("...");
+            match action {
+                "start" => {
+                    let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("...");
+                    format!("Starting background process: {}", &cmd.chars().take(50).collect::<String>())
+                }
+                "list" => "Listing background processes".to_string(),
+                "poll" => "Reading process output".to_string(),
+                "wait" => "Waiting for process to complete".to_string(),
+                "kill" => "Terminating process".to_string(),
+                "write" => "Sending input to process".to_string(),
+                _ => format!("Managing process: {}", action),
+            }
+        }
+        "todo" => {
+            if args.get("todos").is_some() {
+                "📋 Updating task plan".to_string()
+            } else {
+                "📋 Reviewing task plan".to_string()
+            }
+        }
+        "clarify" => {
+            let q = args.get("question").and_then(|q| q.as_str()).unwrap_or("...");
+            let preview: String = q.chars().take(50).collect();
+            format!("❓ Asking: {}", preview)
+        }
+        "vision_analyze" => {
+            let source = args.get("image_path")
+                .or_else(|| args.get("image_url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("image");
+            format!("👁️ Analyzing image: {}", &source.chars().take(40).collect::<String>())
+        }
+        "send_message" => {
+            let platform = args.get("platform").and_then(|p| p.as_str()).unwrap_or("...");
+            format!("📤 Sending message via {}", platform)
+        }
+        "homeassistant" => {
+            let action = args.get("action").and_then(|a| a.as_str()).unwrap_or("...");
+            match action {
+                "list_entities" => "🏠 Listing smart home devices".to_string(),
+                "get_state" => {
+                    let entity = args.get("entity_id").and_then(|e| e.as_str()).unwrap_or("...");
+                    format!("🏠 Checking {}", entity)
+                }
+                "call_service" => {
+                    let entity = args.get("entity_id").and_then(|e| e.as_str()).unwrap_or("...");
+                    let service = args.get("service").and_then(|s| s.as_str()).unwrap_or("...");
+                    format!("🏠 {} → {}", entity, service)
+                }
+                _ => format!("🏠 Smart home: {}", action),
+            }
+        }
+        "mixture_of_agents" => "🧠 Multi-model reasoning (MoA)".to_string(),
         _ => {
             // Generic fallback: use the tool name as-is
             format!("Using tool: {}", tool_name)
@@ -125,6 +180,13 @@ fn extract_key_args(tool_name: &str, args: &serde_json::Value) -> Option<String>
         "shell" | "exec" => "command",
         "read_file" | "write_file" => "path",
         "calculator" => "expression",
+        "process" => "action",
+        "todo" => return Some("task planner".to_string()),
+        "clarify" => "question",
+        "vision_analyze" => "image_path",
+        "send_message" => "platform",
+        "homeassistant" => "action",
+        "mixture_of_agents" => "prompt",
         _ => return None,
     };
 
