@@ -775,12 +775,25 @@ async fn main() -> anyhow::Result<()> {
 
     // Register lifecycle hooks.
     let send_message_channels = Arc::clone(&channels);
-    let email_channel = if config.channels.apple_mail.is_some() {
-        Some("apple_mail".to_string())
-    } else if config.channels.gmail.is_some() {
-        Some("gmail".to_string())
-    } else {
-        None
+    let email_channel = {
+        #[cfg(target_os = "macos")]
+        {
+            if config.channels.apple_mail.is_some() {
+                Some("apple_mail".to_string())
+            } else if config.channels.gmail.is_some() {
+                Some("gmail".to_string())
+            } else {
+                None
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if config.channels.gmail.is_some() {
+                Some("gmail".to_string())
+            } else {
+                None
+            }
+        }
     };
     components.tools.register_send_message_tool(Some(Arc::new(
         move |platform, recipient, text, thread_id| {
