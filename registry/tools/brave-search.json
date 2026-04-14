@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.5/brave-search-wasm32-wasip2.tar.gz",
-      "sha256": "89abf96180ed0b89e997eeb672db828aa781a2b56cbee1a6e5ccb987762ae608"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.6/brave-search-wasm32-wasip2.tar.gz",
+      "sha256": "aa749731e505ef6d8a12318ec9571042e808dc4379e95b4d7dd3c731c4f6d1be"
     }
   },
   "auth_summary": {
